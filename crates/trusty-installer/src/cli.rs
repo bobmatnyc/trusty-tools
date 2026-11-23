@@ -131,9 +131,9 @@ pub enum AnalyzeCoreArg {
 ///
 /// What: `Search` → the `trusty-search` + `trusty-embedderd` +
 /// `trusty-embedderd-py` set (#9973); `Mpm` → the
-/// `trusty-mpm` set (owner-authorized scope extension, #2558); `Agents` → the
-/// `trusty-agents` set, i.e. `tagent` (owner-authorized scope extension,
-/// #4277); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
+/// `trusty-mpm` set (owner-authorized scope extension, #2558); `Assistants`
+/// → the `trusty-assistants` set, i.e. `ta` and its `tagent` alias
+/// (owner-authorized scope extension, #4277; renamed in #11632); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
 /// `trusty-memory-mcp-bridge`; `Analyze` → the
 /// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06).
 ///
@@ -146,9 +146,10 @@ pub enum SignTargetArg {
     /// `trusty-mpm`.
     #[value(name = "trusty-mpm")]
     Mpm,
-    /// `trusty-agents` (`tagent`). (#4277)
-    #[value(name = "trusty-agents")]
-    Agents,
+    /// `trusty-assistants` (`ta`, and the `tagent` alias). (#4277)
+    /// #11632: `trusty-agents` is accepted for one release.
+    #[value(name = "trusty-assistants", alias = "trusty-agents")]
+    Assistants,
     /// `trusty-memory` and the deprecated
     /// `trusty-memory-mcp-bridge` shim. (owner ruling 2026-08-06)
     #[value(name = "trusty-memory")]
@@ -164,8 +165,8 @@ impl SignTargetArg {
     /// Why: Bridges the clap enum to the plain-`&str` set vocabulary used by
     /// `macos_signing::binaries_for_set` / `sign_set_strict`, so that module
     /// has no clap dependency.
-    /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`, `Agents` →
-    /// `"trusty-agents"`, `Memory` → `"trusty-memory"`, `Analyze` →
+    /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`, `Assistants` →
+    /// `"trusty-assistants"`, `Memory` → `"trusty-memory"`, `Analyze` →
     /// `"trusty-analyze"`.
     /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip),
     /// `macos_signing::tests::every_sign_target_arg_resolves_to_a_real_set`
@@ -174,7 +175,7 @@ impl SignTargetArg {
         match self {
             SignTargetArg::Search => "trusty-search",
             SignTargetArg::Mpm => "trusty-mpm",
-            SignTargetArg::Agents => "trusty-agents",
+            SignTargetArg::Assistants => "trusty-assistants",
             SignTargetArg::Memory => "trusty-memory",
             SignTargetArg::Analyze => "trusty-analyze",
         }

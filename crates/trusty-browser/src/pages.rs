@@ -50,6 +50,17 @@ pub const OPS: &[(&str, &[&str])] = &[
         &["op", "lease", "request_id", "ref", "files"],
     ),
     ("page_downloads", &["op", "lease"]),
+    (
+        "page_emulate",
+        &[
+            "op",
+            "lease",
+            "javascript",
+            "color_scheme",
+            "width",
+            "height",
+        ],
+    ),
     ("page_find", &["op", "lease"]),
     ("page_back", &["op", "lease", "request_id"]),
     ("page_forward", &["op", "lease", "request_id"]),
@@ -326,7 +337,12 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
             request_string(request, name)?;
         }
     }
-    if (op == "page_press" && !press_ok(request)) || (op == "page_scroll" && !scroll_ok(request)) {
+    // #11371: the emulation fields' types and ranges.
+    let emulate_bad = op == "page_emulate" && !crate::emulation::valid(request);
+    if (op == "page_press" && !press_ok(request))
+        || (op == "page_scroll" && !scroll_ok(request))
+        || emulate_bad
+    {
         return Err(invalid());
     }
     if let Some(tab) = request.get("tab")

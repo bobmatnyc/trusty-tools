@@ -182,3 +182,23 @@ fn drop_counters_are_pruned_with_their_day_files() {
     assert!(!ledger.join("2026-10-01.dropped").exists());
     assert!(!ledger.join("2026-10-01.jsonl").exists());
 }
+
+/// #11563: verbs survive, paths, flags and patterns do not.
+#[test]
+fn ledger_tool_name_keeps_verbs_and_drops_paths_and_patterns() {
+    for (raw, want) in [
+        ("git log", "git log"),
+        ("cargo test", "cargo test"),
+        ("/usr/bin/git diff", "git diff"),
+        ("ls /Users/x/p", "ls"),
+        ("grep -n", "grep"),
+        ("cat notes.txt", "cat"),
+        ("find .", "find"),
+        ("git /tmp/x", "git"),
+        ("Read", "Read"),
+        ("mcp__trusty-search__search", "mcp__trusty-search__search"),
+        ("", ""),
+    ] {
+        assert_eq!(ledger_tool_name(raw), want, "{raw}");
+    }
+}

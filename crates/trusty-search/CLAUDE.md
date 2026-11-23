@@ -1398,7 +1398,7 @@ this table is generated from it, not maintained by hand.
 - **HTTP**: axum 0.8 types for the transport-neutral cores (no listener since #9214)
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
-- **Lexical**: BM25 (zero-dep port from `crates/trusty-agents/src/context/bm25.rs`)
+- **Lexical**: BM25 (zero-dep port from trusty-agents' `context/bm25.rs`, since cut in #11632)
 - **KV store**: redb 2.6 (chunk metadata, file→chunks mapping, `_meta` schema version)
 - **File watching**: notify 6 + notify-debouncer-mini 0.4 (500ms debounce, fsevent)
 - **Code parsing**: tree-sitter 0.24 (rust, python, js, ts, go, java, c, cpp)

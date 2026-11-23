@@ -32,7 +32,6 @@ const HELP_YAMLS: &[(&str, &str)] = &[
     ("../trusty-memory/help.yaml", "trusty-memory"),
     ("../trusty-analyze/help.yaml", "trusty-analyze"),
     ("../trusty-mpm/help.yaml", "trusty-mpm"),
-    ("../trusty-agents/help.yaml", "tagent"),
 ];
 
 #[test]

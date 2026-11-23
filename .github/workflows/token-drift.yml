@@ -2,7 +2,7 @@
 #
 # Foundry v2 design tokens (docs/design/UI/design-system/tokens.css) are the
 # canonical hex source. Adopted UIs consume it two ways: Tailwind crates
-# (trusty-agents, trusty-code-gui) hand-transcribe the hex
+# (trusty-code-gui) hand-transcribe the hex
 # into Tailwind's `--color-*: R G B` RGB-triple convention; plain-CSS crates
 # (trusty-console, trusty-analyze, trusty-search, trusty-memory) keep the
 # canonical `--trusty-*` names with `#hex` values verbatim. Nothing previously
@@ -31,7 +31,6 @@ on:
     branches: [main]
     paths:
       - "docs/design/UI/design-system/tokens.css"
-      - "crates/trusty-agents/ui/src/app.css"
       - "crates/trusty-code-gui/ui/src/app.css"
       - "crates/trusty-console/ui/src/theme.css"
       - "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css"
@@ -51,7 +50,6 @@ on:
     branches: [main]
     paths:
       - "docs/design/UI/design-system/tokens.css"
-      - "crates/trusty-agents/ui/src/app.css"
       - "crates/trusty-code-gui/ui/src/app.css"
       - "crates/trusty-console/ui/src/theme.css"
       - "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css"

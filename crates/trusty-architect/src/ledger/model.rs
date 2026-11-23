@@ -275,7 +275,7 @@ impl Next {
     }
 }
 
-/// The session record (LDG-2.4.1), rewritten whole, at most 2 KB.
+/// The session record (LDG-2.4.1), rewritten whole, at most 8 KB.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)] // field names are the contract; DOC-82 LDG-2.4.1 defines them
 pub struct SessionRecord {

@@ -6,6 +6,8 @@ use super::super::hook_rewrite::{
     compression_rewrite_decision, rewrite_bash_command_for_compression,
 };
 use super::super::hook_rewrite_isolated::cwd_rewrite_decision;
+// See #11658: the shell list, with zsh required under CI, lives in one place.
+use super::super::hook_rewrite_shells::available_shells;
 use super::chain_rewrite_with_nonce;
 use std::path::Path;
 use trusty_mpm::core::savings_opportunity::SkipReason;
@@ -259,15 +261,8 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
         "cd sub && grep -n nomatch marker.txt | wc -l",
         "export X=1 && grep -c hi sub/marker.txt; date +%Y; true",
     ];
-    for shell in ["sh", "bash", "zsh"] {
-        if std::process::Command::new(shell)
-            .args(["-c", "exit 0"])
-            .output()
-            .is_err()
-        {
-            eprintln!("SKIP a_chain_rewrite_runs_like_the_original_in_a_real_shell: no {shell}");
-            continue;
-        }
+    // See #11658: a missing zsh fails under CI instead of skipping.
+    for shell in available_shells() {
         for command in cases {
             let original = run_in(shell, &root, command);
             let rewritten = run_rewrite(shell, &root, "", command);
@@ -363,10 +358,8 @@ fn a_cd_semicolon_chain_leaves_the_same_cwd_in_a_real_shell() {
     std::fs::create_dir_all(root.join("sub")).expect("mkdir");
     std::fs::write(root.join("sub/marker.txt"), "hi there\n").expect("write");
     std::fs::write(root.join("marker.txt"), "hi root\n").expect("write");
-    for shell in ["sh", "bash", "zsh"] {
-        if run_in(shell, &root, "exit 0").0.is_none() {
-            continue;
-        }
+    // See #11644: zsh is run where present.
+    for shell in available_shells() {
         for command in [
             "cd sub; grep -n hi marker.txt",
             "cd sub && grep -n hi marker.txt",
@@ -410,10 +403,8 @@ fn a_short_circuit_before_a_semicolon_runs_like_the_original() {
     let root = root.path().canonicalize().expect("canonical temp dir");
     std::fs::create_dir_all(root.join("sub")).expect("mkdir");
     std::fs::write(root.join("sub/marker.txt"), "hi there\nhi again\n").expect("write");
-    for shell in ["sh", "bash", "zsh"] {
-        if run_in(shell, &root, "exit 0").0.is_none() {
-            continue;
-        }
+    // See #11644: zsh is run where present.
+    for shell in available_shells() {
         for command in [
             "grep -q nomatch sub/marker.txt && grep -n hi sub/marker.txt; grep -c hi sub/marker.txt",
             "cd sub; grep -q nomatch marker.txt && grep -n hi marker.txt; grep -c hi marker.txt",

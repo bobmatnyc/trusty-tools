@@ -1,0 +1,253 @@
+//! Parser for `.md` + YAML-frontmatter agent files (claude-mpm format).
+//!
+//! Why: Supports the claude-mpm ecosystem convention where agent definitions
+//! are authored as Markdown with a YAML frontmatter header, so operators can
+//! drop `.md` agents into `.claude/agents/` or `.trusty-agents/agents/` without
+//! hand-converting to TOML.
+//! What: `parse_md_agent` splits frontmatter from body, deserializes the
+//! `MdAgentFrontmatter` subset, and assembles a full `AgentConfig` with sane
+//! defaults plus the standard model-resolution + adapter selection.
+//! Test: `md_agent_file_parses_frontmatter_and_body`,
+//! `registry_picks_up_md_files_alongside_toml`.
+
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::agents::{
+    AgentCapabilities, AgentCompressConfig, AgentConfig, AgentInfo, LlmParams, RunnerKind,
+    SystemPrompt, ToolChoice, ToolsConfig,
+};
+
+/// YAML frontmatter shape for `.md` agent files.
+///
+/// Why: Supports the claude-mpm ecosystem convention where agent definitions
+/// are authored as Markdown with a YAML frontmatter header. Lets operators
+/// drop `.md` agents into `.claude/agents/` or `.trusty-agents/agents/` without
+/// hand-converting to TOML.
+/// What: Mirrors the subset of `AgentConfig` fields an operator is likely to
+/// override per-agent. Unknown keys are ignored (no `deny_unknown_fields`) so
+/// richer claude-mpm frontmatter doesn't fail parsing.
+/// Test: `md_agent_file_parses_frontmatter_and_body`.
+#[derive(Debug, Deserialize, Default)]
+struct MdAgentFrontmatter {
+    name: Option<String>,
+    role: Option<String>,
+    model: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    runner: Option<String>,
+    #[serde(default)]
+    capabilities: Option<AgentCapabilities>,
+    /// Persona/display name layered by a personalization overlay (DOC-41
+    /// §2.5.1, #3055).
+    ///
+    /// Why: base agents are nameless; the friendly persona name (e.g.
+    /// `Izzie`) comes from the child overlay that `extends` the base. Parsing
+    /// it here lets a `.md` child set `display_name` even when its base has
+    /// none — scalar child-overrides semantics.
+    /// What: Optional string mapped straight onto `AgentInfo::display_name`.
+    /// Test: `agents::extends::tests::extends_child_sets_display_name_over_none`.
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Per-agent tool allowlist / scopes layered by a personalization overlay
+    /// (DOC-41 §2.5.1 worked example, #3055).
+    ///
+    /// Why: the §2.5.1 personalization example authors a `.md` agent whose
+    /// frontmatter declares `tools:\n  allowed: [...]` — before this the `.md`
+    /// loader hardcoded `ToolsConfig::default()` and silently dropped any
+    /// declared tools, so the `extends` tool UNION had nothing to union. Parsing
+    /// it here makes the personalization example actually work.
+    /// What: Optional `ToolsConfig` (same shape as the TOML `[tools]` table);
+    /// absent → `ToolsConfig::default()` (no restriction), exactly as before.
+    /// Test: `agents::extends::tests::registry_resolves_extends_chain`.
+    #[serde(default)]
+    tools: Option<ToolsConfig>,
+    /// Name of a base agent to inherit from (`extends:`), DOC-41 §2.5 / #3055.
+    ///
+    /// Why: makes the previously-inert `extends:` frontmatter key live so a
+    /// user can personalize a bundled base agent without forking it.
+    /// What: Optional base-agent name; resolved + merged by the loader.
+    /// Test: `agents::extends::tests`.
+    #[serde(default)]
+    extends: Option<String>,
+    /// Privilege tier declaration (#4168, epic #4167 — L0/L1 orchestration
+    /// model). Mirrors `AgentInfo::tier`'s raw string exactly — see that
+    /// field's doc comment for the fail-closed resolution
+    /// (`AgentInfo::tier()`) every consumer must call. Absent (the
+    /// overwhelming majority of `.md` overlays) resolves to L1, same as a
+    /// TOML agent that omits `[agent].tier`.
+    /// Test: `md_frontmatter_tier_parses_and_defaults_absent`.
+    #[serde(default)]
+    tier: Option<String>,
+}
+
+/// Parse an `.md` agent file into an `AgentConfig`.
+///
+/// Why: `AgentRegistry::load` supports both `.toml` and `.md` agent formats so
+/// users can install agents using whichever convention suits their workflow.
+/// The `.md` + YAML frontmatter format matches the claude-mpm ecosystem.
+/// What: Reads the file, splits on `---` fences, parses frontmatter via
+/// serde_yaml, and uses the post-frontmatter body as the system prompt. Missing
+/// fields fall back to sane defaults: `role = "agent"`, generic model, runner
+/// = Subprocess. The resolver still applies `TAGENT_MODEL_*` / default env
+/// overrides through `resolve_model`. A non-`extends` agent a provider lock
+/// refuses is an error (#10978).
+/// Test: `md_agent_file_parses_frontmatter_and_body`,
+/// `registry_picks_up_md_files_alongside_toml`.
+pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
+    use anyhow::{Context, anyhow};
+
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read agent md {}", path.display()))?;
+    let trimmed = raw.trim_start_matches('\u{feff}');
+    let trimmed = trimmed.trim_start_matches(['\n', '\r']);
+
+    let rest = trimmed
+        .strip_prefix("---")
+        .ok_or_else(|| anyhow!("agent md missing opening --- fence: {}", path.display()))?;
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+        .ok_or_else(|| anyhow!("agent md malformed fence: {}", path.display()))?;
+    let end_rel = rest
+        .find("\n---")
+        .ok_or_else(|| anyhow!("agent md missing closing --- fence: {}", path.display()))?;
+    let fm_str = &rest[..end_rel];
+    let after = &rest[end_rel + 4..];
+    let body = after
+        .strip_prefix('\n')
+        .or_else(|| after.strip_prefix("\r\n"))
+        .unwrap_or(after)
+        .to_string();
+
+    let fm: MdAgentFrontmatter = serde_yaml::from_str(fm_str)
+        .with_context(|| format!("failed to parse agent md frontmatter {}", path.display()))?;
+
+    let name = fm.name.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
+    let agent_model_raw = fm.model.unwrap_or_default();
+    // #3055: when this agent `extends` a base, defer model resolution until
+    // after the `extends` merge. A child that omits `model` must INHERIT the
+    // base's, so keep the raw (possibly empty) value here rather than resolving
+    // it to a default now; `AgentRegistry::load` re-resolves the merged config.
+    let resolved_model = if fm.extends.is_some() {
+        agent_model_raw
+    } else {
+        crate::agents::resolve_model(&name, &agent_model_raw, None)?.0
+    };
+    let runner = match fm.runner.as_deref() {
+        Some("claude-code") => RunnerKind::ClaudeCode,
+        Some("inline") => RunnerKind::Inline,
+        Some("in-process") => RunnerKind::InProcess,
+        Some("subprocess") | None => RunnerKind::Subprocess,
+        Some(other) => {
+            return Err(anyhow!(
+                "agent md {} has unknown runner {:?}",
+                path.display(),
+                other
+            ));
+        }
+    };
+
+    // #3052 PR A follow-up: `.md` frontmatter doesn't expose `temperature`/
+    // `max_tokens` as parseable keys (`MdAgentFrontmatter` has no such
+    // fields), so a `.md` file can never explicitly declare them. When this
+    // agent `extends` a base, use the UNSET sentinel so `merge_extends`
+    // inherits the base's real tuned values instead of clobbering them with
+    // a hardcoded stub (the pre-#3052 wholesale-inherit behavior, preserved
+    // here for `.md` children specifically). A non-`extends` `.md` agent has
+    // no base to inherit from, so it keeps the historical 0.2/8192 defaults.
+    let (llm_temperature, llm_max_tokens) = if fm.extends.is_some() {
+        (
+            crate::agents::params::unset_temperature(),
+            crate::agents::params::unset_max_tokens(),
+        )
+    } else {
+        (0.2, 8192)
+    };
+
+    let has_extends = fm.extends.is_some();
+    let cfg = AgentConfig {
+        agent: AgentInfo {
+            name,
+            role: fm.role.unwrap_or_else(|| "agent".to_string()),
+            model: resolved_model,
+            description: fm.description.unwrap_or_default(),
+            persistent_session: false,
+            runner,
+            capabilities: fm.capabilities,
+            display_name: fm.display_name,
+            // #3819: `.md` overlay agents have no `hidden` frontmatter key
+            // yet — the demo's hide-from-picker need is on the three
+            // TOML/package agents (`assistant`/`personal-assistant`/
+            // `research-agent`), not overlays. Defaulting visible here is
+            // the pre-#3819 behavior, unchanged.
+            hidden: false,
+            kind: "assistant".to_string(),
+            prompt_label: None,
+            extends: fm.extends,
+            tier: fm.tier,
+            // #3765: `.md` overlay agents have no `provider_id` frontmatter
+            // key — pinning is a TOML/package-agent feature for now, and an
+            // absent pin is exactly today's ambient behaviour.
+            provider_id: None,
+        },
+        llm: LlmParams {
+            temperature: llm_temperature,
+            max_tokens: llm_max_tokens,
+            model_override: None,
+            enable_prompt_caching: true,
+            max_turns: 20,
+            persona_max_turns: None,
+            tool_choice: ToolChoice::Auto,
+            use_finish_task: false,
+            use_anthropic_direct: false,
+            claude_allowed_tools: Vec::new(),
+            aws_profile: None,
+            aws_region: None,
+            elevation_threshold: None,
+            elevation_model: None,
+            stop_sequences: Vec::new(),
+            routing_model: None,
+            thinking_enabled: None,
+        },
+        system_prompt: SystemPrompt {
+            content: body,
+            skills: None,
+        },
+        tools: fm.tools.unwrap_or_default(),
+        compress: AgentCompressConfig::default(),
+        runner_config: crate::agents::RunnerConfig::default(),
+        session: crate::agents::SessionCompressionConfig::default(),
+        plugins: crate::agents::AgentPluginsConfig::default(),
+        rbac: crate::agents::RbacConfig::default(),
+        workstreams: crate::agents::WorkstreamContextConfig::default(),
+        declared: Default::default(),
+        // Flat `.md` frontmatter has no `[[listeners]]` shape yet (#3820
+        // ships the binding only for directory-package `agent.toml`, DOC-54
+        // §5.3's primary format) — a `.md` overlay agent never wakes on a
+        // listener event until this parser grows frontmatter support.
+        residual_listeners: None,
+        channels: Vec::new(),
+        // #3816: markdown agents carry no `[[stores]]` table — an unbound
+        // store is a valid state (see `AgentConfig::stores`).
+        stores: crate::stores::StoresConfig::default(),
+        skills: crate::agents::SkillsConfig::default(),
+        // #3936: markdown agents carry no `[permissions]` table.
+        permissions: crate::agents::PermissionsConfig::default(),
+        // #4026: no cross-product grants from an .md-sourced agent yet.
+        subagents: crate::agents::SubagentsConfig::default(),
+    };
+    // #10978: this projection skips `apply_provider_pin`, so the lock is
+    // checked here. An `extends` child is checked after its merge, in
+    // `AgentConfig::finalize_extends`.
+    if !has_extends {
+        cfg.enforce_provider_lock(&crate::llm::provider_lock::active())?;
+    }
+    Ok(cfg)
+}

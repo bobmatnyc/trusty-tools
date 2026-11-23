@@ -133,9 +133,27 @@ pub(crate) const STABLE_HOOK_EXE: &str = "/usr/local/bin/tm";
 /// Why: `env::temp_dir()` reads `$TMPDIR`, which is the exact indirection this
 /// module exists to remove. `/tmp` exists on both targets the suite runs on
 /// (macOS locally, `ubuntu-latest` in CI), is never inside a project tree, and
-/// no environment variable can redirect it.
+/// no inherited `TMPDIR` can redirect it. #10785: a dedicated `TM_TEST_TMP`
+/// may move it; a value inside `$HOME` panics, as the lib's guard does.
+/// Test: [`tests::hermetic_temp_dir_ignores_tmpdir`],
+/// [`tests::tm_test_tmp_override_sets_the_root_10785`].
 fn real_system_tmp() -> PathBuf {
-    PathBuf::from("/tmp")
+    let root = resolve_test_tmp_root(std::env::var_os("TM_TEST_TMP"));
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && home.components().count() > 1
+        && home != root
+        && root.starts_with(&home)
+    {
+        panic!("TM_TEST_TMP {root:?} resolves inside $HOME ({home:?}); see #3382");
+    }
+    root
+}
+
+/// Pure resolution behind [`real_system_tmp`]: a non-empty override, else `/tmp`.
+fn resolve_test_tmp_root(override_root: Option<std::ffi::OsString>) -> PathBuf {
+    override_root
+        .filter(|r| !r.is_empty())
+        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
 }
 
 /// Create a test `TempDir` immune to an inherited or sibling-mutated `$TMPDIR`.
@@ -259,6 +277,20 @@ mod tests {
         assert!(
             std::env::var_os("TMUX").is_none(),
             "the host's $TMUX must not reach a test"
+        );
+    }
+
+    /// #10785: `TM_TEST_TMP` sets the root; an empty value falls back to `/tmp`.
+    #[test]
+    fn tm_test_tmp_override_sets_the_root_10785() {
+        let chosen = std::ffi::OsString::from("/var/tmp/tm-tests");
+        assert_eq!(
+            resolve_test_tmp_root(Some(chosen)),
+            PathBuf::from("/var/tmp/tm-tests")
+        );
+        assert_eq!(
+            resolve_test_tmp_root(Some(std::ffi::OsString::new())),
+            PathBuf::from("/tmp")
         );
     }
 

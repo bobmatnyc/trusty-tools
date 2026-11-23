@@ -198,14 +198,15 @@ The dual production/test cap was introduced in [#1131](https://github.com/bobmat
 
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
 landed — all three former monoliths are now under the 500-SLOC cap):
-- `crates/trusty-agents/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
-  submodules under `crates/trusty-agents/src/ctrl/` (`state`, `config`, `repl`,
-  `handlers`, `pm_task`, …); `mod.rs` is now a ~50-line re-export facade.
-- `crates/trusty-agents/src/runtime/` — RESOLVED (#171). The original `runtime.rs`
-  was split into a `runtime/` module; every submodule is now under the cap.
-- `crates/trusty-agents/src/workflow/engine/` — RESOLVED (#172). The original
-  `engine.rs` was split into an `engine/` module; every submodule is now under
-  the cap (largest is `engine/executor/run.rs` at ~485 lines).
+- trusty-agents `ctrl/mod.rs` — RESOLVED (#170). Split into focused
+  submodules (`state`, `config`, `repl`, `handlers`, `pm_task`, …); `mod.rs`
+  became a ~50-line re-export facade.
+- trusty-agents `runtime/` — RESOLVED (#171). The original `runtime.rs` was
+  split into a `runtime/` module; every submodule went under the cap.
+- trusty-agents `workflow/engine/` — RESOLVED (#172). The original `engine.rs`
+  was split into an `engine/` module; every submodule went under the cap.
+
+#11632 later cut all three modules with the trusty-agents harness.
 
 The largest remaining production file in `trusty-agents` (not tied to an open
 ticket) is `tm/manager.rs` — file a fresh refactor ticket before growing it

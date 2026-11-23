@@ -72,7 +72,8 @@ use crate::daemon::state::DaemonState;
 /// `session_start_hook_still_refuses_a_live_subagent_id`,
 /// `session_start_hook_reasserting_same_id_is_a_noop`,
 /// `session_start_hook_re_correlates_a_stale_id` in `api_tests.rs`;
-/// `session_start_same_id_reapply_failure_still_fails`.
+/// `session_start_same_id_reapply_failure_still_fails`;
+/// `architect_clear_moves_the_conversation_record_to_the_new_id` (#10594).
 pub(crate) async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
@@ -85,6 +86,26 @@ pub(crate) async fn correlate_session_start(
     // Canonicalize hook cwd (resolves /tmp ↔ /private/tmp on macOS).
     let hook_cwd =
         std::fs::canonicalize(cwd_str).unwrap_or_else(|_| std::path::PathBuf::from(cwd_str));
+
+    // #10594: `/clear` in the Architect starts a new conversation whose old
+    // transcript stays live, so the #4337 guard below cannot see it; the
+    // Architect's own record follows it here, keyed on its directory.
+    // Best-effort, like the correlation: a failure is logged, never returned.
+    match crate::core::architect_conversation::follow_clear(
+        state.framework_root(),
+        &hook_cwd,
+        claude_session_id,
+        payload["source"].as_str(),
+    ) {
+        Ok(true) => tracing::info!(
+            claude_session_id = %claude_session_id,
+            "SessionStart(clear): Architect conversation record moved to the new id (#10594)"
+        ),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!("SessionStart(clear): Architect conversation record not updated: {e}")
+        }
+    }
 
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
@@ -523,6 +544,9 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
     }
 }
 
+#[cfg(test)]
+#[path = "session_start_clear_tests.rs"]
+mod clear_tests;
 #[cfg(test)]
 #[path = "session_start_taint_tests.rs"]
 mod taint_tests;

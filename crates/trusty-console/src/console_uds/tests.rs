@@ -17,7 +17,8 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use trusty_common::console_rpc::{
-    ConsoleFleetStatus, ConsoleHealth, METHOD_FLEET_STATUS, METHOD_HEALTH, METHODS,
+    ConsoleFleetStatus, ConsoleHealth, METHOD_CONSOLE_METRICS, METHOD_FLEET_STATUS, METHOD_HEALTH,
+    METHODS,
 };
 use trusty_common::uds::server::{CODE_METHOD_NOT_FOUND, RpcResponse};
 use trusty_common::uds::{UdsSecurityError, send_framed_request};
@@ -216,6 +217,52 @@ async fn listener_serves_both_methods_over_a_real_socket() {
 
     socket.shutdown().await;
     assert!(!path.exists(), "shutdown unlinks the socket");
+}
+
+/// Why: #10907 (D95) — `console.console_metrics` must report the HTTP traffic
+/// the console served, over the real socket, as a `ConsoleMetricsReport`.
+/// What: serves two HTTP requests through the router built from the same
+/// state, then calls the method over a bound socket and reads the counts.
+/// Test: this test itself.
+#[tokio::test]
+async fn console_metrics_over_uds_reports_http_traffic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("console.sock");
+    let (state, _) = state();
+    let http = crate::server::build_router(state.clone());
+    for uri in ["/health", "/health"] {
+        let request = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        let response = http.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let socket = start_at(state, &path).await.expect("bind");
+
+    let request = json!({"jsonrpc": "2.0", "id": 9, "method": METHOD_CONSOLE_METRICS});
+    let response: RpcResponse = send_framed_request(&path, &request, CALL_TIMEOUT)
+        .await
+        .expect("framed call");
+    socket.shutdown().await;
+
+    let report: trusty_common::console_metrics::ConsoleMetricsReport =
+        serde_json::from_value(response.result.expect("console_metrics result")).expect("decode");
+    assert_eq!(report.service_id, "trusty-console");
+    let route = &report.metrics["by_route"]["/health"];
+    assert_eq!(route["requests"], 2);
+    assert_eq!(route["by_status"]["200"], 2);
+    assert_eq!(route["by_method"]["GET"], 2);
+    assert_eq!(report.metrics["totals"]["requests"], 2);
+    // #10907: the console's own schema version, and the shared `by_*` shape.
+    assert_eq!(
+        report.metrics_schema_version,
+        crate::request_metrics::METRICS_SCHEMA_VERSION
+    );
+    assert_eq!(
+        trusty_common::console_metrics::check_by_convention(&report.metrics),
+        Ok(())
+    );
 }
 
 /// Why: ADR-0034 §3 — the socket is private to this uid.

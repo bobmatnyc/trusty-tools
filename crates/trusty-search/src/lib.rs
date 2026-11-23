@@ -34,7 +34,7 @@ pub use service::SearchMcpService;
 /// `available_parallelism` workers (e.g. 8 on a 4-core box) and tasks blocking
 /// on long embed calls, the axum accept loop starves.
 /// What: returns `max(cpu_count, 16)`. The result is always `>= 16`.
-/// Test: `worker_thread_count_at_least_16` in `tests_state.rs` — asserts the
+/// Test: `worker_thread_count_at_least_16` in `state_tests.rs` — asserts the
 /// floor with `cpu_count=1` (→ 16) and the pass-through with `cpu_count=32` (→ 32).
 pub fn worker_thread_count(cpu_count: usize) -> usize {
     std::cmp::max(cpu_count, 16)

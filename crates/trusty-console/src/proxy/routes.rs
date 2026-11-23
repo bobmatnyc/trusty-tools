@@ -56,7 +56,8 @@ static HOP_BY_HOP: &[&str] = &[
 /// `mpm` left the allowlist in #6288 PR 1b.
 /// What: Returns the full service ID, or `None` for unknown/disallowed keys.
 /// Test: `test_service_key_mapping` below.
-fn full_id(service_key: &str) -> Option<&'static str> {
+// #10907: also read by `request_metrics::upstream_for`.
+pub(crate) fn full_id(service_key: &str) -> Option<&'static str> {
     match service_key {
         // #6285: NO `search` row. trusty-search moved to UDS (ADR-0032) and
         // stopped writing the `http_addr` file this proxy resolves a base URL
@@ -91,12 +92,8 @@ fn full_id(service_key: &str) -> Option<&'static str> {
         // daemon's Unix socket (PR 1a), so `/api/mpm/*` had no caller, and PR 2
         // retires the daemon's 7880 bind. The console reaches mpm through its
         // `tm serve --stdio` MCP handle and `mpm.health` on the socket.
-        // #3331: agents added so the trusty-agents API surface is reachable via
-        // `/api/agents/*`. Under the loopback-only doctrine (#3328) the agents
-        // daemon binds 127.0.0.1 by default, so this console proxy is the
-        // intended remote path to it — resolved from the same `http_addr`
-        // discovery file the other entries use (see `detect::AgentsConnector`).
-        "agents" => Some("trusty-agents"),
+        // #11632: NO `agents` row. The trusty-agents HTTP API that `/api/agents/*`
+        // proxied (#3331) was cut; the assistant's UDS API is later work.
         _ => None,
     }
 }
@@ -721,8 +718,8 @@ mod tests {
         assert_eq!(full_id("review"), Some("trusty-review"));
         // #6288 PR 1b: the mpm gateway is deleted; it had no caller.
         assert_eq!(full_id("mpm"), None);
-        // #3331: agents must be in the allowlist so `/api/agents/*` proxies.
-        assert_eq!(full_id("agents"), Some("trusty-agents"));
+        // #11632: the agents gateway is deleted with the trusty-agents HTTP API.
+        assert_eq!(full_id("agents"), None);
         assert_eq!(full_id("unknown"), None);
     }
 

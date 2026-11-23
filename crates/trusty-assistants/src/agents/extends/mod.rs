@@ -1,0 +1,616 @@
+//! `extends`-based agent personalization (DOC-41 §2.5 / §2.5.1, epic #3052,
+//! issue #3055).
+//!
+//! Why: trusty-assistants lets a user personalize a stock/bundled base agent
+//! (name it, add tools, override tone) WITHOUT forking it — they author a
+//! child agent declaring `extends: <base>` and layer personal deltas on top.
+//! Rather than invent a bespoke algorithm, this mirrors trusty-mpm's proven
+//! `compose_agent` (`trusty-mpm/src/core/agent_builder.rs`, now
+//! `trusty-agents-common::agents::builder`): the SAME `MAX_DEPTH = 8` ceiling,
+//! the SAME case-insensitive name resolution, and the SAME base-first prose
+//! concatenation. trusty-assistants does not depend on trusty-mpm as a library and
+//! that composer operates on Claude-Code deploy MARKDOWN with tools-OVERRIDE
+//! semantics, so this is an analogous — not shared — implementation working on
+//! the structured [`AgentConfig`] with the personalization merge table.
+//! What: [`resolve`] walks an agent's single-parent `extends` chain base-first
+//! against a name→config lookup, enforcing cycle and depth limits, and folds
+//! it into one self-contained [`AgentConfig`] via [`merge_extends`]. Resolution
+//! runs once at load time (`AgentRegistry::load` / `AgentConfig::by_name`),
+//! never per dispatch.
+//! Test: `agents::extends::tests`.
+
+use crate::agents::{AgentCapabilities, AgentConfig, RunnerKind};
+
+mod declared;
+pub use declared::DeclaredKeys;
+
+#[cfg(test)]
+mod declared_tests;
+#[cfg(test)]
+mod tests;
+
+/// Maximum inheritance-chain depth before [`resolve`] gives up.
+///
+/// Why: a malformed set of agents could declare an unbounded `extends` chain;
+/// the limit converts that into a clear [`AgentExtendsError::ExtendsTooDeep`]
+/// instead of unbounded recursion. Mirrors `agent_builder.rs::MAX_DEPTH`
+/// (DOC-41 §2.5) exactly — a safety ceiling, not an operator preference.
+/// What: 8 levels of ancestry.
+/// Test: `extends_depth_limit_rejected`.
+pub const MAX_DEPTH: usize = 8;
+
+/// A failure raised while resolving an `extends` inheritance chain.
+///
+/// Why: callers need a typed failure surface so a missing base is
+/// distinguishable from a cycle from an over-deep chain, mirroring
+/// `AgentBuildError` (DOC-41 §2.5) without a cross-crate dependency.
+/// What: the three structural failures §2.5 enumerates.
+/// Test: `extends_missing_parent_rejected`, `extends_cycle_rejected`,
+/// `extends_depth_limit_rejected`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AgentExtendsError {
+    /// The agent's `extends:` target could not be resolved (the informal
+    /// `ExtendsTargetNotFound` in issue #3055; named `ExtendsNotFound` to
+    /// match DOC-41 §2.5's normative enum).
+    #[error("agent '{agent}' extends unknown base agent '{base}'")]
+    ExtendsNotFound { agent: String, base: String },
+
+    /// The `extends` chain forms a cycle; the payload is the offending chain
+    /// in walk order (base-first), with the repeated name appended.
+    #[error("agent inheritance cycle detected: {}", .chain.join(" -> "))]
+    ExtendsCycle { chain: Vec<String> },
+
+    /// The `extends` chain exceeded [`MAX_DEPTH`].
+    #[error("agent '{agent}' extends chain exceeded depth limit of {depth}")]
+    ExtendsTooDeep { agent: String, depth: usize },
+}
+
+/// Resolve an agent's `extends` chain into one flattened [`AgentConfig`].
+///
+/// Why: an agent declaring `extends:` is only half-defined on disk — its
+/// behavior is the base's behavior with the child's deltas layered on. This
+/// walks the chain to its root and folds it so downstream consumers see a
+/// single self-contained config, exactly as trusty-mpm's `compose_agent`
+/// flattens before a Claude Code session starts.
+/// What: `name` is the agent to resolve; `lookup` returns the UNRESOLVED
+/// (as-loaded, `extends` still set) config for a case-insensitive name, or
+/// `None` when absent. Walks `extends` base-first, tracking a visited list for
+/// cycle detection and enforcing [`MAX_DEPTH`], then folds each level via
+/// [`merge_extends`]. An agent with no `extends` resolves to itself (with
+/// `extends` cleared). Generic over the lookup closure so both the in-memory
+/// registry map and the disk-backed `by_name` loader reuse this one walk.
+/// Test: `extends_two_level_merge`, `extends_missing_parent_rejected`,
+/// `extends_cycle_rejected`, `extends_depth_limit_rejected`.
+pub fn resolve<F>(name: &str, lookup: &F) -> Result<AgentConfig, AgentExtendsError>
+where
+    F: Fn(&str) -> Option<AgentConfig>,
+{
+    let mut visiting: Vec<String> = Vec::new();
+    resolve_inner(name, lookup, &mut visiting)
+}
+
+/// Recursive worker for [`resolve`], tracking the visited path.
+///
+/// Why: cycle and depth detection need the ancestry walked so far; keeping the
+/// `visiting` stack in a helper keeps [`resolve`]'s public signature clean.
+/// What: the depth/cycle guards mirror `agent_builder.rs::resolve` — depth is
+/// checked on entry (a 9-level chain trips the limit at the 9th call), the
+/// cycle check is case-insensitive to match name resolution, and the base is
+/// resolved (recursively flattened) BEFORE the child is merged onto it so
+/// ordering is base-first.
+/// Test: exercised by every `extends_*` test via [`resolve`].
+fn resolve_inner<F>(
+    name: &str,
+    lookup: &F,
+    visiting: &mut Vec<String>,
+) -> Result<AgentConfig, AgentExtendsError>
+where
+    F: Fn(&str) -> Option<AgentConfig>,
+{
+    if visiting.len() >= MAX_DEPTH {
+        return Err(AgentExtendsError::ExtendsTooDeep {
+            agent: name.to_string(),
+            depth: MAX_DEPTH,
+        });
+    }
+    if visiting.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+        let mut chain = visiting.clone();
+        chain.push(name.to_string());
+        return Err(AgentExtendsError::ExtendsCycle { chain });
+    }
+
+    let cfg = lookup(name).ok_or_else(|| AgentExtendsError::ExtendsNotFound {
+        // The referrer is the top of the visited stack (the agent whose
+        // `extends:` pointed here); for a top-level miss it is the name itself.
+        agent: visiting.last().cloned().unwrap_or_else(|| name.to_string()),
+        base: name.to_string(),
+    })?;
+
+    match cfg.agent.extends.clone() {
+        None => Ok(clear_extends(cfg)),
+        Some(base) => {
+            visiting.push(name.to_string());
+            let resolved_base = resolve_inner(&base, lookup, visiting)?;
+            visiting.pop();
+            Ok(merge_extends(resolved_base, cfg))
+        }
+    }
+}
+
+/// Clear the `extends` marker on a fully-resolved config.
+///
+/// Why: once a chain is flattened the `extends` field has been consumed;
+/// leaving it set would make a resolved config look unresolved and could
+/// trigger a redundant second resolution. `extends` is itself never inherited.
+/// What: returns `cfg` with `agent.extends = None`.
+/// Test: `extends_resolved_config_has_no_extends`.
+fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
+    cfg.agent.extends = None;
+    // #3936: seed the `permissions.scopes` accumulator with THIS (root)
+    // level's own CC-9-resolved value, so a root agent and a merged
+    // multi-level agent share one invariant: after resolution,
+    // `permissions.scopes` always holds the chain's fully-resolved effective
+    // scope set — see `merge_extends`'s matching seed for the non-root case.
+    cfg.permissions.scopes =
+        crate::agents::permissions::effective_scopes(&cfg.tools, &cfg.permissions);
+    cfg
+}
+
+/// Merge a resolved base config with a child overlay, base-first (DOC-41
+/// §2.5 merge table).
+///
+/// Why: personalization layers a child's deltas onto a base's behavior. The
+/// merge must be faithful to §2.5: scalars are child-overrides-when-present,
+/// list fields UNION (dedup, base-first order), and prose CONCATENATES
+/// base-first (parent instructions, then child) — NOT child-replaces-parent.
+/// What: starts from `base` (so the child inherits the base's rich runtime
+/// config — `llm`, `runner`, `compress`, `session`, `plugins`, `rbac` — which
+/// a personalization overlay rarely redeclares), keeps the child's own
+/// identity (`name`), then applies the §2.5 rules:
+///   - scalars (`role`, `model`, `description`): child overrides when it
+///     carries a non-neutral value, else inherits base (a `.md` child that
+///     omits `model` leaves it empty and inherits the base's; a `.toml` child
+///     always declares `model`);
+///   - `display_name` / `prompt_label`: child-`Some`-wins; a child that OMITS
+///     it falls back to its OWN name rather than inheriting the base's
+///     (#3738 — the base `assistant` is now the named generic default
+///     "Assistant", so a nameless overlay must NOT report "Assistant" as its
+///     identity). A child can still set `display_name` even when the base has
+///     none (the reverse case);
+///   - list fields (`tools.allowed`, `tools.allow`, `tools.scopes`,
+///     `skills.allow`, `subagents.allowed`, `subagents.delegate_allowed`,
+///     `system_prompt.skills`, and every `capabilities` sub-list): UNION,
+///     de-duplicated in first-seen base-first order;
+///   - prose (`system_prompt.content`): base body then child body, joined by a
+///     blank line, matching `compose_agent`'s `bodies.join("\n\n")`.
+/// `extends` itself is cleared (never inherited). ADR-0024 decision 4 added
+/// `[subagents]` to the union set — see the inline comment for the silent-drop
+/// bug that fixes. The `user_authority` field is
+/// deliberately excluded from inheritance — see the stub note in the body.
+/// The provider `adapter` is left as the base's here and recomputed by the
+/// loader after model resolution.
+/// Test: `extends_two_level_merge`, `extends_prose_base_first`,
+/// `extends_tools_union_dedup`, `extends_child_sets_display_name_over_none`,
+/// `extends_nameless_child_does_not_inherit_named_base_display`,
+/// `extends_scalar_child_override`, `extends_llm_child_overrides_temperature_only`,
+/// `extends_llm_child_overrides_max_tokens_only`,
+/// `extends_llm_child_inherits_when_omitted`,
+/// `extends_tier_child_inherits_l0_from_base_when_omitted`,
+/// `extends_tier_child_can_downgrade_l0_base_to_l1`,
+/// `extends_tier_omitted_everywhere_resolves_l1`,
+/// `extends_unions_the_subagent_whitelist`,
+/// `extends_child_provider_id_wins_and_omitted_inherits`.
+pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
+    // #3936: the base's own contribution to the `permissions.scopes`
+    // accumulator, captured BEFORE `base` moves into `merged` below.
+    //
+    // `resolve_inner` always hands this function a `base` that already went
+    // through `clear_extends` (root) or a prior `merge_extends` call
+    // (multi-level) — either way `base.permissions.scopes` already holds
+    // that level's CC-9-collapsed, chain-unioned value, and is used
+    // verbatim. A `base` that skipped both (a direct `merge_extends` call,
+    // e.g. from a unit test) has NOT been collapsed yet, so this falls back
+    // to computing it here — the same `effective_scopes` call
+    // `clear_extends` makes — rather than silently dropping that level's
+    // legacy `[tools].scopes` contribution. Idempotent either way: re-running
+    // `effective_scopes` over an already-collapsed value is a no-op because
+    // `permissions.scopes` is already `Some`.
+    let base_scopes_seed = if base.permissions.scopes.is_some() {
+        base.permissions.scopes.clone()
+    } else {
+        crate::agents::permissions::effective_scopes(&base.tools, &base.permissions)
+    };
+
+    let mut merged = base;
+
+    // #3738: capture the base's identity BEFORE overwriting it with the
+    // child's, so the display_name/prompt_label rule below can distinguish a
+    // value the CHILD declared from one it would merely INHERIT from the base
+    // template.
+    let base_name = merged.agent.name.clone();
+
+    // Identity always comes from the child — it is the concrete agent being
+    // loaded, not the template it extends.
+    merged.agent.name = child.agent.name;
+    merged.agent.extends = None;
+
+    // --- Scalars: child overrides when present (non-neutral) ---
+    //
+    // Accepted limitation (code-critic LOW, PR #3106): `role == "agent"` is used
+    // as the "unset" sentinel because `AgentConfig` collapses the parsed
+    // `Option<String>` into a defaulted `String` (`parse_md_agent` fills the
+    // absent `role:` with `"agent"`), so post-parse we cannot distinguish a
+    // child that deliberately declared `role: agent` from one that omitted it —
+    // the former inherits the base's role. This is immaterial for the
+    // personalization use case (an overlay of a role-bearing base rarely
+    // re-declares the neutral role) and would only matter if a base itself had
+    // role `"agent"`, in which case the outcome is identical either way.
+    if !child.agent.role.is_empty() && child.agent.role != "agent" {
+        merged.agent.role = child.agent.role;
+    }
+    if !child.agent.model.is_empty() {
+        merged.agent.model = child.agent.model;
+    }
+    if !child.agent.description.is_empty() {
+        merged.agent.description = child.agent.description;
+    }
+    // `display_name` / `prompt_label`: a child that declares its own value
+    // wins (child-`Some`-wins). A child that OMITS it must fall back to its
+    // OWN name, NOT silently inherit the base's brand. Before #3738 bases were
+    // nameless (base `display_name == None`), so inheriting was a harmless
+    // no-op; now the base `assistant` is the named generic default
+    // (`display_name = "Assistant"`), and a nameless `extends = "assistant"`
+    // overlay that inherited it would report "Assistant" as its identity
+    // (e.g. `/agent my-overlay` printing "Switched to: Assistant"). A genuine
+    // extends child always has a name distinct from its base, so clear the
+    // inherited value here and let `AgentInfo::display_label` resolve to the
+    // child's own `name`.
+    if child.agent.display_name.is_some() {
+        merged.agent.display_name = child.agent.display_name;
+    } else if merged.agent.name != base_name {
+        merged.agent.display_name = None;
+    }
+    if child.agent.prompt_label.is_some() {
+        merged.agent.prompt_label = child.agent.prompt_label;
+    } else if merged.agent.name != base_name {
+        merged.agent.prompt_label = None;
+    }
+    // `runner`: child-overrides when the child chose a non-default runner. The
+    // enum has no "unset", so a non-default child value is treated as a
+    // deliberate override (a `.md` child defaults to `Subprocess` and thus
+    // inherits the base's runner); this fixes the code-critic finding that a
+    // child's declared `runner:` was silently discarded.
+    if child.agent.runner != RunnerKind::default() {
+        merged.agent.runner = child.agent.runner;
+    }
+    // `persistent_session`: opt-in bool, child-overrides only when set true
+    // (`false` is the neutral default and inherits the base).
+    if child.agent.persistent_session {
+        merged.agent.persistent_session = true;
+    }
+    // `tier` (#4168, epic #4167 — L0/L1 orchestration model): child-declares-
+    // wins, child-omits-inherits — the SAME posture as `enforce_search_indexes`/
+    // `default_tier` below: a hardened (L1) base stays hardened under a
+    // silent overlay, and this is a privilege boundary, not a convenience
+    // default, so the rule cuts both ways deliberately. An L0 base's
+    // elevated tier travels to a child overlay that doesn't explicitly
+    // declare its own `tier` — exactly like every other un-redeclared field
+    // in an `extends` overlay — while a child that DOES declare `tier`
+    // (including downgrading an L0 base to `l1`) always wins. This is
+    // distinct from the "absent/malformed -> L1" fail-closed resolution
+    // `AgentInfo::tier()` performs: that guards a chain where NO level ever
+    // declares a recognized value, not a child that inherits an ancestor's
+    // explicit declaration.
+    if child.agent.tier.is_some() {
+        merged.agent.tier = child.agent.tier.clone();
+    }
+    // #11043: the provider pin is child-`Some`-wins, child-omits-inherits.
+    // Dropping it let an overlay such as `cto-assistant` (#7878) run unpinned.
+    if child.agent.provider_id.is_some() {
+        merged.agent.provider_id = child.agent.provider_id;
+    }
+
+    // --- user_authority: NEVER inherited/unioned through `extends` ---
+    //
+    // Owner decision 2026-07-18 (AUTH carve-out): a child's `user_authority` is
+    // always its own explicit setting (defaulting false), even when `extends`
+    // targets the authority holder. The field does not exist on `AgentConfig`
+    // yet — AUTH-1/#3074 adds it. This is the merge site where the exclusion
+    // must live: when the field lands, DO NOT copy it from `base`; leave
+    // `merged`'s value (which will already be the child's own, since `merged`
+    // starts from `base` — so AUTH-1 must additionally reset it to the child's
+    // explicit value here). See the TODO test placeholder in `tests.rs`
+    // (`extends_does_not_inherit_user_authority`) for AUTH-2/#3075 to fill in.
+
+    // #7901: `[llm]`, `[compress]`, `[runner_config]`, `[session]`,
+    // `[plugins]`, `[rbac]` and `[workstreams]` merge per key — a key the child
+    // declared wins, an omitted key keeps the base's. The sentinel rule for
+    // `temperature`/`max_tokens` (#3052) and the `Some` rule for
+    // `aws_profile`/`aws_region` (#7878) live in `declared::merge_llm`.
+    declared::inherit_tables(
+        &mut merged,
+        declared::ChildTables {
+            declared: child.declared,
+            llm: child.llm,
+            compress: child.compress,
+            runner_config: child.runner_config,
+            session: child.session,
+            plugins: child.plugins,
+            rbac: child.rbac,
+            workstreams: child.workstreams,
+        },
+    );
+
+    // #3936: computed BEFORE the `child.tools.*` partial moves below (`scopes`
+    // and `search_indexes` are moved out of `child.tools` by `union_opt_vec`
+    // a few lines down) — `effective_scopes` needs to borrow `child.tools`
+    // and `child.permissions` together, so it must run first.
+    let child_effective_scopes =
+        crate::agents::permissions::effective_scopes(&child.tools, &child.permissions);
+
+    // --- List fields: union (dedup, base-first order) ---
+    merged.tools.allowed = union_opt_vec(merged.tools.allowed, child.tools.allowed);
+    // #7360: an operator's Settings selection is exact, including an empty list.
+    merged.tools.allow = if child.permissions.replace_tools {
+        Some(child.tools.allow.unwrap_or_default())
+    } else {
+        union_opt_vec(merged.tools.allow, child.tools.allow)
+    };
+    merged.tools.scopes = union_opt_vec(merged.tools.scopes, child.tools.scopes);
+    // #3232: `[tools].search_indexes` — attached trusty-search indexes, the
+    // tier-2 knowledge mechanism (epic #4007). Same base-first union as
+    // `allow`/`scopes` for the same reason, and it is the overlay case the
+    // ticket names: a base Assistant attaches its project index, a CTO
+    // Assistant extending it unions in `cto-projects` WITHOUT re-declaring
+    // (or being able to silently drop) the base's.
+    merged.tools.search_indexes =
+        union_opt_vec(merged.tools.search_indexes, child.tools.search_indexes);
+    // #4009: `enforce_search_indexes` is a posture, not a list — child
+    // child-declares-wins (an overlay may harden or relax), child-omits
+    // inherits, so a hardened base stays hardened under a silent overlay.
+    if child.tools.enforce_search_indexes.is_some() {
+        merged.tools.enforce_search_indexes = child.tools.enforce_search_indexes;
+    }
+    // `[skills].allow` (#3933): same base-first union as `[tools].allow`, for
+    // the same reason — an AUTHORED overlay ADDS capability to its base and
+    // must never silently remove what the base granted. #7360's
+    // `replace_skills` is the one exception, and it is not an authored overlay:
+    // it is set only by a Settings write, where the operator's selection is
+    // exact and a union would silently re-add what they just removed. Narrowing
+    // is the only direction that flag reaches — a turn-originated patch cannot
+    // widen past the manifest's own grants (#7396,
+    // `api::server::grant_ceiling`).
+    merged.skills.allow = if child.permissions.replace_skills {
+        Some(child.skills.allow.unwrap_or_default())
+    } else {
+        union_opt_vec(merged.skills.allow, child.skills.allow)
+    };
+
+    // `[subagents]` (#4026 `allowed`, ADR-0024 decision 4 `delegate_allowed`):
+    // base-first UNION, the §2.5 list rule, for the same reason as
+    // `[skills].allow`. Until decision 4 neither key was merged AT ALL — the
+    // base's value survived because `merged` starts as `base`, and a CHILD's
+    // declaration was silently discarded. That was harmless while nothing in
+    // the roster declared `[subagents]`; it is not harmless for a whitelist the
+    // owner ratified as EDITABLE, because a personalization overlay declaring
+    // its own reachable set would have had it dropped on the floor. Union
+    // cannot widen past the server-owned floor: `SubagentAllowSet::resolve`
+    // intersects the merged list with the floor at every dispatch.
+    merged.subagents.allowed = union_opt_vec(merged.subagents.allowed, child.subagents.allowed);
+    merged.subagents.delegate_allowed = if child.permissions.replace_subagents {
+        Some(child.subagents.delegate_allowed.unwrap_or_default())
+    } else {
+        union_opt_vec(
+            merged.subagents.delegate_allowed,
+            child.subagents.delegate_allowed,
+        )
+    };
+
+    // `[permissions]` (#3936, DOC-57 §2.3 + §7.2):
+    //
+    // `scopes` — base-first UNION across the chain, same polarity as legacy
+    // `tools.scopes` above, but sourced through `effective_scopes` so a
+    // per-file CC-9 collapse (this file's OWN `[permissions].scopes` beats
+    // this file's OWN legacy `[tools].scopes`) happens BEFORE the cross-chain
+    // union. `base_scopes_seed` (captured above, before `base` moved into
+    // `merged`) already holds the accumulated union of every ancestor level;
+    // this only has to fold in the CHILD's own contribution (also computed
+    // above, before the partial moves).
+    merged.permissions.scopes = if child.permissions.replace_scopes {
+        Some(child_effective_scopes.unwrap_or_default())
+    } else {
+        union_opt_vec(base_scopes_seed, child_effective_scopes)
+    };
+    merged.permissions.replace_scopes = child.permissions.replace_scopes;
+    merged.permissions.replace_tools = child.permissions.replace_tools;
+    merged.permissions.replace_skills = child.permissions.replace_skills;
+    merged.permissions.replace_subagents = child.permissions.replace_subagents;
+    // `grants[]` — union keyed by `skill`, same shape as the listener-binding
+    // union: a child re-declaring a grant for a skill OVERRIDES the base's
+    // mode for it rather than appending a second, shadowing entry.
+    merged.permissions.grants =
+        union_permission_grants(merged.permissions.grants, child.permissions.grants);
+    // `default_tier` / `unauthenticated_tier` / `autonomy` — child-declares-
+    // wins, child-omits-inherits (same posture as `enforce_search_indexes`
+    // above): a hardened base stays hardened under a silent overlay.
+    if child.permissions.default_tier.is_some() {
+        merged.permissions.default_tier = child.permissions.default_tier.clone();
+    }
+    if child.permissions.unauthenticated_tier.is_some() {
+        merged.permissions.unauthenticated_tier = child.permissions.unauthenticated_tier.clone();
+    }
+    if child.permissions.autonomy.is_some() {
+        merged.permissions.autonomy = child.permissions.autonomy;
+    }
+    // `user_authority` — NEVER inherited (PM-3, DOC-41 §5.5). Always the
+    // child's own explicit setting (defaulting `false`), even when `extends`
+    // targets the authority holder. `merged` starts as a clone of `base`, so
+    // this assignment is what actually enforces the exclusion — omitting it
+    // would leave the base's value sitting in `merged` untouched.
+    merged.permissions.user_authority = child.permissions.user_authority;
+    merged.system_prompt.skills =
+        union_opt_vec(merged.system_prompt.skills, child.system_prompt.skills);
+    merged.agent.capabilities =
+        merge_capabilities(merged.agent.capabilities, child.agent.capabilities);
+    // #7609: `channels` unions by `id` exactly the way the retired
+    // `[[listeners]]` table unioned by `name` (#3820) — a child that
+    // re-declares one REPLACES the base's entry rather than appending a
+    // shadowing duplicate — and it is the one the derived
+    // `AgentConfig::listeners()` view reads.
+    merged.channels = union_channels_by_id(merged.channels, child.channels);
+
+    // `stores` (#3816): child REPLACES rather than unions. Unlike listeners
+    // and tools — where "the base's surface plus my extras" is the intent —
+    // the spec allows exactly ONE OKG store per agent (DOC-54 §5.1). A
+    // personalization overlay declaring its own store (`izzie` → `bob-kb`,
+    // `cto-assistant` → `cto-assistant`) means "this is MY knowledge", not
+    // "add mine alongside the base's"; unioning would produce a two-store
+    // config whose default search target is the BASE's index, silently
+    // routing every unqualified `vector_search` to the wrong corpus. A child
+    // that declares no `[[stores]]` still inherits the base's.
+    if !child.stores.bindings.is_empty() {
+        merged.stores = child.stores.clone();
+    }
+
+    // --- Prose: base-first concatenation ---
+    merged.system_prompt.content =
+        concat_prose(&merged.system_prompt.content, &child.system_prompt.content);
+
+    merged
+}
+
+/// Union two optional string lists, de-duplicated in first-seen (base-first)
+/// order.
+///
+/// Why: list fields accumulate through inheritance (a child ADDS tools to the
+/// base set rather than replacing it) — the personalization semantics of
+/// DOC-41 §2.5, and the key point that distinguishes trusty-assistants' `tools`
+/// union from trusty-mpm's `tools` override.
+/// What: `None + None => None`; otherwise `Some` of the base list followed by
+/// any child entries not already present (case-sensitive dedup — tool/scope
+/// names are case-sensitive identifiers). Preserves base-first order.
+/// Test: `extends_tools_union_dedup`, `extends_union_none_cases`.
+fn union_opt_vec(base: Option<Vec<String>>, child: Option<Vec<String>>) -> Option<Vec<String>> {
+    match (base, child) {
+        (None, None) => None,
+        (Some(b), None) => Some(b),
+        (None, Some(c)) => Some(c),
+        (Some(mut b), Some(c)) => {
+            for item in c {
+                if !b.contains(&item) {
+                    b.push(item);
+                }
+            }
+            Some(b)
+        }
+    }
+}
+
+/// Union two channel lists, base-first, keyed by `id`.
+///
+/// Why (#7609): the channels merge replaced `[[listeners]]` with
+/// `[[channels]]`, and inheritance has to keep the semantics it had — a child
+/// that re-declares the same channel REPLACES the base's entry in place rather
+/// than appending a shadowing duplicate. `id` is the channel's stable storage
+/// key, which is what a listener binding's `name` became.
+/// What: base-first; a child entry with a known `id` replaces it in place.
+/// Test: `extends_unions_channels_by_id`,
+/// `extends_channel_child_override_replaces_base_filter` (`extends/tests.rs`).
+fn union_channels_by_id(
+    base: Vec<crate::channels::Channel>,
+    child: Vec<crate::channels::Channel>,
+) -> Vec<crate::channels::Channel> {
+    let mut merged = base;
+    for child_channel in child {
+        if let Some(existing) = merged.iter_mut().find(|c| c.id == child_channel.id) {
+            *existing = child_channel;
+        } else {
+            merged.push(child_channel);
+        }
+    }
+    merged
+}
+
+/// Union two `[[permissions.grants]]` lists, base-first, keyed by `skill` —
+/// a child grant for a skill already named by the base REPLACES the base's
+/// mode for it (#3936, DOC-57 §2.3 "grants union-by-skill").
+///
+/// Why: Mirrors [`union_channels_by_id`]'s keyed-replace semantics exactly
+/// — a grant is identified by WHICH skill it governs, not by its `mode`, so
+/// two grants for the same skill are the same declaration with the child's
+/// value winning, not two independent entries.
+/// What: base entries, with any child entry sharing a `skill` overwriting
+/// in place; a child entry naming a new skill is appended.
+/// Test: `extends_permission_grants_union_by_skill`.
+fn union_permission_grants(
+    base: Vec<crate::agents::permissions::PermissionGrant>,
+    child: Vec<crate::agents::permissions::PermissionGrant>,
+) -> Vec<crate::agents::permissions::PermissionGrant> {
+    let mut merged = base;
+    for grant in child {
+        if let Some(existing) = merged.iter_mut().find(|g| g.skill == grant.skill) {
+            *existing = grant;
+        } else {
+            merged.push(grant);
+        }
+    }
+    merged
+}
+
+/// Union the four capability sub-lists of two optional [`AgentCapabilities`].
+///
+/// Why: `capabilities` is a list-bearing field, so it follows the same union
+/// rule as `tools` — a child's declared languages/frameworks/roles/tags add to
+/// the base's rather than replacing them.
+/// What: `None + None => None`; otherwise `Some` with each of the four lists
+/// unioned base-first via a plain `Vec<String>` union (dedup, first-seen order).
+/// Test: `extends_capabilities_union`.
+fn merge_capabilities(
+    base: Option<AgentCapabilities>,
+    child: Option<AgentCapabilities>,
+) -> Option<AgentCapabilities> {
+    match (base, child) {
+        (None, None) => None,
+        (Some(b), None) => Some(b),
+        (None, Some(c)) => Some(c),
+        (Some(b), Some(c)) => Some(AgentCapabilities {
+            languages: union_vec(b.languages, c.languages),
+            frameworks: union_vec(b.frameworks, c.frameworks),
+            roles: union_vec(b.roles, c.roles),
+            tags: union_vec(b.tags, c.tags),
+        }),
+    }
+}
+
+/// Union two `Vec<String>` de-duplicated in first-seen (base-first) order.
+///
+/// Why: the bare-`Vec` counterpart of [`union_opt_vec`] for `capabilities`
+/// sub-lists, which are non-optional `Vec`s.
+/// What: base entries, then child entries not already present.
+/// Test: covered via `extends_capabilities_union`.
+fn union_vec(mut base: Vec<String>, child: Vec<String>) -> Vec<String> {
+    for item in child {
+        if !base.contains(&item) {
+            base.push(item);
+        }
+    }
+    base
+}
+
+/// Concatenate base and child prose base-first, joined by a blank line.
+///
+/// Why: §2.5 mandates base-first prose concatenation (parent instructions
+/// then child), matching `compose_agent`'s `bodies.join("\n\n")` — NOT
+/// child-replaces-parent. A child's persona/override prose is APPENDED so the
+/// base's behavior is preserved and refined, not discarded.
+/// What: trims surrounding newlines off each side, drops empties, and joins
+/// the non-empty parts with `"\n\n"`.
+/// Test: `extends_prose_base_first`, `extends_prose_empty_sides`.
+fn concat_prose(base: &str, child: &str) -> String {
+    let parts: Vec<&str> = [base, child]
+        .into_iter()
+        .map(|s| s.trim_matches('\n'))
+        .filter(|s| !s.is_empty())
+        .collect();
+    parts.join("\n\n")
+}

@@ -1268,7 +1268,8 @@ assert_eq "release.yml calls the wrapper"           "1" \
 # 12 -> 13: the `trusty-common-lanes` job (owner ruling 2026-09-27).
 # 13 -> 12: the `mpm-gui` job left with trusty-mpm-gui (#7964).
 # 12 -> 13: the trusty-okf bubblewrap step in `affected-test` (#10822).
-assert_eq "every apt step routes through the wrapper" "13" \
+# 13 -> 12: the `agents-ui` job left with trusty-agents-ui (#11632).
+assert_eq "every apt step routes through the wrapper" "12" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------

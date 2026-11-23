@@ -1,0 +1,361 @@
+//! One adapter per channel provider, behind a single [`ChannelAdapter`] trait.
+//!
+//! Why: `api::server::agent_channels` used to carry a `match binding.provider`
+//! arm per provider in `send`, a second provider test in `messages`, a third in
+//! `Binding::validate`, and a hand-written `providers()` JSON literal. Adding a
+//! provider meant editing four places that could disagree, and the file was
+//! approaching the 500-SLOC cap. Provider knowledge now lives in one adapter
+//! per provider and `agent_channels` dispatches through the registry.
+//! What: [`ChannelAdapter`] states what a provider can do ([`Capabilities`]),
+//! what destination text it accepts, how it sends, and how it turns an inbound
+//! event into a [`WakePrompt`]. [`registry::adapter`] resolves a provider id;
+//! an id with no adapter is unsupported rather than silently inert.
+//! [`credentials`] resolves a binding's `credential_ref` to a
+//! [`trusty_common::credentials::Secret`]; [`status`] holds the per-binding
+//! dispatch-failure counter the assistant's channel view reads.
+//! [`model::Channel`] is the ONE type a listener and a channel binding both
+//! collapse into (#7609); [`migrate`] drains the legacy `[[listeners]]` tables
+//! into it and [`resolve_channels`] states which of two bindings on the same
+//! destination wins. [`dispatch`] is the inbound half of that merge: one
+//! selector, shared by every provider, that answers which ONE channel an
+//! arriving event wakes an assistant through (slice 4).
+//! [`ChannelAdapter::addresses`] is how a binding claims an inbound event —
+//! equality on a destination id for Slack and Telegram, a sender or label match
+//! for Gmail (#7427).
+//! Test: `channel_registry_resolves_known_providers_and_rejects_notion`,
+//! `channel_adapter_receive_defaults_to_unsupported`,
+//! `channel_adapter_read_defaults_to_unsupported`,
+//! `a_default_environment_has_no_stub_provider`,
+//! `channel_credential_ref_resolves_through_the_authority`,
+//! `channel_dispatch_failure_is_counted_per_binding`,
+//! `gworkspace_adapter_addresses_sender_and_label_targets`.
+
+// #7427: adapter model for two-way channel connectors (epic #7425 item b).
+pub(crate) mod credentials;
+mod gworkspace;
+// #7609: listeners and channel bindings are one type now — the model, its
+// storage migrations, the global-vs-assistant precedence rule, and the
+// exactly-one-wake selector every inbound provider runs through (slice 4).
+pub(crate) mod dispatch;
+// #7609 slice 7: comment-preserving edits of the two channel tables, after a
+// live `PUT /api/channels` deleted an unrelated comment block with the legacy
+// `[[listeners]]` table it sat above.
+pub(crate) mod document;
+pub mod migrate;
+pub mod model;
+mod registry;
+pub mod resolve;
+// #7609 slice 7: taking the retired `[[listeners]]` table out of an
+// `agent.toml` once the assistant's channels file covers it.
+pub(crate) mod retire;
+mod slack;
+pub(crate) mod status;
+// #8037: the credential-free provider that makes send/read/inbound testable
+// end to end. Admitted only when `stub::ENABLE_ENV` is set; see its module doc.
+pub(crate) mod stub;
+mod telegram;
+
+use crate::listeners::store::StoredEvent;
+use crate::operations::agent_channels::Binding;
+pub(crate) use credentials::{resolve_credential, validate_credential_ref};
+pub use model::{Channel, ChannelScope};
+pub(crate) use registry::{adapter, adapter_id, providers_json, require_adapter};
+pub use resolve::resolve_channels;
+use serde_json::Value;
+
+/// What a provider can do, and the user-facing reason when it cannot.
+///
+/// Why: `providers()` publishes these to the UI, `Binding::validate` refuses a
+/// `receive_enabled` binding on a send-only provider, and `messages()` refuses
+/// history on a provider that has none. One struct keeps those three answers
+/// from drifting apart.
+/// Test: `channel_registry_resolves_known_providers_and_rejects_notion`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Capabilities {
+    /// The provider accepts outbound messages.
+    pub can_send: bool,
+    /// The provider can be asked for prior messages on the bound destination.
+    pub can_read: bool,
+    /// The provider delivers inbound events to the assistant.
+    pub can_receive: bool,
+    /// Shown beside `can_receive` in the channel view.
+    pub receive_reason: &'static str,
+    /// Shown when a read is refused because [`Capabilities::can_read`] is false.
+    pub read_reason: &'static str,
+}
+
+/// An inbound provider event, addressed to one assistant.
+///
+/// Why: [`ChannelAdapter::receive`] needs both the event and the assistant it
+/// was matched to — the Slack intake pipeline is keyed by assistant name.
+pub(crate) struct InboundEvent<'a> {
+    /// Assistant the bound destination belongs to.
+    pub agent: &'a str,
+    /// The stored inbound event.
+    pub event: &'a StoredEvent,
+}
+
+/// A wake dispatch an inbound event earned: the prompt, and its event metadata.
+///
+/// Why: the adapter owns how a provider's event becomes prompt text; the caller
+/// owns spawning the dispatch and recording its outcome.
+pub(crate) struct WakePrompt {
+    /// Prompt text handed to the assistant.
+    pub prompt: String,
+    /// Serialized `trusty.listener-event` metadata scoped around the dispatch.
+    pub metadata: String,
+}
+
+/// Why a channel operation did not happen.
+///
+/// Why: `agent_channels` maps these onto HTTP statuses, so the reasons have to
+/// be distinguishable — an unsupported provider is the caller's mistake (400),
+/// a credential that will not resolve and a provider that rejected the request
+/// are both upstream (502) but need different operator guidance.
+/// What: no variant carries a credential value. [`ChannelError::Credential`]
+/// names the scheme and the failure, never the resolved secret.
+/// Test: `channel_credential_ref_resolves_through_the_authority`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ChannelError {
+    /// No adapter is registered for this provider id.
+    #[error("unsupported channel provider `{0}`")]
+    UnsupportedProvider(String),
+
+    /// The provider has no inbound path in this build.
+    #[error("provider `{0}` does not deliver inbound events")]
+    ReceiveUnsupported(&'static str),
+
+    /// The provider claims readable history and implements none.
+    ///
+    /// Why (#8037): [`ChannelAdapter::read`] has a default, and a default that
+    /// answered with an EMPTY history would render as "this destination has no
+    /// messages" — indistinguishable from a working read. A build defect must
+    /// not look like an empty inbox.
+    #[error("provider `{0}` does not serve message history")]
+    ReadUnsupported(&'static str),
+
+    /// The binding's `credential_ref` could not be resolved. Never the value.
+    #[error("credential reference could not be resolved: {0}")]
+    Credential(String),
+
+    /// The provider client could not be built or the request failed.
+    #[error("channel provider `{provider}` request failed")]
+    Provider {
+        /// Provider id whose request failed.
+        provider: &'static str,
+    },
+
+    /// The binding's destination cannot be addressed for this operation.
+    ///
+    /// Why (#7427): a gworkspace `label:` binding can answer a message that
+    /// arrived under that label, but has no correspondent to open a fresh
+    /// thread to. That is the operator's configuration, not an upstream
+    /// failure, so it answers 400 rather than 502.
+    #[error("channel destination `{target}` cannot be addressed for an outbound message")]
+    Destination {
+        /// The binding target that has no outbound address.
+        target: String,
+    },
+}
+
+/// One provider's half of the channel model: capabilities, destinations, send,
+/// receive.
+///
+/// Why: a binding names a provider; everything that differs between providers
+/// has to resolve from that one string. Without this trait each difference is a
+/// `match` arm somewhere in the HTTP layer, and the arms drift — the send path
+/// knew about Telegram, the receive path did not, and only a comment recorded
+/// that Telegram is send-only.
+/// What: [`ChannelAdapter::capabilities`] and
+/// [`ChannelAdapter::validate_target`] answer without any network call, so
+/// validation and the providers listing are cheap. [`ChannelAdapter::send`] and
+/// [`ChannelAdapter::receive`] do the provider work.
+/// [`ChannelAdapter::receive`] defaults to
+/// [`ChannelError::ReceiveUnsupported`], so a send-only provider implements
+/// nothing and still refuses inbound correctly.
+/// Test: `channel_registry_resolves_known_providers_and_rejects_notion`,
+/// `channel_adapter_receive_defaults_to_unsupported`.
+#[async_trait::async_trait]
+pub(crate) trait ChannelAdapter: Send + Sync {
+    /// The provider id a `Binding.provider` must equal to select this adapter.
+    fn provider(&self) -> &'static str;
+
+    /// Display name for the channel view.
+    fn display_name(&self) -> &'static str;
+
+    /// What this provider can do.
+    fn capabilities(&self) -> Capabilities;
+
+    /// Whether a credential for this provider resolves on this host.
+    fn configured(&self) -> bool;
+
+    /// Credential-registry keys a binding on this provider may send as, most
+    /// specific first; the first entry is the default when a binding names
+    /// none.
+    ///
+    /// Why (#7427): a binding's `credential_ref` is operator-supplied text.
+    /// Confining it to the adapter's own provider family is what stops a Slack
+    /// binding naming `github` and forwarding an unrelated credential to Slack.
+    /// Every entry must appear in `trusty_common::credentials::REGISTRY`.
+    /// Test: `channel_credential_providers_map_to_the_adapters_env_prefix`.
+    fn credential_providers(&self) -> &'static [&'static str];
+
+    /// Environment-variable prefix every one of this adapter's
+    /// [`ChannelAdapter::credential_providers`] must map to.
+    ///
+    /// Why: the confinement above is by registry key; this states the property
+    /// that makes those keys safe, so a future registry entry that breaks it
+    /// fails a test rather than shipping.
+    /// Test: `channel_credential_providers_map_to_the_adapters_env_prefix`.
+    fn credential_env_prefix(&self) -> &'static str;
+
+    /// Whether `target` is a well-formed destination for this provider.
+    fn validate_target(&self, target: &str) -> bool;
+
+    /// Whether `target` addresses the destination this inbound event arrived
+    /// on.
+    ///
+    /// Why (#7427): Slack and Telegram bind to one destination id, so the
+    /// inbound path compared `binding.target` to the channel or chat id and
+    /// equality answered. Gmail has no such id — a gworkspace binding names a
+    /// correspondent (`from:alice@example.com`) or a label (`label:INBOX`), and
+    /// only the event can say whether it matches. Asking the adapter keeps that
+    /// difference inside the adapter rather than adding a provider arm to the
+    /// inbound path.
+    /// What: the default is the equality the two id-shaped providers need.
+    /// `destination` is the caller's id for where the event arrived — a channel
+    /// id, a chat id, or for Gmail the message's `From` header.
+    /// Test: `gworkspace_adapter_addresses_sender_and_label_targets`.
+    fn addresses(&self, target: &str, destination: &str, event: &StoredEvent) -> bool {
+        let _ = event;
+        target == destination
+    }
+
+    /// Send `text` to the binding's destination, returning the provider's
+    /// acknowledgement.
+    async fn send(&self, binding: &Binding, text: &str) -> Result<Value, ChannelError>;
+
+    /// Prior messages on the binding's destination, newest last.
+    ///
+    /// Why (#8037): the history read used to be a Slack client written into
+    /// `agent_channels::messages`, which is the fourth `match provider` site
+    /// #7427 set out to remove — no other provider could serve history however
+    /// its [`Capabilities::can_read`] read. Asking the adapter is what lets the
+    /// stub provider answer a read at all.
+    /// What: the caller checks [`Capabilities::can_read`] first and answers
+    /// `available: false` when it is unset, so this is only reached by a
+    /// provider that CLAIMS history. The default therefore refuses rather than
+    /// returning an empty list — see [`ChannelError::ReadUnsupported`].
+    /// Test: `channel_adapter_read_defaults_to_unsupported`,
+    /// `the_stub_outbox_round_trips_a_send_into_a_read`.
+    async fn read(&self, binding: &Binding) -> Result<Vec<Value>, ChannelError> {
+        let _ = binding;
+        Err(ChannelError::ReadUnsupported(self.provider()))
+    }
+
+    /// Turn an inbound event into a wake dispatch, or `Ok(None)` when the event
+    /// earns none.
+    ///
+    /// Why: the default refuses, so inbound support is opt-in per provider.
+    async fn receive(
+        &self,
+        binding: &Binding,
+        event: InboundEvent<'_>,
+    ) -> Result<Option<WakePrompt>, ChannelError> {
+        let _ = (binding, event);
+        Err(ChannelError::ReceiveUnsupported(self.provider()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct SendOnly;
+
+    #[async_trait::async_trait]
+    impl ChannelAdapter for SendOnly {
+        fn provider(&self) -> &'static str {
+            "send-only"
+        }
+        fn display_name(&self) -> &'static str {
+            "Send Only"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                can_send: true,
+                can_read: false,
+                can_receive: false,
+                receive_reason: "no inbound",
+                read_reason: "no history",
+            }
+        }
+        fn configured(&self) -> bool {
+            false
+        }
+        fn credential_providers(&self) -> &'static [&'static str] {
+            &["slack"]
+        }
+        fn credential_env_prefix(&self) -> &'static str {
+            "SLACK_"
+        }
+        fn validate_target(&self, target: &str) -> bool {
+            !target.is_empty()
+        }
+        async fn send(&self, _binding: &Binding, _text: &str) -> Result<Value, ChannelError> {
+            Ok(serde_json::json!({"ok":true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_adapter_receive_defaults_to_unsupported() {
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "id":"team","name":"Team","provider":"send-only","target":"X","enabled":true
+        }))
+        .unwrap();
+        let event = crate::listeners::store::StoredEvent {
+            id: "x".into(),
+            listener_id: "send-only".into(),
+            provider: "send-only".into(),
+            event_type: "message".into(),
+            ts: "now".into(),
+            from: None,
+            subject: None,
+            snippet: None,
+            included: true,
+            labels: vec![],
+        };
+        let outcome = SendOnly
+            .receive(
+                &binding,
+                InboundEvent {
+                    agent: "fixture",
+                    event: &event,
+                },
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            Err(ChannelError::ReceiveUnsupported("send-only"))
+        ));
+    }
+
+    /// The history default REFUSES; it never answers with an empty inbox.
+    ///
+    /// Why (#8037, fail-open): `Ok(Vec::new())` would have been the convenient
+    /// default, and `agent_channels::messages` renders it as
+    /// `{"available":true,"messages":[]}` — a provider that serves no history
+    /// at all reading exactly like a quiet destination. This is the error arm
+    /// of that decision.
+    #[tokio::test]
+    async fn channel_adapter_read_defaults_to_unsupported() {
+        let binding: Binding = serde_json::from_value(serde_json::json!({
+            "id":"team","name":"Team","provider":"send-only","target":"X","enabled":true
+        }))
+        .expect("fixture binding");
+        assert!(matches!(
+            SendOnly.read(&binding).await,
+            Err(ChannelError::ReadUnsupported("send-only"))
+        ));
+    }
+}
