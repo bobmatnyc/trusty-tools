@@ -30,7 +30,7 @@ the subsystem labels below. Resolve abbreviations against `CLAUDE.md`'s
 "Abbreviations & Aliases" table first.
 
 Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
-`trusty-agents-ui`, `trusty-analyze`,
+`trusty-analyze`,
 `trusty-bm25-daemon`, `trusty-channels`, `trusty-code`, `trusty-code-gui`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
 `trusty-crate-contracts`, `trusty-embedderd`,

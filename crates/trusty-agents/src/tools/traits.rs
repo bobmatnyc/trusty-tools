@@ -80,7 +80,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::{AgentOutput, AgentRunner, RunContext};
-    use crate::perf::TokenUsage;
+    use trusty_agents_common::perf::TokenUsage;
 
     /// Mock runner that records the RunContext it receives in `run_with_context`.
     ///

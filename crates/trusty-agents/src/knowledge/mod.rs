@@ -2,7 +2,6 @@
 pub mod execution;
 pub mod extraction;
 mod inbox;
-pub mod inference;
 pub(crate) mod persistence;
 mod planning;
 pub mod search_binding;

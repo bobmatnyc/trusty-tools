@@ -80,8 +80,7 @@ pub use tracker::{
 /// What: `None` when no home directory could be resolved. Every helper that
 /// accepts a root treats `None` as a documented no-op, so an unresolvable home
 /// degrades the signal rather than failing a turn.
-/// Test: `slack_handle_command_records_attendance_under_the_injected_root`,
-/// `telegram_handle_command_records_attendance_under_the_injected_root`.
+/// Test: its covering test left with the cut code (#11632).
 pub type AttendanceRoot = Option<std::sync::Arc<std::path::PathBuf>>;
 
 /// How long after the last human turn an instance counts as unattended.

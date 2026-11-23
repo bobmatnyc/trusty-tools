@@ -44,7 +44,40 @@
 //! `kind_ignores_non_assistant_sources`; the behavioral coverage lives in
 //! `tools::delegate`'s tests (`delegate_assistant_to_assistant_is_refused*`).
 
-use crate::runtime::tool_registry::ASSISTANT_TIER_ROLE;
+/// The `agent.role` value that marks an assistant-tier persona.
+///
+/// Why: the ONE definition of the assistant role, read by
+/// [`is_assistant_kind`] and by the delegate role allowlist below.
+/// #11632: moved here from the cut `runtime::tool_registry`.
+/// What: matches `AgentInfo.role`, not the agent's `name` — every persona
+/// TOML/overlay sets `role = "assistant"` regardless of its display name.
+/// Test: `assistant_kind_is_read_from_role_not_tier`.
+pub(crate) const ASSISTANT_TIER_ROLE: &str = "assistant";
+
+/// Fail-closed allowlist of `agent.role` values an assistant-tier
+/// `delegate_to_agent` call may target.
+///
+/// Why (#3555): an assistant delegating to an orchestrator/controller role
+/// would hand the subprocess an unrestricted registry — a privilege
+/// escalation out of the assistant tier. #11632: moved here from the cut
+/// `runtime::tool_registry`.
+/// What: the exact `role` values declared by the bundled workers plus
+/// [`ASSISTANT_TIER_ROLE`]; an assistant-to-assistant edge is still refused
+/// by [`is_assistant_kind`] inside `DelegateToAgentTool::execute`
+/// (ADR-0024). Any role not listed is rejected.
+/// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
+/// `delegate_assistant_role_gate_allows_worker_role`.
+#[allow(dead_code)] // #11632: its production reader, the cut tool-registry builder.
+pub(crate) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
+    "engineer",          // engineer.toml, code-agent.toml, python-engineer.toml, …
+    "qa",                // qa-agent.toml
+    "researcher",        // research-agent.toml
+    "ticketing",         // ticketing-agent.toml (ADR-0024 decision 4)
+    "documentation",     // docs-agent.toml
+    "ops",               // local-ops-agent.toml
+    "planner",           // plan-agent.toml
+    ASSISTANT_TIER_ROLE, // peer assistant personas: izzie, cto-assistant, …
+];
 
 /// The server-owned FLOOR of in-process sub-agent NAMES an assistant-kind
 /// delegator may ever reach — the ceiling ADR-0024 decision 4's editable

@@ -45,7 +45,6 @@
 //! proof (`normalized_mpm_role_still_reaches_nothing`).
 
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::Context;
 use trusty_agents_common::agents::frontmatter::parse_kv_line;
@@ -55,7 +54,6 @@ use crate::agents::{
     AgentCompressConfig, AgentConfig, AgentInfo, LlmParams, RunnerKind, SystemPrompt, ToolChoice,
     ToolsConfig,
 };
-use crate::llm::adapter::adapter_for_model;
 
 /// The frontmatter keys this projection actually consumes.
 ///
@@ -334,7 +332,6 @@ fn project_mpm_agent(
 ) -> anyhow::Result<AgentConfig> {
     let name = meta.name.unwrap_or_else(|| default_name.to_string());
     let model = crate::agents::resolve_model(&name, &meta.model.unwrap_or_default(), None)?.0;
-    let adapter: Arc<dyn crate::llm::adapter::ModelAdapter> = Arc::from(adapter_for_model(&model));
 
     Ok(AgentConfig {
         agent: AgentInfo {
@@ -399,7 +396,6 @@ fn project_mpm_agent(
         rbac: crate::agents::RbacConfig::default(),
         workstreams: crate::agents::WorkstreamContextConfig::default(),
         declared: Default::default(),
-        adapter,
         residual_listeners: None,
         channels: Vec::new(),
         stores: crate::stores::StoresConfig::default(),

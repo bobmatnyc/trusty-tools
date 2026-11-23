@@ -26,8 +26,7 @@ pub async fn migrate_chat(name: &str, input: &str) -> Result<()> {
 /// apply — any Settings revision or skill restriction prevents expansion. The
 /// `settings_revision` stamp is NOT set here: it marks the repair as persisted,
 /// so only [`migrate`] writes it, and a read stays byte-deterministic.
-/// Test: `migration_preserves_later_tool_revocation`,
-/// `a_get_serves_the_migrated_view_without_writing_the_manifest`.
+/// Test: `migration_preserves_later_tool_revocation`.
 pub(crate) fn repaired(
     dirs: &[PathBuf],
     name: &str,
@@ -74,7 +73,7 @@ pub(crate) fn repaired(
 /// What: persist the repair once; any Settings revision or skill restriction prevents expansion.
 /// Test: `migration_preserves_later_tool_revocation`.
 pub async fn migrate(dirs: &[PathBuf], name: &str) -> Result<()> {
-    let Some((manifest, _)) = crate::api::server::agent_patch::resolve_agent_paths(dirs, name)
+    let Some((manifest, _)) = crate::operations::agent_paths::resolve_agent_paths(dirs, name)
     else {
         return Ok(());
     };

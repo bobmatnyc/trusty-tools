@@ -1540,3 +1540,103 @@ content = "c"
         "a child with no pin inherits the base's"
     );
 }
+
+/// Why (#11632): a child's `[permissions].replace_*` flags must REPLACE the
+/// grant lists it inherits, not union them — otherwise narrowing an assistant
+/// that `extends` a broader base would silently keep the base's grants. The
+/// test that covered this went through the cut HTTP settings route; this one
+/// drives `extends::resolve` over fixture TOMLs directly.
+/// What: a base grants two tools, two scopes, two skills and two sub-agents;
+/// the child replaces each list with one entry, then with an empty list, and
+/// the resolved config carries exactly the child's lists.
+/// Test: itself.
+#[test]
+fn settings_grant_replacements_survive_extends() {
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "assistant"
+model = "fixture"
+description = "Synthetic"
+
+[llm]
+temperature = 0.0
+max_tokens = 128
+
+[system_prompt]
+content = "Synthetic"
+
+[tools]
+allow = ["memory_write", "memory_recall"]
+scopes = ["memory.write", "memory.read"]
+
+[skills]
+allow = ["tm-ticketing", "tm-workflow"]
+
+[subagents]
+delegate_allowed = ["research-agent", "project-manager"]
+"#);
+    for empty in [false, true] {
+        let pick = |v: &str| if empty { vec![] } else { vec![v.to_string()] };
+        let (tools, scopes, skills, delegates) = (
+            pick("memory_recall"),
+            pick("memory.read"),
+            pick("tm-ticketing"),
+            pick("research-agent"),
+        );
+        let list = |v: &[String]| {
+            v.iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let child = cfg(&format!(
+            r#"
+[agent]
+name = "fixture"
+role = "assistant"
+extends = "base"
+model = "fixture"
+description = "Synthetic"
+
+[llm]
+temperature = 0.0
+max_tokens = 128
+
+[system_prompt]
+content = "Synthetic"
+
+[tools]
+allow = [{}]
+
+[skills]
+allow = [{}]
+
+[subagents]
+delegate_allowed = [{}]
+
+[permissions]
+replace_scopes = true
+replace_tools = true
+replace_skills = true
+replace_subagents = true
+scopes = [{}]
+"#,
+            list(&tools),
+            list(&skills),
+            list(&delegates),
+            list(&scopes)
+        ));
+        let map = lookup_map(vec![base.clone(), child]);
+        let lookup = |name: &str| map.get(&name.to_lowercase()).cloned();
+        let config = resolve("fixture", &lookup).expect("resolves");
+        assert_eq!(config.tools.allow.unwrap(), tools, "empty={empty}");
+        assert_eq!(config.permissions.scopes.unwrap(), scopes, "empty={empty}");
+        assert_eq!(config.skills.allow.unwrap(), skills, "empty={empty}");
+        assert_eq!(
+            config.subagents.delegate_allowed.unwrap(),
+            delegates,
+            "empty={empty}"
+        );
+    }
+}

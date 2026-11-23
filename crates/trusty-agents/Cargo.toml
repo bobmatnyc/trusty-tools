@@ -17,7 +17,7 @@ name = "trusty-agents"
 # no public API change.
 version = "0.40.0"
 edition = "2024"
-description = "Trusty Agents: Rust-native agentic harness with multi-model routing, tool execution, and subprocess delegation."
+description = "Trusty Agents: the assistant core (channels, listeners, memory, knowledge, OKG) and a stdio MCP dispatch surface."
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -26,20 +26,10 @@ homepage = "https://trustytools.dev"
 include = [
     "src/**/*",
     "assets/**/*",
-    "ui/dist/**/*",
-    "ui/src/**/*",
-    "ui/index.html",
-    "ui/package.json",
-    "ui/pnpm-lock.yaml",
-    "ui/svelte.config.*",
-    "ui/tsconfig.*",
-    "ui/vite.config.*",
-    "ui/tailwind.config.*",
-    "ui/postcss.config.*",
     "build.rs",
-    # #8094: `build.rs` `include!`s this, so a published crate without it
+    # #8787: `build.rs` `include!`s this, so a published crate without it
     # would not build at all.
-    "build_ui_policy.rs",
+    "build_git_paths.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",
@@ -56,36 +46,18 @@ trusty-code = { workspace = true }
 #      SearchMcpService impls. trusty-search now aligns on tree-sitter 0.26
 #      (matches the symgraph parser) so the previous `links = "tree-sitter"`
 #      single-copy conflict is resolved and we link it directly.
-# The `symgraph-parser` feature pulls in the full symbol-graph engine
-# (absorbed from the former `trusty-symgraph` crate in #5 phase 2c).
-# #9271: `memory-core` is gone from this list (a no-op since the engine moved
-# to trusty-memory); `credentials` and `chat-attachments`, which it implied,
-# are named because this crate's own code uses them.
-# `axum-server` (#3329): the shared same-origin write guard + standard axum
-#      middleware stack (`trusty_common::server::with_guarded_middleware`,
-#      `SelfOrigins`) the API server adopts router-wide for the loopback-only
-#      doctrine (mirrors trusty-console/#3317).
-# `inference-client` (#2410, epic #2400): the shared OpenAI-compatible
-#      adapter layer (`Configurator`, `InferenceAdapter`, the `ChatRequest`/
-#      `ChatResponse` wire types, `test_support::MockInferenceServer` when
-#      paired with `axum-server`) that `llm::inference_bridge` /
-#      `llm::inference_client` build on. Already implied transitively by
-#      `config-cli`, but declared explicitly so that relationship is never a
-#      silent, breakable assumption.
-# `bedrock` (issue #3767): unlocks trusty-common's real `chat::BedrockProvider`
-#      (`ConverseStream`-backed) for `llm::stream::stream_reply`'s Bedrock
-#      branch — without it `BedrockProvider` resolves to the always-erroring
-#      stub. Zero added dependency weight: `aws-config`/`aws-sdk-bedrockruntime`/
-#      `aws-types` below are already unconditional direct dependencies of this
-#      crate for the existing `llm::bedrock` (Converse, non-streaming) client.
+# #11632: the features the cut harness and HTTP API needed (`axum-server`,
+# `inference-client`, `bedrock`, `cli-help`, `gh-cli`, `session-naming`,
+# `update-check`, `symgraph-parser`, `palace-resolve`, `chat-attachments`)
+# are gone with them.
 trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primitives (ADR-0040, #5803); `config` (#7454, ADR-0060) is the one MCP-server config authority this crate's connectors are built from.
 # #10662: `memory::embed` imports `embedder::retry_transient_init`, first in
 # trusty-common 0.67.5. The workspace entry admits `^0.67`, so this crate states
 # its own floor, as trusty-memory does. The dev-dependency below matches it.
-trusty-common = { path = "../trusty-common", version = "0.70", features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain", "update-check"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.  `update-check` (#11075): `update::NO_UPDATE_CHECK_ENV`, the one opt-out name; the feature compiles a module only and adds no dependency.
+trusty-common = { path = "../trusty-common", version = "0.70", features = ["credentials", "stdio-mcp-client", "config-cli", "uds", "memory-rpc", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): the `[log_drain]` config section `crate::log_drain` resolves. `config-cli` (#2405): the shared `config` credential verbs.
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
-#      surface (it owns its own axum stack for the orchestrator's UI). Setting
+#      surface. Setting
 #      `default-features = false` drops the `axum-server` feature so we don't
 #      compile the trusty-memory HTTP daemon code paths just to pick up a
 #      zero-sized service descriptor.
@@ -123,89 +95,30 @@ thiserror = "1"
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dotenvy = { workspace = true }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-scraper = { workspace = true }
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 chrono-tz = { workspace = true }
 redb = { workspace = true }
 usearch = "2.25"
 fastembed = "5.13"
-tree-sitter = "0.26"
-tree-sitter-rust = "0.24"
-tree-sitter-python = "0.25"
-tree-sitter-javascript = "0.25"
-tree-sitter-go = "0.25"
-tree-sitter-java = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
 walkdir = "2.5"
-notify = { version = "8", features = ["macos_fsevent"] }
-notify-debouncer-mini = { version = "0.6", default-features = false, features = ["macos_fsevent"] }
 fs4 = "1.0"
 regex = "1"
-once_cell = "1"
-# Quote-aware POSIX word-splitting for `pytest_exec`'s allowlist (#3679):
-# tokenizes the vetted command into argv so it can be exec'd directly (no
-# `/bin/sh -c`), which is what actually closes the shell-injection hole —
-# already a workspace dep for the PM Bash guard's git-argv parsing (#2734).
-shlex = { workspace = true }
-stop-words = "0.8"
 dirs = "5"
 sha2 = "0.10"
 tempfile = "3"
-# subtle (#3761): constant-time byte equality for the internal relay's shared
-# secret (`api::server::relay::relay_authorized`). Plain `==` short-circuits on
-# the first differing byte, leaking the matching-prefix length to a caller that
-# can time its own requests. Already present in the lockfile as a transitive
-# dependency of the TLS stack, so declaring it directly adds no new compilation.
-subtle = "2"
-comrak = { workspace = true }
 serde_yaml = { workspace = true }
 toml_edit = "0.22"
-base64 = "0.22"
-# `multipart` (#7370): the chat-attachment upload route takes a file the
-# browser already holds as a `File`; base64 in JSON would cost a third more
-# bytes for nothing. Declared on the member entry, which UNIONS with the root
-# `[workspace.dependencies]` feature list rather than replacing it.
-axum = { workspace = true, features = ["multipart"] }
-tower-http = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-backon = "1"
 indexmap = { version = "2", features = ["serde"] }
-rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = "2"
-hostname = "0.4"
-async-stream = "0.3"
-tokio-stream = "0.1"
-# #2872: was a local `crossterm = "0.28"` / `ratatui = "0.29"` pair. Both now
-# name the workspace pins (crossterm 0.29 / ratatui 0.30) so the TUI crates
-# cannot drift apart and the vulnerable `lru 0.12` ratatui 0.29 pulled in
-# stays out of the graph.
-crossterm = { workspace = true }
-ratatui = { workspace = true }
-strip-ansi-escapes = "0.2"
-nu-ansi-term = "0.50"
-aws-config = { workspace = true }
-aws-sdk-bedrockruntime = { workspace = true }
-aws-types = { workspace = true }
-aws-smithy-types = "1"
-git2 = { version = "0.20", features = ["vendored-libgit2"] }
-teloxide = { version = "0.17", features = ["macros"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # #4825: needed by `tls::install_crypto_provider` — see the workspace entry.
 rustls = { workspace = true }
 flate2 = "1"
-rand = "0.8"
-similar = { version = "2", features = ["text"] }
-petgraph = { version = "0.8", features = ["serde-1"] }
 libc = "0.2"
-lru = "0.16"
 
 # Stable plugin surface shared with external agent crates. Defined in its own
 # crate (rather than in trusty-agents/lib.rs) to break the trusty-agents ↔ agent-plugin
@@ -239,17 +152,14 @@ path = "src/main.rs"
 # `DISCOVERY_TIMEOUT` on the virtual clock. Declared explicitly rather than
 # relying on `tokio-test` happening to pull the same feature in.
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-test = "0.4"
-tower = { version = "0.5", features = ["util"] }
 serial_test = "3"
-# #9014: `tests/support/content.rs` packs the checkout's content into the
-# verified bundle a spawned `tagent` reads. Already in the graph through
-# trusty-common's `content-resolver`, so no new crate compiles.
-tar = { workspace = true }
-# Exposes async-openai's `OpenAIConfig::api_key()` (a `SecretString`) in
-# tests so credential-resolution tests can assert on the actual value that
-# reaches the request builder, not just "no panic" (see #3431 follow-up).
-secrecy = "0.10"
+# #11632: test-only since the HTTP API was cut. `axum` serves the throwaway
+# Slack/Telegram API stubs the channel adapter tests post to; `base64` and
+# `tokio-tungstenite` are read only by tests (`tests/slack_wss_crypto_provider.rs`
+# drives the WSS handshake against `tls::install_crypto_provider`).
+axum = { workspace = true }
+base64 = "0.22"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # #9123: the shared credential test sandbox. Dev-only because it mutates the
 # process environment; it must never reach a normal build.
 # #10746 S11: `knowledge-document` for `tests/okf_tombstone.rs` (SPEC-OKF-01

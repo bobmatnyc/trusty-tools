@@ -118,17 +118,6 @@ async fn dispatch_gated_allows_when_in_list() {
 }
 
 #[test]
-fn registers_fs_reader_tools() {
-    // #34: the convenience helper should register all three read-only
-    // filesystem exploration tools.
-    let mut reg = ToolRegistry::new();
-    reg.with_fs_reader_tools();
-    assert!(reg.contains("read_file"));
-    assert!(reg.contains("list_dir"));
-    assert!(reg.contains("grep_files"));
-}
-
-#[test]
 fn registry_schemas_includes_registered_tools() {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(FakeTool));
@@ -322,18 +311,6 @@ fn tool_scopes_includes_only_scoped_tools() {
         Some("google.gmail.read")
     );
     assert!(!scopes.contains_key("fake"));
-}
-
-#[test]
-fn native_tool_registry_returns_six_tools_without_ticketing() {
-    // Default backends (all None) still returns the six native tools in
-    // graceful-degradation mode.
-    let tools = native_tool_registry(None, NativeToolBackends::default());
-    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    assert_eq!(tools.len(), 3);
-    assert!(names.contains(&"search_code"));
-    assert!(names.contains(&"search_memory"));
-    assert!(names.contains(&"search_skills"));
 }
 
 #[tokio::test]

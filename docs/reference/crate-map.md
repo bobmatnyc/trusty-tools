@@ -51,15 +51,6 @@ versions, publishability, and targets.
 | `trusty-secrets` | [`crates/trusty-secrets/`](../../crates/trusty-secrets/) | library, `trusty-secrets` (on-demand socket server) | [crate README](../../crates/trusty-secrets/README.md), [extended docs](../trusty-secrets/README.md) |
 | `trusty-sld-lint` | [`crates/trusty-sld-lint/`](../../crates/trusty-sld-lint/) | library, `sld-lint` | [crate README](../../crates/trusty-sld-lint/README.md) |
 
-## Nested workspace packages
-
-The root manifest explicitly includes these packages because `crates/*` does
-not reach nested Tauri manifests.
-
-| Package | Code | Primary target | Documentation |
-|---|---|---|---|
-| `trusty-agents-ui` | [`crates/trusty-agents/ui/src-tauri/`](../../crates/trusty-agents/ui/src-tauri/) | `trusty-agents-ui` | [UI README](../../crates/trusty-agents/ui/README.md) |
-
 ## External tools
 
 `tga` (binary `tga`) and `trusty-audit` (binaries `trusty-audit`, `taudit`,

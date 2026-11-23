@@ -24,8 +24,8 @@
 
 // #7609: slice 4, inbound dispatch generalized over channels.
 use super::model::{Channel, ChannelScope};
-use crate::api::server::agent_channels::Binding;
 use crate::listeners::store::StoredEvent;
+use crate::operations::agent_channels::Binding;
 
 /// Which of the three inbound sources selects an assistant for one event.
 ///
@@ -178,7 +178,8 @@ fn wakes(channel: &Channel, event: &StoredEvent) -> bool {
 /// computes for source (1) — set by ADDRESSING the event, before the
 /// `enabled`/`receive_enabled`/filter gates decide whether it also wakes. At
 /// most one of `routed`/`legacy` is ever `Some`.
-/// Test: `a_disabled_overlay_claims_the_event_and_wakes_nobody`.
+/// Test: `a_disabled_overlay_claims_the_event_and_wakes_nobody`,
+/// `a_send_only_global_wakes_nobody_it_routes_to`.
 #[derive(Debug, Default)]
 pub(crate) struct RouteSources {
     /// A global or overlay addresses this event, whether or not it wakes.
@@ -200,7 +201,8 @@ pub(crate) struct RouteSources {
 /// An empty `target` is account-wide and addresses everything the provider
 /// ingests; a non-empty one is put to the adapter, the same
 /// [`super::ChannelAdapter::addresses`] call source (1) makes.
-/// Test: `a_slack_global_routes_only_to_its_own_destination`.
+/// Test: `a_slack_global_routes_only_to_its_own_destination`,
+/// `agent_channels_gmail_binding_claims_only_its_own_correspondent`.
 fn addresses(channel: &Channel, provider: &str, destination: &str, event: &StoredEvent) -> bool {
     if channel.provider != provider {
         return false;

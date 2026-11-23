@@ -11,7 +11,6 @@
 //! `registry_picks_up_md_files_alongside_toml`.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -19,7 +18,6 @@ use crate::agents::{
     AgentCapabilities, AgentCompressConfig, AgentConfig, AgentInfo, LlmParams, RunnerKind,
     SystemPrompt, ToolChoice, ToolsConfig,
 };
-use crate::llm::adapter::adapter_for_model;
 
 /// YAML frontmatter shape for `.md` agent files.
 ///
@@ -155,8 +153,6 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             ));
         }
     };
-    let adapter: Arc<dyn crate::llm::adapter::ModelAdapter> =
-        Arc::from(adapter_for_model(&resolved_model));
 
     // #3052 PR A follow-up: `.md` frontmatter doesn't expose `temperature`/
     // `max_tokens` as parseable keys (`MdAgentFrontmatter` has no such
@@ -232,7 +228,6 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         rbac: crate::agents::RbacConfig::default(),
         workstreams: crate::agents::WorkstreamContextConfig::default(),
         declared: Default::default(),
-        adapter,
         // Flat `.md` frontmatter has no `[[listeners]]` shape yet (#3820
         // ships the binding only for directory-package `agent.toml`, DOC-54
         // §5.3's primary format) — a `.md` overlay agent never wakes on a

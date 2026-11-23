@@ -43,7 +43,6 @@ use trusty_okf::profile::Profile;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 pub use docstore::OkgIngestDocstoreTool;
-pub(crate) use docstore::ingest_into_store;
 pub use drive::OkgIngestDriveTool;
 pub use gmail::OkgIngestGmailTool;
 pub use sources::OkgSourcesTool;

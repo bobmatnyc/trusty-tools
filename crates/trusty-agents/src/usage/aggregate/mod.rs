@@ -45,7 +45,7 @@
 //!
 //! What: [`aggregate_usage`] folds the log into a [`CostSummary`] — totals plus
 //! three [`CostRow`] breakdowns (by agent, by model, by UTC date) — pricing
-//! every row through the single entry point `crate::perf::cost_usd`.
+//! every row through the single entry point `crate::usage::pricing::cost_usd`.
 //! [`AggregateError`] separates "no log yet" from "the log could not be read",
 //! because a Costs view that renders a confident `$0.00` over a missing file is
 //! worse than one that says it has no data.
@@ -184,7 +184,7 @@ pub fn usage_log_path(project_dir: &Path) -> PathBuf {
 /// Why: (#4098) The single aggregation for every cost surface — the HTTP route
 /// and any future CLI report call this rather than each re-deriving totals.
 /// What: Reads the log at [`usage_log_path`], parses each non-blank line as a
-/// [`UsageRecord`], prices it through `crate::perf::cost_usd`, and folds it
+/// [`UsageRecord`], prices it through `crate::usage::pricing::cost_usd`, and folds it
 /// into the grand total plus three grouped breakdowns. `window_days`, when set,
 /// keeps only rows whose UTC date is within that many days of the newest row in
 /// the file (not of wall-clock "now" — a log whose last entry is a week old
@@ -232,7 +232,7 @@ pub fn aggregate_usage(
         // #4098: one pricing table for the whole crate — see perf::pricing.
         // Cache buckets are 0 until #4101 threads cache tokens into the
         // record; they are absent from the log today, not dropped here.
-        let cost = crate::perf::cost_usd(
+        let cost = crate::usage::pricing::cost_usd(
             &record.model,
             u64::from(record.input_tokens),
             u64::from(record.output_tokens),

@@ -141,7 +141,7 @@ pub(crate) fn normalize_role(role: Option<&str>, agent_type: Option<&str>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES;
+    use crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES;
 
     /// The property the whole module exists to guarantee: the fallback can
     /// never be an allowlisted role. If `ASSISTANT_ALLOWED_DELEGATE_ROLES` is

@@ -83,9 +83,8 @@
 //! for agents that did nothing wrong. Audit the call sites, not just the
 //! bundled configs, before flipping this to an error.
 //!
-//! Test: the `tests` module below, plus
-//! `ctrl::pm_task::dispatch::persona_tests::base_assistant_declares_no_dead_scope_patterns`
-//! which pins the SHIPPED base template clean.
+//! Test: the `tests` module below. The test that pinned the shipped base
+//! template clean left with the cut ctrl dispatch (#11632).
 
 use std::collections::BTreeSet;
 

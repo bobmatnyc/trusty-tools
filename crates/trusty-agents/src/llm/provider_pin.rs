@@ -12,7 +12,7 @@
 //! provider → credential present) and FAILS CLOSED on each step;
 //! [`pinned_model_slug`] rewrites the agent's model slug so it carries the
 //! pinned provider's routing marker, which is the mechanism
-//! [`crate::llm::adapter::adapter_for_model`] already uses to select an
+//! `adapter_for_model` (cut with the agent loop, #11632) already uses to select an
 //! adapter. Encoding the pin in the slug (rather than threading a second
 //! argument through a dozen call sites) means every place that re-derives an
 //! adapter from `cfg.agent.model` agrees with the pin by construction.
@@ -78,7 +78,7 @@ pub enum ProviderPinError {
 /// guaranteed runtime failure dressed up as configuration. Rejecting it at
 /// load — with the reachable set spelled out — is the fail-closed reading of
 /// #3765, and it keeps this list and
-/// `crate::api::server::models::reachable_today` (what the GUI offers) from
+/// the cut GUI model catalog (what it offered, #11632) from
 /// drifting apart: both describe the same property, "chat dispatch resolves a
 /// working adapter for this provider".
 /// What: the six providers `crate::llm::adapter::adapter_for_model` resolves
@@ -99,7 +99,7 @@ const PINNABLE: [ProviderId; 6] = [
 /// Why: the single predicate both the loader and the `PATCH /api/agents/:name`
 /// write gate consult, so the API cannot persist a pin the loader will reject.
 /// What: membership in [`PINNABLE`].
-/// Test: `pinnable_set_matches_reachable_today`.
+/// Test: its covering test left with the cut code (#11632).
 pub fn is_pinnable(id: ProviderId) -> bool {
     PINNABLE.contains(&id)
 }
@@ -383,21 +383,6 @@ mod tests {
                 ProviderId::OpenRouter => assert_eq!(routing_marker(id), None),
                 other => assert!(routing_marker(other).is_some(), "{other} has no marker"),
             }
-        }
-    }
-
-    /// Why: the pinnable set and `models::reachable_today` describe the same
-    /// property; if they drift, the GUI offers a provider the loader refuses.
-    /// Test: itself.
-    #[test]
-    fn pinnable_set_matches_reachable_today() {
-        for caps in registry::all() {
-            assert_eq!(
-                is_pinnable(caps.id),
-                crate::api::server::reachable_today(caps.id),
-                "{} disagrees between PINNABLE and reachable_today",
-                caps.id
-            );
         }
     }
 

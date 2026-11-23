@@ -1,7 +1,7 @@
 //! Tool registry and definitions for LLM function calling.
 //!
 //! Why: Replaces hardcoded `if tc.name == "delegate_to_agent"` dispatch with
-//! a polymorphic registry so new tools (`web_search`, `load_skill`, etc.) can
+//! a polymorphic registry so new tools can
 //! be plugged in without touching the PM loop. This is the SOA seam.
 //! What: `ToolRegistry` holds `Arc<dyn ToolExecutor>` keyed by name; emits a
 //! vector of OpenAI-compatible JSON schemas for the LLM request; dispatches
@@ -10,14 +10,9 @@
 //! `dispatch("fake", args)` returns the fake's output and `schemas()`
 //! contains the fake's schema.
 
-pub(crate) mod activity;
 pub mod agent_plugin;
-pub mod always_on;
-pub mod analysis;
 pub mod assistant_memory;
-pub mod ast_tools;
 pub mod channel;
-pub mod concierge;
 // #4026/#4028: cross-product subagent allow-set + propose-only envelope.
 pub mod cross_product;
 pub mod delegate;
@@ -25,42 +20,21 @@ pub mod delegate;
 // delegation, and the raise-never-lower resolution that applies it.
 pub mod execution_style;
 pub mod file_filter;
-pub mod finish_task;
-pub mod format_translator;
+// #11632: grep only, as `memory::vector_search`'s fallback.
 pub mod fs_reader;
-// #4170 (epic #4167): GitHub PR/CI inspection, grantable to L0 only.
-pub mod gh_tools;
-pub mod git_tools;
 pub mod izzie;
-// #4173 (epic #4167): the L0-orchestration-tier-only shell/build/test grant.
-pub mod l0_exec;
+pub mod knowledge_history;
 pub mod mcp_live;
 pub mod mcp_service_tools;
 pub mod mcp_tools;
 pub mod memory;
 pub mod memory_search;
-pub mod native_search;
-pub mod native_ticketing;
 pub mod okg;
-pub mod phase_audit;
 pub mod pm_bridge;
 pub mod pm_bridge_backend;
-pub mod python_skill;
 pub mod registry;
-pub mod run_bash;
-// #4171 (epic #4167): L0-only read-only session-state visibility.
-pub mod knowledge_history;
-pub mod session_state;
-pub mod shell;
-pub mod shell_exec;
-pub mod skill_loader;
 pub mod subagent_allow;
-pub mod system_status;
-pub mod timer;
-pub mod tm_tools;
 pub mod traits;
-pub mod web_search;
-pub mod write_file;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -109,24 +83,6 @@ impl ToolRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    /// Register the three read-only filesystem exploration tools
-    /// (`read_file`, `list_dir`, `grep_files`).
-    ///
-    /// Why: #34 — these tools ship together because they form a coherent
-    /// "read-only explorer" capability. Any agent that wants a subset should
-    /// rely on its own `[tools].allowed` allowlist.
-    /// What: Adds one `Arc<ReadFileTool>` / `ListDirTool` / `GrepFilesTool`
-    /// to the registry. Returns `&mut Self` for chaining.
-    /// Test: `registers_fs_reader_tools` below.
-    #[allow(dead_code)]
-    pub fn with_fs_reader_tools(&mut self) -> &mut Self {
-        use crate::tools::fs_reader::{GrepFilesTool, ListDirTool, ReadFileTool};
-        self.register(Arc::new(ReadFileTool::new()));
-        self.register(Arc::new(ListDirTool::new()));
-        self.register(Arc::new(GrepFilesTool::new()));
-        self
-    }
-
     /// Register a tool by its `name()`.
     ///
     /// Why: Using the tool's own name prevents mismatches between registered
@@ -347,55 +303,6 @@ impl ToolRegistry {
         }
         Ok(out)
     }
-}
-
-/// Optional code index and skill backends. Fact memory always uses the bound daemon.
-#[derive(Default, Clone)]
-#[allow(dead_code)]
-pub struct NativeToolBackends {
-    pub code_indexer: Option<Arc<crate::search::indexer::CodeIndexer>>,
-    pub skill_resolver: Option<Arc<dyn SkillResolver>>,
-}
-
-/// Build a list of native (non-shell) tools (#133, #137).
-///
-/// Why: Agents upgrading from `shell_exec`-backed workflows need a single
-/// call to get the new typed search/memory tools registered. Ticketing is
-/// opt-in because it requires a configured `TicketingClient`; search/memory
-/// backends are opt-in because callers may not have them initialized yet.
-/// What: Returns native search + memory tools always. When a backend is
-/// provided in `backends`, the corresponding tool is wired through it;
-/// otherwise the tool is registered in graceful-degradation mode. When
-/// `ticketing` is `Some(client)`, also returns the five ticketing tools.
-/// Test: See `native_tool_registry_returns_expected_names` in unit tests.
-#[allow(dead_code)]
-pub fn native_tool_registry(
-    ticketing: Option<Arc<dyn crate::ticketing::TicketingClient>>,
-    backends: NativeToolBackends,
-) -> Vec<Arc<dyn ToolExecutor>> {
-    use crate::tools::native_search::{SearchCodeTool, SearchMemoryTool, SearchSkillsTool};
-    use crate::tools::native_ticketing::{
-        AddCommentTool, CloseTicketTool, CreateTicketTool, GetTicketTool, ListTicketsTool,
-    };
-
-    let search_code: Arc<dyn ToolExecutor> = match backends.code_indexer {
-        Some(idx) => Arc::new(SearchCodeTool::with_indexer(idx)),
-        None => Arc::new(SearchCodeTool::new()),
-    };
-    let search_memory: Arc<dyn ToolExecutor> = Arc::new(SearchMemoryTool::new());
-    let search_skills: Arc<dyn ToolExecutor> = match backends.skill_resolver {
-        Some(r) => Arc::new(SearchSkillsTool::with_resolver(r)),
-        None => Arc::new(SearchSkillsTool::new()),
-    };
-    let mut out: Vec<Arc<dyn ToolExecutor>> = vec![search_code, search_memory, search_skills];
-    if let Some(client) = ticketing {
-        out.push(Arc::new(CreateTicketTool(client.clone())));
-        out.push(Arc::new(GetTicketTool(client.clone())));
-        out.push(Arc::new(CloseTicketTool(client.clone())));
-        out.push(Arc::new(ListTicketsTool(client.clone())));
-        out.push(Arc::new(AddCommentTool(client)));
-    }
-    out
 }
 
 /// Legacy helper for the `delegate_to_agent` tool schema.

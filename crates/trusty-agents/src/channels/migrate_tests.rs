@@ -216,7 +216,7 @@ fn an_agent_binding_migrates_once_and_never_again() {
     assert_eq!(report.channels, vec!["gmail-personal".to_string()]);
 
     let raw = std::fs::read_to_string(&channels).expect("read back");
-    let stored: Vec<crate::api::server::agent_channels::Binding> =
+    let stored: Vec<crate::operations::agent_channels::Binding> =
         serde_json::from_str(&raw).expect("the written file must parse as bindings");
     assert_eq!(stored.len(), 1);
     let migrated = crate::channels::Channel::from(&stored[0]);
@@ -280,7 +280,7 @@ fn an_overlay_of_an_account_wide_global_is_now_stored() {
     assert_eq!(report.channels, vec!["gmail-personal".to_string()]);
 
     let raw = std::fs::read_to_string(&channels).expect("read back");
-    let stored: Vec<crate::api::server::agent_channels::Binding> =
+    let stored: Vec<crate::operations::agent_channels::Binding> =
         serde_json::from_str(&raw).expect("the written file must parse as bindings");
     assert_eq!(stored.len(), 1);
     assert_eq!(
@@ -543,7 +543,7 @@ fn an_agent_binding_with_no_wake_filter_still_migrates() {
         .expect("succeeds")
         .expect("migrates");
     assert_eq!(report.channels, vec!["gmail-personal".to_string()]);
-    let stored: Vec<crate::api::server::agent_channels::Binding> =
+    let stored: Vec<crate::operations::agent_channels::Binding> =
         serde_json::from_str(&std::fs::read_to_string(&channels).expect("read back"))
             .expect("parses");
     assert_eq!(stored[0].filter, AgentBindingFilter::default());

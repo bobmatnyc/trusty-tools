@@ -1,8 +1,6 @@
 //! Thin `tagent` binary wrapper (trusty-agents).
 //!
-//! Why: The entire startup pipeline (argv parsing, env load, tracing init,
-//!      subcommand dispatch, REPL/CTRL fallback) lives in the library at
-//!      `trusty_agents::runtime::run`. Hosting it in the library lets a
+//! Why: The argv dispatch lives in the library at `trusty_agents::cli::run`. Hosting it in the library lets a
 //!      downstream launcher install additional agent plugins via
 //!      `trusty_agents::install_plugins(...)` BEFORE invoking `run()`, without
 //!      polluting the crate with references to `publish = false` agent crates
@@ -11,7 +9,7 @@
 //!      former `trusty-agents-local` binary was byte-for-byte this same
 //!      pass-through and was removed.
 //! What: Synchronous entry point that delegates straight to
-//!       `trusty_agents::run_to_completion()`, which owns the tokio runtime.
+//!       `trusty_agents::cli::run_to_completion()`, which owns the tokio runtime.
 //!       No additional setup, no plugin wiring — the binary ships with an
 //!       empty plugin registry by default.
 //! Test: `cargo run -p trusty-agents -- --version` prints the build banner.
@@ -30,5 +28,5 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
-    trusty_agents::run_to_completion()
+    trusty_agents::cli::run_to_completion()
 }

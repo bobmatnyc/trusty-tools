@@ -284,8 +284,7 @@ pub(crate) fn format_mcp_call_result(value: &Value) -> String {
 /// service's tools so we spawn at most one MCP subprocess per server, lazily
 /// on first call.
 /// Test: `mcp_service_tool_executors_returns_tools_for_enabled_services`,
-/// `disabled_services_are_skipped`,
-/// `crate::ctrl::pm_task::dispatch::persona_mcp` (one resolution per turn).
+/// `disabled_services_are_skipped`.
 pub fn mcp_service_tool_executors(servers: &[&McpServerConfig]) -> Vec<Arc<dyn ToolExecutor>> {
     let mut executors: Vec<Arc<dyn ToolExecutor>> = Vec::new();
     // Used to dedupe across servers in case two advertise the same tool name —

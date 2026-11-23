@@ -290,7 +290,7 @@ impl SkillManifest {
     /// `members` — a bundle whose members all failed to resolve is still a
     /// bundle, and treating it as a tool-less prose skill would grant it by id.
     /// What: True when `kind` is [`SkillKind::Function`].
-    /// Test: `granted_ids_do_not_grant_a_function_skill_by_id_alone`.
+    /// Test: its covering test left with the cut code (#11632).
     pub fn is_function(&self) -> bool {
         self.kind == SkillKind::Function
     }

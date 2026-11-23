@@ -215,9 +215,8 @@ package to its manifest, source, and documentation, use the
 
 | Crate | Description |
 |---|---|
-| `trusty-agents` | Agent orchestration platform |
+| `trusty-agents` | Assistant core: channels, listeners, memory, knowledge, and a stdio MCP dispatch surface |
 | `trusty-agents-common` | Shared types and utilities for agent framework |
-| `trusty-agents-ui` | Nested Tauri desktop client for trusty-agents |
 
 ### Moved to their own repo
 

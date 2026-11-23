@@ -15,16 +15,13 @@
 //!   (stage-two, per-agent binding).
 //! - `store` — the append-only JSONL event log + per-event-type
 //!   include/exclude filter state under `~/.trusty-agents/events/`.
-//! - `poll` — the Gmail `history.list` polling engine: cursor persistence,
-//!   dedup, exponential backoff, 410-GONE re-baseline.
-//! - `wake` — stage-two filter matching + the agent-wake dispatch path,
-//!   reusing `ctrl::pm_task::run_pm_task_with_persona` (the same entry point
-//!   the `/agent` REPL command uses) so a wake reaction is indistinguishable
-//!   from an ordinary chat turn in the agent's history.
-//! Test: See each submodule's own test coverage. End-to-end (real Gmail
-//! account) verification is manual — see the PR body's proof plan.
+//! - `wake` — stage-two filter matching and the wake prompt.
+//!
+//! #11632: the Gmail polling engine (`poll`) and the wake dispatcher were cut
+//! with the agent loop that answered a wake; what is left is the config, the
+//! event store and the filters.
+//! Test: See each submodule's own test coverage.
 
 pub mod config;
-pub mod poll;
 pub mod store;
 pub mod wake;

@@ -48,11 +48,9 @@ pub const FALLBACK_MEDIA_TYPE: &str = "application/octet-stream";
 ///
 /// Why: each attachment is rendered into the turn and then replayed as
 /// conversation history on every later turn in the session, so the cost is paid
-/// repeatedly. The upload route and `api::server::handlers::submit_task` read
-/// the SAME constant, because a request that may stage more files than a turn
-/// may reference would accept work that can never be used.
-/// Test: `super::tests::store_tests::store_all_refuses_more_than_the_cap`,
-/// `crate::api::server::tests::attachments::send_refuses_too_many_attachments`.
+/// repeatedly. The upload route and `submit_task` that also read it were cut
+/// with the HTTP API (#11632).
+/// Test: `super::tests::store_tests::store_all_refuses_more_than_the_cap`.
 pub const MAX_ATTACHMENTS_PER_TURN: usize = 8;
 
 /// One file as it arrived, before any guard has looked at it.

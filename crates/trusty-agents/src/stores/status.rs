@@ -58,8 +58,8 @@ use super::config::{AgentStoreBinding, StoresConfig};
 
 /// Per-probe timeout.
 ///
-/// Why: Identical rationale (and value) to
-/// [`crate::system_status::daemons::PROBE_TIMEOUT`] — a daemon that accepts
+/// Why: the same rationale and value as the cut `system_status` daemon probe
+/// (#11632) — a daemon that accepts
 /// the TCP connection but never answers must degrade to "not connected"
 /// within a couple of seconds rather than stalling agent boot or an API
 /// request behind it.

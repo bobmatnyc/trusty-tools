@@ -22,7 +22,7 @@
 //! [`crate::service_metrics::apply_metrics_overlay`].
 //! Test: `console_connector_reports_itself_running`,
 //! `console_connector_reports_the_crate_version`,
-//! `super::tests::test_all_connectors_returns_eight`,
+//! `super::tests::test_all_connectors_returns_seven`,
 //! `crate::server::tests::services_route_lists_the_console_itself`.
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceStatus};

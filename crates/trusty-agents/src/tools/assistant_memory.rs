@@ -66,8 +66,23 @@ pub(crate) fn operation_granted(config: &crate::agents::AgentConfig, name: &str)
         &catalog,
     );
     scope_granted(config, scope_for(name))
-        && patterns
-            .is_some_and(|p| crate::ctrl::pm_task::tool_authz::allow_patterns_grant_tool(name, &p))
+        && patterns.is_some_and(|p| allow_patterns_grant(name, &p))
+}
+
+/// Whether `[tools].allow` `patterns` grant the memory tool `name`.
+///
+/// Why (#11632): this was `ctrl::pm_task::tool_authz::allow_patterns_grant_tool`,
+/// cut with the agent loop. Its one special case (#4520: an L0 execution tool
+/// is granted only when named literally) never applied here, because `name` is
+/// always a memory tool, so the plain glob match is the same answer.
+/// What: true when a pattern equals `name`, or ends in `*` and `name` starts
+/// with its prefix.
+/// Test: `allow_patterns_grant_matches_exact_and_suffix_glob`.
+fn allow_patterns_grant(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == p,
+    })
 }
 
 /// Why: discovery must never provide an unbound memory bypass.
@@ -116,6 +131,7 @@ pub struct BoundMemory {
 }
 
 /// Closed host entry point; callers cannot supply a daemon tool name.
+#[allow(dead_code)] // #11632: its caller, the HTTP operations route, was cut.
 pub(crate) async fn execute_operation(assistant: &str, operation: &str, args: Value) -> ToolResult {
     if !matches!(
         operation,
@@ -294,7 +310,7 @@ impl ToolExecutor for BoundMemory {
         let _write_guard = if scope_for(&self.name) == "memory.write" {
             let dirs = crate::agents::agents_dir_candidates();
             let Some((manifest, _)) =
-                crate::api::server::agent_patch::resolve_agent_paths(&dirs, &self.assistant)
+                crate::operations::agent_paths::resolve_agent_paths(&dirs, &self.assistant)
             else {
                 return ToolResult::err("Assistant manifest unavailable");
             };
@@ -444,6 +460,23 @@ pub fn recall_stores(config: &crate::agents::AgentConfig) -> crate::stores::Stor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#11632): the local matcher replaced the cut L0-aware gate; it must
+    /// grant exactly what that gate granted a memory tool.
+    /// Test: itself.
+    #[test]
+    fn allow_patterns_grant_matches_exact_and_suffix_glob() {
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(allow_patterns_grant("store_memory", &p(&["store_memory"])));
+        assert!(allow_patterns_grant("store_memory", &p(&["store_*"])));
+        assert!(allow_patterns_grant("store_memory", &p(&["*"])));
+        assert!(!allow_patterns_grant(
+            "store_memory",
+            &p(&["search_*", "store"])
+        ));
+        assert!(!allow_patterns_grant("store_memory", &[]));
+    }
+
     #[tokio::test]
     async fn memory_write_wait_observes_permission_revocation() {
         if std::env::var_os("TRUSTY_MEMORY_REVOCATION_CHILD").is_none() {

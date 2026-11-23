@@ -389,3 +389,164 @@ fn adapter_id_bridges_gmail_to_the_gworkspace_adapter() {
     assert_eq!(super::super::adapter_id("slack"), "slack");
     assert_eq!(super::super::adapter_id("notion"), "notion");
 }
+
+// #11632: the four tests below covered `route_sources` and `addresses` through
+// the cut `api::server::agent_channels::inbound` loop. They are re-expressed
+// here as direct unit tests of the kept routing logic.
+
+/// An overlay the operator DISABLED still claims the event, so nothing wakes
+/// for it — whether or not the global's `route_to` was backfilled to name it.
+///
+/// Why (#7609 review HIGH-1): `claimed: false` would send the event down the
+/// legacy `[[listeners]]` wake, which reads the still-enabled `agent.toml`
+/// binding and wakes anyway, so disabling a channel changed nothing.
+/// Test: itself.
+#[test]
+fn a_disabled_overlay_claims_the_event_and_wakes_nobody() {
+    let off = || Channel {
+        enabled: false,
+        ..izzie_overlay()
+    };
+    // Backfilled: the global routes to her AND she still has the overlay.
+    let backfilled = sources(
+        &[global_gmail(vec!["izzie"])],
+        &[off()],
+        "izzie",
+        &mail(&["INBOX"]),
+    );
+    assert!(backfilled.claimed);
+    assert_eq!(ids(backfilled), (None, None));
+
+    // Not yet backfilled: the legacy overlay alone, disabled.
+    let legacy = sources(
+        &[global_gmail(vec![])],
+        &[off()],
+        "izzie",
+        &mail(&["INBOX"]),
+    );
+    assert!(
+        legacy.claimed,
+        "a disabled overlay must still claim the event"
+    );
+    assert_eq!(ids(legacy), (None, None));
+}
+
+/// A Slack global's `route_to` follows only the destination the global
+/// actually names.
+///
+/// Why (#7609 review HIGH-3): every Slack message arrives with
+/// `listener_id: "slack"`, so keying the global only on that id made one
+/// `route_to` entry a wake for every channel in the workspace.
+/// Test: itself.
+#[test]
+fn a_slack_global_routes_only_to_its_own_destination() {
+    let assistant = "fixture-slack-routed";
+    let globals = [Channel {
+        id: "slack".into(),
+        name: "Team Slack".into(),
+        provider: "slack".into(),
+        scope: ChannelScope::Global,
+        target: "C123".into(),
+        enabled: true,
+        receive_enabled: true,
+        route_to: vec![assistant.into()],
+        ..Channel::default()
+    }];
+    let event = |channel: &str| StoredEvent {
+        id: format!("slack:{channel}:1"),
+        listener_id: "slack".into(),
+        provider: "slack".into(),
+        event_type: "message.channel".into(),
+        from: Some("Masa".into()),
+        subject: None,
+        snippet: Some("standup?".into()),
+        labels: vec![],
+        ..mail(&[])
+    };
+
+    let named = route_sources(&globals, &[], assistant, "slack", "C123", &event("C123"));
+    assert!(named.claimed);
+    assert_eq!(ids(named), (Some("slack".to_string()), None));
+
+    let other = route_sources(
+        &globals,
+        &[],
+        assistant,
+        "slack",
+        "COTHER",
+        &event("COTHER"),
+    );
+    assert!(
+        !other.claimed,
+        "a channel the global does not name is not this assistant's message"
+    );
+    assert_eq!(ids(other), (None, None));
+}
+
+/// A send-only global wakes nobody it routes to.
+///
+/// Why (#7609 review HIGH-5): `receive_enabled = false` is the operator saying
+/// this channel delivers no incoming updates; a `route_to` name must not wake
+/// through it, though the event is still claimed so the legacy wake stays off.
+/// Test: itself.
+#[test]
+fn a_send_only_global_wakes_nobody_it_routes_to() {
+    let assistant = "fixture-izzie-send-only";
+    let global = Channel {
+        receive_enabled: false,
+        ..global_gmail(vec![assistant])
+    };
+    let outcome = sources(&[global], &[izzie_overlay()], assistant, &mail(&["INBOX"]));
+    assert!(outcome.claimed);
+    assert_eq!(ids(outcome), (None, None));
+}
+
+/// A Gmail message addressed by a gworkspace binding is claimed; a message
+/// from anyone else is not, so it stays on whatever path it was taking.
+///
+/// Why: this pair keeps a bound correspondent's mail and every other mailbox
+/// message on separate inbound paths. The binding's target grammar is checked
+/// at save time by `Binding::validate_in`.
+/// Test: itself.
+#[test]
+fn agent_channels_gmail_binding_claims_only_its_own_correspondent() {
+    let binding: Binding = serde_json::from_value(serde_json::json!({
+        "id":"family","name":"Family mail","provider":"gworkspace",
+        "target":"from:alice@example.com","enabled":true,"receive_enabled":true
+    }))
+    .expect("binding parses");
+    assert!(binding.validate_in(&[]).is_ok());
+    let mut wrong_target = binding.clone();
+    wrong_target.target = "alice@example.com".into();
+    assert!(wrong_target.validate_in(&[]).is_err());
+
+    let channel = Channel {
+        id: "family".into(),
+        name: "Family mail".into(),
+        provider: "gworkspace".into(),
+        scope: ChannelScope::Assistant,
+        target: "from:alice@example.com".into(),
+        enabled: true,
+        receive_enabled: true,
+        ..Channel::default()
+    };
+    let alice = mail(&["INBOX"]);
+    assert!(addresses(
+        &channel,
+        "gworkspace",
+        alice.from.as_deref().unwrap_or_default(),
+        &alice
+    ));
+    let bob = StoredEvent {
+        from: Some("bob@example.com".into()),
+        ..mail(&["INBOX"])
+    };
+    assert!(
+        !addresses(&channel, "gworkspace", "bob@example.com", &bob),
+        "an unbound sender must not be claimed"
+    );
+    assert!(
+        !addresses(&channel, "slack", "alice@example.com", &alice),
+        "the same address under another provider is a different destination"
+    );
+}

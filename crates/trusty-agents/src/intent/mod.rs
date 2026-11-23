@@ -25,8 +25,7 @@ pub mod route;
 /// What: `Conversational` -> reply directly, no tools.
 /// `Research` -> in-process PM loop with `delegate_to_agent` available.
 /// `Implementation` -> full subprocess prescriptive workflow.
-/// Test: Pattern-match in `submit_task` + `run_pm_task_with_session`; covered
-/// by `tests::*` below.
+/// Test: covered by the `tests` module below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentClass {
     /// Greeting, thanks, or simple self-referential question — answer directly.

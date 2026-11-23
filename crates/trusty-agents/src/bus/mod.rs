@@ -298,8 +298,8 @@ pub async fn subscribe_and_drain(
 /// handled in its own spawned task that reads lines until EOF, deserializes
 /// each as `BusEnvelope`, and sends it on the broadcast channel. Lagged
 /// receivers are silently ignored.
-/// Test: `ctrl_and_bus_accept_loops_size_the_accepted_socket`; the connection
-/// path itself is implicit via the `start` integration test.
+/// Test: the connection path is implicit via the `start` integration test;
+/// the accept-loop sizing test left with the cut ctrl socket (#11632).
 async fn accept_loop(listener: UnixListener, tx: broadcast::Sender<BusEnvelope>) {
     loop {
         // #6940: Linux builds the accepted socket from scratch and does not copy

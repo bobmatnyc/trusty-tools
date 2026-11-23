@@ -55,17 +55,12 @@ pub(crate) mod status;
 pub(crate) mod stub;
 mod telegram;
 
+use crate::listeners::store::StoredEvent;
+use crate::operations::agent_channels::Binding;
 pub(crate) use credentials::{resolve_credential, validate_credential_ref};
 pub use model::{Channel, ChannelScope};
 pub(crate) use registry::{adapter, adapter_id, providers_json, require_adapter};
 pub use resolve::resolve_channels;
-// #7427 (PR 2): the Telegram long-poll loop resolves its bot token through the
-// same reference a binding names, so `crate::telegram` never reads the
-// environment itself.
-pub(crate) use telegram::poll_token as telegram_poll_token;
-
-use crate::api::server::agent_channels::Binding;
-use crate::listeners::store::StoredEvent;
 use serde_json::Value;
 
 /// What a provider can do, and the user-facing reason when it cannot.

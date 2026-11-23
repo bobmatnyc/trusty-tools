@@ -6,8 +6,8 @@ For people installing and using trusty-agents (binary `tagent`).
 
 | File | What's here |
 |---|---|
-| [quickstart.md](./quickstart.md) | Install, configure, and run your first workflow. |
-| [cli-reference.md](./cli-reference.md) | Every flag, every mode. |
+| [quickstart.md](./quickstart.md) | Install `tagent` and connect an MCP client. |
+| [cli-reference.md](./cli-reference.md) | The four verbs left after the #11632 cut. |
 | [configuration.md](./configuration.md) | `.trusty-agents/` layout, agent TOML, skill markdown, workflow JSON. |
 | [agents-and-skills.md](./agents-and-skills.md) | Bundled agents, custom agents, custom skills. |
 

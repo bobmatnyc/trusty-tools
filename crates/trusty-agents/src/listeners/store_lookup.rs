@@ -14,7 +14,7 @@ impl EventStore {
     /// What: stream the log and retain only requested IDs, using the newest record and current filters.
     /// Retains at most 16 MiB across 10000 IDs. Missing IDs stay unknown;
     /// oversized/malformed records fail without authorizing withdrawal.
-    /// Test: `published_event_survives_unrelated_event_batch_rollover`, `exact_lookup_bounds_and_latest_filter_are_enforced`.
+    /// Test: `exact_lookup_bounds_and_latest_filter_are_enforced`.
     pub(crate) async fn read_exact(
         ids: &BTreeSet<String>,
     ) -> Result<BTreeMap<String, StoredEvent>> {

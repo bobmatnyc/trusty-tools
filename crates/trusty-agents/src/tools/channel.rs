@@ -93,23 +93,23 @@ impl ToolExecutor for ChannelTool {
         };
         let result = match (request.action.as_str(), request.scope) {
             ("list" | "get", Scope::Global) => {
-                crate::api::server::global_channels::read_view().await
+                crate::operations::global_channels::read_view().await
             }
             ("list", Scope::Assistant)
                 if request.binding_id.is_none() && request.text.is_none() =>
             {
-                crate::api::server::agent_channels::read(&self.agent).await
+                crate::operations::agent_channels::read(&self.agent).await
             }
             ("get", Scope::Assistant)
                 if request.revision.is_none() && request.listeners.is_none() =>
             {
-                crate::api::server::agent_listeners::read(&self.agent).await
+                crate::operations::agent_listeners::read(&self.agent).await
             }
             ("set", Scope::Global) => match (request.revision, request.channels) {
                 (Some(revision), Some(channels)) => {
                     match serde_json::from_value(json!({"revision":revision,"channels":channels})) {
                         Ok(update) => {
-                            crate::api::server::global_channels::write_from_turn(update).await
+                            crate::operations::global_channels::write_from_turn(update).await
                         }
                         Err(e) => return ToolResult::err(e.to_string()),
                     }
@@ -118,9 +118,9 @@ impl ToolExecutor for ChannelTool {
             },
             ("set", Scope::Assistant) => match (request.revision, request.listeners) {
                 (Some(revision), Some(listeners)) => {
-                    crate::api::server::agent_listeners::write_from_turn(
+                    crate::operations::agent_listeners::write_from_turn(
                         &self.agent,
-                        crate::api::server::agent_listeners::ListenerUpdate {
+                        crate::operations::agent_listeners::ListenerUpdate {
                             revision,
                             listeners,
                         },
@@ -130,13 +130,13 @@ impl ToolExecutor for ChannelTool {
                 _ => return ToolResult::err("set requires revision and listeners from get"),
             },
             ("read", Scope::Assistant) if request.text.is_none() => match request.binding_id {
-                Some(id) => crate::api::server::agent_channels::messages(&self.agent, &id).await,
+                Some(id) => crate::operations::agent_channels::messages(&self.agent, &id).await,
                 None => return ToolResult::err("binding_id required"),
             },
             ("send", Scope::Assistant) => {
                 match (request.binding_id, request.text, request.revision) {
                     (Some(id), Some(text), Some(revision)) => {
-                        crate::api::server::agent_channels::send(&self.agent, &id, &text, &revision)
+                        crate::operations::agent_channels::send(&self.agent, &id, &text, &revision)
                             .await
                     }
                     _ => {
@@ -155,7 +155,7 @@ impl ToolExecutor for ChannelTool {
         };
         match result {
             Ok(v) => ToolResult::ok(v.to_string()),
-            Err((_, axum::Json(v))) => {
+            Err((_, crate::operations::Json(v))) => {
                 ToolResult::err(v["error"].as_str().unwrap_or("Channel request failed"))
             }
         }

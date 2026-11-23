@@ -306,27 +306,6 @@ pub(crate) fn override_on_this_thread(state: LockState) -> LockOverride {
     LockOverride(())
 }
 
-/// Test-only: run `fut` to completion under the Bedrock lock, with every
-/// credential tier empty and `$HOME` sandboxed, on a current-thread runtime.
-///
-/// Why: an egress-site test must not reach the network even with the guard
-/// removed (the red proof); with no credential the unguarded path fails
-/// locally instead. Callers are sync `#[serial]` tests.
-#[cfg(test)]
-pub(crate) fn block_on_locked_without_credentials<F: std::future::Future>(fut: F) -> F::Output {
-    let _env = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home = crate::test_env::lock_home();
-    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
-    let _lock = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("current-thread runtime")
-        .block_on(fut)
-}
-
 /// Whether `state` confines routing. An unreadable lock counts as locked.
 pub fn is_locked(state: &LockState) -> bool {
     !matches!(state, Ok(None))

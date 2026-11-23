@@ -247,7 +247,7 @@ fn every_tool_declared_in_source_has_a_skill() {
     let catalog = SkillCatalog::builtin();
     let mut missing: Vec<String> = Vec::new();
     let mut scanned = 0usize;
-    for dir in ["src/tools", "src/ctrl/handlers"] {
+    for dir in ["src/tools"] {
         for tool in declared_tool_names(&crate_path(dir)) {
             if FIXTURE_TOOL_NAMES.contains(&tool.as_str())
                 || SUBAGENT_ONLY_TOOL_NAMES.contains(&tool.as_str())
@@ -261,9 +261,10 @@ fn every_tool_declared_in_source_has_a_skill() {
         }
     }
     // Guard against a silently vacuous scan: if the extraction regressed and
-    // found nothing, "no missing tools" would be a false pass.
+    // found nothing, "no missing tools" would be a false pass. #11632: the
+    // floor follows the tool surface, which the cut took from 80+ to 15.
     assert!(
-        scanned >= 80,
+        scanned >= 12,
         "source scan found only {scanned} tool declarations; extraction is broken"
     );
     missing.sort();
@@ -328,11 +329,7 @@ fn agent_roster_grants_only_tools_that_have_a_skill() {
 fn roster_granted_tool_names() -> Vec<String> {
     let mut out = Vec::new();
     // #9014: the bundled roster lives under content/.
-    let mut stack = vec![
-        crate::agents::bundled::content::test_support::repo_tree_dir(
-            crate::agents::bundled::BundledTreeKind::Agents,
-        ),
-    ];
+    let mut stack = vec![crate::test_env::bundled_agents_dir()];
     while let Some(path) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
             continue;

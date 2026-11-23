@@ -9,15 +9,12 @@
 //! serde defaults and small helper impls.
 //! Test: Round-trip parsing is exercised by the unit tests in `tests.rs`.
 
-use std::sync::Arc;
-
 use serde::Deserialize;
 
 use super::params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
     SessionCompressionConfig, WorkstreamContextConfig,
 };
-use crate::llm::adapter::ModelAdapter;
 
 /// Top-level agent config loaded from TOML.
 #[derive(Debug, Clone, Deserialize)]
@@ -107,21 +104,6 @@ pub struct AgentConfig {
     /// `workstream_context_config_parses_block`.
     #[serde(default)]
     pub workstreams: WorkstreamContextConfig,
-
-    /// Provider-specific behavior adapter derived from `agent.model` (#57).
-    ///
-    /// Why: Replaces scattered `model_is_anthropic()` branches with a single
-    /// object that knows how to format `tool_choice`, inject cache_control,
-    /// and parse usage for the active provider family. Populated in
-    /// `AgentConfig::load` after TOML parsing so the model string (post
-    /// resolution) drives the selection.
-    /// What: `Arc<dyn ModelAdapter>` so the config stays `Clone` cheaply.
-    /// Skipped by serde (created after parsing); defaults to a generic
-    /// adapter so tests that call `toml::from_str` directly still construct
-    /// a valid value.
-    /// Test: `agent_config_load_populates_adapter`.
-    #[serde(skip, default = "default_adapter")]
-    pub adapter: Arc<dyn ModelAdapter>,
 
     /// A `[[listeners]]` table still in this `agent.toml` — the RETIRED spelling
     /// of a per-assistant channel, held only so its presence can be reported
@@ -251,10 +233,6 @@ pub struct AgentConfig {
     /// Test: `agents::extends::declared_tests::extends_child_declared_keys_win_in_every_table`.
     #[serde(skip)]
     pub declared: super::extends::DeclaredKeys,
-}
-
-fn default_adapter() -> Arc<dyn ModelAdapter> {
-    Arc::new(crate::llm::adapter::GenericAdapter)
 }
 
 // #4026: minimal, forward-compatible shape — a struct (not a bare `Vec`) so
@@ -554,7 +532,8 @@ fn default_agent_kind() -> String {
 /// `TicketingConfig::from_env()`.
 /// What: All fields optional; fields not relevant to the chosen provider
 /// are ignored.
-/// Test: Construction happy-path covered via `TicketingConfig::build_client`.
+/// Test: parsed as part of `AgentConfig`; the client it built left with the
+/// cut `ticketing` module (#11632).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct TicketingTomlConfig {
@@ -567,26 +546,6 @@ pub struct TicketingTomlConfig {
     pub jira_project: Option<String>,
     pub linear_api_key: Option<String>,
     pub linear_team_id: Option<String>,
-}
-
-impl TicketingTomlConfig {
-    /// Merge TOML-provided fields with env var fallbacks.
-    #[allow(dead_code)]
-    pub fn into_ticketing_config(self) -> crate::ticketing::TicketingConfig {
-        let env = crate::ticketing::TicketingConfig::from_env();
-        crate::ticketing::TicketingConfig {
-            provider: self.provider.unwrap_or(env.provider),
-            github_token: self.github_token.or(env.github_token),
-            github_repo: self.github_repo.or(env.github_repo),
-            jira_url: self.jira_url.or(env.jira_url),
-            jira_email: self.jira_email.or(env.jira_email),
-            jira_token: self.jira_token.or(env.jira_token),
-            jira_project: self.jira_project.or(env.jira_project),
-            linear_api_key: self.linear_api_key.or(env.linear_api_key),
-            linear_team_id: self.linear_team_id.or(env.linear_team_id),
-            force_gh_cli: false,
-        }
-    }
 }
 
 /// Identity and model selection.
@@ -670,7 +629,7 @@ pub struct AgentInfo {
     /// agent dispatchable but out of picker UIs (e.g. trimming the demo
     /// roster to Izzie/CTO Assistant/Concierge without touching
     /// `assistant`/`personal-assistant`/`research-agent`'s role or tools).
-    /// Test: `parse_agent_toml_hidden_defaults_false_and_parses_true`.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default)]
     pub hidden: bool,
 
@@ -689,7 +648,7 @@ pub struct AgentInfo {
     /// `"system-tool"` (set on `ctrl`/Concierge). Not an enum: new picker
     /// sections are meant to be addable by dropping a new `kind` string into
     /// an agent TOML, not by a Rust code change every time.
-    /// Test: `parse_agent_toml_kind_defaults_assistant_and_parses_system_tool`.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default = "default_agent_kind")]
     pub kind: String,
 

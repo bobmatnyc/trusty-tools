@@ -325,15 +325,14 @@ fn config_root() -> PathBuf {
 /// Strip a leading YAML frontmatter block (if any) and return the body.
 ///
 /// Why: Persona/language skill files carry `---` frontmatter for indexing.
-/// Injecting that into a task prompt is noise. Mirrors the helper in
-/// `crate::skills::strip_frontmatter` but kept local to avoid a circular
-/// dep on the broader skills module from this small helper.
+/// Injecting that into a task prompt is noise. #11632: the crate's one copy
+/// now; the `skills` module that held the other was cut.
 /// What: If `content` starts with `---\n`, finds the next `\n---` and returns
 /// the text after it (skipping the trailing newline). Otherwise returns
 /// `content` unchanged.
 /// Test: `strip_frontmatter_local_removes_block`,
 /// `strip_frontmatter_local_passthrough`.
-fn strip_frontmatter(content: &str) -> &str {
+pub(crate) fn strip_frontmatter(content: &str) -> &str {
     let Some(rest) = content.strip_prefix("---") else {
         return content;
     };

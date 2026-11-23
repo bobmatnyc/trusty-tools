@@ -19,7 +19,7 @@
 // #7427: Telegram's send arm, its capabilities, and its inbound half, in one
 // place.
 use super::{Capabilities, ChannelAdapter, ChannelError, InboundEvent, WakePrompt};
-use crate::api::server::agent_channels::Binding;
+use crate::operations::agent_channels::Binding;
 use serde_json::{Value, json};
 use trusty_channels::telegram::api::client::BaseClient;
 use trusty_channels::telegram::api::constants::TELEGRAM_API_BASE;
