@@ -77,8 +77,10 @@ pub fn ensure_global_config_dir(
 /// touching the refusal, which stays exactly as strict for production callers
 /// (`exe_override` is `None` there, as it was before).
 /// What: the body of [`ensure_global_config_dir`], forwarding `exe_override` to
-/// [`super::hooks::ensure_managed_hooks_with_exe`].
+/// [`super::hooks::ensure_managed_hooks_with_exe`]. #11195: the seeding runs
+/// between two owner-only passes (`config_dir_mode::secure_config_dir`).
 /// Test: `test_global_config_dir_ensure_idempotent`,
+/// `provisioning_leaves_config_dir_backups_and_secret_files_owner_only`,
 /// `test_global_config_dir_seeds_builtin_mcp_servers`,
 /// `hook_triad_written_to_settings_json` (`tests/standalone_isolation.rs`).
 pub fn ensure_global_config_dir_with_exe(
@@ -88,6 +90,34 @@ pub fn ensure_global_config_dir_with_exe(
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(claude_config_dir)?;
 
+    // #11195: Claude Code writes `backups/` and rewrites `.claude.json` at the
+    // umask mode, and the settings writers below replace `settings.json`, so
+    // the owner-only pass runs before them (the dir is private while they
+    // write) and again after, whether or not a step returned early.
+    secure_config_dir_logged(claude_config_dir);
+    let seeded = seed_config_dir(managed_root, claude_config_dir, exe_override);
+    secure_config_dir_logged(claude_config_dir);
+    seeded?;
+
+    Ok(claude_config_dir.to_path_buf())
+}
+
+/// Run [`super::config_dir_mode::secure_config_dir`] and log each failure.
+///
+/// Why (#11195): a chmod that fails must not pass silently; the warning names
+/// the path, and the `claude_json_secrets` doctor row still flags the mode.
+fn secure_config_dir_logged(claude_config_dir: &Path) {
+    for f in super::config_dir_mode::secure_config_dir(claude_config_dir) {
+        tracing::warn!(path = %f.path.display(), "could not make owner-only: {}", f.reason);
+    }
+}
+
+/// The seeding steps of [`ensure_global_config_dir_with_exe`].
+fn seed_config_dir(
+    managed_root: &Path,
+    claude_config_dir: &Path,
+    exe_override: Option<&Path>,
+) -> anyhow::Result<()> {
     // Issue #2214: seed `outputStyle`/`statusLine` defaults directly into the
     // tm-owned settings.json (defense-in-depth, independent of the project tier
     // + `--setting-sources`). Non-destructive — see module doc comment.
@@ -101,7 +131,7 @@ pub fn ensure_global_config_dir_with_exe(
     seed_builtin_mcp_servers(claude_config_dir);
     deploy_agents_and_skills(managed_root, claude_config_dir)?;
 
-    Ok(claude_config_dir.to_path_buf())
+    Ok(())
 }
 
 /// Deploy bundled agents and skills into the managed CLAUDE_CONFIG_DIR (WI-2).
