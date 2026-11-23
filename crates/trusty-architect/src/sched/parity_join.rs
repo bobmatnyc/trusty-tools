@@ -306,14 +306,15 @@ mod tests {
 
     #[test]
     fn idle_with_different_screen_hashes_never_pairs() {
-        let shadow = [Event::keyed(1000, 60, key("tm-a", "idle", "since-900-aaaa"))];
-        let live = [Event::keyed(1030, 0, key("tm-a", "idle", "since-998-bbbb"))];
+        let ev = |ts, iv, kind: &str, fp: &str| Event::keyed(ts, iv, key("tm-a", kind, fp));
+        let shadow = [ev(1000, 60, "idle", "since-900-aaaa")];
+        let live = [ev(1030, 0, "idle", "since-998-bbbb")];
         let j = join(&shadow, &live, &|_| true, true);
         assert_eq!((j.counts.matched, j.by_relaxed), (0, 0));
         assert_eq!((j.counts.scheduler_only, j.counts.poller_only), (1, 1));
         // A non-idle kind with the same shape keeps exact identity.
-        let shadow = [Event::keyed(1000, 60, key("tm-a", "token", "since-900-aaaa"))];
-        let live = [Event::keyed(1030, 0, key("tm-a", "token", "since-998-aaaa"))];
+        let shadow = [ev(1000, 60, "token", "since-900-aaaa")];
+        let live = [ev(1030, 0, "token", "since-998-aaaa")];
         assert_eq!(join(&shadow, &live, &|_| true, true).counts.matched, 0);
     }
 
