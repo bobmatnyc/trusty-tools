@@ -61,7 +61,7 @@ const MARKERS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "API_KEY", "_KEY"];
 /// fails until you do.
 const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
     (
-        "trusty-agents/src/agents/tests/mod.rs",
+        "trusty-assistants/src/agents/tests/mod.rs",
         &[
             "agent_config_anthropic_pin_forces_the_direct_path",
             "agent_config_pin_routes_atlascloud",
@@ -71,25 +71,25 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "trusty-agents/src/channels/slack.rs",
+        "trusty-assistants/src/channels/slack.rs",
         &[
             "slack_adapter_read_uses_the_credential_the_binding_names",
             "slack_adapter_send_uses_the_credential_the_binding_names",
         ],
     ),
     (
-        "trusty-agents/src/channels/telegram.rs",
+        "trusty-assistants/src/channels/telegram.rs",
         &[
             "telegram_adapter_send_uses_the_credential_the_binding_names",
             "telegram_poll_token_refuses_a_credential_outside_the_family",
         ],
     ),
     (
-        "trusty-agents/src/mcp/tests/extensions_tests.rs",
+        "trusty-assistants/src/mcp/tests/extensions_tests.rs",
         &["auth_resolves_from_the_environment"],
     ),
     (
-        "trusty-agents/src/tools/mcp_tools/mod.rs",
+        "trusty-assistants/src/tools/mcp_tools/mod.rs",
         &["dispatch_mcp_add_strips_undeclared_env_field"],
     ),
     (
@@ -1099,7 +1099,8 @@ fn every_credential_test_is_serial_and_sandboxed() {
     assert!(
         sources
             .iter()
-            .any(|(rel, _)| rel.starts_with("trusty-agents/")),
+            // #11632: the crate directory is `trusty-assistants`.
+            .any(|(rel, _)| rel.starts_with("trusty-assistants/")),
         "the scan did not reach the workspace's other crates ({} files)",
         sources.len()
     );
