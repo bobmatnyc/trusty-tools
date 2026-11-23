@@ -117,11 +117,17 @@ def per_pm_session(project):
         has_subs = any(os.path.isfile(os.path.join(base, e, "state.json")) for e in os.listdir(base)
                        if os.path.isdir(os.path.join(base, e)))
     except OSError:
-        return None
-    if has_subs:
-        t = _tmux_session()
-        if t and SESSION_RE.match(t) and os.path.isfile(os.path.join(base, t, "state.json")):
-            return t
+        has_subs = False
+    dbatg = os.path.join(project, ".trusty-mpm", "dbatg")
+    if not has_subs and not os.path.isdir(dbatg):
+        return None  # no per-PM store of either kind: skip the tmux probe
+    t = _tmux_session()
+    if has_subs and t and SESSION_RE.match(t) and os.path.isfile(os.path.join(base, t, "state.json")):
+        return t
+    # #11685: this pane's ledger lives only in the dbatg store; never fall back to the legacy or another PM's ledger.
+    if t and SESSION_RE.match(t) and os.path.isfile(os.path.join(dbatg, t, "state.json")):
+        raise DatgError(f"session {t} keeps its ledger in .trusty-mpm/dbatg/{t}/ (dbatg), not datg; "
+                        f"use `tm dbatg`, or `datg.py --session {t} init` to start a datg ledger")
     return None
 
 
@@ -227,6 +233,30 @@ def size_report(st, n=3):
     return "; ".join(parts) + "; largest: " + _largest(st, n)
 
 
+PRIOR_KEEP = 20  # #11685: prior state.json versions kept under <datg>/prior/
+
+
+def _snapshot_prior(d, sp):
+    """Copy the current state.json to <d>/prior/state.v<N>.json before it is replaced; keep PRIOR_KEEP.
+
+    #11685: a write replaced whole fields with no copy, so an overwritten version was lost.
+    Restore: copy a prior file back over state.json. Test: tests/test_datg_identity.py
+    """
+    try:
+        with open(sp, encoding="utf-8") as f:
+            old = f.read()
+        v = json.loads(old).get("v")
+    except (OSError, ValueError, AttributeError):
+        return  # nothing (readable) to keep: first write, or malformed state load_state already refused
+    pd = os.path.join(d, "prior")
+    os.makedirs(pd, exist_ok=True)
+    _atomic_write(os.path.join(pd, f"state.v{v}.json"), old)
+    snaps = sorted((f for f in os.listdir(pd) if re.fullmatch(r"state\.v\d+\.json", f)),
+                   key=lambda f: int(f[7:-5]))
+    for f in snaps[:-PRIOR_KEEP]:
+        os.unlink(os.path.join(pd, f))
+
+
 def commit(project, st, events, archived=()):
     """Bump v, stamp session.written_*, archive closed items, replace state.json, append log lines.
 
@@ -258,6 +288,7 @@ def commit(project, st, events, archived=()):
             os.fsync(fd)
         finally:
             os.close(fd)
+    _snapshot_prior(d, sp)
     _atomic_write(sp, text)
     with open(lp, "a", encoding="utf-8") as f:
         t = now_iso()
