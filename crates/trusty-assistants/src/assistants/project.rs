@@ -34,15 +34,55 @@ pub struct ProjectClaim {
     pub id: AssistantInstanceId,
     /// The `project_dir` value as declared.
     pub declared: PathBuf,
+    /// The `config.toml` that declares it.
+    pub config: PathBuf,
 }
 
 impl ProjectClaim {
-    /// The claim's canonical directory, or `None` when the declared path is no
-    /// longer an absolute, existing directory. Such a claim matches nothing;
-    /// [`super::health`] reports it.
+    /// The claim's canonical directory, or `None` when it is unusable for any
+    /// reason. For comparing claims only; resolution uses [`Self::resolve`].
     /// Test: `super::tests::project_tests::a_stale_claim_matches_nothing`.
     pub fn canonical(&self) -> Option<PathBuf> {
-        canonical_project_dir(&self.declared).ok()
+        self.resolve().ok().flatten()
+    }
+
+    /// The claim's canonical directory for resolution.
+    ///
+    /// Why: a claim that is wrong (relative, or not a directory) may be the one
+    /// that holds the working directory, so skipping it could hand the session
+    /// to another instance (#11649 review). Only a directory that is gone can
+    /// hold nothing.
+    /// What: `Ok(Some(dir))` for an absolute, existing directory; `Ok(None)`
+    /// for an absolute path that does not exist; otherwise
+    /// [`AssistantError::InvalidConfig`] naming this home's `config.toml` and
+    /// instance id. A TOML string is always UTF-8, so no claim read from
+    /// `config.toml` can be a non-UTF-8 path.
+    /// Test: `super::tests::project_tests::an_invalid_claim_stops_resolution`,
+    /// `super::tests::project_tests::a_stale_claim_matches_nothing`.
+    pub fn resolve(&self) -> Result<Option<PathBuf>, AssistantError> {
+        let invalid = |what: String| AssistantError::InvalidConfig {
+            path: self.config.clone(),
+            reason: format!(
+                "assistant `{}` declares `{PROJECT_DIR_KEY}` `{}`, which {what}",
+                self.id,
+                self.declared.display()
+            ),
+        };
+        if !self.declared.is_absolute() {
+            return Err(invalid("is not an absolute path".into()));
+        }
+        let meta = match std::fs::metadata(&self.declared) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(invalid(format!("cannot be read ({e})"))),
+        };
+        if !meta.is_dir() {
+            return Err(invalid("is not a directory".into()));
+        }
+        self.declared
+            .canonicalize()
+            .map(Some)
+            .map_err(|e| invalid(format!("cannot be resolved ({e})")))
     }
 }
 
@@ -132,7 +172,11 @@ pub fn project_claims(root: &Path) -> Result<Vec<ProjectClaim>, AssistantError> 
         };
         let home = AssistantHome::under(root, id.clone());
         if let Some(declared) = read_home_config(&home)?.and_then(|c| c.project_dir) {
-            claims.push(ProjectClaim { id, declared });
+            claims.push(ProjectClaim {
+                id,
+                declared,
+                config: home.config_path(),
+            });
         }
     }
     claims.sort_by(|a, b| a.id.cmp(&b.id));
@@ -172,22 +216,28 @@ pub fn duplicate_claims(
 /// [`AssistantError::NoInstanceForProject`] when no claim holds it,
 /// [`AssistantError::ProjectDirConflict`] naming both instances when two claim
 /// the matching directory, and [`AssistantError::InvalidConfig`] for any home
-/// whose config cannot be parsed.
+/// whose config cannot be parsed or whose claim is not absolute or not a
+/// directory ([`ProjectClaim::resolve`]).
 /// Test: `super::tests::project_tests::resolves_a_cwd_at_or_under_a_project_dir`,
 /// `super::tests::project_tests::two_homes_claiming_one_dir_is_a_named_conflict`,
 /// `super::tests::project_tests::dotdot_and_symlink_escapes_are_rejected`,
 /// `super::tests::project_tests::no_match_is_an_error_not_a_default`,
-/// `super::tests::project_tests::a_malformed_config_stops_resolution`.
+/// `super::tests::project_tests::a_malformed_config_stops_resolution`,
+/// `super::tests::project_tests::an_invalid_claim_stops_resolution`.
 pub fn instance_for_project(
     root: &Path,
     cwd: &Path,
 ) -> Result<AssistantInstanceId, AssistantError> {
     let cwd = canonical_project_dir(cwd)?;
-    let mut matches: Vec<(PathBuf, AssistantInstanceId)> = project_claims(root)?
-        .into_iter()
-        .filter_map(|c| c.canonical().map(|dir| (dir, c.id)))
-        .filter(|(dir, _)| cwd.starts_with(dir))
-        .collect();
+    let mut matches: Vec<(PathBuf, AssistantInstanceId)> = Vec::new();
+    for claim in project_claims(root)? {
+        // #11649: an invalid claim stops resolution; only a gone dir is skipped.
+        if let Some(dir) = claim.resolve()?
+            && cwd.starts_with(&dir)
+        {
+            matches.push((dir, claim.id));
+        }
+    }
     let Some(depth) = matches.iter().map(|(d, _)| d.components().count()).max() else {
         return Err(AssistantError::NoInstanceForProject { cwd });
     };

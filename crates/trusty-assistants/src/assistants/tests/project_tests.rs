@@ -299,3 +299,36 @@ fn a_malformed_config_stops_resolution() {
         "{err}"
     );
 }
+
+/// #11649 review (HIGH): a claim that is relative or not a directory might be
+/// the one meant for this cwd, so it stops resolution with an error naming
+/// its home instead of being skipped in favour of another instance.
+#[test]
+fn an_invalid_claim_stops_resolution() {
+    let (_tmp, base) = temp();
+    let root = mkdir(&base, "homes");
+    let project = mkdir(&base, "project");
+    let cwd = mkdir(&project, "x");
+    claim(&root, "personal", &project);
+    let cto = mkdir(&root, "cto-assistant");
+    let not_a_dir = base.join("file.txt");
+    std::fs::write(&not_a_dir, "x").unwrap();
+
+    for declared in ["relative/path".to_string(), not_a_dir.display().to_string()] {
+        std::fs::write(
+            cto.join("config.toml"),
+            format!("id = \"cto-assistant\"\nproject_dir = \"{declared}\"\n"),
+        )
+        .unwrap();
+
+        let err = instance_for_project(&root, &cwd).unwrap_err();
+
+        match &err {
+            AssistantError::InvalidConfig { path, reason } => {
+                assert_eq!(path, &cto.join("config.toml"));
+                assert!(reason.contains("cto-assistant"), "{reason}");
+            }
+            other => panic!("{declared}: expected InvalidConfig, got {other}"),
+        }
+    }
+}
