@@ -144,3 +144,97 @@ fn an_empty_file_is_a_typed_error() {
         "{err}"
     );
 }
+
+/// Verbs that order a write or a send. The assistant's tools are read-only,
+/// so no template clause may start with one, or say "you <verb>".
+const WRITE_VERBS: &[&str] = &[
+    "record", "store", "save", "remember", "write", "send", "post", "file", "email", "delegate",
+    "dispatch", "persist", "log", "hand", "forward", "publish", "submit", "commit",
+];
+
+/// Clauses whose first word, or whose `you <word>`, is a [`WRITE_VERBS`] entry.
+fn write_instructions(template: &str) -> Vec<String> {
+    let joined = template.replace("\n- ", ". ").replace('\n', " ");
+    let mut hits = Vec::new();
+    for clause in joined
+        .split(['.', ';', ':', '(', ')', '!', '?'])
+        .flat_map(|c| c.split(" and "))
+    {
+        let words: Vec<String> = clause
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect();
+        let starts = words
+            .first()
+            .is_some_and(|w| WRITE_VERBS.contains(&w.as_str()));
+        let you_verb = words
+            .windows(2)
+            .any(|p| p[0] == "you" && WRITE_VERBS.contains(&p[1].as_str()));
+        if starts || you_verb {
+            hits.push(clause.trim().to_string());
+        }
+    }
+    hits
+}
+
+/// #11649 review: the assistant has read-only tools, so its templates may
+/// propose a write to the owner but never order one, and never carry the
+/// "unless an earlier ruling covers it" escape on the send limit.
+#[test]
+fn role_templates_never_instruct_a_write_or_send() {
+    for role in [AssistantRole::Personal, AssistantRole::Cto] {
+        let template = role.template();
+        assert_eq!(
+            write_instructions(template),
+            Vec::<String>::new(),
+            "{role:?}"
+        );
+        assert!(
+            template.contains(
+                "Your tools are read-only; never claim you stored, sent or filed anything."
+            ),
+            "{role:?}"
+        );
+        assert!(!template.contains("unless an earlier ruling"), "{role:?}");
+    }
+    // The checker itself catches the shapes the first templates used.
+    for bad in [
+        "- **Record decisions.** Store each ruling.",
+        "a task (record it)",
+        "When you hand work on, state the goal.",
+        "- **Delegate reads.** Send specifications to research.",
+    ] {
+        assert!(!write_instructions(bad).is_empty(), "{bad}");
+    }
+}
+
+/// #11649 review: a write that fails part-way leaves neither a truncated
+/// target nor its temp file. The writer is injected because a real
+/// `write_all` failure (a full disk) cannot be produced in a test.
+#[test]
+fn a_failed_write_leaves_no_partial_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("agent.toml");
+
+    let err =
+        crate::assistants::instructions::write_new_via(&target, b"full body", |file, body| {
+            use std::io::Write;
+            file.write_all(&body[..4])?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+
+    assert!(matches!(err, AssistantError::Io { .. }), "{err}");
+    assert!(!target.exists());
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+
+    assert!(crate::assistants::instructions::write_new(&target, b"full body").unwrap());
+    assert_eq!(std::fs::read(&target).unwrap(), b"full body");
+    assert!(!crate::assistants::instructions::write_new(&target, b"other").unwrap());
+    assert_eq!(std::fs::read(&target).unwrap(), b"full body");
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+}

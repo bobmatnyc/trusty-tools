@@ -77,9 +77,9 @@ impl AssistantRole {
 ///
 /// Why: the file is the user's after it exists; provisioning must never
 /// replace an edited one, including on a second run.
-/// What: creates the home directory if needed, then opens the file with
-/// `create_new`, so an existing file is never truncated even when two callers
-/// race. Returns `true` when this call wrote the file, `false` when one was
+/// What: creates the home directory if needed, then writes through
+/// [`write_new`], so an existing file is never truncated even when two callers
+/// race, and a failed write leaves no partial file. Returns `true` when this call wrote the file, `false` when one was
 /// already there.
 /// Test: `super::tests::instructions_tests::seeding_writes_the_role_template_once`,
 /// `super::tests::instructions_tests::seeding_never_overwrites_an_edited_file`.
@@ -95,22 +95,57 @@ pub fn seed_role_instructions(
 }
 
 /// Write `body` to `path` only when nothing is there; `Ok(false)` if it exists.
+///
+/// Why: a failed write must not leave a truncated `instructions.md`,
+/// `persona.md` or `agent.toml` that every later run then keeps (#11649 review).
+/// What: writes a hidden temp file in the same directory, then `hard_link`s it
+/// to `path` — atomic, and `AlreadyExists` when a file is there. The temp file
+/// is removed on every path out.
+/// Test: `super::tests::instructions_tests::a_failed_write_leaves_no_partial_file`.
 pub(super) fn write_new(path: &Path, body: &[u8]) -> Result<bool, AssistantError> {
-    let io = |source| AssistantError::Io {
-        path: path.to_path_buf(),
+    write_new_via(path, body, |file, body| file.write_all(body))
+}
+
+/// [`write_new`] with the body writer injectable, so the failure arm is testable.
+pub(super) fn write_new_via(
+    path: &Path,
+    body: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<bool, AssistantError> {
+    if path.exists() {
+        return Ok(false);
+    }
+    let io = |at: &Path, source| AssistantError::Io {
+        path: at.to_path_buf(),
         source,
     };
-    let mut file = match std::fs::OpenOptions::new()
+    let tmp = temp_sibling(path);
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(io(e)),
-    };
-    file.write_all(body).map_err(io)?;
-    Ok(true)
+        .open(&tmp)
+        .map_err(|e| io(&tmp, e))?;
+    let written = write(&mut file, body).and_then(|()| file.sync_all());
+    drop(file);
+    let linked = written.and_then(|()| std::fs::hard_link(&tmp, path));
+    // Best effort: the temp name is unique, and a leftover is never read.
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(io(path, e)),
+    }
+}
+
+/// A unique hidden temp path beside `path`.
+fn temp_sibling(path: &Path) -> std::path::PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()))
 }
 
 impl AssistantHome {
