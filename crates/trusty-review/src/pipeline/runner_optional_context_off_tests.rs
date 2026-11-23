@@ -233,6 +233,7 @@ pub(super) fn legacy_caller() -> CallerContext {
             "Reviewer asked about overflow; author says inputs are bounded.".into(),
         ),
         referenced_code: Some("fn step_2(input: u64) -> u64 { input }".to_string()),
+        author_intent: None,
     }
 }
 

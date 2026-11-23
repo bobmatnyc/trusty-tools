@@ -84,6 +84,7 @@ fn caller_context_fields_are_capped_with_a_visible_marker() {
         pr_description: Some("ééééé-tail".into()),
         pr_discussion: Some("short".into()),
         referenced_code: None,
+        author_intent: None,
     };
     cap_caller_context(&mut caller, 5);
     let desc = caller.pr_description.as_deref().unwrap_or_default();

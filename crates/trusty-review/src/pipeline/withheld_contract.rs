@@ -33,6 +33,7 @@ use tracing::{info, warn};
 use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus, WithheldFinding};
 use crate::pipeline::{
     absence_claim::ABSENCE_REASON,
+    author_intent::AS_IS_CARRYOVER_REASON,
     citation_check::CITATION_REASON,
     citation_gate::{LineIndex, resolves_at_head, verdict::settle_withheld},
     diff_analyzer::models::FilteredDiff,
@@ -60,7 +61,8 @@ pub const UNRESOLVED_AT_HEAD_REASON: &str = "#9188 does not resolve at the head"
 /// line-gate reason (#8905), whose text varies, is `line_citation`.
 /// Test: `reason_class_names_every_producer`.
 pub fn reason_class(reason: &str) -> &'static str {
-    let prefixed: [(&str, &'static str); 5] = [
+    let prefixed: [(&str, &'static str); 6] = [
+        (AS_IS_CARRYOVER_REASON, "as_is_carryover"), // #10758
         (CITATION_REASON, "citation_integrity"),
         (NO_QUOTE_PREGATE_REASON, "no_quote_pregate"), // #10782
         (SELF_NEGATED_REASON, "self_negated"),
@@ -103,6 +105,7 @@ fn class_phrase(class: &str) -> &str {
         "self_negated" => "self-negated",
         "absence_claim" => "refuted absence claim",
         "no_quote_pregate" => "quotes no code", // #10782
+        "as_is_carryover" => "carried over by an as-is migration", // #10758
         "unresolved_at_head" => "citation does not resolve at the head",
         "duplicate" => "duplicate",
         "over_max_findings" => "over the findings cap",

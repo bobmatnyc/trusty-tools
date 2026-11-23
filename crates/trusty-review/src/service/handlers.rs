@@ -372,6 +372,10 @@ pub struct ReviewRequest {
     /// reviewer as a `## Referenced Code` section.
     #[serde(default)]
     pub referenced_code: Option<String>,
+    /// Free-text author intent, e.g. "as-is legacy migration" (#10758).
+    /// Optional and additive: absent, the review runs exactly as before.
+    #[serde(default)]
+    pub author_intent: Option<String>,
 }
 
 // ─── Status computation ───────────────────────────────────────────────────────
@@ -699,6 +703,7 @@ pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<Revie
             pr_description: req.pr_description.clone(),
             pr_discussion: req.pr_discussion.clone(),
             referenced_code: req.referenced_code.clone(),
+            author_intent: req.author_intent.clone(), // #10758
         },
         // `review` is out of scope for the interactive-degrade default
         // (unaffected by the search-unreachable semantics fix) — keeps the

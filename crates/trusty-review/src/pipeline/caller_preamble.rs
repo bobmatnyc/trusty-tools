@@ -107,6 +107,7 @@ pub fn cap_caller_context(caller: &mut CallerContext, max: usize) {
         &mut caller.pr_description,
         &mut caller.pr_discussion,
         &mut caller.referenced_code,
+        &mut caller.author_intent, // #10758
     ];
     for text in fields.into_iter().flatten() {
         let Some((cut, _)) = text.char_indices().nth(max) else {

@@ -25,6 +25,8 @@
 //! Test: each submodule carries its own unit tests.
 
 pub mod absence_claim;
+// #10758: per-review author intent — prompt rule + as-is carry-over gate.
+pub mod author_intent;
 // Why: keeps the raw structured reviewer payload out of `review_body`, which
 // consumers read (and post) as the human-readable review (#4999).
 pub(crate) mod body_render;

@@ -396,10 +396,13 @@ fn review_request_deserializes_with_optional_context() {
         "local_diff_text": "+fn x() {}\n",
         "pr_description": "Adds a retry guard.",
         "pr_discussion": "Author: checked the source; no values exceed the cap.",
-        "referenced_code": "pub const CAP: u32 = 100;"
+        "referenced_code": "pub const CAP: u32 = 100;",
+        "author_intent": "as-is legacy migration"
     }"#;
     let req: ReviewRequest =
         serde_json::from_str(body).expect("body with context must deserialize");
+    // #10758: the optional author-intent field.
+    assert_eq!(req.author_intent.as_deref(), Some("as-is legacy migration"));
     assert_eq!(req.pr_description.as_deref(), Some("Adds a retry guard."));
     assert_eq!(
         req.pr_discussion.as_deref(),

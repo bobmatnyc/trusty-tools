@@ -301,6 +301,7 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
         pr_description: texts[0].take(),
         pr_discussion: texts[1].take(),
         referenced_code: texts[2].take(),
+        author_intent: None,
     };
     let include = match args.get(INCLUDE_PR_BODY) {
         None | Some(Value::Null) => false,

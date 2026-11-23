@@ -181,6 +181,12 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH")]
     pub referenced_code_file: Option<std::path::PathBuf>,
 
+    /// Author intent for this review, as literal text, e.g. "as-is legacy
+    /// migration" (#10758). A declared as-is migration's carried-over legacy
+    /// style is not reported; bugs the change introduces still are.
+    #[arg(long, value_name = "TEXT")]
+    pub author_intent: Option<String>,
+
     /// Merge the fetched PR body into the reviewer's PR description, capped at
     /// 64,000 characters with a visible marker, ahead of any --pr-description
     /// text (#9192). A local diff has no PR body; the review runs without it.
@@ -309,8 +315,9 @@ fn run_config(config_path: Option<&std::path::Path>, args: &RunArgs) -> ReviewCo
 pub async fn cmd_run(
     config: ReviewConfig,
     config_path: Option<&std::path::Path>,
-    args: RunArgs,
+    args: Box<RunArgs>,
 ) -> Result<()> {
+    let args = *args; // #10758: `Commands::Run` boxes its args (large_enum_variant)
     // #4460: print the resolved posting mode before any network call, so the
     // signal is visible at the moment it matters — never a silent ambient
     // default. Stderr, not stdout, so `--json` output stays parseable.
@@ -608,7 +615,8 @@ pub(crate) fn run_input(
 ///
 /// Test: `pr_context_flags_read_text_and_files`,
 /// `unreadable_pr_context_file_fails_the_run`,
-/// `pr_context_file_over_the_cap_or_not_regular_is_refused`.
+/// `pr_context_file_over_the_cap_or_not_regular_is_refused`,
+/// `author_intent_flag_reaches_the_caller_context`.
 pub(crate) fn caller_context_from_args(args: &RunArgs) -> Result<CallerContext> {
     let read = |flag: &str,
                 text: Option<&str>,
@@ -638,6 +646,8 @@ pub(crate) fn caller_context_from_args(args: &RunArgs) -> Result<CallerContext> 
             args.referenced_code.as_deref(),
             args.referenced_code_file.as_deref(),
         )?,
+        // #10758: blank intent is no intent.
+        author_intent: args.author_intent.clone().filter(|t| !t.trim().is_empty()),
     })
 }
 

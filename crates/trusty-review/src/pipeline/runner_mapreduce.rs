@@ -136,7 +136,13 @@ pub(super) async fn run_mapreduce_branch(
         &deps.llm,
         &ctx,
         mr_config,
-        &|file: &str, first: bool| run.applied.chunk_sections(file, first), // #9193, #9195
+        // #9193, #9195; #10758: the author intent leads every chunk prompt.
+        &|file: &str, first: bool| {
+            crate::pipeline::author_intent::with_intent_section(
+                input.caller_context.author_intent.as_deref(),
+                run.applied.chunk_sections(file, first),
+            )
+        },
     )
     .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
