@@ -74,6 +74,28 @@ pub struct RoleModels {
     /// CLI, manifest, env, or config-file model named (#11527). Only then may
     /// the startup liveness gate fall back to `FALLBACK_VERIFIER_MODEL`.
     pub verifier_from_builtin_default: bool,
+    /// Model slugs the operator's account is authorized to invoke (#10757).
+    /// Empty when neither `TRUSTY_REVIEW_AUTHORIZED_MODELS` nor
+    /// `[models] authorized` names any; see [`resolve_authorized_models`].
+    pub authorized_models: Vec<String>,
+    /// #10757: set when the config file declares `[models] authorized` but it
+    /// cannot be parsed and no env list overrides it; `compare` must refuse.
+    pub authorized_models_error: Option<AuthorizedModelsError>,
+}
+
+/// A `[models] authorized` key that is present but unparseable (#10757).
+///
+/// Why: falling back to the built-in compare set would invoke models the
+/// operator never authorized.
+/// What: carries the config file path and the parse error text.
+/// Test: `config_tests::compare_refuses_malformed_authorized_key`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("cannot parse `[models] authorized` in {path}: {reason}")]
+pub struct AuthorizedModelsError {
+    /// The config file that declared the key.
+    pub path: String,
+    /// Why the value could not be read as a list of model slugs.
+    pub reason: String,
 }
 
 impl RoleModels {
@@ -191,6 +213,12 @@ impl RoleModels {
             verifier,
             summarizer,
             verifier_from_builtin_default,
+            // #10757: model access comes from config, not a hard-coded list.
+            authorized_models: resolve_authorized_models(
+                env.authorized_models.as_deref(),
+                file_models,
+            ),
+            authorized_models_error: None,
         };
         // #11527: surface a reviewer/verifier pair that shares one model.
         if let Some(message) = roles.same_model_warning() {
@@ -270,6 +298,8 @@ pub struct RoleEnv {
     pub verifier_model: Option<String>,
     pub summarizer_model: Option<String>,
     pub provider: Option<String>,
+    /// `TRUSTY_REVIEW_AUTHORIZED_MODELS` — comma-separated slugs (#10757).
+    pub authorized_models: Option<String>,
 }
 
 /// Per-role model ids a report manifest declares (#6135).
@@ -308,6 +338,7 @@ impl RoleEnv {
             verifier_model: std::env::var("TRUSTY_REVIEW_VERIFIER_MODEL").ok(),
             summarizer_model: std::env::var("TRUSTY_REVIEW_SUMMARIZER_MODEL").ok(),
             provider: std::env::var("TRUSTY_REVIEW_PROVIDER").ok(),
+            authorized_models: std::env::var("TRUSTY_REVIEW_AUTHORIZED_MODELS").ok(),
         }
     }
 }
@@ -322,6 +353,52 @@ pub struct FileModels {
     pub reviewer: Option<RoleConfigOverride>,
     pub verifier: Option<RoleConfigOverride>,
     pub summarizer: Option<RoleConfigOverride>,
+    /// `[models] authorized = ["bedrock/<id>", ...]` — the models the
+    /// operator's account is authorized to invoke (#10757).
+    #[serde(default)]
+    pub authorized: Vec<String>,
+}
+
+/// Resolve the operator-declared authorized model list (#10757).
+///
+/// Why: whether an account may invoke a model is a fact about that account,
+/// so it must come from the operator, never from a list compiled into the
+/// binary (a stale one hid Opus 4.8 after the account was granted it).
+/// What: a non-blank `TRUSTY_REVIEW_AUTHORIZED_MODELS` (comma-separated)
+/// wins; otherwise `[models] authorized`. Entries are trimmed, blanks dropped.
+/// Empty means "none declared".
+/// Test: `config_tests::authorized_models_env_beats_config_file`,
+/// `config_tests::compare_set_uses_config_authorized_model`.
+pub fn resolve_authorized_models(env: Option<&str>, file: Option<&FileModels>) -> Vec<String> {
+    let clean = |ids: &mut dyn Iterator<Item = &str>| -> Vec<String> {
+        ids.map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let from_env = env.map(|v| clean(&mut v.split(','))).unwrap_or_default();
+    if !from_env.is_empty() {
+        return from_env;
+    }
+    file.map(|f| clean(&mut f.authorized.iter().map(String::as_str)))
+        .unwrap_or_default()
+}
+
+impl RoleModels {
+    /// The model set `compare` runs when `--models` is not given (#10757).
+    ///
+    /// Why: a malformed `[models] authorized` must not fail open to the
+    /// built-in set, which may name models the account cannot invoke.
+    /// What: returns `authorized_models_error` when set; otherwise
+    /// `compare_models(&authorized_models)`.
+    /// Test: `config_tests::compare_refuses_malformed_authorized_key`,
+    /// `config_tests::compare_set_uses_config_authorized_model`.
+    pub fn compare_default_models(&self) -> Result<Vec<String>, AuthorizedModelsError> {
+        match &self.authorized_models_error {
+            Some(err) => Err(err.clone()),
+            None => Ok(crate::llm::models::compare_models(&self.authorized_models)),
+        }
+    }
 }
 
 // ─── Resolution helper (private) ─────────────────────────────────────────────

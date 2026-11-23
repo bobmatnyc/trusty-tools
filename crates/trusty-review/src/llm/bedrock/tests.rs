@@ -137,7 +137,10 @@ fn priced(model: &str) -> (f64, f64) {
 /// Test: this test itself; no network calls.
 #[test]
 fn bedrock_cost_estimate_matches_price_list_per_profile() {
-    let cases: [(&str, (f64, f64)); 9] = [
+    let cases: [(&str, (f64, f64)); 11] = [
+        // #10757: Haiku 5.5, Price List retrieved 2026-11-22.
+        ("us.anthropic.claude-haiku-5-5", (0.11, 0.55)),
+        ("global.anthropic.claude-haiku-5-5", (0.10, 0.50)),
         ("us.anthropic.claude-sonnet-5-5", (2.20, 11.00)),
         ("global.anthropic.claude-sonnet-5-5", (2.00, 10.00)),
         ("us.anthropic.claude-opus-5-5", (4.40, 22.00)),
@@ -712,6 +715,8 @@ fn system_blocks_add_the_tool_line_only_for_auto_models() {
 
 /// Sonnet 5.5 and Opus 5.5 ids, in each shape, beyond [`AUTO_MODEL_IDS`].
 const NO_TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-haiku-5-5",
+    "global.anthropic.claude-haiku-5-5",
     "us.anthropic.claude-sonnet-5-5-20260901-v1:0",
     "eu.anthropic.claude-opus-5-5",
     "jp.anthropic.claude-sonnet-5-5-20260901-v1:0",
@@ -757,6 +762,25 @@ fn inference_config_omits_temperature_only_for_claude_5_5() {
         assert_eq!(config.temperature(), Some(0.3), "{model} keeps temperature");
         assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
     }
+}
+
+/// Haiku 5.5 has an id and a price, and its requests omit `temperature`.
+///
+/// Why: #10757 adds Haiku 5.5 to the model table; Bedrock rejects
+/// `temperature` for it ("deprecated for this model", probed 2026-11-22).
+/// What: prices [`HAIKU_5_5_MODEL`] at the `us.` rate and checks the Converse
+/// config drops `temperature` for it.
+/// Test: this test.
+#[test]
+fn haiku_5_5_id_has_a_price() {
+    use crate::llm::models::HAIKU_5_5_MODEL;
+    let cost = super::estimate_bedrock_cost_usd(HAIKU_5_5_MODEL, 1_000_000, 1_000_000);
+    assert!((cost - 0.66).abs() < 1e-9, "Haiku 5.5 us. rate: {cost}");
+    let req = structured_request("reviewer");
+    assert_eq!(
+        super::inference_config(&req, HAIKU_5_5_MODEL).temperature(),
+        None
+    );
 }
 
 /// Every compare-set candidate and the reviewer default has a stated

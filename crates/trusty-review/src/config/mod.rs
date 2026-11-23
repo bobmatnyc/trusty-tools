@@ -468,8 +468,13 @@ impl ReviewConfig {
             toml_file.as_ref().map(|f| &f.coverage);
 
         let env = RoleEnv::from_env();
-        let role_models =
+        let mut role_models =
             RoleModels::resolve_with_manifest(cli_overrides, manifest, &env, file_models.as_ref());
+        // #10757: a whole-file parse failure must not hide a bad `authorized`
+        // key from `compare`; a non-blank env list still wins.
+        if toml_file.is_none() && role_models.authorized_models.is_empty() {
+            role_models.authorized_models_error = config_path.and_then(authorized_key_error);
+        }
         let verification = VerificationConfig::from_env_and_file(file_verification.as_ref());
         let context = ContextConfig::from_env_and_file(file_context.as_ref());
         let context_sources = crate::integrations::context::ContextSourcesConfig::from_env_and_file(
@@ -849,6 +854,41 @@ fn load_toml_file(path: Option<&std::path::Path>) -> Option<TomlFile> {
                 None
             }
         },
+    }
+}
+
+/// Report a present-but-unparseable `[models] authorized` key (#10757).
+///
+/// Why: `load_toml_file` fails open on any parse error, which left
+/// `authorized_models` empty and let `compare` run the built-in set.
+/// What: re-reads `path`. When it parses as TOML, returns an error only if
+/// `models.authorized` exists and is not a list of strings, or is a valid list
+/// in a file the typed `TomlFile` parse rejects. When the file is
+/// not valid TOML at all, returns an error if any line declares `authorized`.
+/// Otherwise `None` (absent key, unreadable file).
+/// Test: `config_tests::compare_refuses_malformed_authorized_key`,
+/// `config_tests::compare_refuses_valid_authorized_in_unparseable_file`.
+fn authorized_key_error(path: &std::path::Path) -> Option<role_models::AuthorizedModelsError> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let error = |reason: String| role_models::AuthorizedModelsError {
+        path: path.display().to_string(),
+        reason,
+    };
+    match toml::from_str::<toml::Table>(&text) {
+        Ok(table) => {
+            let value = table.get("models")?.get("authorized")?.clone();
+            match value.try_into::<Vec<String>>() {
+                Err(e) => Some(error(e.to_string())),
+                // #10757: a valid list the typed whole-file parse rejected is unread.
+                Ok(_) => toml::from_str::<TomlFile>(&text)
+                    .err()
+                    .map(|e| error(e.to_string())),
+            }
+        }
+        Err(e) => text
+            .lines()
+            .any(|l| l.trim_start().starts_with("authorized"))
+            .then(|| error(e.to_string())),
     }
 }
 

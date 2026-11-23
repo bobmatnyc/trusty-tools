@@ -157,12 +157,15 @@ Each role may use a different provider (e.g. reviewer on Bedrock, summarizer on 
 | Verifier / Summarizer | `us.anthropic.claude-haiku-4-5-20251001-v1:0` (date-versioned; the short form `us.anthropic.claude-haiku-4-5` produces HTTP 400) |
 | Compare Sonnet 4.5 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (confirmed available) |
 
-**Default compare-set** (`COMPARE_CANDIDATE_MODELS`, all `bedrock/`-prefixed):
-1. `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` (cheapest)
-2. `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0` (mid-tier)
-3. `bedrock/us.anthropic.claude-sonnet-4-6` (reviewer default)
+**Default compare-set** (`COMPARE_CANDIDATE_MODELS`, all `bedrock/`-prefixed),
+ordered by tier then generation: Haiku 4.5, Sonnet 4.6, Sonnet 5.5, Opus 5.5.
+Haiku 5.5 (`us.anthropic.claude-haiku-5-5`) is in the model table and priced,
+but not in the default set. The list in `llm/models.rs` is the source of truth.
 
-Opus is intentionally excluded (not access-granted in the target account).
+Model access is not recorded in source (#10757). An operator declares the
+models the account may invoke with `[models] authorized = [...]` or
+`TRUSTY_REVIEW_AUTHORIZED_MODELS` (comma-separated); when set, that list
+replaces the default compare-set.
 
 ### 4.4 OpenRouterProvider
 
