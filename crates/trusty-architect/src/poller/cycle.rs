@@ -37,6 +37,7 @@ use super::events::read_events;
 use super::host::{HostProbe, host_alerts};
 use super::inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 use super::listing::{Pane, capture, list_panes};
+use super::live_idle;
 use super::owner_answers::{ANSWER_KEY, owner_answer_step};
 use super::pm_intake::pm_intake_alerts;
 use super::push::{PushRoute, push_step};
@@ -46,6 +47,7 @@ use super::self_refresh::self_refresh_fault_alerts;
 use super::slack::PushSender;
 use super::state::PollState;
 use super::steps::ledger_shim::ledger_shim_step;
+use super::steps::live_reminders::shadow_reminder_step;
 use super::steps::scripts::ScriptSteps;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
 use super::token::token_alerts;
@@ -186,13 +188,21 @@ pub fn collect<T: Tmux + ?Sized>(
         .iter()
         .filter(|p| p.session.starts_with("tm-") && !s.config.skips(&p.session))
         .collect();
+    // MB1595 window 3: a shadow cycle takes the live poller's idle epochs.
+    let live_idle = (s.dry_run && s.config.shadow)
+        .then(|| live_idle::read(&s.config.read_inbox.join("poll-state.json"), &mut log))
+        .flatten();
     let mut infos = Vec::new();
     let mut current = BTreeMap::new();
     let mut idle_panes = Vec::new();
     for p in &watched {
         let (sess, pid) = (p.session.as_str(), p.pane.as_target());
         current.insert(sess.to_owned(), pid.to_owned());
-        let ps = state.panes.entry(format!("{sess}|{pid}")).or_default();
+        let key = format!("{sess}|{pid}");
+        let ps = state.panes.entry(key.clone()).or_default();
+        if let Some(live) = &live_idle {
+            live_idle::adopt(ps, live, &key);
+        }
         if is_shell(&p.cmd) {
             ps.idle_since = None;
             if !is_test_fixture_session(sess) {
@@ -281,6 +291,12 @@ pub fn collect<T: Tmux + ?Sized>(
         state.other.extend(shim.state);
         log.extend(shim.log);
         shim_failing = shim.failing;
+    }
+    // MB1595 window 3: reminders the live poller fired before this cycle.
+    if s.dry_run && s.config.shadow {
+        let (found, lines) = shadow_reminder_step(s.config, &mut state.other, now);
+        candidates.extend(found);
+        log.extend(lines);
     }
     candidates.extend(selftest_alerts(&s.config.selftest_state, now));
     let failed = |e, log| Stopped::Failed(e, log);

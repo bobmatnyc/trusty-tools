@@ -12,6 +12,8 @@
 
 // #11540: the ledger-bound steps, a Python shim run every 60 s.
 pub mod ledger_shim;
+// MB1595 window 3: reminders the live poller fired, in a shadow run.
+pub mod live_reminders;
 pub mod notify_macos;
 // df-T7i P1b: the prototype's run_* scripts, started on its cadence.
 pub mod scripts;
