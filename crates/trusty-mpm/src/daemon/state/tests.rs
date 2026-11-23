@@ -1591,3 +1591,56 @@ async fn isolated_state_seeds_projects_only_from_its_pinned_home_11170() {
         .collect();
     assert_eq!(names, vec!["pinned-only".to_string()]);
 }
+
+/// Restores `$HOME` on drop. Callers MUST be `#[serial_test::serial]`.
+struct HomeGuard11170(Option<std::ffi::OsString>);
+impl Drop for HomeGuard11170 {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]`.
+        match self.0.take() {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// #11170: a config listing projects at the real-home position (`$HOME`) must
+/// not reach an isolated state's registry, whatever the host holds.
+#[tokio::test]
+#[serial_test::serial]
+async fn isolated_state_ignores_a_populated_real_home_config_11170() {
+    let fake_home = tempfile::tempdir().expect("fake home");
+    let real_cfg = trusty_common::crate_config::crate_config_path_at(
+        fake_home.path(),
+        crate::core::trusty_tools_config::CRATE_NAME,
+    );
+    std::fs::create_dir_all(real_cfg.parent().expect("config dir")).expect("mkdir");
+    std::fs::write(
+        &real_cfg,
+        "projects:\n  - name: host-leak\n    repo_url: https://github.com/acme/host-leak\n",
+    )
+    .expect("write real-home config");
+    let _home = HomeGuard11170(std::env::var_os("HOME"));
+    // SAFETY: serialized via `#[serial_test::serial]`; restored by `_home`.
+    unsafe { std::env::set_var("HOME", fake_home.path()) };
+    // Precondition: the real-home loader does see the populated config.
+    let host = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    assert_eq!(
+        host.projects.len(),
+        1,
+        "fixture must populate the real home"
+    );
+
+    let root = tempfile::tempdir().expect("temp dir");
+    let state = DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await;
+    let names: Vec<String> = state
+        .project_registry()
+        .await
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert!(names.is_empty(), "host projects leaked: {names:?}");
+}
