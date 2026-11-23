@@ -27,6 +27,7 @@ fn sample(n: u64) -> PollState {
         PaneState {
             idle_since: Some(5.0),
             errors: Some(vec![]),
+            ..PaneState::default()
         },
     );
     st.wake_pending = Some(StoredCount::Count(n));

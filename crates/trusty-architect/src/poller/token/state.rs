@@ -49,6 +49,10 @@ pub struct FileState {
     /// A subagent's `agentType`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// The tmux session name last resolved for `session`.
+    // See parity window 5: E.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// When a scan last stat'ed the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_at: Option<f64>,

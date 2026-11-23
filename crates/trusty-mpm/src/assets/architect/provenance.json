@@ -62,7 +62,7 @@
     "scripts/datg_ready.py": "2647953581916e7e39b0967aa3265d6eb4e7f66a490fe75021e4aa947d89e82b",
     "scripts/datg_store.py": "f8f85aed568208411f3e08d4706e02a0eb700f794a0d91ff5c2d8684ede3a318",
     "scripts/datg_task.py": "76ef532320ac5db41ff117fe26d9c5f83692cb9ea8323a46d5eabf5c28149d0c",
-    "scripts/fleet-classify.py": "6507491638881f926b7125dfac036ab0500a16da1e636b0a7ad3998f7d34e9e2",
+    "scripts/fleet-classify.py": "fa1dfdafc37865856689100f94104920054a030bbe3466ddb06a5c7706b82995",
     "scripts/fleet-poll.py": "0555d1a579f0a91f6c55369c0d9fb1cedddd754fefd7267cea3cd4ec2a81aa09",
     "scripts/fleet_alert_dedupe.py": "ce6a9361fa46f993d8c27036ab6c68c4385fe963fdc025b6455899661467653b",
     "scripts/fleet_poll_alerts.py": "ab6f43afa913855d367d445f362088eda5ec9e4b90309a0fa0894ef236348914",

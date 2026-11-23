@@ -8,7 +8,9 @@
 //! Test: `ansi_strip_matches_python_alternatives`, `box_top_rule_accepts_a_short_label`,
 //! `timers_sub_removes_each_shape` (in `classify/tests.rs`).
 
-use crate::pystr::{contains_ci, is_digit, is_space, is_word, lstrip, parse_digits, rstrip, strip};
+use crate::pystr::{
+    is_digit, is_space, is_word, lstrip, parse_digits, rstrip, starts_with_ci, strip,
+};
 
 const ESC: char = '\u{1b}';
 const RULE_CHARS: [char; 2] = ['─', '━'];
@@ -274,19 +276,58 @@ pub(crate) fn is_footer_noise(line: &str) -> bool {
         || left.starts_with("⏺ ")
 }
 
-/// `LIMIT.search(line)`, case-insensitive: a usage-limit notice.
+/// The harness's own plan/usage-limit banner, case-insensitive, anchored at
+/// the start of the line (after blanks and one optional `⎿`, `│` or `●`):
+/// `(?i)^\s*(?:[⎿│●]\s*)?(?:claude (?:ai )?usage limit reached|usage limit
+/// reached|limit reached ∙ resets|you(?:'|’)ve hit your (?:\w+ )?(?:usage
+/// )?limit|(?:5-hour|weekly|opus weekly|session) limit reached)`.
+/// Test: `window5_plan_limit_ignores_prose_but_keeps_the_banner`,
+/// `window5_plan_limit_banner_variants`.
+// See parity window 5: B. The old unanchored `resets at` / `limit
+// reached` matched chat prose ("GitHub rate limit resets at 06:38Z").
 pub(crate) fn is_limit(line: &str) -> bool {
-    let chars: Vec<char> = line.chars().collect();
-    [
+    let mut rest = lstrip(line);
+    if let Some(r) = rest.strip_prefix(['⎿', '│', '●']) {
+        rest = lstrip(r);
+    }
+    let chars: Vec<char> = rest.chars().collect();
+    let fixed = [
+        "claude usage limit reached",
+        "claude ai usage limit reached",
         "usage limit reached",
-        "limit reached",
-        "hit your usage limit",
-        "hit your limit",
-        "resets at",
-        "limit will reset",
+        "limit reached ∙ resets",
+        "5-hour limit reached",
+        "weekly limit reached",
+        "opus weekly limit reached",
+        "session limit reached",
     ]
     .iter()
-    .any(|p| contains_ci(&chars, p))
+    .any(|p| starts_with_ci(&chars, p));
+    fixed || hit_your_limit(&chars)
+}
+
+/// `you(?:'|’)ve hit your (?:\w+ )?(?:usage )?limit`, caselessly, at the start.
+fn hit_your_limit(s: &[char]) -> bool {
+    let Some(tail) = ["you've hit your ", "you’ve hit your "]
+        .iter()
+        .find(|p| starts_with_ci(s, p))
+        .map(|p| &s[p.chars().count()..])
+    else {
+        return false;
+    };
+    let usage_limit = |t: &[char]| {
+        let t = if starts_with_ci(t, "usage ") {
+            &t[6..]
+        } else {
+            t
+        };
+        starts_with_ci(t, "limit")
+    };
+    if usage_limit(tail) {
+        return true;
+    }
+    let word = tail.iter().take_while(|c| is_word(**c)).count();
+    word > 0 && tail.get(word) == Some(&' ') && usage_limit(&tail[word + 1..])
 }
 
 /// `ERROR.search(line)`: `Traceback|API Error|Error: Exit code`.

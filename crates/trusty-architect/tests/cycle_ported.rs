@@ -24,6 +24,7 @@ fn idle_since_zero(keys: &[&str]) -> PollState {
             PaneState {
                 idle_since: Some(0.0),
                 errors: None,
+                ..PaneState::default()
             },
         );
     }

@@ -62,7 +62,28 @@ pub struct PaneState {
     /// Error lines seen last cycle; `None` before the first sight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<String>>,
+    /// The last cycle that read the pane idle.
+    // See parity window 5: C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_seen: Option<f64>,
+    /// The epoch a not-idle read cleared, kept for [`IDLE_GRACE`] s.
+    // See parity window 5: C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_held: Option<f64>,
+    /// The `idle` fingerprint this pane last alerted.
+    // See parity window 5: D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_alerted: Option<String>,
+    /// The idle screen hash last read, and when it first appeared.
+    // See parity window 5: D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_screen: Option<(String, f64)>,
 }
+
+/// Seconds between two idle reads within which one idle episode continues
+/// across not-idle reads: one missed 60 s cycle, with slack.
+// See parity window 5: C.
+pub const IDLE_GRACE: f64 = 150.0;
 
 /// Short stable fingerprint: the first 12 hex digits of SHA-1.
 pub fn fingerprint(text: &str) -> String {
@@ -207,6 +228,8 @@ pub fn alert(
 /// `ctx` (at [`CTX_WARN`]%, fingerprint `31`/`35`), `plan-limit`, and `error` for error lines new since last cycle
 /// (the first sight only seeds the baseline).
 /// Test: `test_idle_prompt_alerts_after_ten_minutes_only`,
+/// `window5_transient_not_idle_read_keeps_the_idle_epoch`,
+/// `window5_alerted_epoch_does_not_alert_again_on_a_new_screen`,
 /// `test_error_alerts_only_for_lines_new_since_last_cycle`,
 /// `evaluate_matches_python_goldens`.
 pub fn evaluate(
@@ -230,19 +253,49 @@ pub fn evaluate(
         super::BoxReading::Input(InputState::Empty | InputState::Suggestion)
     );
     if info.has_box && idle_box && info.dialog.is_none() && !info.busy {
-        let since = *ps.idle_since.get_or_insert(now);
+        // See parity window 5: C. A not-idle stretch shorter than
+        // IDLE_GRACE between two idle reads keeps the episode's epoch.
+        let held = ps
+            .idle_held
+            .take()
+            .filter(|_| ps.idle_seen.is_some_and(|seen| now - seen <= IDLE_GRACE));
+        let since = *ps.idle_since.get_or_insert(held.unwrap_or(now));
+        ps.idle_seen = Some(now);
+        if ps
+            .idle_screen
+            .as_ref()
+            .is_none_or(|(s, _)| *s != info.screen)
+        {
+            ps.idle_screen = Some((info.screen.clone(), now));
+        }
         if now - since >= IDLE_AFTER && !IDLE_EXEMPT_SESSIONS.contains(&session) {
             // Python's int() truncates toward zero; `//` floors.
             let mins = ((now - since) / 60.0).floor() as i64;
-            add(
-                "idle",
-                // See MB1595: the screen hash re-alerts a changed idle screen.
-                &format!("since-{}-{}", since.trunc() as i64, info.screen),
-                &format!("idle {mins} min, no agents running"),
-            );
+            let epoch = format!("since-{}-", since.trunc() as i64);
+            // See MB1595: the screen hash re-alerts a changed idle screen.
+            let fp = format!("{epoch}{}", info.screen);
+            // See parity window 5: D. An alerted epoch re-alerts a new
+            // screen only once that screen has itself been idle IDLE_AFTER s;
+            // a transitional screen on a stale epoch never alerts.
+            let settled = ps
+                .idle_screen
+                .as_ref()
+                .is_some_and(|(_, at)| now - at >= IDLE_AFTER);
+            let stale = !settled
+                && ps
+                    .idle_alerted
+                    .as_ref()
+                    .is_some_and(|a| a.starts_with(&epoch) && *a != fp);
+            if !stale {
+                add("idle", &fp, &format!("idle {mins} min, no agents running"));
+                ps.idle_alerted = Some(fp);
+            }
         }
     } else {
-        ps.idle_since = None;
+        // See parity window 5: C. Held, not dropped, until IDLE_GRACE.
+        if let Some(since) = ps.idle_since.take() {
+            ps.idle_held = Some(since);
+        }
     }
     if let Some(ctx) = info.ctx.filter(|c| *c >= CTX_WARN) {
         let level = if ctx >= CTX_HIGH { CTX_HIGH } else { CTX_WARN };
