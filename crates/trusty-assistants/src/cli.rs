@@ -6,7 +6,7 @@
 //! stdio MCP server and the daemon-less `config` verbs, which were already
 //! dispatched ahead of the old startup path.
 //! What: [`run`] routes argv to `--version`, `--help`, `config …`,
-//! `config profile …`, `mcp-serve`, `ask` or `ask-daemon` (#11650); anything
+//! `config profile …`, `mcp-serve`, `ask`, `ask-daemon` or `handoff` (#11650); anything
 //! else is a usage error. No path here opens a network listener.
 //! Test: `tests/version_provenance.rs`, `tests/help_exit_code.rs`,
 //! `tests/config_mount.rs`, `tests/no_network_listener.rs`.
@@ -47,7 +47,9 @@ const USAGE: &str = concat!(
     env!("TA_BIN_NAME"),
     " ask <instance> <question…>\n                        Ask an assistant instance (starts its daemon on demand)\n  ",
     env!("TA_BIN_NAME"),
-    " ask-daemon <instance> Run an instance's ask daemon (started by `ask`)\n",
+    " ask-daemon <instance> Run an instance's ask daemon (started by `ask`)\n  ",
+    env!("TA_BIN_NAME"),
+    " handoff <instance> --to tm|tc [--key <key>] [--] <task…>\n                        Hand a task to trusty-mpm or trusty-code; prints the handle\n",
 );
 
 /// Launch the binary: own the tokio runtime, run [`run`] on it, and tear the
@@ -87,6 +89,8 @@ enum Command {
     Ask,
     /// #11650: `ask-daemon <instance>`.
     AskDaemon,
+    /// #11650: `handoff <instance> --to tm|tc …` (slice 3c).
+    Handoff,
     Unknown(String),
 }
 
@@ -111,6 +115,7 @@ fn classify(args: &[String]) -> Command {
         Some("mcp-serve") => Command::McpServe,
         Some("ask") => Command::Ask,
         Some(crate::ask::daemon::DAEMON_VERB) => Command::AskDaemon,
+        Some("handoff") => Command::Handoff,
         Some(other) => Command::Unknown(other.to_string()),
     }
 }
@@ -145,6 +150,7 @@ pub async fn run() -> Result<()> {
             };
             Ok(crate::ask::daemon::run_daemon(id).await?)
         }
+        Command::Handoff => run_handoff(&args[2..]).await,
         Command::Unknown(arg) => {
             eprint!("{USAGE}");
             anyhow::bail!(
@@ -173,6 +179,28 @@ async fn run_ask(rest: &[String]) -> Result<()> {
     let launcher = DaemonLauncher::current_exe()?;
     let answer = ask_instance(None, id, &question, &launcher).await?;
     println!("{answer}");
+    Ok(())
+}
+
+/// `ta handoff <instance> --to tm|tc [--key <key>] [--] <task…>` (#11650).
+///
+/// Why: the CLI half of slice 3c.
+/// What: parses with [`crate::handoff::parse_args`], resolves the instance
+/// home (an unknown instance is an error), and runs
+/// [`crate::handoff::handoff`] with tm over `tm serve --stdio` and tc on the
+/// shared `tcode serve` socket. Prints the report as one JSON line; every
+/// failure, `outcome_unknown` included, is an error with a non-zero exit.
+/// Test: `handoff_to_tm_creates_then_reuses_the_session`,
+/// `handoff_to_tc_prints_the_handle_once_per_key`,
+/// `handoff_without_a_target_is_refused` (`tests/handoff_cli.rs`).
+async fn run_handoff(rest: &[String]) -> Result<()> {
+    use crate::handoff::{Clients, StdioTm, UdsTc, handoff, parse_args};
+    let args = parse_args(rest)?;
+    let home = crate::ask::daemon::resolve_home(None, &args.instance)?;
+    let tm = StdioTm::new("tm");
+    let tc = UdsTc::shared();
+    let report = handoff(&home, &args, Clients { tm: &tm, tc: &tc }).await?;
+    println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
 
@@ -349,6 +377,10 @@ mod tests {
         assert_eq!(
             classify(&argv(&["ask-daemon", "izzie"])),
             Command::AskDaemon
+        );
+        assert_eq!(
+            classify(&argv(&["handoff", "izzie", "--to", "tm", "x"])),
+            Command::Handoff
         );
     }
 
