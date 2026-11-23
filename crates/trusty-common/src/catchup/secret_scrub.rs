@@ -91,10 +91,14 @@ fn is_value_byte(c: u8) -> bool {
 /// The byte span of a keyed value starting after a key ending at `at`.
 ///
 /// Why: #10595 — `api_key=<32 hex>` is a SHA by length but a secret by context.
-/// What: skips spaces, one optional `=` or `:`, spaces and one optional quote,
-/// then takes a run of value bytes. Returns it when it is at least
-/// [`MIN_KEYED_LEN`] long and holds a digit, so prose after a key is kept.
-/// Test: `a_keyed_hex_value_is_redacted_and_a_bare_sha_kept`.
+/// What: skips a quote closing a JSON key, spaces, one optional `=` or `:`,
+/// spaces and one optional quote, then takes a run of value bytes, with
+/// interior dots so a JWT is one value. Returns it when it is at least
+/// [`MIN_KEYED_LEN`] long and either follows a separator or holds a digit, so
+/// prose after a bare key is kept.
+/// Test: `a_keyed_hex_value_is_redacted_and_a_bare_sha_kept`,
+/// `a_json_key_keeps_its_closing_quote`, `a_jwt_is_redacted_across_its_dots`,
+/// `a_letter_only_value_after_a_separator_is_redacted`.
 fn keyed_value_span(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
     let skip_spaces = |mut j: usize| {
         while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
@@ -102,19 +106,32 @@ fn keyed_value_span(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
         }
         j
     };
-    let mut j = skip_spaces(at);
-    if j < bytes.len() && matches!(bytes[j], b'=' | b':') {
+    let is_sep = |j: usize| j < bytes.len() && matches!(bytes[j], b'=' | b':');
+    let mut j = at;
+    // #10595: `"token": "…"` — the key's closing quote is not the value's opening one.
+    if j < bytes.len() && matches!(bytes[j], b'"' | b'\'') && is_sep(skip_spaces(j + 1)) {
+        j += 1;
+    }
+    j = skip_spaces(j);
+    let sep = is_sep(j);
+    if sep {
         j = skip_spaces(j + 1);
     }
     if j < bytes.len() && matches!(bytes[j], b'"' | b'\'') {
         j += 1;
     }
     let from = j;
-    while j < bytes.len() && is_value_byte(bytes[j]) {
+    // #10595: a dot followed by a value byte is inside the value (JWT `h.p.s`).
+    while j < bytes.len()
+        && (is_value_byte(bytes[j])
+            || (bytes[j] == b'.' && j + 1 < bytes.len() && is_value_byte(bytes[j + 1])))
+    {
         j += 1;
     }
     let value = &bytes[from..j];
-    (value.len() >= MIN_KEYED_LEN && value.iter().any(u8::is_ascii_digit)).then_some((from, j))
+    // #10595: after `=` or `:` a letter-only value is as secret as a mixed one.
+    let keyed = sep || value.iter().any(u8::is_ascii_digit);
+    (value.len() >= MIN_KEYED_LEN && keyed).then_some((from, j))
 }
 
 /// `text` with every secret-like word replaced by [`SECRET_PLACEHOLDER`].
@@ -220,6 +237,37 @@ mod tests {
             assert!(
                 matches!(scrub_secret_like(kept), Cow::Borrowed(_)),
                 "{kept:?}"
+            );
+        }
+    }
+    /// #10595: the JSON key's closing quote survives redaction.
+    #[test]
+    fn a_json_key_keeps_its_closing_quote() {
+        let hex32 = "c0ffee12".repeat(4);
+        assert_eq!(
+            scrub_secret_like(&format!(r#"{{"token": "{hex32}"}}"#)),
+            format!(r#"{{"token": "{SECRET_PLACEHOLDER}"}}"#)
+        );
+    }
+
+    /// #10595: a JWT after a key is one secret, header through signature.
+    #[test]
+    fn a_jwt_is_redacted_across_its_dots() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpM";
+        assert_eq!(
+            scrub_secret_like(&format!("Authorization: Bearer {jwt}.")),
+            format!("Authorization: Bearer {SECRET_PLACEHOLDER}.")
+        );
+    }
+
+    /// #10595: a letter-only value after `=` or `:` is redacted like a mixed one.
+    #[test]
+    fn a_letter_only_value_after_a_separator_is_redacted() {
+        let letters = "correcthorsebatterystaple";
+        for sep in ["=", ": "] {
+            assert_eq!(
+                scrub_secret_like(&format!("password{sep}{letters}")),
+                format!("password{sep}{SECRET_PLACEHOLDER}")
             );
         }
     }
