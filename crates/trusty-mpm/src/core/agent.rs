@@ -393,6 +393,17 @@ pub struct Delegation {
     /// basis (#8257). `None` for every record no operator repaired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<DelegationRepair>,
+    /// The ledger task id the dispatch prompt bound, as `<id>@MMDD` (#11674).
+    ///
+    /// Why: [`Self::task`] is a free-text description and [`Self::agent_id`] a
+    /// runtime id; neither is the ledger task the subagent's handback must
+    /// restate, so the `SubagentStop` check needs its own field.
+    /// What: the first `Task: <id>@MMDD` line of `input.prompt`, parsed by
+    /// [`crate::core::subagent_task_roundtrip::dispatch_task`]. `None` when the
+    /// prompt binds no task (goal ids and `#N` issue numbers never bind).
+    /// Test: `subagent_task_roundtrip_dispatch_records_the_bound_task`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_task: Option<String>,
 }
 
 /// The audit entry a `tm repair delegation` write leaves on the record (#8257).
@@ -447,6 +458,7 @@ impl Delegation {
             started_at: None,
             ended_at: None,
             repair: None,
+            ledger_task: None,
         }
     }
 
@@ -494,6 +506,7 @@ impl Delegation {
             started_at: Some(now),
             ended_at: None,
             repair: None,
+            ledger_task: None,
         }
     }
 }
