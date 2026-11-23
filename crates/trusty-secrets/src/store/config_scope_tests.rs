@@ -372,7 +372,13 @@ fn config_non_regular_and_linked_files_are_refused() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let err = load_project_at(&link).unwrap_err();
     assert_config_refusal(&err, &link);
-    assert!(!err.to_string().contains("keychain"), "{err}");
+    // See #11644: the error echoes the path, and a checkout key or TMPDIR
+    // can put "keychain" in it; scrub the path so only the file's contents
+    // (its `backend: keychain` line) are checked.
+    let shown = err
+        .to_string()
+        .replace(&tmp.path().display().to_string(), "<tmp>");
+    assert!(!shown.contains("keychain"), "{shown}");
 
     let machine = load_machine_at(&link).unwrap().unwrap();
     assert_eq!(machine.default_backend, None);
@@ -417,6 +423,10 @@ fn config_non_utf8_file_is_refused_without_echoing_its_bytes() {
     let err = load_project_at(&path).unwrap_err();
     assert_config_refusal(&err, &path);
     for shown in [err.to_string(), format!("{err:?}")] {
+        // See #11644: the error echoes the path, and a checkout key or TMPDIR
+        // can put "keychain" in it; scrub the path so "keychain" still
+        // detects the file's own `backend: keychain` line being echoed.
+        let shown = shown.replace(&tmp.path().display().to_string(), "<tmp>");
         for leaked in [marker, "keychain", "\u{fffd}", "\u{ff}", "\\xff", "\\u{ff}"] {
             assert!(!shown.contains(leaked), "{leaked:?} in {shown}");
         }
