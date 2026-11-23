@@ -1,0 +1,4 @@
+crate   trusty-search
+version 1.1.1
+reason  `WalkDiagnostics.walk_refused` was added by #11732 after the 1.1.0 tag. Under the internal numbering policy (owner ruling 2026-09-26), a break never forces a major version. Refs #11732.
+accept  constructible_struct_adds_field field WalkDiagnostics.walk_refused
