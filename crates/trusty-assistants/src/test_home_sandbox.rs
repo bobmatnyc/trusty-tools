@@ -48,6 +48,8 @@ pub const SANDBOX_SCRUB: &[&str] = &[
     "KB_ROOT",
     "FASTEMBED_CACHE_DIR",
     "TRUSTY_MEMORY_SOCKET",
+    // #11550 (via the PR-1 rebase): `trusty_agents_common::health::agents_socket`.
+    "TRUSTY_AGENTS_SOCKET",
 ];
 
 extern "C" fn sandbox_test_home() {
