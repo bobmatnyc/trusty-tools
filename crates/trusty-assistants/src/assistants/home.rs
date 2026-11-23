@@ -419,13 +419,15 @@ impl Created {
 /// land in without another format decision.
 /// What: `id`, an optional `display_name`, (#7428) the `[memory]` table naming
 /// this assistant's palace and its opt-in fan-out, and (#7454) the `[mcp]`
-/// table overriding the global MCP server list. Unknown keys are
+/// table overriding the global MCP server list, and (#11649) an optional
+/// `project_dir`. Unknown keys are
 /// IGNORED, not rejected — a user's hand-added key must never make their home
 /// "malformed" — and every field defaults, so a `config.toml` written before a
 /// field existed still parses unchanged.
 /// Test: `super::tests::health_tests::tolerates_unknown_config_keys`,
 /// `super::tests::health_tests::reports_malformed_config`,
-/// `super::tests::memory_tests::config_defaults_when_the_table_is_absent`.
+/// `super::tests::memory_tests::config_defaults_when_the_table_is_absent`,
+/// `super::tests::project_tests::a_pilot_config_with_only_an_id_still_parses`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AssistantHomeConfig {
     #[serde(default)]
@@ -441,6 +443,11 @@ pub struct AssistantHomeConfig {
     /// overrides", never "no MCP servers".
     #[serde(default)]
     pub mcp: super::mcp::McpOverrides,
+    /// #11649: the project directory this instance serves. Absent on a pilot
+    /// `config.toml`; written only through
+    /// [`super::project::set_project_dir`], which stores it canonical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<PathBuf>,
 }
 
 /// The seeded `instructions.md` body for a fresh home.

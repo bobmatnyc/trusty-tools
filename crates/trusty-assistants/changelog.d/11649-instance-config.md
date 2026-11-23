@@ -1,0 +1,6 @@
+Added
+- An assistant home's `config.toml` takes an optional `project_dir`. `set_project_dir` stores it only as an absolute, existing, canonical directory, and a `config.toml` holding only `id` still parses (#11649).
+- `instance_for_project(root, cwd)` resolves a working directory to the one instance whose project directory holds it. Two homes claiming one directory, a `..` or symlink escape, and no match are each a typed error, never a default instance (#11649).
+- `AssistantHome::read_instructions` returns the instance's `instructions.md`, capped at 64 KiB. A missing, unreadable, non-UTF-8, oversized or empty file is a typed `AssistantError` (#11649).
+- `provision_instance(role, id, project_dir, fan_out)` sets up a `personal` or `cto` instance: the role's instructions template, `project_dir`, `[memory] fan_out`, and an `agent.toml` with `extends = "assistant"` whose first `[[stores]]` binding is the instance's own OKG, `<id>-okg` index and palace. It writes only what is absent, and a second run changes nothing (#11649).
+- Home health flags a `project_dir` that no longer exists, and `inspect_project_claims` flags two homes claiming one directory, naming both without printing config values (#11649).
