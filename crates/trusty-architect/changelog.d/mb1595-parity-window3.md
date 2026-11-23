@@ -1,4 +1,0 @@
-Fixed
-- A shadow scheduler that starts (install or restart) reseeds its dry-run state from the live `poll-state.json` on its first poll run, so cycle 1 dedupes against the live poller's keys and replays no old alert; a reseed that cannot copy fails the run and is retried, never run on the stale state (MB1595 parity window 3).
-- A shadow cycle takes each pane's `idle_since` from the live `poll-state.json` (read only), so the `idle` fingerprint carries the live poller's epoch; an unreadable live state logs `live idle ERROR` and keeps the shadow's own epoch.
-- A shadow cycle raises the `reminder` alert for a reminder the live poller fired since its previous look (same fingerprint and detail as `fleet-poll.py`), which the dry ledger shim could not see; an unreadable ledger logs `live reminders ERROR` and rereads the same window next cycle.

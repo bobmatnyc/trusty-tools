@@ -614,3 +614,112 @@ fn doctor_unknown_reason_decodes_as_other() {
         assert_eq!(serde_json::from_value::<Unavailable>(wire).unwrap(), known);
     }
 }
+
+/// A Keychain double whose OS calls fail as one from a server with no GUI
+/// login session access, or with another `probe` error (#10589).
+#[derive(Debug)]
+struct SessionlessKeychain {
+    probe: fn() -> SecretsError,
+}
+
+fn no_session() -> SecretsError {
+    SecretsError::KeychainNoSession {
+        vault: "trusty-secrets.doctor-probe".into(),
+        key: "probe".into(),
+        status: -25308,
+    }
+}
+
+fn probe_timeout() -> SecretsError {
+    SecretsError::Timeout {
+        backend: BackendId::KEYCHAIN.into(),
+        operation: "probe",
+        vault: "trusty-secrets.doctor-probe".into(),
+        key: "probe".into(),
+        waited: Duration::from_secs(5),
+    }
+}
+
+impl SecretBackend for SessionlessKeychain {
+    fn id(&self) -> BackendId {
+        BackendId::keychain()
+    }
+    fn capabilities(&self) -> crate::store::Capabilities {
+        crate::store::Capabilities::READ | crate::store::Capabilities::WRITE
+    }
+    fn get(&self, _: &VaultName, _: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        Err(no_session())
+    }
+    fn set(&self, _: &VaultName, _: &SecretKey, _: &SecretValue) -> Result<(), SecretsError> {
+        Err(no_session())
+    }
+    fn delete(&self, _: &VaultName, _: &SecretKey) -> Result<bool, SecretsError> {
+        Err(no_session())
+    }
+    fn probe(&self) -> Result<(), SecretsError> {
+        Err((self.probe)())
+    }
+}
+
+/// A server whose `keychain` is a [`SessionlessKeychain`] probing with `probe`.
+async fn start_sessionless(fx: &Fixture, probe: fn() -> SecretsError) -> Running {
+    let keychain: Arc<dyn SecretBackend> = Arc::new(SessionlessKeychain { probe });
+    let base = fx.backends();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        BackendId::KEYCHAIN => Ok(Arc::clone(&keychain)),
+        _ => base(id),
+    });
+    fx.start_state(fx.state(factory)).await
+}
+
+/// Why: #10589 — doctor reported the Keychain `READ | WRITE` available from
+/// a server that could not use it; it must test from the server's own
+/// process and name the cause. A probe error of another kind is still an
+/// unavailable row (the error arm), never `available: true`.
+/// Red before the fix: the keychain row read `available: true`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_keychain_row_reports_no_session_from_the_server_probe() {
+    type ProbeCase = (fn() -> SecretsError, Unavailable, &'static str);
+    let cases: [ProbeCase; 2] = [
+        (
+            no_session,
+            Unavailable::NoSession,
+            "security unlock-keychain",
+        ),
+        (
+            probe_timeout,
+            Unavailable::OpenFailed,
+            "did not finish probe",
+        ),
+    ];
+    for (probe, reason, detail) in cases {
+        let fx = fixture();
+        let server = start_sessionless(&fx, probe).await;
+        let report = doctor(&fx, Value::Null).await;
+        server.stop().await;
+        let (available, got, text) = row(&report, BackendId::KEYCHAIN);
+        assert!(!available, "{report:?}");
+        assert_eq!(got, Some(reason), "{text}");
+        assert!(text.contains(detail), "{text}");
+    }
+}
+
+/// Why: #10589 — `tm secrets set` from an SSH-spawned server failed with
+/// only "the secrets backend failed". The reply must name the cause.
+/// Red before the fix: the kind was `backend_failed`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_from_a_server_without_keychain_session_names_the_cause() {
+    let fx = fixture();
+    let server = start_sessionless(&fx, no_session).await;
+    let response = set(&fx).await;
+    server.stop().await;
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::KeychainNoSession
+    );
+    let message = &response.error.as_ref().unwrap().message;
+    assert!(message.contains("GUI login session"), "{message}");
+    assert!(!wire(&response).contains(VALUE), "the value leaked");
+}

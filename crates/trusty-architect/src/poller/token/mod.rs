@@ -17,12 +17,17 @@
 //! `ARCHITECT_DRY_RUN_STATE`) keeps its own copy beside its poll state,
 //! seeded once from the live file, so it dedupes across cycles without
 //! racing the live watcher's offsets (class D).
+//! A writing scan holds `<state>.lock` (BSD `flock`, shared with the Python
+//! watcher) from load to save and saves through a per-process temp file
+//! (#11629).
 //! Test: token/tests.rs (the deployed `test_token_watch.py` cases, by name),
-//! `token_alerts_shape_and_failure_contract`, `shadow_mode_keeps_its_own_token_state`.
+//! `token_alerts_shape_and_failure_contract`, `shadow_mode_keeps_its_own_token_state`,
+//! `concurrent_writers_keep_every_offset_and_fired_key`, `lock_failure_refuses_the_write`.
 
 mod clock;
 mod discover;
 mod fleet;
+mod lock;
 mod scan;
 mod state;
 mod units;
@@ -137,14 +142,21 @@ pub(crate) fn is_poll_command(cmd: &str) -> bool {
 /// `step(now, dry_run)`: one scan; see the module doc.
 ///
 /// # Errors
-/// [`StateError`] when the state has the wrong shape or cannot be saved, or
-/// the hourly file cannot be appended.
+/// [`StateError`] when the state has the wrong shape or cannot be saved,
+/// the hourly file cannot be appended, or a writing scan cannot take the
+/// state lock within `lock::LOCK_WAIT` (#11629).
 pub fn step(
     now: f64,
     mode: &Mode,
     paths: &Paths<'_>,
     names: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<TokenAlert>, StateError> {
+    // #11629: a writing scan holds the lock the Python watcher also takes,
+    // from load to save; a lock failure is an error, never an unlocked write.
+    let _guard = mode
+        .save
+        .then(|| lock::acquire(&mode.state, lock::LOCK_WAIT))
+        .transpose()?;
     if let Some(seed) = mode.seed.as_ref().filter(|_| !mode.state.exists()) {
         let st = state::load(seed)?;
         state::save(&mode.state, &st)?;

@@ -180,13 +180,10 @@ pub(crate) fn os_read(
     service: &KeychainLabel,
     account: &KeychainLabel,
 ) -> Result<Option<SecretValue>, SecretsError> {
-    let failure = |e: &keyring::Error| SecretsError::Backend {
-        backend: BackendId::KEYCHAIN.to_string(),
-        vault: service.to_string(),
-        key: account.to_string(),
-        // #10998: the one path to text; it drops `BadEncoding`'s bytes.
-        reason: super::keychain::keyring_reason(e),
-    };
+    // #10998: the one path to text; it drops `BadEncoding`'s bytes.
+    // #10589: a no-session status names its cause.
+    let id = super::vault_blob::ItemId::new(service.as_str(), account.as_str());
+    let failure = |e: &keyring::Error| super::keychain::os_error(&id, e);
     let entry = keyring::Entry::new(service.as_str(), account.as_str()).map_err(|e| failure(&e))?;
     match entry.get_password() {
         Ok(value) => Ok(Some(SecretValue::new(value))),

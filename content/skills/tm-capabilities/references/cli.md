@@ -163,6 +163,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `init` — Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`)
   - `list` — List all registered projects with their status (deprecated: use `tm projects list`)
   - `trust` — Grant (or revoke) consent for a project's `[session] plugins` opt-ins
+  - `unadopt` — Remove worktrees from the adoption ledger by path, ledger only (#10592)
 - `projects` — Manage the project registry (registry B) and its Deliverable/Milestone ledger
   - `config` — View or edit a project's deterministic config (§3.1/§6, #2120)
     - `set` — Set a field to a new value

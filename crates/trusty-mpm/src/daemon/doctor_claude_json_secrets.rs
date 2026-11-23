@@ -82,12 +82,25 @@ pub struct ClaudeJsonFinding {
     pub unreadable: Option<String>,
     /// `.claude.json*` siblings wider than 0600, with their modes.
     pub wide_siblings: Vec<(PathBuf, u32)>,
+    /// Mode of the config dir itself, when readable (#11195).
+    pub dir_mode: Option<u32>,
 }
 
 impl ClaudeJsonFinding {
     /// Is the file readable or writable by anyone but its owner?
     pub(crate) fn too_wide(&self) -> bool {
         self.mode.is_some_and(is_wide)
+    }
+
+    /// Can another user reach files in the config dir? (#11195)
+    pub(crate) fn dir_too_wide(&self) -> bool {
+        self.dir_mode.is_some_and(is_wide)
+    }
+
+    /// Is the config dir known to be 0700-tight, so no other user can reach
+    /// a file in it? (#11195)
+    pub(crate) fn dir_is_owner_only(&self) -> bool {
+        self.dir_mode.is_some_and(|m| !is_wide(m))
     }
 
     /// `0644`-style mode, or `unknown`.
@@ -173,6 +186,8 @@ pub fn scan_claude_json(config_dir: &Path) -> ClaudeJsonFinding {
     let mut finding = ClaudeJsonFinding {
         path: path.clone(),
         wide_siblings: wide_siblings(config_dir),
+        // #11195: launch keeps the dir 0700; a wider dir exposes every file.
+        dir_mode: mode_of(config_dir),
         ..ClaudeJsonFinding::default()
     };
     let text = match std::fs::read_to_string(&path) {
@@ -234,13 +249,15 @@ fn wide_siblings(config_dir: &Path) -> Vec<(PathBuf, u32)> {
 
 /// The `claude_json_secrets` row.
 ///
-/// What: FAIL when an env block holds a credential value, when the file is
-/// wider than 0600, or when a `.claude.json*` sibling is; UNKNOWN when the
+/// What: FAIL when an env block holds a credential value or the dir is wider
+/// than 0700 (#11195). A file or `.claude.json*` sibling wider than 0600 is a
+/// WARN inside a 0700 dir and a FAIL otherwise (#11195). UNKNOWN when the
 /// file cannot be read or parsed or there is no managed dir; OK otherwise
 /// (including an absent file).
-/// Test: `row_fails_on_mode_0644`, `row_passes_on_mode_0600`,
+/// Test: `row_warns_on_mode_0644_inside_a_0700_dir`,
+/// `row_fails_on_mode_0644_when_the_dir_is_not_0700`, `row_passes_on_mode_0600`,
 /// `row_fails_on_a_plaintext_credential`, `row_is_unknown_on_malformed_json`,
-/// `row_fails_on_a_wide_backup`.
+/// `row_warns_on_a_wide_backup_inside_a_0700_dir`, `row_fails_on_a_wide_config_dir`.
 pub(crate) fn check_claude_json_secrets(config_dir: Option<&Path>) -> DoctorCheck {
     let Some(config_dir) = config_dir else {
         return DoctorCheck::new(
@@ -257,6 +274,9 @@ pub(crate) fn check_claude_json_secrets(config_dir: Option<&Path>) -> DoctorChec
 pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
     let path = f.path.display();
     let mut problems = Vec::new();
+    // #11195: Claude Code rewrites its files at 0644 between launches. Inside a
+    // 0700 dir no other user can reach them, so a wide file there is a WARN.
+    let mut wide_files = Vec::new();
     if !f.migratable.is_empty() || !f.unmapped.is_empty() || !f.third_party.is_empty() {
         let keys: Vec<String> = f
             .migratable
@@ -287,9 +307,16 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
         ));
     }
     if f.too_wide() {
-        problems.push(format!(
+        wide_files.push(format!(
             "the file is mode {}, readable beyond its owner",
             f.mode_text()
+        ));
+    }
+    if f.dir_too_wide() {
+        problems.push(format!(
+            "its directory is mode {:04o}, so other users can reach every file in it, including \
+             Claude Code's backups/ copies",
+            f.dir_mode.unwrap_or_default()
         ));
     }
     if !f.wide_siblings.is_empty() {
@@ -298,20 +325,39 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
             .iter()
             .map(|(p, m)| format!("{} ({m:04o})", p.display()))
             .collect();
-        problems.push(format!(
+        wide_files.push(format!(
             "{} sibling copies are readable beyond their owner and may hold an older \
              plaintext copy: {}",
             list.len(),
             list.join("; ")
         ));
     }
+    if !wide_files.is_empty() && f.dir_is_owner_only() && problems.is_empty() {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Warn,
+            format!(
+                "{path}: {}. Its directory is mode {:04o}, so no other user can reach these \
+                 files; Claude Code rewrites them at 0644 between launches and the next launch \
+                 tightens them to 0600, or run `tm doctor --fix --yes` now",
+                wide_files.join("; "),
+                f.dir_mode.unwrap_or_default()
+            ),
+        );
+    }
+    if !wide_files.is_empty() && f.dir_mode.is_none() {
+        // #11195: the dir mode is unknown, so the wide files cannot be shown
+        // unreachable.
+        wide_files.push("the directory's mode could not be read, so these files may be reachable by other users".to_string());
+    }
+    problems.extend(wide_files);
     if !problems.is_empty() {
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Fail,
             format!(
                 "{path}: {}. Run `tm doctor --fix --yes` to move each registered credential into \
-                 the credential store and tighten the files to 0600, then ROTATE any credential \
+                 the credential store and tighten the files to 0600 and the directory to 0700, then ROTATE any credential \
                  that sat in the file",
                 problems.join("; ")
             ),

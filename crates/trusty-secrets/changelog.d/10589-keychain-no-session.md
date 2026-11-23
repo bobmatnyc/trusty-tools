@@ -1,0 +1,3 @@
+Fixed
+- A server started outside the macOS GUI login session, for example from SSH, no longer fails `tm secrets set` with only "the secrets backend failed". The Keychain's no-session statuses now answer the new `keychain_no_session` kind, whose text names the cause and the remedy ([#10589](https://github.com/bobmatnyc/trusty-tools/issues/10589)).
+- `secrets.doctor` now writes and removes a probe item from the server's own process, so a Keychain the server cannot use reads as unavailable (`no_session`) instead of `READ | WRITE` ([#10589](https://github.com/bobmatnyc/trusty-tools/issues/10589)).

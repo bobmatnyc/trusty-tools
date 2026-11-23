@@ -113,6 +113,49 @@ pub(crate) async fn project(
             );
         }
         ProjectAction::Trust { dir, revoke } => trust_cmd(dir, revoke)?,
+        // #10592: ledger-only, handled locally.
+        ProjectAction::Unadopt { paths, dry_run } => unadopt_cmd(&paths, dry_run)?,
+    }
+    Ok(())
+}
+
+/// `tm project unadopt` — ledger-only removal of adopted worktrees (#10592).
+///
+/// Why: init adopts legacy worktrees and nothing took a record back out.
+/// What: local, no daemon round-trip; calls
+/// [`trusty_mpm::project::unadopt_paths`] on the CLI's registry data dir and
+/// prints one line per path. A store error fails the command, so a removal is
+/// never printed unless it reached disk; a real run with any unmatched path
+/// exits non-zero too.
+/// Test: `project_unadopt_removes_the_record_and_keeps_the_folder_10592`,
+/// `project_unadopt_dry_run_writes_nothing_10592`,
+/// `project_unadopt_fails_on_a_corrupt_ledger_10592`,
+/// `project_unadopt_fails_when_a_path_matches_no_record_10592`,
+/// `project_unadopt_matches_a_deleted_folder_by_relative_and_symlinked_path_10592`.
+fn unadopt_cmd(paths: &[std::path::PathBuf], dry_run: bool) -> anyhow::Result<()> {
+    let store_dir = trusty_mpm::project::registry_data_dir();
+    let report = trusty_mpm::project::unadopt_paths(&store_dir, paths, dry_run)
+        .map_err(|e| anyhow::anyhow!("tm project unadopt: ledger unchanged: {e}"))?;
+    let verb = if dry_run { "would remove" } else { "removed" };
+    for entry in &report.removed {
+        println!(
+            "{verb} {} (project '{}') from the adoption ledger",
+            entry.path.display(),
+            entry.project
+        );
+    }
+    for path in &report.not_adopted {
+        println!("not adopted: {}", path.display());
+    }
+    if dry_run {
+        println!("dry run: ledger not written; worktree folders are never touched");
+    } else if !report.not_adopted.is_empty() {
+        // #10592: a real run that misses a path must not read as success.
+        anyhow::bail!(
+            "tm project unadopt: {} path(s) matched no ledger record; {} removed",
+            report.not_adopted.len(),
+            report.removed.len()
+        );
     }
     Ok(())
 }

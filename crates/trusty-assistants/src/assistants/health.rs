@@ -24,10 +24,12 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use super::error::AssistantError;
 use super::home::{
     AGENTS_DIR, ATTACHMENTS_DIR, AssistantHome, AssistantHomeConfig, CONFIG_FILE,
     INSTRUCTIONS_FILE, OKG_DIR, STORES_DIR,
 };
+use super::project::{PROJECT_DIR_KEY, canonical_project_dir, duplicate_claims, project_claims};
 
 /// What is wrong with one entry of an assistant's home.
 ///
@@ -55,6 +57,8 @@ pub enum HomeIssueKind {
     /// a directory belongs). Startup continues regardless — see
     /// [`super::provision`](mod@crate::assistants::provision).
     NotCreatable,
+    /// #11649: two homes claim the same project directory.
+    Conflict,
 }
 
 impl HomeIssueKind {
@@ -70,6 +74,7 @@ impl HomeIssueKind {
             Self::Unreadable => "unreadable",
             Self::Malformed => "malformed",
             Self::NotCreatable => "could not be created",
+            Self::Conflict => "claimed by two assistants",
         }
     }
 }
@@ -243,16 +248,93 @@ fn check_config(home: &AssistantHome, issues: &mut Vec<HomeIssue>) {
             return;
         }
     };
-    if let Err(err) = toml::from_str::<AssistantHomeConfig>(&raw) {
-        issues.push(HomeIssue {
-            kind: HomeIssueKind::Malformed,
-            entry: CONFIG_FILE,
-            path,
-            detail: format!("is not valid TOML ({})", first_line(&err.to_string())),
-            remedy: "fix the line the error names, or delete the file to have the standard \
-                     one regenerated"
-                .to_string(),
-        });
+    let config = match toml::from_str::<AssistantHomeConfig>(&raw) {
+        Ok(config) => config,
+        Err(err) => {
+            issues.push(malformed_config(path, &err));
+            return;
+        }
+    };
+    if let Some(declared) = config.project_dir {
+        check_project_dir(&declared, issues);
+    }
+}
+
+/// #11649: a declared `project_dir` must still be an absolute directory.
+/// Only the path is reported; no other config value reaches the finding.
+fn check_project_dir(declared: &Path, issues: &mut Vec<HomeIssue>) {
+    let Err(err) = canonical_project_dir(declared) else {
+        return;
+    };
+    let kind = if declared.is_absolute() && !declared.exists() {
+        HomeIssueKind::Missing
+    } else {
+        HomeIssueKind::Malformed
+    };
+    let reason = match err {
+        AssistantError::InvalidProjectDir { reason, .. } => reason,
+        other => other.to_string(),
+    };
+    issues.push(HomeIssue {
+        kind,
+        entry: PROJECT_DIR_KEY,
+        path: declared.to_path_buf(),
+        detail: format!("`{PROJECT_DIR_KEY}` is not usable: {reason}"),
+        remedy: format!(
+            "restore the directory, or set `{PROJECT_DIR_KEY}` in config.toml to the \
+             absolute path of an existing directory"
+        ),
+    });
+}
+
+/// Every pair of homes under `root` that claim the same project directory.
+///
+/// Why: a duplicate claim makes project resolution refuse to pick an instance
+/// (#11649), so the user must hear which two homes collide. Per-home
+/// [`inspect`] cannot see it.
+/// What: one [`HomeIssueKind::Conflict`] per duplicate pair, naming both
+/// instance ids and the directory; a config that cannot be read becomes one
+/// [`HomeIssueKind::Malformed`] finding carrying the parser position only.
+/// Test: `super::tests::health_tests::flags_a_duplicate_project_dir`.
+pub fn inspect_project_claims(root: &Path) -> Vec<HomeIssue> {
+    let claims = match project_claims(root) {
+        Ok(claims) => claims,
+        Err(err) => {
+            let path = match &err {
+                AssistantError::InvalidConfig { path, .. } => path.clone(),
+                _ => root.to_path_buf(),
+            };
+            return vec![HomeIssue {
+                kind: HomeIssueKind::Malformed,
+                entry: CONFIG_FILE,
+                path,
+                detail: err.to_string(),
+                remedy: "fix that config.toml so project directories can be compared".into(),
+            }];
+        }
+    };
+    duplicate_claims(&claims)
+        .into_iter()
+        .map(|(dir, first, second)| HomeIssue {
+            kind: HomeIssueKind::Conflict,
+            entry: PROJECT_DIR_KEY,
+            detail: format!("assistants `{first}` and `{second}` both claim it"),
+            remedy: format!("remove `{PROJECT_DIR_KEY}` from one of their config.toml files"),
+            path: dir,
+        })
+        .collect()
+}
+
+/// The finding for a `config.toml` that does not parse.
+fn malformed_config(path: PathBuf, err: &toml::de::Error) -> HomeIssue {
+    HomeIssue {
+        kind: HomeIssueKind::Malformed,
+        entry: CONFIG_FILE,
+        path,
+        detail: format!("is not valid TOML ({})", first_line(&err.to_string())),
+        remedy: "fix the line the error names, or delete the file to have the standard \
+                 one regenerated"
+            .to_string(),
     }
 }
 

@@ -5,7 +5,8 @@
 //! the port reads and writes the same shape, keeping keys it does not know.
 //! What: [`TokenState`] mirrors `new_state()`; [`load`] is `load_state` (a
 //! missing or unparsable file is a fresh state, a wrong shape is an error),
-//! [`save`] writes through a temp file and rename. [`Thresholds`] is
+//! [`save`] writes through a per-process temp file and rename; a writing
+//! scan holds `lock::acquire` from load to save (#11629). [`Thresholds`] is
 //! `DEFAULTS` overlaid with `local/usage/token-thresholds.json`.
 //! [`flush_hours`] appends completed-hour rows once per key; [`prune`] is
 //! `prune`.
@@ -195,7 +196,8 @@ pub fn load(path: &Path) -> Result<TokenState, StateError> {
     })
 }
 
-/// `save_state`: the parent is created, the write is a temp file and rename.
+/// `save_state`: the parent is created, the write is a per-process temp file
+/// (`<path>.<pid>.<n>.tmp`), fsynced, then renamed over `path`.
 ///
 /// # Errors
 /// [`StateError::Io`] when the file cannot be written.
@@ -211,10 +213,16 @@ pub fn save(path: &Path, st: &TokenState) -> Result<(), StateError> {
         what: path.display().to_string(),
         detail: e.to_string(),
     })?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, text)
-        .and_then(|()| fs::rename(&tmp, path))
-        .map_err(io_err)
+    // #11629: a per-process temp name; the caller holds `lock::acquire`.
+    let (mut f, tmp) = super::lock::create_tmp(path).map_err(io_err)?;
+    let result = f
+        .write_all(text.as_bytes())
+        .and_then(|()| f.sync_all())
+        .and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(io_err)
 }
 
 /// `DEFAULTS`, overlaid by the thresholds file.

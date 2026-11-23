@@ -93,6 +93,14 @@ trusty-computer grant <bundle-id> --pid N --window N [--ttl 30m] [--idle-ttl 5m]
     [--tools a,b] [--allow-sensitive]
 ```
 
+A grant is scoped to one process: the bounded daemon's manifest names the
+exact pid and window, never the bundle id. cua-driver 0.23.2 admits a
+`bundle_id` entry by the claimed id alone, so any local build reusing the id
+would pass (#11697). At mint the broker reads the pid's claimed bundle id from
+LaunchServices (`lsappinfo`) and refuses a mismatch; it does not verify the
+code signature. The operator's choice of pid is the only identity control.
+A relaunched app has a new pid and needs a rescope.
+
 1. The CLI opens `/dev/tty` before it contacts the broker. With no terminal
    it exits 3 and sends nothing, so an agent running the CLI in Bash fails
    here.

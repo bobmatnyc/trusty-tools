@@ -738,3 +738,162 @@ fn window5_unresolved_name_keeps_the_resolved_label() {
         .collect();
     assert_eq!(seen, [("tm-architect", "ctx_main:405k")]);
 }
+
+// #11629: the Rust and Python watchers share one state file; these prove a
+// writing scan holds the shared lock and loses nothing to a concurrent writer.
+
+/// One writer's scan of a fresh transcript; returns its path, length and sid.
+fn writer_round(
+    root: &Path,
+    state: &Path,
+    w: usize,
+    r: usize,
+) -> Result<(String, u64, String), String> {
+    let base = root.join(format!("base{w}"));
+    let sid = format!("w{w}r{r}");
+    let p = base
+        .join(format!("-srv-proj{w}"))
+        .join(format!("{sid}.jsonl"));
+    fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+    let text = line(&format!("{sid}-m"), NOW - 60.0, 210_000);
+    fs::write(&p, &text).expect("write");
+    touch(&p);
+    let mode = Mode {
+        state: state.to_owned(),
+        seed: None,
+        save: true,
+        hourly: None,
+    };
+    let paths = Paths {
+        base: &base,
+        sessions: root,
+        thresholds: root.join("none.json"),
+        schedule: root,
+    };
+    step(NOW, &mode, &paths, Some(Default::default())).map_err(|e| format!("{sid}: {e}"))?;
+    Ok((p.to_string_lossy().into_owned(), text.len() as u64, sid))
+}
+
+#[test]
+fn concurrent_writers_keep_every_offset_and_fired_key() {
+    const WRITERS: usize = 6;
+    const ROUNDS: usize = 15;
+    let d = tempfile::tempdir().expect("tmp");
+    let state = d.path().join("inbox").join(STATE_FILE);
+    let results: Vec<Result<(String, u64, String), String>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let (root, state) = (d.path(), state.as_path());
+                s.spawn(move || {
+                    (0..ROUNDS)
+                        .map(|r| writer_round(root, state, w, r))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .flat_map(|h| h.join().expect("writer thread"))
+            .collect()
+    });
+    let errors: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    assert!(errors.is_empty(), "scans failed: {errors:?}");
+    let st = state::load(&state).expect("state");
+    let made: Vec<&(String, u64, String)> =
+        results.iter().filter_map(|r| r.as_ref().ok()).collect();
+    let lost: Vec<String> = made
+        .iter()
+        .filter(|(p, len, _)| st.files.get(p).and_then(|f| f.off) != Some(*len))
+        .map(|(p, ..)| p.clone())
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "lost offsets for {} of {}: {lost:?}",
+        lost.len(),
+        made.len()
+    );
+    let unfired: Vec<String> = made
+        .iter()
+        .filter(|(.., sid)| !st.fired.contains_key(&format!("{sid}|ctx_main:200k")))
+        .map(|(.., sid)| sid.clone())
+        .collect();
+    assert!(unfired.is_empty(), "lost fired keys: {unfired:?}");
+    let stray: Vec<String> = fs::read_dir(d.path().join("inbox"))
+        .expect("inbox")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(stray.is_empty(), "temp files left: {stray:?}");
+}
+
+#[test]
+fn lock_failure_refuses_the_write() {
+    let d = tempfile::tempdir().expect("tmp");
+    let e = Env::new(d.path());
+    e.write(&e.main(), &[line("m0", NOW - 60.0, 210_000)]);
+    let mode = e.mode(false);
+    // The lock path is a directory, so the lock cannot be opened.
+    fs::create_dir_all(lock::lock_path(&mode.state)).expect("mkdir");
+    let paths = Paths {
+        base: &e.base,
+        sessions: d.path(),
+        thresholds: d.path().join("none.json"),
+        schedule: d.path(),
+    };
+    let err = step(NOW, &mode, &paths, Some(Default::default())).expect_err("no lock, no write");
+    assert!(err.to_string().starts_with("lock "), "{err}");
+    assert!(!mode.state.exists(), "the state was written unlocked");
+    assert!(!d.path().join("hourly.jsonl").exists());
+    // A held lock times out rather than letting a second writer in.
+    let state = d.path().join("held").join(STATE_FILE);
+    let held = lock::acquire(&state, Duration::from_secs(1)).expect("first holder");
+    match lock::acquire(&state, Duration::from_millis(100)) {
+        Err(StateError::Io { source, .. }) => {
+            assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
+        }
+        other => panic!("second writer got {other:?}"),
+    }
+    drop(held);
+    lock::acquire(&state, Duration::from_secs(1)).expect("free after release");
+}
+
+/// The Python watcher's lock step in protocol: `<state>.lock`, opened for
+/// append, `fcntl.flock(fd, LOCK_EX)`.
+const PY_HOLD: &str = "import fcntl, sys\n\
+f = open(sys.argv[1] + '.lock', 'a')\n\
+fcntl.flock(f.fileno(), fcntl.LOCK_EX)\n\
+print('held', flush=True)\n\
+sys.stdin.read()\n";
+
+#[test]
+fn python_flock_on_the_lock_file_blocks_the_rust_writer() {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    let d = tempfile::tempdir().expect("tmp");
+    let state = d.path().join(STATE_FILE);
+    let name = lock::lock_path(&state);
+    assert_eq!(
+        name.file_name().and_then(|n| n.to_str()),
+        Some("token-watch-state.json.lock")
+    );
+    let mut py = Command::new("python3")
+        .arg("-c")
+        .arg(PY_HOLD)
+        .arg(&state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("python3 on PATH");
+    let out = py.stdout.take().expect("stdout");
+    let mut first = String::new();
+    std::io::BufReader::new(out)
+        .read_line(&mut first)
+        .expect("read");
+    assert_eq!(first.trim(), "held");
+    let blocked = lock::acquire(&state, Duration::from_millis(200));
+    drop(py.stdin.take());
+    let status = py.wait().expect("wait");
+    assert!(status.success());
+    assert!(blocked.is_err(), "Rust took the lock Python held");
+    lock::acquire(&state, Duration::from_secs(1)).expect("free once Python exits");
+}

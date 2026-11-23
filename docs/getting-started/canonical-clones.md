@@ -41,6 +41,19 @@ Leave the old checkout where it is. `tm` does not move or adopt it. Do not run `
 3. Work from the canonical clone from now on.
 4. Delete the old checkout when you no longer need it.
 
+### If you already ran `tm project init` on it
+
+`tm project init` changes four things in the checkout's git metadata and in the trusty-mpm state. Each one can be reversed:
+
+| Change | Reverse it with |
+|---|---|
+| `git config --local maintenance.auto false` and `git config --local gc.auto 0` | `git config --local --unset maintenance.auto` and `git config --local --unset gc.auto` |
+| `/.trusty-mpm-worktree` and `/.trusty-mpm/` appended to `$(git rev-parse --git-common-dir)/info/exclude` | Delete those two lines from that file |
+| Each tree's in-tree `.trusty-mpm-worktree` marker moved to `<common-dir>/worktrees/<name>/trusty-mpm-worktree` (for the main checkout, `.git/trusty-mpm-worktree`) | Move each file back to `<tree>/.trusty-mpm-worktree` |
+| Every existing worktree recorded in `~/.trusty-mpm/project-registry/worktrees.json` | `tm project unadopt <path>...` |
+
+`tm project unadopt` edits the ledger only. It never edits or deletes a worktree folder and never touches git metadata. Run it with `--dry-run` first to see which records it would remove. A later `tm project init` on the same checkout adopts the worktrees again.
+
 Two cases look similar but are different:
 
 - **A no-origin local repository.** `tm launch` runs the session in that checkout itself. It is not refused. Use this for a scratch repository that has no remote.

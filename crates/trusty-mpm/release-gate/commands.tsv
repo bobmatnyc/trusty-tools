@@ -26,6 +26,7 @@ restart	SKIP	-	-	-	-	-	stop (host-wide kill) then start
 project list	SANDBOX	$H	project list	-	0	-	D: deprecated alias of projects list
 project info	SANDBOX	$H/proj	project info	-	0	-	D: after project init
 project trust	SAFE	$H	project trust --dir $H/proj	-	0	-	writes consent file under temp HOME; then --revoke
+project unadopt	SAFE	$H	project unadopt --dry-run $H/proj	-	0	-	dry run against the temp-HOME ledger; writes nothing (#10592)
 sessions start	SKIP	-	-	-	-	-	launches a Claude session (claude binary, credentials)
 sessions stop	SANDBOX	$H	sessions stop nosuch	-	1	session 'nosuch' not found	DT: negative case, unknown id
 sessions list	SANDBOX	$H	sessions list	-	0	-	D

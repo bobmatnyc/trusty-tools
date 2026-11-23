@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.6] — 2026-11-23
+
+### Added
+
+- `launchd_labels::ARCHITECT_SCHED` registers `com.trusty.architect-sched`, and the stray-label scan exempts the leaf crate `trusty-architect`'s plist renderer, which cannot import it (#9171 A1).
+- `console_rpc::METHOD_CONSOLE_METRICS` (`console.console_metrics`, #10907), now listed in `console_rpc::METHODS`. It answers a `ConsoleMetricsReport` whose `metrics` follow the `by_*` breakdown convention.
+- `launchd_labels::COMPUTER` constant and `trusty-computer` service entry for the trusty-computer desktop control daemon.
+- The shared memory client (`memory_rpc::call_memory_tool_at_with_timeout`) waits out a `-32007` palace-opening answer: it asks again with a 250 ms to 2 s backoff for up to 30 s (`PALACE_OPENING_WAIT`), then returns the last `-32007` as the error. New `CODE_PALACE_OPENING` and `MemoryRpcError::is_palace_opening` (#11613).
+
+### Fixed
+
+- `uds::server`: a method marked with the new `RpcRouter::mark_read_only` is cancelled when its client hangs up, and `handle_connection` reports `RpcServerError::ClientGone` instead of running the abandoned request to completion. Unmarked methods, including every write, still run to completion (#11256).
+
+### Changed
+
+- `launchd_labels::AGENTS_SLACK` (`com.trusty.agents.slack`) moves to `RETIRED_SERVICES` under member `trusty-assistants`: `tagent --slack` no longer exists, so nothing installs the unit and an upgrade evicts it (#11632).
+- `bin_resolve` maps `trusty-assistants` to its `ta` binary and the one-release `tagent` alias, replacing the `trusty-agents` row (#11632).
+
 ## [0.70.5] — 2026-11-20
 
 ### Documentation

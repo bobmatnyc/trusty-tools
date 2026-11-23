@@ -11,7 +11,7 @@
 //! [`HomeIssue`] on the report, which is what the [`super::health`] narration
 //! seam was built for.
 //!
-//! What: [`provision`] provisions ONE instance — `ensure()` then `inspect()`,
+//! What: [`provision_home`] provisions ONE instance — `ensure()` then `inspect()`,
 //! never failing. [`provision_all`] runs it across a roster and returns a
 //! [`StartupProvisioning`] the caller logs. Running `inspect` even on the
 //! success path is deliberate: `ensure` reports what it CREATED, not whether the
@@ -112,7 +112,7 @@ impl StartupProvisioning {
 /// Test: `super::tests::provision_tests::startup_creates_a_missing_home`,
 /// `super::tests::provision_tests::startup_survives_a_home_it_cannot_create`,
 /// `super::tests::provision_tests::startup_fills_only_the_gaps`.
-pub fn provision(home: &AssistantHome) -> ProvisionedHome {
+pub fn provision_home(home: &AssistantHome) -> ProvisionedHome {
     let (created, failure) = match home.ensure() {
         Ok(created) => (created.paths, None),
         Err(err) => (Vec::new(), Some(err)),
@@ -134,13 +134,16 @@ pub fn provision(home: &AssistantHome) -> ProvisionedHome {
 /// Why: startup knows a set of assistant instances, not one — and a single
 /// unwritable home must not stop the others from being provisioned. Each is
 /// independent.
-/// What: [`provision`] per instance, collected. An empty roster yields an empty
+/// What: [`provision_home`] per instance, collected. An empty roster yields an empty
 /// report, which is a normal state (no assistants configured yet).
 /// Test: `super::tests::provision_tests::provisions_every_instance_independently`,
 /// `super::tests::provision_tests::an_empty_roster_is_not_an_error`.
 pub fn provision_all(roster: impl IntoIterator<Item = AssistantHome>) -> StartupProvisioning {
     StartupProvisioning {
-        homes: roster.into_iter().map(|home| provision(&home)).collect(),
+        homes: roster
+            .into_iter()
+            .map(|home| provision_home(&home))
+            .collect(),
     }
 }
 

@@ -190,3 +190,67 @@ fn narration_names_every_issue() {
     assert_eq!(HomeIssueKind::Malformed.describe(), "malformed");
     assert_eq!(HomeIssueKind::NotADirectory.describe(), "not a directory");
 }
+
+/// #11649: a `project_dir` that no longer exists is flagged by path only; no
+/// other config value reaches the finding.
+#[test]
+fn flags_a_missing_project_dir_without_printing_secrets() {
+    let (tmp, home) = temp_home();
+    home.ensure().unwrap();
+    let gone = tmp.path().join("gone-project");
+    std::fs::write(
+        home.config_path(),
+        format!(
+            "id = \"izzie\"\napi_token = \"sk-live-SECRET-11649\"\nproject_dir = \"{}\"\n",
+            gone.display()
+        ),
+    )
+    .unwrap();
+
+    let health = inspect(&home);
+
+    let issue = health
+        .issues
+        .iter()
+        .find(|i| i.entry == crate::assistants::PROJECT_DIR_KEY)
+        .expect("a project_dir finding");
+    assert_eq!(issue.kind, HomeIssueKind::Missing);
+    assert_eq!(issue.path, gone);
+    let narration = health.narration().unwrap();
+    assert!(!narration.contains("SECRET"), "{narration}");
+}
+
+/// #11649: two homes claiming one directory are named together.
+#[test]
+fn flags_a_duplicate_project_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = base.join("homes");
+    let project = base.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    for id in ["personal", "cto-assistant"] {
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        std::fs::write(
+            root.join(id).join("config.toml"),
+            format!(
+                "id = \"{id}\"\ntoken = \"sk-live-SECRET-11649\"\nproject_dir = \"{}\"\n",
+                project.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    let issues = crate::assistants::inspect_project_claims(&root);
+
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].kind, HomeIssueKind::Conflict);
+    assert_eq!(issues[0].path, project);
+    let text = issues[0].to_string();
+    assert!(
+        text.contains("personal") && text.contains("cto-assistant"),
+        "{text}"
+    );
+    assert!(!text.contains("SECRET"), "{text}");
+    std::fs::remove_file(root.join("personal/config.toml")).unwrap();
+    assert!(crate::assistants::inspect_project_claims(&root).is_empty());
+}

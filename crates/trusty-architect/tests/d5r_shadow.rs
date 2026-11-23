@@ -225,13 +225,15 @@ fn shadow_seeds_state_once_and_never_writes_the_inbox() -> TestResult {
     );
     let shadow = listing(&env.config.shadow_dir())?;
     // MB1595 fix round: the token watcher keeps its own state in the shadow dir.
+    // #11629: a shadow scan saves that scratch state, so it locks it here; the inbox stays untouched.
     assert_eq!(
         shadow,
         [
             "alerts.jsonl",
             "poll-state.json",
             "shadow.log",
-            "token-watch-state.json"
+            "token-watch-state.json",
+            "token-watch-state.json.lock"
         ]
     );
     assert!(env.log().contains("shadow: seeded"), "{}", env.log());

@@ -1563,12 +1563,14 @@ pub use chat::{
 };
 
 // Data directory
-pub use data_dir::{DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, sanitize_data_root};
+pub use data_dir::{
+    DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, resolve_data_dir_no_create, sanitize_data_root,
+};
 
 // Daemon address
 pub use daemon_addr::{
-    check_already_running, daemon_socket_path, read_daemon_addr, remove_daemon_addr,
-    resolve_daemon_base_url, write_daemon_addr,
+    check_already_running, daemon_socket_path, daemon_socket_path_no_create, read_daemon_addr,
+    remove_daemon_addr, resolve_daemon_base_url, write_daemon_addr,
 };
 
 // Health probe
