@@ -548,7 +548,6 @@ crates/trusty-mpm/src/project/resolver/mod.rs	resolver_keyword_match
 crates/trusty-mpm/src/project/resolver/mod.rs	resolver_keyword_reason
 crates/trusty-mpm/src/project/resolver/mod.rs	resolver_keyword_score_accumulates
 crates/trusty-mpm/src/project/resolver/mod.rs	resolver_resolution_primary_is_highest_confidence
-crates/trusty-mpm/src/project/resolver/mod.rs	resolver_session_no_repo
 crates/trusty-mpm/src/project/resolver/mod.rs	resolver_session_url_tie_break
 crates/trusty-mpm/src/project/resolver/mod.rs	resolver_single_above_floor
 crates/trusty-mpm/src/project/resolver/mod.rs	resolver_url_match

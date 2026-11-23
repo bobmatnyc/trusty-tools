@@ -584,3 +584,155 @@ async fn decommission_project_without_records_unloads_by_its_checkout() {
     );
     assert!(report.stopped.is_empty() && report.left_as_is.is_empty());
 }
+
+/// #11551 (critic round): a GitHub project whose clone is gone still names its
+/// `owner/repo` palace, which may be loaded; it must be unloaded, never
+/// reported NotLoaded.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_with_a_deleted_github_clone_unloads_its_palace() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let project = registry.get("widget").await.expect("row");
+    assert!(
+        crate::project::local_checkout_for(&project).is_none_or(|p| !p.is_dir()),
+        "premise: no checkout on disk"
+    );
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("the palace unloads");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    assert!(
+        rig.params_of("memory.palace_unload").is_some(),
+        "the unload was asked"
+    );
+}
+
+/// Register scratch project `name`: a `local:` key, no remote, and a
+/// path-form `repo_url` whose directory is gone. Returns the dir's guard.
+async fn register_scratch(registry: &ProjectRegistry, name: &str) -> tempfile::TempDir {
+    let gone = crate::test_support::hermetic_temp_dir();
+    let mut project = registry.get("widget").await.expect("row");
+    project.name = name.into();
+    project.repo_url = gone.path().join(name).to_string_lossy().into_owned();
+    project.project_key = Some("local:5678".into());
+    registry.register(project).await.expect("register");
+    gone
+}
+
+/// trusty-search's "not found": no index is registered for the scratch path.
+fn search_not_found() -> crate::session_manager::index_shutdown::tests::Answer {
+    Arc::new(|_, _| Err(crate::uds_mock::RpcError::new(-32004, "no such project")))
+}
+
+/// A trusty-memory whose `memory.palace_get` answers `code`; unloads succeed.
+fn memory_lookup_fails(code: i64) -> crate::session_manager::index_shutdown::tests::Answer {
+    let healthy = crate::session_manager::index_shutdown::tests::healthy_memory();
+    Arc::new(move |method, params| match method {
+        "memory.palace_get" => Err(crate::uds_mock::RpcError::new(code, "lookup")),
+        _ => healthy(method, params),
+    })
+}
+
+/// #11551 criterion 1: a scratch project with no checkout and no remote
+/// still names its palace (the `parent-dir` slug of its recorded path); it
+/// exists, so it is unloaded.
+/// Test: this function IS the test. Fails if a no-checkout path project
+/// derives no palace id (reported NotLoaded, no unload asked).
+#[tokio::test]
+async fn decommission_scratch_project_without_checkout_unloads_its_palace() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let gone = register_scratch(&registry, "qa-scratch").await;
+    let expected = trusty_common::palace_id::parent_dir_slug(&gone.path().join("qa-scratch"));
+    let rig = rig(search_not_found(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "qa-scratch", Ok(rig.capability()))
+        .await
+        .expect("the palace unloads");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert_eq!(
+        shutdown.palace,
+        ShutdownState::Unloaded {
+            id: expected.clone().expect("a slug")
+        }
+    );
+    assert_eq!(
+        rig.params_of("memory.palace_get").expect("looked up")["palace_id"],
+        expected.expect("a slug")
+    );
+}
+
+/// #11551 criterion 2: no palace exists for the scratch project, so the
+/// unload is skipped, the skip is reported, and the decommission completes.
+/// Test: this function IS the test. Fails if trusty-memory is never asked
+/// whether the palace exists.
+#[tokio::test]
+async fn decommission_scratch_project_with_no_palace_skips_the_unload() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::rig;
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let _gone = register_scratch(&registry, "gone-proj").await;
+    let rig = rig(search_not_found(), memory_lookup_fails(-32004)).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "gone-proj", Ok(rig.capability()))
+        .await
+        .expect("an absent palace must not refuse the decommission");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    match &shutdown.palace {
+        ShutdownState::NotLoaded { reason } => assert!(reason.contains("skipped"), "{reason}"),
+        other => panic!("expected a reported skip, got {other:?}"),
+    }
+    assert!(rig.params_of("memory.palace_get").is_some(), "looked up");
+    assert!(rig.params_of("memory.palace_unload").is_none(), "no unload");
+    assert!(
+        registry
+            .get("gone-proj")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
+/// #11551 fail-open check: a palace lookup that errors (not "not found")
+/// fails the shutdown loudly and leaves the project active.
+/// Test: this function IS the test. Fails if a lookup error reads as absent.
+#[tokio::test]
+async fn decommission_scratch_project_palace_lookup_error_refuses() {
+    use crate::session_manager::index_shutdown::tests::rig;
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let _gone = register_scratch(&registry, "err-proj").await;
+    let rig = rig(search_not_found(), memory_lookup_fails(-32603)).await;
+
+    let err = mgr
+        .decommission_project_with(&registry, "err-proj", Ok(rig.capability()))
+        .await
+        .expect_err("a lookup error must refuse");
+
+    assert!(
+        matches!(err, ProjectDecommissionError::IndexShutdown { .. }),
+        "{err:?}"
+    );
+    assert!(rig.params_of("memory.palace_unload").is_none(), "no unload");
+    assert!(
+        !registry
+            .get("err-proj")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
