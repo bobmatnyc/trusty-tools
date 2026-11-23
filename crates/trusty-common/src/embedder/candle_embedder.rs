@@ -30,7 +30,10 @@ use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE, HiddenAct};
-use hf_hub::{Repo, RepoType, api::sync::Api};
+use hf_hub::{
+    Repo, RepoType,
+    api::sync::{Api, ApiBuilder},
+};
 use thiserror::Error;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
@@ -126,22 +129,13 @@ impl CandleEmbedder {
             if metal { "metal" } else { "cpu" }
         );
 
-        let api = Api::new()
+        // #10866: hf-hub 0.5's `Api::new()` ignores HF_HOME; `from_env` keeps it.
+        let api = ApiBuilder::from_env()
+            .build()
             .context("hf_hub api init")
             .map_err(CandleEmbedderError::Init)?;
-        let repo = api.repo(Repo::new(MODEL_REPO.to_string(), RepoType::Model));
-        let config_filename = repo
-            .get("config.json")
-            .context("download config.json")
-            .map_err(CandleEmbedderError::Init)?;
-        let tokenizer_filename = repo
-            .get("tokenizer.json")
-            .context("download tokenizer.json")
-            .map_err(CandleEmbedderError::Init)?;
-        let weights_filename = repo
-            .get("model.safetensors")
-            .context("download model.safetensors")
-            .map_err(CandleEmbedderError::Init)?;
+        let [config_filename, tokenizer_filename, weights_filename] =
+            fetch_model_files(&api).map_err(CandleEmbedderError::Init)?;
 
         let config_bytes = std::fs::read(&config_filename)
             .context("read config.json")
@@ -384,10 +378,119 @@ fn pick_device(use_metal: bool) -> Device {
     Device::Cpu
 }
 
+/// Model files the embedder loads, in `[config, tokenizer, weights]` order.
+const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+
+/// Fetch the model files from `api` into its cache and return their paths.
+///
+/// Why: HuggingFace answers `/resolve/main/<file>` with a 307 whose
+/// `location` is relative; the download must resolve it (#10866).
+/// What: `repo.get` for each of [`MODEL_FILES`] in order, one caller at a
+/// time per process.
+/// Test: `fetch_model_files_follows_relative_redirect`.
+fn fetch_model_files(api: &Api) -> Result<[std::path::PathBuf; 3]> {
+    // #10866: hf-hub 0.5 gives up on a contended blob lock after ~5 s, so two
+    // first-use downloads in one process would fail; serialize them.
+    static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = FETCH.lock().unwrap_or_else(|p| p.into_inner());
+    let repo = api.repo(Repo::new(MODEL_REPO.to_string(), RepoType::Model));
+    let mut out: [std::path::PathBuf; 3] = Default::default();
+    for (slot, name) in out.iter_mut().zip(MODEL_FILES) {
+        // #10866: needs hf-hub >= 0.5; 0.3.2 handed the relative 307 to ureq.
+        *slot = repo.get(name).with_context(|| format!("download {name}"))?;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[cfg(feature = "embedder-candle")]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// Serve one HTTP request the way HuggingFace does: `/resolve/` answers a
+    /// relative 307, `/api/resolve-cache/` serves the file, honouring `Range`.
+    fn serve_hf(stream: std::net::TcpStream, seen: &Mutex<Vec<String>>) {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("request line");
+        let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+        // `(start, Some(end))` for `bytes=a-b`, `(start, None)` for `bytes=a-`.
+        let mut range: (usize, Option<usize>) = (0, None);
+        loop {
+            let mut h = String::new();
+            if reader.read_line(&mut h).expect("header") == 0 || h == "\r\n" {
+                break;
+            }
+            let lower = h.trim().to_ascii_lowercase();
+            if let Some((a, b)) = lower
+                .strip_prefix("range: bytes=")
+                .and_then(|v| v.split_once('-'))
+            {
+                range = (a.parse().unwrap_or(0), b.parse().ok());
+            }
+        }
+        seen.lock().expect("lock").push(path.clone());
+        let name = path.rsplit('/').next().unwrap_or("").to_string();
+        let mut stream = stream;
+        let resp = if path.contains("/resolve/main/") {
+            format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: /api/resolve-cache/models/{MODEL_REPO}/abc123/{name}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes()
+        } else {
+            let body = format!("body-of-{name}").into_bytes();
+            let lo = range.0.min(body.len() - 1);
+            let hi = range.1.unwrap_or(body.len() - 1).min(body.len() - 1);
+            let slice = &body[lo..=hi];
+            let mut r = format!(
+                "HTTP/1.1 206 Partial Content\r\nETag: \"etag-{name}\"\r\nX-Repo-Commit: abc123\r\nContent-Range: bytes {lo}-{hi}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len(),
+                slice.len()
+            )
+            .into_bytes();
+            r.extend_from_slice(slice);
+            r
+        };
+        stream.write_all(&resp).expect("write response");
+    }
+
+    /// Why: #10866 — HuggingFace's relative 307 broke every first-use download.
+    /// What: a local stub answers like HF; all three model files must land in
+    /// the cache with the served bytes, via the redirect target.
+    /// Test: this test.
+    #[test]
+    fn fetch_model_files_follows_relative_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let addr = listener.local_addr().expect("addr");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_srv = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                serve_hf(stream, &seen_srv);
+            }
+        });
+        let cache = tempfile::tempdir().expect("tempdir");
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_endpoint(format!("http://{addr}"))
+            .with_cache_dir(cache.path().to_path_buf())
+            .with_progress(false)
+            .build()
+            .expect("build api");
+
+        let files = fetch_model_files(&api).expect("download through relative 307");
+        for (path, name) in files.iter().zip(MODEL_FILES) {
+            let got = std::fs::read_to_string(path).expect("read cached file");
+            assert_eq!(got, format!("body-of-{name}"));
+        }
+        let seen = seen.lock().expect("lock");
+        assert!(
+            seen.iter().any(|p| p.starts_with("/api/resolve-cache/")),
+            "redirect target never requested: {seen:?}"
+        );
+    }
 
     /// Why: regression guard — the rest of the pipeline assumes 384-dim
     /// vectors. A model swap that changed this would silently break every

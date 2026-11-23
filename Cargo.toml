@@ -112,7 +112,7 @@ trusty-code = { path = "crates/trusty-code", version = "0.8" }
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.11.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.70.7" }
+trusty-common = { path = "crates/trusty-common", version = "0.70.8" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
 trusty-secrets = { path = "crates/trusty-secrets", version = "0.9", default-features = false }
@@ -512,7 +512,9 @@ candle-nn = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
 # #6067: no `tokio` feature; both callers use only `api::sync`, and `tokio`
 # pulls reqwest 0.11 -> h2 0.3.27 (RUSTSEC-2026-0258).
-hf-hub = { version = "0.3", default-features = false, features = ["online"] }
+# #10866: 0.5 follows HuggingFace's relative 307 `location`; 0.3.2's sync
+# client passed it to ureq unresolved. 0.5 is already in the lock via fastembed.
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 http-body-util = "0.1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
