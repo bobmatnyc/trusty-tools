@@ -136,16 +136,16 @@ fn blob_store_corrupt_blob_reads_the_backup() {
 #[test]
 fn blob_store_corrupt_blob_without_backup_reads_per_item() {
     for bad in corrupt_blobs() {
-        let items = Arc::new(MemItems::with(&[(&item(1), "per-item")]));
+        let items = Arc::new(MemItems::with(&[(&item(1), "sk-per-item-7f")]));
         items.put_raw(&ItemId::blob(), &bad);
         let store = store_over(&items);
         let got = store.get(&item(1)).expect("a corrupt blob failed the read");
-        assert_eq!(got.as_deref().map(String::as_str), Some("per-item"));
+        assert_eq!(got.as_deref().map(String::as_str), Some("sk-per-item-7f"));
         let err = store.get(&item(2)).unwrap_err();
         let shown = format!("{err} / {err:?}");
         assert!(shown.contains("vault blob is corrupt"), "{shown}");
         assert!(shown.contains("KEY_2"), "{shown}");
-        assert!(!shown.contains(VALUE) && !shown.contains("per-item"));
+        assert!(!shown.contains(VALUE) && !shown.contains("sk-per-item-7f"));
     }
 }
 
