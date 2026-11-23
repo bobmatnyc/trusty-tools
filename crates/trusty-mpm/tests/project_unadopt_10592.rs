@@ -101,6 +101,55 @@ fn project_unadopt_dry_run_writes_nothing_10592() {
     assert_eq!(std::fs::read(ledger(home.path())).expect("read"), before);
 }
 
+/// A worktree folder already deleted is still unadopted when named by a
+/// relative path or through a symlinked parent (#10592 code-critic finding 1).
+#[test]
+fn project_unadopt_matches_a_deleted_folder_by_relative_and_symlinked_path_10592() {
+    let home = tempfile::tempdir().expect("home");
+    let root = tempfile::tempdir().expect("root");
+    let real = root.path().join("real");
+    std::fs::create_dir_all(real.join("wt-rel")).expect("mkdir rel");
+    std::fs::create_dir_all(real.join("wt-link")).expect("mkdir link");
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let rel = std::fs::canonicalize(real.join("wt-rel")).expect("canon rel");
+    let via = std::fs::canonicalize(real.join("wt-link")).expect("canon link");
+    seed(home.path(), &[&rel, &via]);
+    std::fs::remove_dir(&rel).expect("delete rel");
+    std::fs::remove_dir(&via).expect("delete link");
+
+    let out = common::tm_command_in(home.path())
+        .current_dir(&link)
+        .args(["--url", "http://127.0.0.1:1", "project", "unadopt"])
+        .arg("wt-rel")
+        .arg(link.join("sub").join("..").join("wt-link"))
+        .output()
+        .expect("spawn tm");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        recorded(home.path()).is_empty(),
+        "both records must leave the ledger: stdout={stdout} stderr={stderr}"
+    );
+    assert!(out.status.success(), "stdout={stdout} stderr={stderr}");
+}
+
+/// A real run naming a path with no record exits non-zero (#10592 finding 2).
+#[test]
+fn project_unadopt_fails_when_a_path_matches_no_record_10592() {
+    let home = tempfile::tempdir().expect("home");
+    let (_trees, a, b) = trees();
+    seed(home.path(), &[&a]);
+
+    let (ok, stdout, stderr) = unadopt(home.path(), &[b.to_str().expect("utf8")]);
+
+    assert!(!ok, "an unmatched path must fail: stdout={stdout}");
+    assert!(stdout.contains("not adopted"), "{stdout}");
+    assert!(stderr.contains("matched no ledger record"), "{stderr}");
+    assert_eq!(recorded(home.path()), vec![a.display().to_string()]);
+}
+
 /// Fail-Open Check: a corrupt ledger fails the command, prints no removal,
 /// and is left byte-for-byte.
 #[test]

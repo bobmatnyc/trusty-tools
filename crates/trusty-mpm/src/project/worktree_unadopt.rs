@@ -37,18 +37,50 @@ pub struct UnadoptReport {
     pub not_adopted: Vec<PathBuf>,
 }
 
-/// The paths one requested path may be stored under: as given, and canonical.
+/// The paths one requested path may be stored under (#10592).
 ///
 /// Why: backfill stores canonical paths, while an operator may type a
-/// relative or symlinked one; a folder already deleted cannot canonicalize,
-/// so the given form is always kept too.
+/// relative, symlinked or `..` path — often to a folder already deleted,
+/// which `canonicalize` cannot resolve.
+/// What: the path as given, its absolute form, and the canonical form of its
+/// deepest existing ancestor re-joined with the remaining components (with
+/// `.`/`..` in that remainder resolved lexically).
+/// Test: `unadopt_matches_a_deleted_folder_through_a_symlinked_parent`,
+/// `project_unadopt_matches_a_deleted_folder_by_relative_and_symlinked_path_10592`.
 fn candidates_for(path: &Path) -> Vec<PathBuf> {
     let mut out = vec![path.to_path_buf()];
-    if let Ok(canonical) = std::fs::canonicalize(path)
-        && canonical != path
-    {
-        out.push(canonical);
+    let Ok(absolute) = std::path::absolute(path) else {
+        return out;
+    };
+    // #10592: canonicalize the deepest ancestor that exists, then re-join.
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut base = absolute.as_path();
+    let resolved = loop {
+        if let Ok(canonical) = std::fs::canonicalize(base) {
+            break Some(canonical);
+        }
+        match (base.parent(), base.components().next_back()) {
+            (Some(parent), Some(last)) => {
+                rest.push(last.as_os_str().to_os_string());
+                base = parent;
+            }
+            _ => break None,
+        }
+    };
+    if let Some(mut joined) = resolved {
+        for name in rest.iter().rev() {
+            match name.to_str() {
+                Some("..") => {
+                    joined.pop();
+                }
+                Some(".") => {}
+                _ => joined.push(name),
+            }
+        }
+        out.push(joined);
     }
+    out.push(absolute);
+    out.dedup();
     out
 }
 

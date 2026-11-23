@@ -82,6 +82,28 @@ fn unadopt_dry_run_reports_and_writes_nothing() {
     assert_eq!(before, after, "a dry run leaves the store byte-for-byte");
 }
 
+/// #10592 code-critic finding 1: a deleted folder named through a symlinked
+/// parent and a `..` still matches its canonical record.
+#[test]
+fn unadopt_matches_a_deleted_folder_through_a_symlinked_parent() {
+    let store = tempfile::tempdir().expect("store");
+    let root = tempfile::tempdir().expect("root");
+    let real = root.path().join("real");
+    std::fs::create_dir_all(real.join("wt")).expect("mkdir");
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let wt = canon(&real.join("wt"));
+    seed(store.path(), &[&wt]);
+    std::fs::remove_dir(&wt).expect("delete folder");
+
+    let named = link.join("gone").join("..").join("wt");
+    let report = unadopt_paths(store.path(), &[named], false).expect("unadopt");
+
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(report.not_adopted.is_empty());
+    assert!(AdoptionStore::load(store.path()).entries().is_empty());
+}
+
 #[test]
 fn unadopt_matches_a_non_canonical_path() {
     let store = tempfile::tempdir().expect("store");

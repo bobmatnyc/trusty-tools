@@ -24,6 +24,10 @@ pub(crate) enum ProjectAction {
     /// - `/.trusty-mpm-worktree` and `/.trusty-mpm/` appended to
     ///   `$(git rev-parse --git-common-dir)/info/exclude` (#8511). Reverse:
     ///   delete those two lines from that file.
+    /// - each tree's in-tree `.trusty-mpm-worktree` marker moved to
+    ///   `<common-dir>/worktrees/<name>/trusty-mpm-worktree` (main checkout:
+    ///   `.git/trusty-mpm-worktree`) (#8511). Reverse: move each file back to
+    ///   `<tree>/.trusty-mpm-worktree`.
     /// - every pre-existing worktree recorded in
     ///   `~/.trusty-mpm/project-registry/worktrees.json` (#7588). Reverse:
     ///   `tm project unadopt <path>...` (ledger only; `--dry-run` previews).
