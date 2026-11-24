@@ -96,3 +96,63 @@ fn successful_and_in_flight_calls_are_not_marked_failed() {
     assert!(!failed, "a call that has not finished has not failed");
     assert!(result.is_none());
 }
+
+/// #11788: the exact stream a run that fails before the model answers emits
+/// (captured live from `tcode serve`): an error `Log` naming the reason, then
+/// `SessionDone { status: "failed" }`. Every event the TUI receives must
+/// leave visible text, and the reason must reach the operator.
+#[test]
+fn a_run_that_fails_early_renders_its_reason_and_an_error_line() {
+    let (tx, mut rx) = unbounded_channel();
+    let reason = "PM config error: failed to load agent config for 'pm'";
+    let sequence = [
+        Event::Log {
+            session_id: "s-1".into(),
+            level: "error".into(),
+            message: reason.into(),
+        },
+        Event::SessionDone {
+            session_id: "s-1".into(),
+            status: "failed".into(),
+        },
+    ];
+    let terminal: Vec<bool> = sequence
+        .into_iter()
+        .map(|event| forward_session_event(envelope(event), &tx))
+        .collect();
+    assert_eq!(terminal, [false, true], "only SessionDone ends the turn");
+
+    let mut rendered = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        rendered.push(event);
+    }
+    assert_eq!(
+        rendered.first(),
+        Some(&ReplEvent::StatusMessage(format!("error: {reason}"))),
+        "the failure reason must reach the TUI: {rendered:?}"
+    );
+    match rendered.last() {
+        Some(ReplEvent::AssistantOutput {
+            chunk,
+            done: true,
+            is_error: true,
+        }) => assert!(!chunk.is_empty(), "a failed run must not end in silence"),
+        other => panic!("expected a visible terminal error, got {other:?}"),
+    }
+}
+
+/// Only error-level logs surface; an info log stays out of the chat.
+#[test]
+fn a_non_error_log_is_not_rendered() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::Log {
+            session_id: "s-1".into(),
+            level: "info".into(),
+            message: "indexing skipped".into(),
+        }),
+        &tx,
+    );
+    assert!(!terminal);
+    assert!(rx.try_recv().is_err(), "an info log must not render");
+}
