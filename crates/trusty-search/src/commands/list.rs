@@ -10,13 +10,15 @@ use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
 /// `search.indexes.list`, the twin of `GET /indexes`), prints it as plain text
 /// or JSON depending on the global `--json` flag. Returns `Err` when the daemon
 /// is unreachable; `main()` prints the friendly red-✗ line and exits 1 (issue
-/// #104).
-/// Test: `list_reads_the_index_list_over_the_socket`.
-pub async fn handle_list(json: bool) -> Result<()> {
+/// #104). #11625: `details` asks for the `{id, size_bytes, …}` rows the MCP
+/// `list_indexes` tool returns, so `list --details --json` matches it.
+/// Test: `list_reads_the_index_list_over_the_socket`,
+/// `list_details_sends_the_mcp_tool_params`.
+pub async fn handle_list(json: bool, details: bool) -> Result<()> {
     // #9214: the socket, never the retiring HTTP listener.
     let client = DaemonClient::resolve()?;
     crate::commands::daemon_guard::ensure_daemon_up(&client).await?;
-    let body = fetch_index_list(&client).await?;
+    let body = fetch_index_list_with(&client, details).await?;
     if json {
         println!("{}", body);
     } else {
@@ -30,7 +32,8 @@ pub async fn handle_list(json: bool) -> Result<()> {
             println!("  {}", "(none)".dimmed());
         } else {
             for v in arr {
-                if let Some(s) = v.as_str() {
+                // #11625: a `--details` row is an object carrying `id`.
+                if let Some(s) = v.as_str().or_else(|| v.get("id").and_then(|i| i.as_str())) {
                     println!("  • {}", s);
                 }
             }
@@ -46,10 +49,24 @@ pub async fn handle_list(json: bool) -> Result<()> {
 ///
 /// When the socket is unreachable, or the daemon refuses the call.
 pub(crate) async fn fetch_index_list(client: &DaemonClient) -> Result<serde_json::Value> {
-    match client
-        .call(METHOD_INDEXES_LIST, serde_json::json!({}))
-        .await
-    {
+    fetch_index_list_with(client, false).await
+}
+
+/// [`fetch_index_list`], with `details: true` sent when asked (#11625).
+///
+/// # Errors
+///
+/// The same set as [`fetch_index_list`].
+pub(crate) async fn fetch_index_list_with(
+    client: &DaemonClient,
+    details: bool,
+) -> Result<serde_json::Value> {
+    let params = if details {
+        serde_json::json!({ "details": true })
+    } else {
+        serde_json::json!({})
+    };
+    match client.call(METHOD_INDEXES_LIST, params).await {
         Ok(body) => Ok(body),
         Err(e) if e.is_unreachable() => bail!("could not reach daemon: {e}"),
         Err(e) => bail!("daemon returned {e}"),
@@ -99,6 +116,21 @@ mod tests {
         .await;
         let body = fetch_index_list(&daemon.client).await.expect("listed");
         assert_eq!(body["indexes"], serde_json::json!(["a", "b"]));
+    }
+
+    /// #11625: `--details` sends the params the MCP `list_indexes` tool sends.
+    #[tokio::test]
+    async fn list_details_sends_the_mcp_tool_params() {
+        let daemon = mock_daemon(|method, params| {
+            assert_eq!(method, METHOD_INDEXES_LIST);
+            assert_eq!(params, serde_json::json!({"details": true}));
+            Ok(serde_json::json!({"indexes": [{"id": "a", "size_bytes": 1}]}))
+        })
+        .await;
+        let body = fetch_index_list_with(&daemon.client, true)
+            .await
+            .expect("listed");
+        assert_eq!(body["indexes"][0]["id"], "a");
     }
 
     /// #9214: an absent socket fails closed, naming it, with no URL.
