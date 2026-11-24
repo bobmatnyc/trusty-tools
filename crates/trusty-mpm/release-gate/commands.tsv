@@ -99,6 +99,16 @@ memory forget	SKIP	-	-	-	-	-	deletes a drawer; same
 memory rename	SKIP	-	-	-	-	-	moves a palace; same
 memory import	SKIP	-	-	-	-	-	bulk write into a palace; same
 memory import-auto-memory	SKIP	-	-	-	-	-	reads Claude's auto-memory store, writes a palace
+memory recall-deep	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same as memory recall
+memory recall-all	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same
+memory list	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same
+memory prompt-context	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same
+memory task add	SKIP	-	-	-	-	-	writes a palace; same
+memory task list	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same
+memory task complete	SKIP	-	-	-	-	-	writes a palace; same
+memory kg assert	SKIP	-	-	-	-	-	writes a palace's knowledge graph; same
+memory kg query	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same
+memory kg gaps	SKIP	-	-	-	-	-	needs a trusty-memory daemon; same
 compress	SAFE	$H	compress --tool 'cargo test'	$FX/lines.txt	0	-	stdin filter
 wait	SAFE	$H	wait --for file --path $FX/present --timeout 5	-	0	-	`--for check` is NETWORK, see wait --for check
 build-lease	SAFE	$H	build-lease status	-	0	-	flock slots under $H/.trusty-mpm/build-slots; a build after `--` is never smoked

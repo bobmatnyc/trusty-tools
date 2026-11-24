@@ -271,6 +271,8 @@ pub mod memory_reachable;
 // #8352: `tm memory recall|remember|note` — palace access over the daemon
 // socket, so a dead MCP connection does not cut the session off from memory.
 pub mod memory_verbs;
+// #11625: the MCP-only memory tools as `tm memory` verbs, over the same socket.
+pub mod memory_tool_verbs;
 // #9340: `tm memory forget` — the forget-specific half of `memory_verbs`.
 pub mod memory_forget;
 // #9544: `tm memory rename` — trusty-memory's `palace_rename` over the socket.

@@ -256,4 +256,8 @@ pub(crate) enum MemoryAction {
         #[arg(long)]
         memory_socket: Option<PathBuf>,
     },
+
+    // #11625: the MCP-only tools, flattened so they read as `tm memory <verb>`.
+    #[command(flatten)]
+    Tool(super::memory_tools::MemoryToolAction),
 }

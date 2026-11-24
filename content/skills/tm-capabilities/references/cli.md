@@ -133,10 +133,22 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `forget` — Delete one drawer by id or by slot — the native `memory_forget` (#9340)
   - `import` — Bulk-import a directory of memory `.md` files into a palace
   - `import-auto-memory` — Migrate Claude Code's own auto-memory store into the project's palace
+  - `kg` — The knowledge graph — `kg_assert`, `kg_query`, `kg_gaps`
+    - `assert` — Assert a triple — the native `kg_assert`
+    - `gaps` — Knowledge gaps the dream cycle found — the native `kg_gaps`
+    - `query` — Active triples for one subject — the native `kg_query`
+  - `list` — List drawers in a palace — the native `memory_list`
   - `note` — Store a short curated fact — the native `memory_note` (#8352)
+  - `prompt-context` — Print the hot prompt facts as Markdown — the native `get_prompt_context`
   - `recall` — Recall memories from the palace — the native `memory_recall` (#8352)
+  - `recall-all` — Search across palaces — the native `memory_recall_all`
+  - `recall-deep` — Deep recall (L3 full HNSW search) — the native `memory_recall_deep`
   - `remember` — Store a memory in the palace — the native `memory_remember` (#8352)
   - `rename` — Move a palace to a new id — trusty-memory's `palace_rename` (#9544)
+  - `task` — Task drawers — `task_add`, `task_list`, `task_complete`
+    - `add` — Create a Task drawer — the native `task_add`
+    - `complete` — Mark a Task drawer completed — the native `task_complete`
+    - `list` — List open Task drawers — the native `task_list`
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer

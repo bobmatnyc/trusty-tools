@@ -183,6 +183,8 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        // #11625: the MCP-only tools, in their own file.
+        MemoryAction::Tool(action) => super::memory_tool_verbs::run(action).await,
     }
 }
 
