@@ -19,7 +19,7 @@
 //! [`service_cli`] (`install-service`, `uninstall-service`). #11694 adds
 //! [`screenshot`], the bounded window screenshot. #11695 adds [`menu`], the
 //! menu path deny list and the menu tree `computer_read` returns. #11696 adds
-//! [`pointer`], click and drag at window coordinates, bounded at event time.
+//! [`mod@pointer`], click and drag at window coordinates, bounded at event time.
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
 //! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`,
 //! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`,
