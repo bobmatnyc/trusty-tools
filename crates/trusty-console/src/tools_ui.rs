@@ -387,7 +387,8 @@ fn serve_index(mount: &SpaMount) -> Response {
 /// anywhere in the document runs before it — position inside `<head>` is not
 /// load-bearing, but it matches how the daemons injected their own boot globals.
 /// Test: `inject_api_base_lands_before_head_close`,
-/// `inject_api_base_without_head`, `inject_api_base_escapes_the_base`.
+/// `inject_api_base_without_head`, `inject_api_base_escapes_the_base`,
+/// `inject_api_base_skips_a_head_close_inside_a_comment`.
 fn inject_api_base(html: &str, global: &str, api_base: &str) -> String {
     let script = format!(
         "<script>\n\
@@ -395,7 +396,7 @@ fn inject_api_base(html: &str, global: &str, api_base: &str) -> String {
          window.{global} = new URL({api_base:?}, document.baseURI).href;\n\
          </script>"
     );
-    match html.find("</head>") {
+    match live_head_close(html) {
         Some(idx) => {
             let mut out = String::with_capacity(html.len() + script.len());
             out.push_str(&html[..idx]);
@@ -404,6 +405,24 @@ fn inject_api_base(html: &str, global: &str, api_base: &str) -> String {
             out
         }
         None => format!("{script}{html}"),
+    }
+}
+
+/// Byte offset of the first `</head>` outside an `<!-- … -->` comment.
+///
+/// #11758: a comment quoting the tag put the injected base inside the comment.
+fn live_head_close(html: &str) -> Option<usize> {
+    let mut from = 0;
+    loop {
+        let rest = &html[from..];
+        let head = rest.find("</head>")?;
+        match rest.find("<!--") {
+            Some(open) if open < head => {
+                let body = from + open + 4;
+                from = body + html[body..].find("-->")? + 3;
+            }
+            _ => return Some(from + head),
+        }
     }
 }
 
@@ -529,6 +548,36 @@ mod tests {
         assert!(analyze.contains(r#"window.__ANALYZE_BASE__ = new URL("/api/analyze/""#));
         assert!(!memory.contains("__SEARCH_BASE__"));
         assert!(!analyze.contains("__MEMORY_BASE__"));
+    }
+
+    /// #11758: a head-close tag quoted in a comment is not the real one.
+    #[test]
+    fn inject_api_base_skips_a_head_close_inside_a_comment() {
+        let html = "<head><!-- before </head> --><title>x</title></head><body></body>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        let script = out.find("<script>").expect("script injected");
+        assert!(script > out.find("-->").expect("comment kept"));
+        assert!(script < out.rfind("</head>").expect("head close kept"));
+        assert!(out[script..].starts_with("<script>"));
+        assert!(out.ends_with("</head><body></body>"));
+    }
+
+    /// #11758: an unterminated comment swallows its `</head>`, so the base is prepended live.
+    #[test]
+    fn inject_api_base_prepends_when_an_unterminated_comment_holds_head_close() {
+        let html = "<html><head><!-- oops </head><body></body></html>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        assert!(out.starts_with("<script>"), "base must be live: {out}");
+        assert!(out.ends_with(html), "document must follow unchanged: {out}");
+    }
+
+    /// #11758: a `</head>` that exists only inside a comment is no head close.
+    #[test]
+    fn inject_api_base_prepends_when_head_close_is_only_in_a_comment() {
+        let html = "<html><head><!-- </head> --><body></body></html>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        assert!(out.starts_with("<script>"), "base must be live: {out}");
+        assert!(out.ends_with(html), "document must follow unchanged: {out}");
     }
 
     #[test]
