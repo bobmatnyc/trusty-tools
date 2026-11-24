@@ -8,9 +8,10 @@ import test from "node:test";
 import vm from "node:vm";
 
 const dir = new URL("../../extension/", import.meta.url);
-const names = ["worker.js", "pages.js", "pages_read.js", "codes.js", "emulation.js"];
+const names = ["worker.js", "pages.js", "pages_read.js", "codes.js", "emulation.js", "pages_frames.js"];
 const [source, ...rest] = await Promise.all(names.map(f => readFile(new URL(f, dir), "utf8")));
 const scripts = {"pages.js":rest[0], "pages_read.js":rest[1], "codes.js":rest[2], "emulation.js":rest[3],
+  "pages_frames.js":rest[4],
   "indicator.js":""};
 const id = "jabfhcolknbbdajilgpficniedhcfahc";
 const email = "qa@example.org", secret = "a".repeat(64);

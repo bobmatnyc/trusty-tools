@@ -7,8 +7,11 @@
 //! What: [`framed`] checks a `READ`/`FOUND` result plus the optional
 //! `frames` table and `denied_frames` list; [`child_hosts`] lists the URL
 //! hosts of the child frames a result read, for the `frames` audit field.
+//! [`acted`] (#11808) splits the `frame` an action on a frame-scoped ref ran
+//! in off its result, so the op's shape check and the audit both see it.
 //! Test: `a_result_with_frames_passes_and_an_unknown_field_still_refuses`,
-//! `child_hosts_names_each_child_frame_once` below.
+//! `child_hosts_names_each_child_frame_once`,
+//! `an_action_result_names_its_frame_or_is_refused` below.
 
 use crate::pages::{self, Shape, Ty};
 use crate::pages_url::host;
@@ -83,9 +86,45 @@ pub fn framed(value: &Json, shape: Shape) -> Result<Json, Refusal> {
     Ok(value.clone())
 }
 
-/// The URL hosts of the child frames (`id` other than 0) a result read, each
-/// once, in table order; `None` when it read none.
+/// One action result's `frame`: the child frame a frame-scoped ref acted in (#11808).
+pub const ACTED_IN: Shape = &[("id", &[Ty::Int]), ("origin", &[Ty::Str])];
+
+/// Why: an action on a frame-scoped ref runs in a cross-origin child, and the
+/// audit must name that child's origin (#11808); a top-document action's
+/// result must stay byte for byte what it was.
+/// What: splits the optional `frame` key off a worker action result. A
+/// `frame` must be exactly [`ACTED_IN`] with an `id` above 0 and an http(s)
+/// `origin` that has a host, else `BrowserRefused`. Returns the rest, for the
+/// op's own shape check, and the `frame` value.
+/// Test: `an_action_result_names_its_frame_or_is_refused`,
+/// `a_frame_action_is_audited_with_the_frame_origin` in `tests/parity_pages.rs`.
+pub fn acted(raw: &Json) -> Result<(Json, Option<Json>), Refusal> {
+    let Json::Object(pairs) = raw else {
+        return Ok((raw.clone(), None));
+    };
+    let Some(frame) = raw.get("frame") else {
+        return Ok((raw.clone(), None));
+    };
+    pages::shaped(frame, ACTED_IN)?;
+    let id_ok = matches!(frame.get("id"), Some(Json::Int(id)) if *id > 0);
+    let origin = frame.get("origin").and_then(Json::as_str);
+    let web = origin.is_some_and(|o| o.starts_with("https://") || o.starts_with("http://"));
+    if !id_ok || !web || !matches!(host(origin), Ok(Some(_))) {
+        return Err(refused());
+    }
+    let rest = pairs.iter().filter(|(k, _)| k != "frame").cloned();
+    Ok((Json::Object(rest.collect()), Some(frame.clone())))
+}
+
+/// The URL hosts of the child frames a result touched, each once, in table
+/// order: the `frames` entries (`id` other than 0) of a read, or (#11808) the
+/// one `frame` an action ran in; `None` when there is none.
 pub fn child_hosts(result: &Json) -> Option<Json> {
+    if let Some(frame) = result.get("frame") {
+        let origin = frame.get("origin").and_then(Json::as_str);
+        let h = host(origin).ok().flatten()?;
+        return Some(Json::Array(vec![Json::from(h)]));
+    }
     let Some(Json::Array(frames)) = result.get("frames") else {
         return None;
     };
@@ -161,6 +200,33 @@ mod tests {
             Some(Json::Array(vec![Json::from("b.test")]))
         );
         assert_eq!(child_hosts(&parse(&format!("{{{READ}}}"))), None);
+    }
+
+    // #11808: a frame action's result keeps its op shape and names one child.
+    #[test]
+    fn an_action_result_names_its_frame_or_is_refused() {
+        let top = parse(r#"{"document":"D"}"#);
+        assert_eq!(acted(&top).ok(), Some((top.clone(), None)));
+        let framed = parse(r#"{"document":"D","frame":{"id":7,"origin":"https://b.test:8443"}}"#);
+        let (rest, frame) = acted(&framed).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(rest, top);
+        let frame = frame.unwrap_or(Json::Null);
+        assert_eq!(frame.get("id"), Some(&Json::Int(7)));
+        assert_eq!(
+            child_hosts(&framed),
+            Some(Json::Array(vec![Json::from("b.test")]))
+        );
+        let bad = [
+            r#"{"document":"D","frame":{"id":0,"origin":"https://b.test"}}"#,
+            r#"{"document":"D","frame":{"id":7,"origin":"null"}}"#,
+            r#"{"document":"D","frame":{"id":7,"origin":"chrome-extension://x"}}"#,
+            r#"{"document":"D","frame":{"id":7}}"#,
+            r#"{"document":"D","frame":{"id":7,"origin":"https://b.test","text":"x"}}"#,
+            r#"{"document":"D","frame":7}"#,
+        ];
+        for text in bad {
+            assert!(acted(&parse(text)).is_err(), "{text}");
+        }
     }
 
     const FRAMES_INNER: &str = r#"{"id":0,"origin":"https://a.test","url":"https://a.test/","document":"D"},{"id":7,"origin":"https://b.test:8443","url":"https://b.test:8443/child","document":"C"}"#;

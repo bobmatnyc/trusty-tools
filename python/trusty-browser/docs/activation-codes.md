@@ -665,8 +665,9 @@ parent's grant. The worker finds frames with one
 frame is a root when it is the top frame or its parent is cross-origin (a
 root's walk already covers its same-origin descendants), and each root lists
 the declared `src` origins of the cross-origin frames it embeds. It then reads
-each permitted root child with `documentIds: [documentId]`. Click, type and
-the other actions do not reach child frames (#11318).
+each permitted root child with `documentIds: [documentId]`. Six actions also
+reach child frames through frame-scoped refs (#11808, "Actions in child
+frames" below).
 
 With any child frame read or denied, the result adds:
 
@@ -683,9 +684,32 @@ stay the top document's. A child's ref is frame-scoped:
 The worker records frameKey to `documentId` at read time. A frame-scoped
 `scope_ref` or `within_ref` reads that child document only, after the
 permission check again; once the frame navigated (its `documentId` changed),
-or for a frame key no read recorded, it answers `StaleElement`. A
-frame-scoped ref is not an action `ref`: `page_click` and the other actions
-refuse it as `InvalidRequest`.
+or for a frame key no read recorded, it answers `StaleElement`.
+
+#### Actions in child frames (#11808)
+
+`page_click`, `page_hover`, `page_type`, `page_press`, `page_select` and
+`page_scroll` take a frame-scoped `ref`; `page_drag` and `page_upload` refuse
+one as `InvalidRequest`. Tool names and request fields are unchanged. The
+worker checks, in order: the lease's `document` is still the tab's top
+document (`DocumentChanged`); a read under that top document recorded the
+frame key (`StaleElement`); Chrome still holds host permission for the
+child's own origin (`PermissionNeeded`, with `origin` set to the child's
+origin). It then injects only into the recorded child `documentId`, never the
+top frame; a child that navigated answers `StaleElement`. The tab scope and
+write gate are the same as for any action.
+
+A click is trusted CDP input at a top-frame point: the child's point is lifted
+one parent at a time. Each hop injects a listener into every frame, the child
+posts a nonce to its parent, and the parent names the iframe whose
+`contentWindow` sent it, adds that iframe's content-box offset and hit-tests
+the point (`Obscured` when covered). A parent the extension cannot reach, or
+more than 8 hops, answers `PermissionNeeded`.
+
+The reply (worker `result` and agent reply) adds `"frame": {"id": int,
+"origin": str}`, the child it ran in. The broker refuses a `frame` that is not
+exactly that, with `id` above 0 and an http(s) origin (`BrowserRefused`). The
+`operation` audit line lists the child's host in `frames`, as a read does.
 
 Child entries carry no viewport distance: they keep document order and
 `viewport_only` does not filter them. `include_text` reads the top

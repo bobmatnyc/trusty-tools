@@ -1,7 +1,8 @@
-"""Two-HTTPS-origin UAT for cross-origin iframe reads (#11301).
+"""Two-HTTPS-origin UAT for cross-origin iframe reads (#11301) and actions (#11808).
 
-Why: the unit tests mock chrome.scripting; this proves page_read and page_find
-against real Chromium frames, real host permissions and real documentIds.
+Why: the unit tests mock chrome.scripting; this proves page_read and page_find,
+and the actions on the refs they return, against real Chromium frames, real
+host permissions and real documentIds.
 What: one HTTPS server with a self-signed certificate answers a.test (the top
 page, embedding an iframe) and b.test (the child, labelled CHILD-LABEL-7);
 Chromium maps both names to 127.0.0.1 with --host-resolver-rules and loads a
@@ -13,7 +14,10 @@ port would drive them.
 Run: python3 -m pytest crates/trusty-browser/tests/extension/test_frames_uat.py
 Test: `test_granted_child_is_read_and_found_with_attribution`,
 `test_child_without_permission_is_denied`, `test_child_ref_is_refused_after_the_frame_navigates`,
-`test_include_text_reads_top_and_child_text_on_a_link_heavy_page`.
+`test_include_text_reads_top_and_child_text_on_a_link_heavy_page`,
+`test_type_submit_and_read_back_in_a_granted_child_frame`,
+`test_click_in_a_granted_child_frame_lands_trusted`,
+`test_action_on_an_ungranted_child_origin_is_refused`.
 """
 
 import json
@@ -41,7 +45,21 @@ def pages(port):
             f'<a href="/l{i}">Link number {i}</a> ' for i in range(1500)) + f'<iframe src="{child}"></iframe>',
         ("b.test", "/child"): f'<title>Child</title><form><button>{LABEL}</button><a href="/next">Next</a></form>',
         ("b.test", "/next"): "<title>Next</title><button>After navigation</button>",
+        # #11808: an assistant-like widget in a cross-origin frame, offset inside the top page.
+        ("a.test", "/form"): '<title>Top</title><button>Top button</button>'
+        '<div style="height:400px"></div><iframe src="https://b.test:%d/form" '
+        'style="width:520px;height:320px;padding:7px;border:5px solid"></iframe>' % port,
+        ("b.test", "/form"): FORM,
     }
+
+
+FORM = """<title>Child form</title><div style="height:60px"></div>
+<form id="f"><input name="q" aria-label="Question"><button type="submit">Send</button></form>
+<p id="reply"></p><button id="probe">Trusted probe</button><p id="trust"></p>
+<script>
+f.addEventListener("submit", e => { e.preventDefault(); reply.textContent = "Echo: " + f.q.value; });
+probe.addEventListener("click", e => { trust.textContent = "clicked trusted=" + e.isTrusted; });
+</script>"""
 
 
 @pytest.fixture(scope="module")
@@ -86,13 +104,27 @@ ASK = """async ([tab, op, fields]) => {
     return await __qa.command({id:1, op, email:"qa@example.org", grant:"g", tab, document:null, ...fields});
   } catch (error) { return {error:error.message}; }
 }"""
+# #11808: ASK plus a refusal's relayed fields, and a `revoke` seam: Chrome cannot drop a manifest host
+# permission at runtime, so the worker's own permission check is made to answer false for `pattern`.
+ASK_FIELDS = """async ([tab, op, fields]) => {
+  if (op === "revoke") {
+    const contains = chrome.permissions.contains.bind(chrome.permissions);
+    chrome.permissions.contains = async q => q.origins.some(o => o.startsWith(fields.pattern)) ? false : contains(q);
+    return {revoked:true};
+  }
+  try {
+    return await __qa.command({id:1, op, email:"qa@example.org", grant:"g", tab, document:null, ...fields});
+  } catch (error) { return {error:error.message, ...error.fields}; }
+}"""
 READ = {"scope_ref": None, "max_chars": 50000, "viewport_only": False, "include_text": False}
 FIND = {"role": None, "name": LABEL, "text": None, "within_ref": None, "limit": 10}
 
 
-def browse(tmp_path, port, granted, body, path="/"):
+def browse(tmp_path, port, granted, body, path="/", ask_script=ASK):
     """Load the extension copy granting `granted` origins, open a.test `path`, and run `body(ask, tab)`."""
     copy = tmp_path / "extension"
+    shutil.rmtree(copy, ignore_errors=True)
+    shutil.rmtree(tmp_path / "profile", ignore_errors=True)
     shutil.copytree(EXTENSION, copy)
     manifest = json.loads((copy / "manifest.json").read_text())
     manifest["host_permissions"] = [f"https://{host}/*" for host in granted]
@@ -110,7 +142,7 @@ def browse(tmp_path, port, granted, body, path="/"):
             child = next(f for f in tab.frames if f.url.startswith("https://b.test"))
             child.wait_for_selector("button")
             tab_id = worker.evaluate(SETUP)
-            body(lambda op, fields: worker.evaluate(ASK, [tab_id, op, fields]), child)
+            body(lambda op, fields: worker.evaluate(ask_script, [tab_id, op, fields]), child)
         finally:
             context.close()
 
@@ -166,3 +198,58 @@ def test_include_text_reads_top_and_child_text_on_a_link_heavy_page(site, tmp_pa
         assert result["truncated"] is True
         assert len(json.dumps(result, separators=(",", ":")).encode()) <= READ["max_chars"]
     browse(tmp_path, site, ["a.test", "b.test"], body, "/links")
+
+
+# #11808: actions on the refs a read returned, inside a real cross-origin frame.
+def find(ask, name):
+    """page_find `name`; returns (the lease's top document, the first match)."""
+    found = ask("page_find", {**FIND, "name": name})["result"]
+    assert found["matches"], found
+    return found["document"], found["matches"][0]
+
+
+def test_type_submit_and_read_back_in_a_granted_child_frame(site, tmp_path):
+    def body(ask, child):
+        top, box = find(ask, "Question")
+        assert ":" in box["ref"] and box["frame"] != 0
+        typed = ask("page_type", {"document": top, "ref": box["ref"], "text": "hello frame\n"})
+        assert typed["result"] == {"document": top, "frame": {"id": box["frame"],
+                                                              "origin": f"https://b.test:{site}"}}, typed
+        assert child.evaluate("document.querySelector('input').value") == "hello frame"
+        back = ask("page_read", {**READ, "include_text": True})["result"]
+        assert f'[frame {box["frame"]}]' in back["text"] and "Echo: hello frame" in back["text"], back["text"]
+        # The top document's own button was never touched by the frame action.
+        assert back["document"] == top
+    browse(tmp_path, site, ["a.test", "b.test"], body, "/form")
+
+
+def test_click_in_a_granted_child_frame_lands_trusted(site, tmp_path):
+    def body(ask, child):
+        top, probe = find(ask, "Trusted probe")
+        clicked = ask("page_click", {"document": top, "ref": probe["ref"], "dialog": "dismiss"})
+        assert clicked["result"]["frame"]["origin"] == f"https://b.test:{site}", clicked
+        child.wait_for_selector("text=clicked trusted=true", timeout=3000)
+    browse(tmp_path, site, ["a.test", "b.test"], body, "/form")
+
+
+def test_action_on_an_ungranted_child_origin_is_refused(site, tmp_path):
+    def ungranted(ask, child):
+        result = ask("page_read", READ)["result"]
+        assert result["denied_frames"] == [{"origin": f"https://b.test:{site}", "reason": "no_permission"}]
+        # No read recorded the child, so any frame ref names nothing; nothing is typed anywhere.
+        for frame_id in range(1, 6):
+            reply = ask("page_type", {"document": result["document"], "ref": f"{frame_id}:1.0", "text": "x"})
+            assert reply == {"error": "StaleElement"}, reply
+        assert child.evaluate("document.querySelector('input').value") == ""
+    browse(tmp_path, site, ["a.test"], ungranted, "/form")
+
+    def revoked(ask, child):
+        top, box = find(ask, "Question")
+        # The child origin's permission is gone by the time the action runs.
+        reply = ask("revoke", {"pattern": "https://b.test/"})
+        assert reply == {"revoked": True}
+        refused = ask("page_type", {"document": top, "ref": box["ref"], "text": "x"})
+        assert refused == {"error": "PermissionNeeded", "tab": refused.get("tab"),
+                           "origin": f"https://b.test:{site}"}, refused
+        assert child.evaluate("document.querySelector('input').value") == ""
+    browse(tmp_path, site, ["a.test", "b.test"], revoked, "/form", ask_script=ASK_FIELDS)

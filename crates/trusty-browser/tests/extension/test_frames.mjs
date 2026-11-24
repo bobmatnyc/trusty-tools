@@ -1,12 +1,13 @@
-// Cross-origin child-frame reads in page_read / page_find (#11301), against the shipped extension in
-// crates/trusty-browser/extension with mocked chrome APIs. Run: node --test crates/trusty-browser/tests/extension/
+// Cross-origin child-frame reads in page_read / page_find (#11301) and actions on frame-scoped refs (#11808),
+// against the shipped extension in crates/trusty-browser/extension with mocked chrome APIs.
+// Run: node --test crates/trusty-browser/tests/extension/
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
 const dir = new URL("../../extension/", import.meta.url);
-const sources = await Promise.all(["pages_read.js", "emulation.js", "pages.js"].map(f => readFile(new URL(f, dir), "utf8")));
+const sources = await Promise.all(["pages_read.js", "emulation.js", "pages_frames.js", "pages.js"].map(f => readFile(new URL(f, dir), "utf8")));
 const email = "qa@example.org";
 const READ = {scope_ref:null, max_chars:50000, viewport_only:false, include_text:false};
 const FIND = {role:null, name:"CHILD-LABEL", text:null, within_ref:null, limit:10};
@@ -20,10 +21,12 @@ const read = (origin, elements, text = "") => ({origin, url:origin + "/", title:
 const found = (origin, matches) => ({origin, matches:matches.map(m => ({...m, in:{role:"form", name:"", ref:"1.9"}})),
   truncated:false});
 
-// A tab whose frames are `frames` ({id, origin, document, root, children, elements, text}); frame 0 is the top.
-// `allowed` holds the granted host patterns; `gone` the documentIds whose frame navigated away.
+// A tab whose frames are `frames` ({id, origin, document, root, children, elements, text, parent}); frame 0 is
+// the top. `allowed` holds the granted host patterns; `gone` the documentIds whose frame navigated away;
+// `input` the CDP commands a trusted click sent. #11808: an injected action types into `f.value`, and a
+// trailing newline submits it, which sets the frame's text to "Echo: <value>".
 function browser({frames, allowed = [TOP + "/*"], injected = null}) {
-  const calls = [], gone = new Set();
+  const calls = [], gone = new Set(), input = [], posted = new Map();
   const byDoc = new Map(frames.map(f => [f.document, f]));
   const contains = ({origins:[pattern]}) => allowed.includes(pattern) || allowed.includes("https://*/*");
   const reachable = f => (injected ?? (f => contains({origins:[new URL(f.origin).protocol + "//" +
@@ -32,6 +35,25 @@ function browser({frames, allowed = [TOP + "/*"], injected = null}) {
     if (func.name === "pageProbe") return [f.origin, "T", f.origin + "/"];
     if (func.name === "pageFrames") return {origin:f.origin, url:f.origin + "/", root:f.root ?? f.id !== 0,
       children:f.children ?? []};
+    if (func.name === "pageFrameHost") return true;
+    if (func.name === "pageFramePost") { posted.set(args[0], f); return f.id !== 0; }
+    if (func.name === "pageFrameOwner") {
+      const child = posted.get(args[0]);
+      return child && (child.parent ?? 0) === f.id ? {ok:true, x:args[1].x + 100, y:args[1].y + 200} : null;
+    }
+    const ACTS = {pageKeys:0, pageSelect:0, pageHover:0, pageTarget:0, pageScroll:1, pageDrag:0, pageSetFiles:0};
+    if (func.name in ACTS) {
+      if (!f.elements.some(e => e.ref === args[ACTS[func.name]])) return {error:"StaleElement"};
+      if (func.name === "pageTarget") return {ok:true, x:10, y:20};
+      if (func.name === "pageKeys" && args[1] === "type") {
+        f.value = args[2].replace(/\n$/, "");
+        if (args[2].endsWith("\n")) f.text = "Echo: " + f.value;
+      }
+      if (func.name === "pageSelect") return {ok:true, changed:true, value:args[1]};
+      if (func.name === "pageScroll") return {ok:true, view:{scroll_y:0, scroll_height:10, viewport_height:10,
+        grew:false, at_end:true}};
+      return {ok:true};
+    }
     const [mode, , options] = args;
     const scope = options.scope_ref ?? options.within_ref;
     if (scope != null && !f.elements.some(e => e.ref === scope)) return {error:"StaleElement"};
@@ -40,6 +62,8 @@ function browser({frames, allowed = [TOP + "/*"], injected = null}) {
   };
   const chrome = {
     tabs:{get:async id => ({id, status:"complete"}), onUpdated:{addListener(){}, removeListener(){}}},
+    debugger:{attach:async () => {}, detach:async () => {}, onEvent:{addListener(){}, removeListener(){}},
+      sendCommand:async (_, method, params) => { input.push([method, params]); return {}; }},
     permissions:{contains:async query => contains(query)},
     scripting:{async executeScript({target, func, args = []}) {
       calls.push({target, func:func.name, args});
@@ -56,7 +80,7 @@ function browser({frames, allowed = [TOP + "/*"], injected = null}) {
   };
   const ctx = vm.createContext({chrome, TextEncoder, URL, setTimeout, clearTimeout, crypto:globalThis.crypto});
   for (const source of sources) vm.runInContext(source, ctx);
-  return {ctx, chrome, calls, gone};
+  return {ctx, chrome, calls, gone, input};
 }
 
 function commands(b, row = {scope:"profile"}) {
@@ -143,8 +167,9 @@ test("a child ref is refused once its frame navigated", async () => {
   b.gone.add("D7");
   await failed(ask(cmds, "page_read", {...READ, scope_ref:"7:22.0"}), "StaleElement");
   await failed(ask(cmds, "page_find", {...FIND, within_ref:"7:22.0"}), "StaleElement");
-  // A frame ref is never an action target: click and type in frames are not in this build (#11318).
-  await failed(ask(cmds, "page_click", {ref:"7:22.0", dialog:"dismiss"}), "InvalidRequest");
+  // #11808: drag and upload still take no frame ref; the six actions do (see the tests below).
+  await failed(ask(cmds, "page_drag", {ref:"7:22.0", target:"7:22.1"}), "InvalidRequest");
+  await failed(ask(cmds, "page_upload", {ref:"7:22.0", files:[{name:"a", type:"", data:""}]}), "InvalidRequest");
 });
 
 test("the frame count and byte share stay inside the result budget", async () => {
@@ -248,4 +273,97 @@ test("include_text reads each granted child frame's text within its share", asyn
   const child = b.calls.find(c => c.target.documentIds && c.func === "pageInspect");
   assert.equal(child.args[2].include_text, true);
   assert.equal(child.args[2].max_chars, 25000);
+});
+
+// #11808: the six actions on frame-scoped refs. Each runs a read first, as an agent would, so the worker has
+// recorded the child's documentId under the lease's top document.
+const lease = async (cmds, fields = READ) => plain(await ask(cmds, "page_read", fields)).result.document;
+const act = (cmds, op, fields, document = "D0") => ask(cmds, op, {...fields, document});
+const ran = (b, func) => plain(b.calls.filter(c => c.func === func && c.target.documentIds));
+const form = (child = {}) => page({elements:[element("22.0", "CHILD-LABEL-7"), element("22.1", "Send")],
+  ...child});
+
+test("a granted child frame is typed into, submitted and read back", async () => {
+  const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"]});
+  const cmds = commands(b);
+  const top = await lease(cmds);
+  const box = plain(await ask(cmds, "page_find", FIND)).result.matches[0];
+  assert.equal(box.ref, "7:22.0");
+  const typed = plain(await act(cmds, "page_type", {ref:box.ref, text:"hello\n"}, top));
+  assert.deepEqual(typed.result, {document:"D0", frame:{id:7, origin:CHILD}});
+  const keys = ran(b, "pageKeys");
+  assert.deepEqual(keys.map(c => [c.target.documentIds, c.args]), [[["D7"], ["22.0", "type", "hello\n"]]]);
+  const back = plain(await ask(cmds, "page_read", TEXT_READ)).result;
+  assert.ok(back.text.includes("[frame 7]\nEcho: hello"), back.text);
+  // The other actions reach the same child document with the child-local ref.
+  const replies = [
+    await act(cmds, "page_press", {ref:"7:22.0", key:"Enter", modifiers:[]}),
+    await act(cmds, "page_select", {ref:"7:22.1", value:"x"}),
+    await act(cmds, "page_hover", {ref:"7:22.1"}),
+    await act(cmds, "page_scroll", {to:"element", ref:"7:22.1", wait_ms:0}),
+  ].map(r => plain(r).result);
+  assert.ok(replies.every(r => r.document === "D0" && r.frame.id === 7 && r.frame.origin === CHILD));
+  assert.equal(replies[1].value, "x");
+  for (const func of ["pageSelect", "pageHover", "pageScroll"]) {
+    assert.deepEqual(ran(b, func).map(c => c.target.documentIds), [["D7"]], func);
+  }
+  // A top-document ref still runs in the top document and names no frame.
+  assert.deepEqual(plain(await act(cmds, "page_hover", {ref:"11.0"})).result, {document:"D0"});
+  assert.deepEqual(ran(b, "pageHover").at(-1).target.documentIds, ["D0"]);
+});
+
+test("an action on a child origin without permission is refused and never reaches the top", async () => {
+  const allowed = [TOP + "/*", CHILD + "/*"];
+  const b = browser({frames:form(), allowed});
+  const cmds = commands(b);
+  // No read recorded the child yet: the ref names nothing, and nothing runs.
+  await failed(act(cmds, "page_type", {ref:"7:22.0", text:"x"}), "StaleElement");
+  const top = await lease(cmds);
+  allowed.splice(1);
+  const ops = [["page_type", {text:"x"}], ["page_press", {key:"a", modifiers:[]}], ["page_select", {value:"x"}],
+    ["page_hover", {}], ["page_scroll", {to:"element", wait_ms:0}], ["page_click", {dialog:"dismiss"}]];
+  for (const [op, fields] of ops) {
+    await assert.rejects(act(cmds, op, {ref:"7:22.0", ...fields}, top),
+      e => e.message === "PermissionNeeded" && e.fields.origin === CHILD && e.fields.tab === 1, op);
+  }
+  const acting = ["pageKeys", "pageSelect", "pageHover", "pageScroll", "pageTarget"];
+  assert.deepEqual(b.calls.filter(c => acting.includes(c.func)), [], "no frame and no top document was acted on");
+  assert.deepEqual(b.input, [], "no trusted input was sent");
+  // A child that was denied at read time never gets a ref, so a forged one names nothing.
+  const denied = browser({frames:form()});
+  const dc = commands(denied);
+  const r = plain(await ask(dc, "page_read", READ)).result;
+  assert.deepEqual(r.denied_frames, [{origin:CHILD, reason:"no_permission"}]);
+  await failed(act(dc, "page_type", {ref:"7:22.0", text:"x"}, r.document), "StaleElement");
+  assert.deepEqual(denied.calls.filter(c => acting.includes(c.func)), []);
+});
+
+test("a frame ref from an earlier top document or a navigated child is stale", async () => {
+  const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"]});
+  const cmds = commands(b);
+  await lease(cmds);
+  // The lease names another top document: the worker refuses before touching any frame.
+  await failed(act(cmds, "page_type", {ref:"7:22.0", text:"x"}, "D-old"), "DocumentChanged");
+  b.gone.add("D7");
+  await failed(act(cmds, "page_type", {ref:"7:22.0", text:"x"}), "StaleElement");
+  // The record is dropped: a repeat answers StaleElement without injecting.
+  const before = b.calls.length;
+  await failed(act(cmds, "page_type", {ref:"7:22.0", text:"x"}), "StaleElement");
+  assert.ok(!b.calls.slice(before).some(c => c.func === "pageKeys"));
+});
+
+test("a trusted click in a child frame lands at the top-frame point", async () => {
+  const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"]});
+  const cmds = commands(b);
+  const top = await lease(cmds);
+  const reply = plain(await act(cmds, "page_click", {ref:"7:22.1", dialog:"dismiss"}, top));
+  assert.deepEqual(reply.result, {document:"D0", frame:{id:7, origin:CHILD}});
+  assert.deepEqual(ran(b, "pageTarget").map(c => [c.target.documentIds, c.args]), [[["D7"], ["22.1"]]]);
+  const mouse = b.input.filter(([m]) => m === "Input.dispatchMouseEvent").map(([, p]) => [p.type, p.x, p.y]);
+  assert.deepEqual(mouse, [["mouseMoved", 110, 220], ["mousePressed", 110, 220], ["mouseReleased", 110, 220]]);
+  // A child whose parent the extension cannot reach is refused before any input.
+  const deep = browser({frames:form({parent:5}), allowed:[TOP + "/*", CHILD + "/*"]});
+  const dc = commands(deep);
+  await failed(act(dc, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(dc)), "PermissionNeeded");
+  assert.ok(!deep.input.some(([m]) => m === "Input.dispatchMouseEvent"));
 });
