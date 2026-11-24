@@ -437,7 +437,7 @@
  },
  {
   "name": "computer_invoke_menu",
-  "description": "Invoke a menu item of the granted app by its label path, when the grant names invoke_menu; activates the target app (brings it to the front); the path must be one computer_read listed as menu for this window; the Apple and app menus, Quit, Close, Hide Others, Show All, Move to Trash, Print, Export, Save As, Services, Open With, Share and System Settings are never listed. Known limitation: Localized labels outside first two menus (e.g., 'Teilen' for Share in File menu) may not be blocked. First two menu items (Apple, app menu) are refused by position.",
+  "description": "Invoke a menu item of the granted app by its label path, when the grant names invoke_menu; the broker checks pid and window_id scope before forwarding the call to the driver (authority boundary: out-of-scope calls are refused before driver activation); upon authorization, the driver activates the target app (brings it to the front); the path must be one computer_read listed as menu for this window; the Apple and app menus, Quit, Close, Hide Others, Show All, Move to Trash, Print, Export, Save As, Services, Open With, Share and System Settings are never listed. Known limitation: Localized labels outside first two menus (e.g., 'Teilen' for Share in File menu) may not be blocked. First two menu items (Apple, app menu) are refused by position.",
   "inputSchema": {
    "type": "object",
    "properties": {
