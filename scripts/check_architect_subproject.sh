@@ -85,7 +85,8 @@ TAB="$(printf '\t')"
 # then the six D2 skills (review, drift, provisioning, macOS, improvements,
 # host administration), then the dashboard store set and its schemas (P4a-1),
 # then the serve set, the read-only views, the page, Live and vendor (D3b),
-# then the P1 dashboard routes, siblings, pending-answers set and design tokens (#10571).
+# then the P1 dashboard routes, siblings, pending-answers set and design tokens (#10571),
+# then the five Architect agents, their two skills and the claim checker (D3c).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -105,6 +106,15 @@ skills/architect-macos.md|content/instructions/architect/skills/architect-macos.
 skills/architect-improvements.md|content/instructions/architect/skills/architect-improvements.md
 skills/architect-host-admin.md|content/instructions/architect/skills/architect-host-admin.md
 skills/architect-dashboard.md|content/instructions/architect/skills/architect-dashboard.md
+skills/architect-drift-guard.md|content/instructions/architect/skills/architect-drift-guard.md
+skills/architect-improver.md|content/instructions/architect/skills/architect-improver.md
+agents/runner.md|content/instructions/architect/agents/runner.md
+agents/event-extractor.md|content/instructions/architect/agents/event-extractor.md
+agents/improver.md|content/instructions/architect/agents/improver.md
+agents/improvement-curator.md|content/instructions/architect/agents/improvement-curator.md
+agents/drift-guard.md|content/instructions/architect/agents/drift-guard.md
+scripts/verify-claim.py|crates/trusty-mpm/src/assets/architect/scripts/verify-claim.py
+scripts/verify_claim_input.py|crates/trusty-mpm/src/assets/architect/scripts/verify_claim_input.py
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/fleet_poll_cfg.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_cfg.py
@@ -427,6 +437,7 @@ NL="
 "
 for unpaired_rel in "crates/trusty-mpm/src/assets/architect" \
                     "content/instructions/architect/skills" \
+                    "content/instructions/architect/agents" \
                     "content/instructions/architect/templates"; do
   [ -d "$ROOT/$unpaired_rel" ] || continue
   shipped="$(find "$ROOT/$unpaired_rel" -type f ! -name .DS_Store \

@@ -68,9 +68,19 @@ Load the named skill before the step it covers. `tm fleet init` writes them to `
 - `architect-workflow`: pass start, `local/` record writes, end of pass, cadence, heartbeat.
 - `architect-host-admin`: resource report, builder bands, health check, secrets, build cache, single-account mode.
 - `architect-improvements`, `architect-project-provision`, `architect-review`, `architect-drift-check`, `architect-macos`, `architect-dashboard`: by their descriptions.
+- `architect-drift-guard`: a scheduled drift-guard day; a drift review of the instructions; drift-guard reports.
+- `architect-improver`: a scheduled improver day; improver reports.
 - `tm-fleet-check` (every wake), `tm-context-refresh` (context bar, pause, clear, resume).
 
 Voice guide: `docs/architect/voice.md`. Scripts and layout: `scripts/` and the Layout table in `CLAUDE.md`.
+
+## Agents
+`tm fleet init` writes these agents to `.claude/agents/`. Dispatch each by name; each writes only what its own file names.
+- `runner`: one read-only shell check (gh, CI status, tmux capture), at most 20 lines back.
+- `event-extractor`: one PM message as an event line, checked by `scripts/verify-claim.py`.
+- `improvement-curator`: the daily improvement consolidation (details: architect-improvements).
+- `improver`: a scheduled improver run (details: architect-improver).
+- `drift-guard`: a scheduled instruction-drift run (details: architect-drift-guard).
 
 ## Owner overrides (AGENTS.md)
 
