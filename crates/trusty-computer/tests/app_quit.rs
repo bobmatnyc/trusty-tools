@@ -30,8 +30,7 @@ fn quit(rig: &mut Rig, rid: &str, bundle: &str) -> Value {
 
 #[test]
 fn quit_args_are_checked() {
-    let rule = rule(QUIT_TOOL).expect("rule");
-    assert_eq!(rule.verdict, Verdict::Filter);
+    assert_eq!(rule(QUIT_TOOL).expect("rule").verdict, Verdict::Filter);
     assert_eq!(code(json!({"pid": pid(), "bundle_id": BUNDLE})), None);
     for (args, want) in [
         (json!({"bundle_id": BUNDLE}), "pid_required"),
