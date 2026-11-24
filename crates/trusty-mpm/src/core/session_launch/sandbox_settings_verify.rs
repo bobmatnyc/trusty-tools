@@ -51,7 +51,8 @@ const GLOB_CHARS: [char; 4] = ['*', '?', '[', '{'];
 /// block holds a key [`project_policy`] does not write, when any tier's
 /// `permissions.additionalDirectories` names a path outside those roots, and
 /// when a widening key or `excludedCommands` is `null`. For the Architect, refuses unless the project
-/// file's `sandbox.enabled` is `false`. FAIL-CLOSED: a missing project or user
+/// file's `sandbox.enabled` is `false` and, #10102, its `env` carries the
+/// sccache client env the policy names. FAIL-CLOSED: a missing project or user
 /// file, any of the three that cannot be read or is not a JSON object, an
 /// allow list or rule that is not text, and a rule path that cannot be placed
 /// are errors; only a missing local file is fine.
@@ -82,11 +83,24 @@ pub fn verify_sandbox_settings(
     let project = read(&project_file, true)?.unwrap_or(Value::Null);
     let enabled = project.pointer("/sandbox/enabled");
     if role == SandboxRole::Architect {
-        return (enabled == Some(&Value::Bool(false)))
-            .then_some(())
-            .ok_or_else(|| {
-                refused("the Architect's project settings do not set `sandbox.enabled: false`")
-            });
+        if enabled != Some(&Value::Bool(false)) {
+            return Err(refused(
+                "the Architect's project settings do not set `sandbox.enabled: false`",
+            ));
+        }
+        // #10102: the sccache client env the Architect builds with.
+        let wanted = project_policy(role, inputs);
+        let env = wanted.get("env").and_then(Value::as_object);
+        return match env
+            .into_iter()
+            .flatten()
+            .find(|(k, v)| project.pointer(&format!("/env/{k}")) != Some(*v))
+        {
+            Some((k, _)) => Err(refused(&format!(
+                "the Architect's project settings do not carry the sccache client env `{k}`"
+            ))),
+            None => Ok(()),
+        };
     }
     let local_file = claude.join("settings.local.json");
     let local = read(&local_file, false)?.unwrap_or(Value::Null);

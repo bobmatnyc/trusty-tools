@@ -297,6 +297,8 @@ pub(crate) async fn launch(
     // #7422: compose this session's default-deny MCP config before the line
     // that names it. Fatal — launching without `--mcp-config` would hand the
     // pane the whole shared server map.
+    // #10102: the role's sandbox is written and verified, or the launch refuses.
+    super::launch_home::apply_sandbox(&managed_path, home, config_dir.as_deref(), cli.profile)?;
     let files = launch_files(&managed_path, config_dir.as_deref(), home, cli.profile)?;
     // #8308: the launch travels in a mode-0600 spec; the pane types a short
     // line naming it, so no token or path is typed.
@@ -622,6 +624,8 @@ pub(crate) async fn connect(
         // #7422: same fail-closed composition as `tm launch`.
         // #10101: these run after the registration, so a failure rolls it back.
         let started = (|| -> anyhow::Result<()> {
+            // #10102: fail closed before the pane gets its `claude`.
+            super::launch_home::apply_sandbox(&path, home, config_dir.as_deref(), cli.profile)?;
             let files = launch_files(&path, config_dir.as_deref(), home, cli.profile)?;
             // #8308: same spec carrier as `tm launch`.
             let claude_spec = connect_claude_spec(

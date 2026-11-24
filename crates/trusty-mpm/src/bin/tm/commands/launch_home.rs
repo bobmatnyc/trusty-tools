@@ -94,6 +94,31 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
     dir
 }
 
+/// Write and verify the launch's sandbox in `workspace` (#10102).
+///
+/// Why: #8928 step 6 — `tm launch`, `tm connect` and the Architect launch
+/// start `claude` only inside the sandbox their role asked for.
+/// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
+/// `profile`'s role, with `config_dir` (the relocated `CLAUDE_CONFIG_DIR`) as
+/// the user tier. FAIL-CLOSED: no home, no config dir, or a read-back that
+/// does not verify is an error, and every caller refuses its launch on it.
+/// Test: `apply_sandbox_refuses_without_a_config_dir_and_applies_with_one`,
+/// `apply_sandbox_refuses_a_workspace_that_does_not_verify`.
+pub(crate) fn apply_sandbox(
+    workspace: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+) -> anyhow::Result<()> {
+    use trusty_mpm::core::session_launch as sl;
+    let home = home.ok_or_else(|| {
+        anyhow::anyhow!("no home directory resolved; the sandbox cannot be applied")
+    })?;
+    let inputs = sl::launch_sandbox_inputs(workspace, home);
+    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, config_dir)
+        .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
 /// Compose the session-scoped MCP config and the owner settings file under
 /// `home`'s `~/.trusty-tools/trusty-mpm/` (#7422, #8545, #8988).
 ///
@@ -153,6 +178,8 @@ pub(crate) fn strip_global_hooks(home: Option<&Path>) {
 
 #[cfg(test)]
 mod tests {
+    use super::apply_sandbox;
+
     /// #8988: a workspace with no owner gets its session-MCP file and no
     /// settings file, so `tm launch`/`tm connect` argv stays as before.
     #[test]
@@ -208,5 +235,41 @@ mod tests {
                 super::resolve_launch_home(flag, Some(OsStr::new("/tmp/sbx/data")), home.clone());
             assert_eq!(got.expect("no sandbox never refuses"), home);
         }
+    }
+
+    /// #10102: no config dir refuses; a tm-owned one applies and verifies.
+    #[test]
+    fn apply_sandbox_refuses_without_a_config_dir_and_applies_with_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        let home = root.join("home");
+        let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
+        let err = apply_sandbox(&ws, Some(&home), None, pm).expect_err("unset refuses");
+        assert!(err.to_string().contains("CLAUDE_CONFIG_DIR"), "{err}");
+        assert!(!home.join(".claude").exists(), "no `~/.claude` write");
+        let config = home.join(".trusty-tools/trusty-mpm/claude-config");
+        apply_sandbox(&ws, Some(&home), Some(&config), pm).expect("applies");
+        assert!(config.join("settings.json").exists());
+    }
+
+    /// #10102 Fail-Open Check: a workspace whose read-back fails is an error.
+    #[test]
+    fn apply_sandbox_refuses_a_workspace_that_does_not_verify() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).expect("mkdir");
+        std::fs::write(
+            ws.join(".claude/settings.local.json"),
+            r#"{"sandbox":{"enabled":false}}"#,
+        )
+        .expect("plant");
+        let home = root.join("home");
+        let config = home.join(".trusty-tools/trusty-mpm/claude-config");
+        let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
+        let err = apply_sandbox(&ws, Some(&home), Some(&config), pm).expect_err("refuses");
+        assert!(err.to_string().contains("settings.local.json"), "{err}");
     }
 }

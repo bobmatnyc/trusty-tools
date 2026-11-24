@@ -2216,3 +2216,71 @@ fn an_architect_inplace_relaunch_carries_the_lockdown() {
     let missing = tmp.path().join("gone.json");
     assert!(super::inplace_tail_args(SessionProfile::Architect, Some(&missing)).is_err());
 }
+
+/// #10102: a managed spawn writes the PM sandbox into the workspace and tm's
+/// user tier, and both verify, before the launch line is typed.
+#[test]
+#[serial_test::serial]
+fn spawn_writes_and_verifies_the_sandbox_before_the_line() {
+    // #9123: the spawn resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    drive_spawn(&fake, &home);
+    let read = |p: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(p).expect("read")).expect("json")
+    };
+    let project = read(&home.home().join(".claude/settings.json"));
+    assert_eq!(
+        project.pointer("/sandbox/enabled"),
+        Some(&serde_json::json!(true))
+    );
+    let fw = FrameworkPaths::from_root(home.home().join(".trusty-mpm"));
+    let config_dir = fw.managed_claude_config_dir();
+    let mut inputs = crate::core::session_launch::SandboxInputs::new(home.home(), home.home());
+    inputs.cargo_target_dir = None;
+    crate::core::session_launch::verify_sandbox_settings(
+        crate::core::session_launch::SandboxRole::Pm,
+        &inputs,
+        &config_dir,
+    )
+    .expect("the spawned workspace verifies");
+}
+
+/// #10102 Fail-Open Check: a sandbox that does not verify refuses the spawn
+/// and the resume, and nothing is typed into the pane.
+#[test]
+#[serial_test::serial]
+fn spawn_refuses_when_the_sandbox_does_not_verify() {
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let local = home.home().join(".claude/settings.local.json");
+    std::fs::create_dir_all(local.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&local, r#"{"sandbox":{"enabled":false}}"#).expect("plant override");
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let err = adapter
+        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect_err("an unverified sandbox must refuse the spawn");
+    assert!(err.to_string().contains("settings.local.json"), "{err}");
+    let err = adapter
+        .spawn_resume(
+            "tm-sess",
+            None,
+            home.home(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect_err("an unverified sandbox must refuse the resume");
+    assert!(err.to_string().contains("settings.local.json"), "{err}");
+    assert!(
+        fake.sends.lock().expect("send log").is_empty()
+            && fake.pane_sends.lock().expect("pane send log").is_empty(),
+        "a refused launch must type nothing into the pane"
+    );
+}

@@ -75,12 +75,13 @@ pub use resume_hooks::{ensure_project_hooks, missing_lifecycle_hook_events};
 // writer, and drives it from a hermetic `FrameworkPaths` so the repair never
 // reads the operator's `$HOME`.
 pub(crate) use resume_hooks::ensure_project_hooks_with;
-// #8928 step 5: the per-role sandbox settings generator (wired by step 6).
+// #8928 step 5: the per-role sandbox settings generator; #10102 wires it
+// into every launch path through `sandbox_launch`.
 mod sandbox_settings;
 mod sandbox_settings_verify;
 pub use sandbox_settings::{
-    SandboxInputs, SandboxRole, SandboxSettingsError, project_policy, user_policy,
-    verify_sandbox_settings, write_sandbox_settings,
+    SandboxInputs, SandboxRole, SandboxSettingsError, apply_launch_sandbox, launch_sandbox_inputs,
+    project_policy, sandbox_role_for, user_policy, verify_sandbox_settings, write_sandbox_settings,
 };
 mod search_index;
 pub(crate) use search_index::registered_project_for;
