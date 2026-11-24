@@ -84,7 +84,15 @@ fn replaced_app_is_not_quit() {
     let mut rig = Rig::with(&[GRANT_FLAG], WINDOW);
     rig.resolver.set(pid(), "com.apple.Safari", "Safari");
     let reply = quit(&mut rig, "q1", BUNDLE);
-    assert_ne!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["code"], "app_changed", "{reply}");
+    // The re-check revokes the grant; the audit line records it.
+    let line = rig
+        .audit()
+        .into_iter()
+        .rfind(|r| r["tool"] == QUIT_TOOL)
+        .expect("audit line");
+    assert_eq!(line["refused"], "app_changed", "{line}");
+    assert_eq!(line["revoked"], true, "{line}");
     assert!(rig.quitter.sent().is_empty());
 }
 
