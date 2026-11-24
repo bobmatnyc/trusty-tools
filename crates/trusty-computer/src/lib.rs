@@ -23,12 +23,13 @@
 //! and [`window_mgmt`], focus, move and resize of the granted window only, and
 //! [`clipboard`], text read (size-capped, redacted) and write, each behind its flag,
 //! and [`app_quit`], a graceful quit of the granted app only (Phase D).
+//! #11756 adds [`window_order`], the window-on-top gate that turns drag on.
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
 //! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`,
 //! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`,
 //! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`, `tests/install.rs`,
 //! `tests/screenshot.rs`, `tests/menu_policy.rs`, `tests/pointer.rs`, `tests/window_mgmt.rs`,
-//! `tests/clipboard.rs`, `tests/app_quit.rs`.
+//! `tests/clipboard.rs`, `tests/app_quit.rs`, `tests/window_order.rs`.
 
 pub mod app_identity;
 pub mod app_quit;
@@ -69,3 +70,4 @@ pub mod serve;
 pub mod service_cli;
 pub mod supervisor;
 pub mod window_mgmt;
+pub mod window_order;
