@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.3] — 2026-11-24
+
+### Security
+
+- `secrets.unlock` no longer holds a vault-blob snapshot made stale by a `set`, `delete` or agent-deny write that lands while the blob read waits on a Keychain prompt. The grant reads the blob once more, and refuses to open if the snapshot is stale again, so a key the owner just denied is never served to an agent from memory (#11786).
+- `secrets.unlock` waits for a Keychain write already in flight before it reads the blob, up to the Keychain call deadline or the request deadline, whichever comes first. If the write is still waiting, for example on an access prompt, unlock fails with `keychain_access_prompt` and opens no grant. An unlock never opens a grant after its request deadline has passed (#11786).
+- The corrupt-vault-blob error now says that `tm secrets migrate --rollback` recovers only when a migration backup exists, and that it restores the backup's values (#11786).
+
 ## [0.9.2] — 2026-11-24
 
 ### Fixed
