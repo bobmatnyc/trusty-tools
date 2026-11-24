@@ -562,6 +562,24 @@ mod tests {
         assert!(out.ends_with("</head><body></body>"));
     }
 
+    /// #11758: an unterminated comment swallows its `</head>`, so the base is prepended live.
+    #[test]
+    fn inject_api_base_prepends_when_an_unterminated_comment_holds_head_close() {
+        let html = "<html><head><!-- oops </head><body></body></html>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        assert!(out.starts_with("<script>"), "base must be live: {out}");
+        assert!(out.ends_with(html), "document must follow unchanged: {out}");
+    }
+
+    /// #11758: a `</head>` that exists only inside a comment is no head close.
+    #[test]
+    fn inject_api_base_prepends_when_head_close_is_only_in_a_comment() {
+        let html = "<html><head><!-- </head> --><body></body></html>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        assert!(out.starts_with("<script>"), "base must be live: {out}");
+        assert!(out.ends_with(html), "document must follow unchanged: {out}");
+    }
+
     #[test]
     fn inject_api_base_without_head() {
         let out = inject_api_base(
