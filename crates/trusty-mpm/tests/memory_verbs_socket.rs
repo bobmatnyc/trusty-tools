@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_common::uds::server::{RpcError, RpcFallback, RpcRouter, RpcServeOptions, serve_until};
+use trusty_mpm::core::memory_first_call::WARM_METHOD;
 
 /// Every `(method, params)` frame the stub was sent.
 pub(crate) type Calls = Arc<Mutex<Vec<(String, Value)>>>;
@@ -41,6 +42,10 @@ impl RpcFallback for Canned {
         if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
             let max = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
             return Ok(json!({ "protocol_version": max }));
+        }
+        // #10648: a write warms its palace first; that read is not the verb's call.
+        if method == WARM_METHOD {
+            return Ok(json!({}));
         }
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params));
@@ -468,6 +473,10 @@ impl RpcFallback for ByMethod {
         if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
             let max = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
             return Ok(json!({ "protocol_version": max }));
+        }
+        // #10648: a write warms its palace first; that read is not the verb's call.
+        if method == WARM_METHOD {
+            return Ok(json!({}));
         }
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params));
