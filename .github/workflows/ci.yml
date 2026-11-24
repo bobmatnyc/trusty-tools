@@ -2406,6 +2406,12 @@ jobs:
           - name: trusty-console-secrets
             dir: crates/trusty-console/ui-secrets
             command: pnpm run build && pnpm run test
+          # #11749: the Trusty Assistants page, the console's sixth UI project.
+          # Its tests pin the error texts, the pending state and text-only
+          # rendering. Not a required context, so no open PR is wedged.
+          - name: trusty-console-assistants
+            dir: crates/trusty-console/ui-assistants
+            command: pnpm run build && pnpm run test
     steps:
       - uses: actions/checkout@v5
 

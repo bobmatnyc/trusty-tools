@@ -124,9 +124,9 @@ because a favicon is shipped as a file rather than imported as a component;
 - `crates/trusty-code-gui/ui/public/favicon.svg`
 - `website/static/favicon.svg`
 
-Five committed bundles carry a fifth kind of copy, which nobody edits by hand:
+Six committed bundles carry a fifth kind of copy, which nobody edits by hand:
 `crates/trusty-console/ui/dist/`, `ui-search-dist/`, `ui-memory-dist/`,
-`ui-analyze-dist/` and `ui-secrets-dist/` are bundler output that a Rust binary embeds, so each one
+`ui-analyze-dist/`, `ui-secrets-dist/` and `ui-assistants-dist/` are bundler output that a Rust binary embeds, so each one
 holds a mirror of its package's `favicon.svg` emitted by `pnpm build`. Refresh
 them with that build rather than by copying, and `scripts/check-ui-bundle-freshness.sh` proves each mirror
 still matches the source it was built from.

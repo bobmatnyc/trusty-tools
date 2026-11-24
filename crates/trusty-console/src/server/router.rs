@@ -415,6 +415,22 @@ fn build_router_inner(
                 crate::tools_ui::secrets_page_guard,
             )),
         )
+        // #11749: the Trusty Assistants page, served under /tools/assistants/.
+        // Its calls go to /api/console/assistants*, the gated routes merged
+        // above. No loopback-only layer: the page is for tailnet devices too,
+        // and the per-listener guards already cover every route.
+        .route(
+            "/tools/assistants",
+            get(crate::tools_ui::assistants_ui_redirect),
+        )
+        .route(
+            "/tools/assistants/",
+            get(crate::tools_ui::assistants_ui_index),
+        )
+        .route(
+            "/tools/assistants/{*path}",
+            get(crate::tools_ui::assistants_ui_asset),
+        )
         // #9979 (D96): the mpm chat page, moved from the daemon's `/web`. One
         // embedded HTML file, so no asset wildcard; loopback-only, unframeable.
         .route(
