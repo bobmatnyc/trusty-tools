@@ -8,9 +8,9 @@
 //! What: stages the bytes in a sibling file, has a `/bin/cp` child copy them
 //! onto `path`, then `chmod`s it 0755. The only write fd to `path` lives in the
 //! `cp` child, which has exited before this returns.
-//! Test: every test that execs a stub written here (`serve_activity`,
-//! `watchdog_ported::system_runner_reports_exit_codes_and_timeouts`, and the
-//! live wake tests in `poller::wake_live_tests`).
+//! Test: `tmux_failure_is_a_fault_then_clears`,
+//! `system_runner_reports_exit_codes_and_timeouts`,
+//! `live_wake_types_then_enters_and_refuses_a_draft`.
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
