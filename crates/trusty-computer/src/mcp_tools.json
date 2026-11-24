@@ -553,6 +553,103 @@
   }
  },
  {
+  "name": "computer_focus",
+  "description": "Bring the granted window to the front, when the grant names window_management; activates the target app (takes the foreground from the user's current app). Refused unless window_id is the granted window and the daemon lists it under the granted pid at call time; no other window, app or the desktop is touched.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_move_window",
+  "description": "Move the granted window so its top-left corner is at x, y in desktop points (the space computer_windows reports), keeping its size, when the grant names window_management. Refused unless window_id is the granted window and the daemon lists it under the granted pid at call time; no other window, app or the desktop is touched.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "x": {
+     "type": "number",
+     "minimum": -16384,
+     "maximum": 16384,
+     "description": "Desktop X of the window's top-left corner."
+    },
+    "y": {
+     "type": "number",
+     "minimum": -16384,
+     "maximum": 16384,
+     "description": "Desktop Y of the window's top-left corner."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "x",
+    "y"
+   ]
+  }
+ },
+ {
+  "name": "computer_resize_window",
+  "description": "Resize the granted window to width x height desktop points, keeping its top-left corner, when the grant names window_management. Refused unless window_id is the granted window and the daemon lists it under the granted pid at call time; no other window, app or the desktop is touched.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "width": {
+     "type": "number",
+     "minimum": 1,
+     "maximum": 16384,
+     "description": "New width in desktop points."
+    },
+    "height": {
+     "type": "number",
+     "minimum": 1,
+     "maximum": 16384,
+     "description": "New height in desktop points."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "width",
+    "height"
+   ]
+  }
+ },
+ {
   "name": "computer_wait",
   "description": "Sleep up to 5 s in the broker; keeps the lease alive.",
   "inputSchema": {

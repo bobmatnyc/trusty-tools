@@ -19,12 +19,13 @@
 //! [`service_cli`] (`install-service`, `uninstall-service`). #11694 adds
 //! [`screenshot`], the bounded window screenshot. #11695 adds [`menu`], the
 //! menu path deny list and the menu tree `computer_read` returns. #11696 adds
-//! [`mod@pointer`], click and drag at window coordinates, bounded at event time.
+//! [`mod@pointer`], click and drag at window coordinates, bounded at event time,
+//! and [`window_mgmt`], focus, move and resize of the granted window only.
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
 //! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`,
 //! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`,
 //! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`, `tests/install.rs`,
-//! `tests/screenshot.rs`, `tests/menu_policy.rs`, `tests/pointer.rs`.
+//! `tests/screenshot.rs`, `tests/menu_policy.rs`, `tests/pointer.rs`, `tests/window_mgmt.rs`.
 
 pub mod app_identity;
 pub mod audit;
@@ -35,6 +36,7 @@ pub mod broker_operator;
 mod broker_pointer;
 pub mod broker_server;
 mod broker_unlock;
+mod broker_window;
 pub mod codesign;
 pub mod consent;
 pub mod driver;
@@ -59,3 +61,4 @@ pub mod screenshot;
 pub mod serve;
 pub mod service_cli;
 pub mod supervisor;
+pub mod window_mgmt;

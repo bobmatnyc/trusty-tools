@@ -28,8 +28,11 @@ final class Target: NSObject {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
+// #11696 Phase B: SIGNEDCHECK_RESIZABLE=1 makes the window resizable (settable AXSize).
+var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
+if ProcessInfo.processInfo.environment["SIGNEDCHECK_RESIZABLE"] == "1" { style.insert(.resizable) }
 let win = NSWindow(contentRect: NSMakeRect(520, 400, 420, 220),
-                   styleMask: [.titled, .closable, .miniaturizable],
+                   styleMask: style,
                    backing: .buffered, defer: false)
 #if IMPOSTOR
 win.title = "Impostor Fixture"
