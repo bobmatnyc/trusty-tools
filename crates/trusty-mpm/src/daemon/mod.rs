@@ -324,6 +324,7 @@ pub async fn serve_with_shutdown(
     services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
     // #8451: evict idle builder-slot dirs once their volume passes its budget.
     services::slot_pool_evict::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+    services::pr_watch_ports::spawn_if_enabled(Arc::clone(&state), cancel.child_token()); // #11673
     project_adoption::spawn_startup_marker_migration(&state); // #8511
     // #9923: the Socket Mode inbound source; it holds no socket until ready.
     #[cfg(feature = "channels")]

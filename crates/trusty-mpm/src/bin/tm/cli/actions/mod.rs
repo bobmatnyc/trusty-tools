@@ -89,7 +89,9 @@ pub(crate) use memory_tools::{MemoryKgAction, MemoryTaskAction, MemoryToolAction
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
-pub(crate) use pr::{PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
+pub(crate) use pr::{
+    PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs, PrWatchArgs, PrWatchCmd,
+};
 pub(crate) use presence::{DevicesAction, PresenceAction};
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{

@@ -1,0 +1,3 @@
+Added
+- `tm pr watch add|ls|rm` tracks a PR's required checks in a local table. A daemon loop reads each tracked PR outbound, and on a CI change on the current head (green, red, new head, or rerun) it emits one `ci_transition` bus event, sets the owner's ledger `ci` wait, and types one line into the owner's pane, once per transition across restarts. A merged or closed PR leaves the table. Set `TRUSTY_MPM_PR_WATCH=0` to disable the loop (#11673).
+- `tm wait --for check` gains `--required-only`, which judges only the base branch's required contexts, and `--watch`, which also registers the PR with the daemon's PR watch (#11673).

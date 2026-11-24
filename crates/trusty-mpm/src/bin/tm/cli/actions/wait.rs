@@ -86,6 +86,18 @@ pub(crate) struct WaitArgs {
     #[arg(long)]
     pub(crate) allow_empty_checks: bool,
 
+    /// `--for check`: judge only the base branch's required contexts (#11673).
+    #[arg(long)]
+    pub(crate) required_only: bool,
+
+    /// `--for check`: also register the PR with the daemon's PR watch (#11673).
+    #[arg(long)]
+    pub(crate) watch: bool,
+
+    /// `--watch`: the tmux session to wake (defaults to this pane's session).
+    #[arg(long)]
+    pub(crate) owner: Option<String>,
+
     /// Total budget in seconds across ALL re-runs, not per call (default 1800,
     /// max 86400). Each call returns after at most one `--slice`; re-run the
     /// printed `rerun=` command until the condition is met or this budget ends.
