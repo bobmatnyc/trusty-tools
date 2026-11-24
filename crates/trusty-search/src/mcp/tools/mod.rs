@@ -58,6 +58,8 @@ pub(crate) mod health;
 mod health_verdicts;
 pub(crate) mod index;
 pub(crate) mod index_directory;
+// #11625: lane readiness + body, shared with the CLI lane verbs.
+pub mod lane;
 pub(crate) mod lexical_args;
 pub(crate) mod misc;
 pub(crate) mod not_ready;
