@@ -110,7 +110,14 @@ async fn pause_writes_a_resume_slot_with_identifiers_and_a_verify_command() {
 
     assert_eq!(result["resume_slot"], json!("stored"), "{result}");
     assert!(Path::new(result["snapshot_path"].as_str().unwrap()).exists());
-    let seen = calls.lock().unwrap().clone();
+    // #10648: the palace warm-up precedes the write; it is not the write.
+    let seen: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m != crate::core::memory_first_call::WARM_METHOD)
+        .cloned()
+        .collect();
     assert_eq!(seen.len(), 1, "exactly one write: {seen:?}");
     let (method, params) = &seen[0];
     assert_eq!(method, "memory_remember");
@@ -218,6 +225,49 @@ async fn a_verify_record_failure_is_reported_as_stored_without_verify() {
         json!("stored_without_verify:verify_not_stored"),
         "{result}"
     );
+}
+
+/// Why (#10648): a cold palace open stalled the pause write into
+/// `memory_unreachable`.
+/// What: the stub stalls its first exchange past the whole 2 s slot budget;
+/// the warm-up retry absorbs it and the slot is stored with one write.
+#[tokio::test]
+async fn pause_slot_write_survives_a_stalled_first_exchange() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    repo_on_branch(tmp.path());
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&calls);
+    let count = Arc::new(AtomicUsize::new(0));
+    let daemon = crate::uds_mock::spawn(move |method: &str, params: Value| {
+        if let Ok(mut seen) = seen.lock() {
+            seen.push((method.to_string(), params));
+        }
+        let stall = count.fetch_add(1, Ordering::SeqCst) == 0;
+        Box::pin(async move {
+            if stall {
+                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            }
+            Ok(json!({ "drawer_id": "d1", "palace": "p", "status": "stored", "tier": "C" }))
+        })
+    })
+    .await;
+    let memory = ResumeSlotHost {
+        socket: daemon.socket().to_path_buf(),
+        palace: Some("p".to_string()),
+    };
+
+    let result = pause(tmp.path(), &memory).await;
+
+    assert_eq!(result["resume_slot"], json!("stored"), "{result}");
+    let writes = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "memory_remember")
+        .count();
+    assert_eq!(writes, 1, "the write is sent exactly once");
 }
 
 /// The PR numbers a pause's free text names, by the module's rule.

@@ -16,12 +16,14 @@
 //! Test: `pause_writes_a_resume_slot_with_identifiers_and_a_verify_command`,
 //! `pause_survives_an_unreachable_memory_socket`,
 //! `a_verify_record_failure_is_reported_as_stored_without_verify`,
-//! `pr_numbers_come_from_pr_mentions_only`, `an_unsafe_branch_gets_no_command`.
+//! `pr_numbers_come_from_pr_mentions_only`, `an_unsafe_branch_gets_no_command`,
+//! `pause_slot_write_survives_a_stalled_first_exchange`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::core::memory_checked::{self, protocol_mismatch};
+use crate::core::memory_checked::protocol_mismatch;
+use crate::core::memory_first_call;
 use serde_json::{Value, json};
 use trusty_common::catchup::git::capture_git_status;
 use trusty_common::catchup::pause::{PauseSnapshotInput, PauseSnapshotOutcome};
@@ -34,6 +36,10 @@ use crate::daemon::verify_allowlist::{AllowedCommand, MAX_PRS, is_safe_branch};
 /// How long the slot write may hold the pause. A pause is interactive, and the
 /// snapshot file, already written, is what it must not lose.
 const SLOT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One exchange's share of [`SLOT_WRITE_TIMEOUT`]: a warm-up, its retry and the
+/// write fit inside it (#10648).
+const SLOT_EXCHANGE_TIMEOUT: Duration = Duration::from_millis(600);
 
 /// The slot's lifetime: ADR-0028's 24-hour Tier C default, stated explicitly.
 const RESUME_SLOT_TTL_HOURS: i64 = 24;
@@ -124,11 +130,30 @@ pub(crate) async fn record_resume_slot(
     if let Some(command) = &verify {
         args["verify"] = json!(command);
     }
-    match memory_checked::call_with_timeout(&host.socket, REMEMBER_METHOD, args, SLOT_WRITE_TIMEOUT)
-        .await
-    {
+    match write_slot(&host.socket, args).await {
         Ok(result) => stored_outcome(&result, verify.is_some()),
         Err(e) => error_outcome(&e),
+    }
+}
+
+/// Send the slot write through the warm-up path, inside [`SLOT_WRITE_TIMEOUT`].
+///
+/// Why: the pause write was the issue's worst symptom (#10648): a cold palace
+/// open stalled it into `memory_unreachable`.
+/// What: `memory_first_call::call_verb` warms the palace with `palace_info`
+/// (retried once on a timeout) and sends `memory_remember` exactly once. Each
+/// exchange gets [`SLOT_EXCHANGE_TIMEOUT`]; the whole sequence is cut off at
+/// [`SLOT_WRITE_TIMEOUT`], so the pause never waits longer than before.
+/// Test: `pause_slot_write_survives_a_stalled_first_exchange`.
+async fn write_slot(socket: &Path, args: Value) -> anyhow::Result<Value> {
+    // #10648: warm-up then one write, all inside the pause's existing budget.
+    let call =
+        memory_first_call::call_verb(socket, REMEMBER_METHOD, args, true, SLOT_EXCHANGE_TIMEOUT);
+    match tokio::time::timeout(SLOT_WRITE_TIMEOUT, call).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "resume slot write did not finish within {SLOT_WRITE_TIMEOUT:?}"
+        )),
     }
 }
 
