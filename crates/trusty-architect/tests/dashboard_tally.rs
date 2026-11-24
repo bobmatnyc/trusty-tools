@@ -89,7 +89,7 @@ fn footer_equals_tally_line() -> R {
         let f = footer(&store, NOW, &links())?;
         assert_eq!(
             f.footer,
-            "Dashboard: [localhost](L) \u{b7} [tailnet](T) \u{2014} 3 open dashboard items: 1 question, 1 action, \
+            "Dashboard: [local](L) \u{b7} [tail](T) \u{2014} 3 open dashboard items: 1 question, 1 action, \
              1 task (1 parked) (1 running), 2 answers waiting"
         );
         assert_eq!(f.tally, tally(&store, NOW)?);

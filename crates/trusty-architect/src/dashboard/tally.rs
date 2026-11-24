@@ -127,7 +127,7 @@ pub fn tally_line(t: &Tally) -> String {
     line
 }
 
-/// The reply footer: `Dashboard: [localhost](…) · [tailnet](…) — <tally line>`,
+/// The reply footer: `Dashboard: [local](…) · [tail](…) — <tally line>`,
 /// from [`tally`] only.
 ///
 /// # Errors
@@ -135,7 +135,7 @@ pub fn tally_line(t: &Tally) -> String {
 pub fn footer(store: &Store, now: f64, links: &FooterLinks) -> Result<Footer, DashError> {
     let tally = tally(store, now)?;
     let footer = format!(
-        "Dashboard: [localhost]({}) \u{b7} [tailnet]({}) \u{2014} {}",
+        "Dashboard: [local]({}) \u{b7} [tail]({}) \u{2014} {}",
         links.local,
         links.tailnet,
         tally_line(&tally)

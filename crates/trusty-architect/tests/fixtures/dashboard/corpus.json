@@ -735,7 +735,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [localhost](http://127.0.0.1:7890/) · [tailnet](https://dash.example.ts.net:7890/) — 3 open dashboard items: 1 question, 1 action, 1 task (2 parked)",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 3 open dashboard items: 1 question, 1 action, 1 task (2 parked)",
     "free": {
      "A": 255,
      "D": 251,
@@ -5647,7 +5647,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [localhost](http://127.0.0.1:7890/) · [tailnet](https://dash.example.ts.net:7890/) — 2 open dashboard items: 0 questions, 1 action, 1 task",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 2 open dashboard items: 0 questions, 1 action, 1 task",
     "free": {
      "A": 248,
      "D": 225,
@@ -7295,7 +7295,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [localhost](http://127.0.0.1:7890/) · [tailnet](https://dash.example.ts.net:7890/) — 0 open dashboard items: 0 questions, 0 actions, 0 tasks",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 open dashboard items: 0 questions, 0 actions, 0 tasks",
     "free": {
      "A": 256,
      "D": 256,
