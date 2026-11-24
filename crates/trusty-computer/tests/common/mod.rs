@@ -170,6 +170,8 @@ struct Shared {
     snapshot_mode: Option<&'static str>,
     /// #11696: `screenshot_width` and `screenshot_height` of every later capture.
     frame: Option<(f64, f64)>,
+    /// #11696 Phase B: `structuredContent.windows` of every later `list_windows`.
+    windows: Option<Value>,
 }
 
 /// A fake daemon serving NDJSON on a Unix socket.
@@ -192,6 +194,7 @@ impl FakeDaemon {
             effect: None,
             snapshot_mode: None,
             frame: None,
+            windows: None,
         }));
         let (state, version_owned) = (Arc::clone(&shared), version.to_owned());
         thread::spawn(move || {
@@ -244,6 +247,11 @@ impl FakeDaemon {
     /// Report a `width` x `height` window in every later capture (#11696).
     pub fn set_frame(&self, width: f64, height: f64) {
         self.lock().frame = Some((width, height));
+    }
+
+    /// Answer every later `list_windows` with `windows` (#11696 Phase B).
+    pub fn set_windows(&self, windows: Value) {
+        self.lock().windows = Some(windows);
     }
 
     /// The fixture's current state.
@@ -367,6 +375,9 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
             _ => {}
         }
         return json!({"ok": true, "result": snap});
+    }
+    if let (true, Some(windows)) = (name == "list_windows", &state.windows) {
+        return json!({"ok": true, "result": {"structuredContent": {"windows": windows}}});
     }
     let token = args.get("element_token").and_then(Value::as_str);
     if let Some(fixture) = state.fixture.as_mut() {

@@ -5,7 +5,8 @@
 //! What: 6 ALLOW, 14 FILTER and 36 DENY rows. `invoke_menu` is FILTER behind
 //! a path deny list (#11695; it was DENY in Phase 2, plan section 1, item 3).
 //! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists:
-//! `screenshot_window` (#11694), `click_at` and `drag_at` (#11696).
+//! `screenshot_window` (#11694), `click_at` and `drag_at` (#11696), and
+//! `focus_window`, `move_window` and `resize_window` (#11696 Phase B).
 //! Test: `every_inventory_tool_is_classified`, `verdict_counts_match_the_plan`
 //! in `tests/spike_policy.rs`; `screenshot_rule_is_filter_and_not_default`.
 
@@ -221,7 +222,7 @@ pub static RULES: [Rule; 56] = [
 ];
 
 /// Broker tools: driven through a driver tool, never named to the daemon.
-pub static BROKER_RULES: [Rule; 3] = [
+pub static BROKER_RULES: [Rule; 6] = [
     // #11694: driven as get_window_state with a screenshot; see `crate::screenshot`.
     filter(
         crate::screenshot::SCREENSHOT_TOOL,
@@ -238,5 +239,21 @@ pub static BROKER_RULES: [Rule; 3] = [
         crate::pointer::DRAG_TOOL,
         "left drag between points inside the granted window's frame at event time",
         &[pid_in_scope, crate::pointer::drag_args],
+    ),
+    // #11696 Phase B: driven as bring_to_front / set_window_frame after an owner read.
+    filter(
+        crate::window_mgmt::FOCUS_TOOL,
+        "bring the granted window of the granted pid to the front",
+        &[pid_in_scope, crate::window_mgmt::focus_args],
+    ),
+    filter(
+        crate::window_mgmt::MOVE_TOOL,
+        "move the granted window of the granted pid, size kept",
+        &[pid_in_scope, crate::window_mgmt::move_args],
+    ),
+    filter(
+        crate::window_mgmt::RESIZE_TOOL,
+        "resize the granted window of the granted pid, origin kept",
+        &[pid_in_scope, crate::window_mgmt::resize_args],
     ),
 ];

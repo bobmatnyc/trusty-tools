@@ -302,7 +302,12 @@ impl Grants {
                 tools.insert(tool.clone());
                 continue;
             }
-            if crate::pointer::is_pointer_tool(tool) {
+            // #11696 Phase B: one flag grants the three window tools, as above.
+            if tool == crate::window_mgmt::GRANT_FLAG {
+                tools.insert(tool.clone());
+                continue;
+            }
+            if crate::pointer::is_pointer_tool(tool) || crate::window_mgmt::is_window_tool(tool) {
                 return Err(GrantError::BadTool(tool.clone()));
             }
             match policy::rule(tool) {
