@@ -6,6 +6,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.13] — 2026-11-24
+
+### Added
+
+- `tm project unadopt <path>... [--dry-run]` removes worktrees from the adoption ledger (`project-registry/worktrees.json`) by path. It never edits or deletes a worktree folder or git metadata. It matches a folder that is already deleted when named by a relative, symlinked or `..` path. A ledger that cannot be read or written, or a real run naming a path with no record, fails the command. `tm project init --help` and the canonical-clones guide now list each change init makes to git metadata and markers, and how to reverse it.
+- `tm memory recall-deep`, `recall-all`, `list`, `prompt-context`, `task add|list|complete` and `kg assert|query|gaps` call the matching trusty-memory tools over the daemon socket, so they work without an MCP connection. Each takes `--json` and `--memory-socket`; the palace-scoped verbs also take `--palace` (#11625).
+- `tm pr watch add|ls|rm` tracks a PR's required checks in a local table. A daemon loop reads each tracked PR outbound, and on a CI change on the current head (green, red, new head, or rerun) it emits one `ci_transition` bus event, sets the owner's ledger `ci` wait, and types one line into the owner's pane, once per transition across restarts. A merged or closed PR leaves the table. Set `TRUSTY_MPM_PR_WATCH=0` to disable the loop (#11673).
+- `tm wait --for check` gains `--required-only`, which judges only the base branch's required contexts, and `--watch`, which also registers the PR with the daemon's PR watch (#11673).
+- `tm hook` binds the ledger task (`Task: <id>@MMDD`) of each Agent/Task dispatch to its delegation record (`ledger_task`) and, at `SubagentStop`, checks the last line of the subagent's final message against it. The outcome (`ok`, `missing`, `mismatch` or `unbound`) is appended to the PM's datg `log.jsonl` as a `subagent_task` event and shown as a hook `systemMessage`; a `missing` or `mismatch` stop is sent back once to restate its last line.
+
+### Fixed
+
+- The bundled Architect `fleet-classify.py` raises a plan-limit alert only for the harness's usage-limit banner at the start of a line, matching the Rust scheduler, so chat text about a rate limit no longer alerts.
+- The credential scrubber no longer redacts a path segment containing `sk-` inside a word (such as `task-roundtrip-…`) as an API key; `sk-` keys are still redacted, including after `_` (`OPENAI_KEY_sk-…`) or a JSON-escaped `\n`, and the character before the key is kept.
+- `tm content update` now names `tm sessions sync-assets --all` after it pins new content, so Architect skills that `tm fleet status` reports stale can be refreshed without a relaunch.
+- `tm hook --pm-guard` no longer refuses a Python script that assigns a local variable named `ps` (`ps = cell.paragraphs`); a real `ps e`/`ps -E` environment listing is still refused (#10688).
+- `tm hook --pm-guard` now reads a Python argv list such as `subprocess.run(["ps", "eww"])` or `["launchctl", "print", …]` as the command it runs, including the compact `["ps","eww"]`, a tuple `("ps", "eww")`, and a command string such as `os.system("ps eww")` or `subprocess.run("ps eww", shell=True)`, so a script that dumps a process environment that way is refused (#10688).
+- Every launch sets the managed `claude-config/` directory and its `backups/` directory to 0700 and its `.claude.json`, `.claude.json.bak`, `settings.json` and `backups/.claude.json.backup.*` files to 0600, so files Claude Code later writes at 0644 stay unreadable by other users. A chmod that fails is logged with its path, and the `claude_json_secrets` doctor row now fails on a config directory wider than 0700 and warns, rather than fails, on a secret file wider than 0600 inside a 0700 directory; `tm doctor --fix` tightens both.
+- `tm tui` socket lookups for Search, Memory, Events, Agents, Analyze, Review and Console no longer create the data directory, so a missing directory is not recreated at 0755 and refused by the 0700 trust check (#11667).
+- `datg.py` refuses with a clear error when the pane's tmux session keeps its ledger only in `.trusty-mpm/dbatg/`, instead of writing another ledger (#11685).
+- Every `datg.py` write keeps the replaced `state.json` as `<datg>/prior/state.v<N>.json` (last 20), so an overwritten version can be restored (#11685).
+- Regenerate `seed_history.tsv` so every embedded Architect seed appears in the shipped history after the #11691 provenance change.
+- `tm pr cleanup` no longer deletes `origin/<head>` while a worktree it refused or failed to remove still holds the head branch, or when the worktree listing could not be read. The `remote-branch` step reports the kept branch and the run exits non-zero.
+
+### Changed
+
+- the catchup_superseded test now expects the head id kept after the SHA scrub was removed (#10595)
+
+### Security
+
+- A session relaunched in place no longer receives a `github.token_env` binding's token as a `GH_TOKEN` value in its environment, where any process running as the same user could read it (`ps -E`). tm now proves the token with `GET /user`, stores it in gh's keyring entry for that account, and gives the session the per-call gh shim from #9750. The session's environment also drops the variable `token_env` names. If any step fails, the relaunch is refused, and the token never goes into the environment instead (#10487).
+
 ## [1.14.12] — 2026-11-23
 
 ### Breaking
