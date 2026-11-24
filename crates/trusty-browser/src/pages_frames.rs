@@ -105,15 +105,27 @@ pub fn acted(raw: &Json) -> Result<(Json, Option<Json>), Refusal> {
     let Some(frame) = raw.get("frame") else {
         return Ok((raw.clone(), None));
     };
-    pages::shaped(frame, ACTED_IN)?;
-    let id_ok = matches!(frame.get("id"), Some(Json::Int(id)) if *id > 0);
-    let origin = frame.get("origin").and_then(Json::as_str);
-    let web = origin.is_some_and(|o| o.starts_with("https://") || o.starts_with("http://"));
-    if !id_ok || !web || !matches!(host(origin), Ok(Some(_))) {
+    if !frame_ok(frame) {
         return Err(refused());
     }
     let rest = pairs.iter().filter(|(k, _)| k != "frame").cloned();
     Ok((Json::Object(rest.collect()), Some(frame.clone())))
+}
+
+/// True when `frame` is exactly [`ACTED_IN`] with an `id` above 0 and an
+/// http(s) `origin` that has a host (#11808).
+pub fn frame_ok(frame: &Json) -> bool {
+    let id_ok = matches!(frame.get("id"), Some(Json::Int(id)) if *id > 0);
+    let origin = frame.get("origin").and_then(Json::as_str);
+    let web = origin.is_some_and(|o| o.starts_with("https://") || o.starts_with("http://"));
+    pages::shaped(frame, ACTED_IN).is_ok() && id_ok && web && matches!(host(origin), Ok(Some(_)))
+}
+
+/// The child host a refused frame action names in its `frame` detail, for
+/// the refusal's `frames` audit field (#11808); `None` without one.
+pub fn refusal_hosts(details: &[(String, Json)]) -> Option<Json> {
+    let (_, frame) = details.iter().find(|(k, _)| k == "frame")?;
+    child_hosts(&Json::object([("frame", frame.clone())]))
 }
 
 /// The URL hosts of the child frames a result touched, each once, in table

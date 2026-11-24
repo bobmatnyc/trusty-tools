@@ -34,7 +34,8 @@ globalThis.TrustyPages = (() => {
       if (!hit || !(hit === node || node.contains(hit))) return {error:"Obscured"};
       if (root.host) { node = root.host; continue; }
       const frame = root.defaultView?.frameElement;
-      if (!frame || root === document) return {ok:true, x, y};
+      // #11808: the viewport size and URL let a cross-origin child's point be mapped onto its owner.
+      if (!frame || root === document) return {ok:true, x, y, vw:innerWidth, vh:innerHeight, url:location.href};
       const at = frame.getBoundingClientRect(), css = frame.ownerDocument.defaultView.getComputedStyle(frame);
       x += at.left + frame.clientLeft + parseFloat(css.paddingLeft);
       y += at.top + frame.clientTop + parseFloat(css.paddingTop);
@@ -301,6 +302,13 @@ globalThis.TrustyPages = (() => {
     }
     if (el && typeof el.focus === "function") el.focus();
     const active = document.activeElement;
+    // #11808: focus inside a cross-origin child frame is unreachable from here; the keys would land on the
+    //   <iframe> element itself. A press there needs the child's frame-scoped ref.
+    if (!el && (active?.localName === "iframe" || active?.localName === "frame")) {
+      let inner = null;
+      try { inner = active.contentDocument; } catch { inner = null; }
+      if (!inner) return {error:"NotEditable"};
+    }
     let node = el ?? (active && active !== document.body ? active : document.body);
     // The reply: ok (with the counts when maxlength cut the text), or TextDropped when a page handler refused text.
     const outcome = () => {
@@ -524,7 +532,8 @@ TrustyPages.commands = deps => {
   const {pageProbe, pageInspect, pageFrames, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed,
     keyAllowed, modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says what was typed and what landed.
-  const RELAYED = ["tab","origin","access","document","typed","accepted","entered"];
+  // #11808: `frame` names the child a refused frame action had resolved.
+  const RELAYED = ["tab","origin","access","document","typed","accepted","entered","frame"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
@@ -791,6 +800,9 @@ TrustyPages.commands = deps => {
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
     const frame = await frameActs.of(req);
+    try { return await injected(req, func, args, frame); } catch (error) { throw frameActs.tag(error, frame); }
+  }
+  async function injected(req, func, args, frame) {
     const target = frame ? frame.document : req.document;
     let hit;
     try {
@@ -850,6 +862,10 @@ TrustyPages.commands = deps => {
     if (!first.access || first.document !== req.document) throw changed(first);
     // #11808: a frame-scoped ref is resolved, and its origin's permission checked, before any attachment.
     const frame = await frameActs.of(req);
+    try { return await attached(req, drive, first, frame); } catch (error) { throw frameActs.tag(error, frame); }
+  }
+  async function attached(req, drive, first, frame) {
+    const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     const target = frame ? frame.document : req.document;
     // #11294: once act returns, its leftover work must not reach a later attachment to this tab.
     let aborted = false;
@@ -913,12 +929,16 @@ TrustyPages.commands = deps => {
       if (["StaleElement","Obscured"].includes(error)) throw refuse(error, {tab:req.tab});
       if (point?.ok !== true || hit.documentId !== target || !Number.isFinite(point.x) ||
           !Number.isFinite(point.y)) throw refuse("OutcomeUnknown");
-      // #11808: a child's point is in its own viewport; CDP input takes the top frame's.
-      await drive(send, frame ? await frameActs.locate(req, frame, point) : point);
+      // #11808: a child's point is in its own viewport; CDP maps it through the owner iframe's quad, and the
+      //   child must then confirm a trusted pointer event reached the target.
+      const at = frame ? await frameActs.locate(req, frame, point, raw) : point;
+      const witness = frame ? await frameActs.watch(req, frame) : null;
+      await drive(send, at);
       await raw("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
         .catch(() => {});
       // A dialog Chrome would not close leaves the page blocked: the outcome is not the one reported.
       if (!(await answered)) throw refuse("OutcomeUnknown");
+      if (frame && !await frameActs.witnessed(req, frame, witness)) throw refuse("OutcomeUnknown");
     }
   }
 

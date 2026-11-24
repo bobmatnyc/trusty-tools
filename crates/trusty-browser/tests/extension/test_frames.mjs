@@ -21,12 +21,23 @@ const read = (origin, elements, text = "") => ({origin, url:origin + "/", title:
 const found = (origin, matches) => ({origin, matches:matches.map(m => ({...m, in:{role:"form", name:"", ref:"1.9"}})),
   truncated:false});
 
-// A tab whose frames are `frames` ({id, origin, document, root, children, elements, text, parent}); frame 0 is
-// the top. `allowed` holds the granted host patterns; `gone` the documentIds whose frame navigated away;
-// `input` the CDP commands a trusted click sent. #11808: an injected action types into `f.value`, and a
-// trailing newline submits it, which sets the frame's text to "Echo: <value>".
-function browser({frames, allowed = [TOP + "/*"], injected = null}) {
-  const calls = [], gone = new Set(), input = [], posted = new Map();
+// A tab whose frames are `frames` ({id, origin, document, root, children, elements, text}); frame 0 is the top.
+// `allowed` holds the granted host patterns; `gone` the documentIds whose frame navigated away; `input` the
+// CDP commands a trusted click sent. #11808: an injected action types into `f.value`, and a trailing newline
+// submits it, which sets the frame's text to "Echo: <value>". `cdp` shapes the top session's DOM: `owners`
+// are the <iframe> nodes ({node, frame, url}), `quad` the owner's content quad, `at` the hit-tested node, and
+// `hit` whether the child's witness saw the trusted click.
+function browser({frames, allowed = [TOP + "/*"], injected = null, cdp = {}}) {
+  const calls = [], gone = new Set(), input = [];
+  const view = {owners:[{node:50, frame:"F7", url:CHILD + "/"}], quad:[100, 200, 500, 200, 500, 500, 100, 500],
+    at:{backendNodeId:50}, hit:true, ...cdp};
+  const DOMS = {
+    "DOM.getDocument":() => ({root:{nodeName:"#document", children:view.owners.map(o =>
+      ({nodeName:"IFRAME", backendNodeId:o.node, frameId:o.frame}))}}),
+    "Page.getFrameTree":() => ({frameTree:{frame:{id:"TOP", url:TOP + "/"}}}),
+    "DOM.getBoxModel":() => ({model:{content:view.quad}}),
+    "DOM.getNodeForLocation":() => view.at,
+  };
   const byDoc = new Map(frames.map(f => [f.document, f]));
   const contains = ({origins:[pattern]}) => allowed.includes(pattern) || allowed.includes("https://*/*");
   const reachable = f => (injected ?? (f => contains({origins:[new URL(f.origin).protocol + "//" +
@@ -35,16 +46,12 @@ function browser({frames, allowed = [TOP + "/*"], injected = null}) {
     if (func.name === "pageProbe") return [f.origin, "T", f.origin + "/"];
     if (func.name === "pageFrames") return {origin:f.origin, url:f.origin + "/", root:f.root ?? f.id !== 0,
       children:f.children ?? []};
-    if (func.name === "pageFrameHost") return true;
-    if (func.name === "pageFramePost") { posted.set(args[0], f); return f.id !== 0; }
-    if (func.name === "pageFrameOwner") {
-      const child = posted.get(args[0]);
-      return child && (child.parent ?? 0) === f.id ? {ok:true, x:args[1].x + 100, y:args[1].y + 200} : null;
-    }
-    const ACTS = {pageKeys:0, pageSelect:0, pageHover:0, pageTarget:0, pageScroll:1, pageDrag:0, pageSetFiles:0};
+    if (func.name === "pageWitnessed") return {ok:true, hit:view.hit};
+    const ACTS = {pageKeys:0, pageSelect:0, pageHover:0, pageTarget:0, pageScroll:1, pageDrag:0, pageSetFiles:0,
+      pageWitness:0};
     if (func.name in ACTS) {
       if (!f.elements.some(e => e.ref === args[ACTS[func.name]])) return {error:"StaleElement"};
-      if (func.name === "pageTarget") return {ok:true, x:10, y:20};
+      if (func.name === "pageTarget") return {ok:true, x:10, y:20, vw:400, vh:300, url:f.origin + "/#top"};
       if (func.name === "pageKeys" && args[1] === "type") {
         f.value = args[2].replace(/\n$/, "");
         if (args[2].endsWith("\n")) f.text = "Echo: " + f.value;
@@ -63,7 +70,8 @@ function browser({frames, allowed = [TOP + "/*"], injected = null}) {
   const chrome = {
     tabs:{get:async id => ({id, status:"complete"}), onUpdated:{addListener(){}, removeListener(){}}},
     debugger:{attach:async () => {}, detach:async () => {}, onEvent:{addListener(){}, removeListener(){}},
-      sendCommand:async (_, method, params) => { input.push([method, params]); return {}; }},
+      getTargets:async () => view.owners.map(o => ({id:o.frame, type:"other", url:o.url})),
+      sendCommand:async (_, method, params) => { input.push([method, params]); return DOMS[method]?.() ?? {}; }},
     permissions:{contains:async query => contains(query)},
     scripting:{async executeScript({target, func, args = []}) {
       calls.push({target, func:func.name, args});
@@ -361,9 +369,61 @@ test("a trusted click in a child frame lands at the top-frame point", async () =
   assert.deepEqual(ran(b, "pageTarget").map(c => [c.target.documentIds, c.args]), [[["D7"], ["22.1"]]]);
   const mouse = b.input.filter(([m]) => m === "Input.dispatchMouseEvent").map(([, p]) => [p.type, p.x, p.y]);
   assert.deepEqual(mouse, [["mouseMoved", 110, 220], ["mousePressed", 110, 220], ["mouseReleased", 110, 220]]);
-  // A child whose parent the extension cannot reach is refused before any input.
-  const deep = browser({frames:form({parent:5}), allowed:[TOP + "/*", CHILD + "/*"]});
-  const dc = commands(deep);
-  await failed(act(dc, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(dc)), "PermissionNeeded");
-  assert.ok(!deep.input.some(([m]) => m === "Input.dispatchMouseEvent"));
+  // The child's point is mapped through the owner's content quad, read from the top debugger session.
+  const asked = b.input.map(([m]) => m);
+  assert.ok(["DOM.getDocument", "DOM.getBoxModel", "DOM.getNodeForLocation"].every(m => asked.includes(m)), asked);
+  // A scaled and rotated owner: the point follows the quad's axes (CSS pixels of the child map onto them).
+  const turned = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"],
+    cdp:{quad:[100, 200, 300, 300, 250, 400, 50, 300]}});
+  const tc = commands(turned);
+  await act(tc, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(tc));
+  const tp = turned.input.find(([m, p]) => m === "Input.dispatchMouseEvent" && p.type === "mousePressed")[1];
+  assert.deepEqual([tp.x, tp.y], [Math.round(100 + 200 * 10 / 400 - 50 * 20 / 300),
+    Math.round(200 + 100 * 10 / 400 + 100 * 20 / 300)]);
+});
+
+test("a click is refused when the owner is ambiguous, covered or unconfirmed", async () => {
+  const pressed = b => b.input.some(([m]) => m === "Input.dispatchMouseEvent");
+  const cases = [
+    // Two owners load the child's URL: neither can be told from the other, so the page cannot steer the click.
+    [{owners:[{node:50, frame:"F7", url:CHILD + "/"}, {node:51, frame:"F8", url:CHILD + "/#x"}]}, "Obscured"],
+    // No owner loads it (the frame sits under another out-of-process frame).
+    [{owners:[{node:51, frame:"F8", url:"https://c.test/"}]}, "Obscured"],
+    // Another element covers the mapped point.
+    [{at:{backendNodeId:99, frameId:"TOP"}}, "Obscured"],
+    // A perspective transform leaves no affine map.
+    [{quad:[100, 200, 500, 200, 520, 520, 90, 500]}, "Obscured"],
+  ];
+  for (const [cdp, error] of cases) {
+    const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"], cdp});
+    const cmds = commands(b);
+    await assert.rejects(act(cmds, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(cmds)),
+      e => e.message === error && e.fields.frame?.id === 7 && e.fields.frame?.origin === CHILD, JSON.stringify(cdp));
+    assert.ok(!pressed(b), "no input for " + JSON.stringify(cdp));
+  }
+  // The child saw no trusted pointer event reach the target: the click ran, so its outcome is unknown.
+  const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"], cdp:{hit:false}});
+  const cmds = commands(b);
+  await assert.rejects(act(cmds, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(cmds)),
+    e => e.message === "OutcomeUnknown" && e.fields.frame?.id === 7);
+  assert.ok(pressed(b));
+  const reply = plain(cmds.failure({id:1, op:"page_click"}, await act(cmds, "page_click",
+    {ref:"7:22.1", dialog:"dismiss"}).catch(e => e)));
+  assert.deepEqual(reply, {id:1, ok:false, error:"OutcomeUnknown", frame:{id:7, origin:CHILD}});
+});
+
+test("a refused frame action names the frame it had resolved", async () => {
+  const allowed = [TOP + "/*", CHILD + "/*"];
+  const b = browser({frames:form(), allowed});
+  const cmds = commands(b);
+  const top = await lease(cmds);
+  // A refusal from the child document itself.
+  await assert.rejects(act(cmds, "page_select", {ref:"7:99.9", value:"x"}, top),
+    e => e.message === "StaleElement" && e.fields.frame?.id === 7);
+  const relayed = plain(cmds.failure({id:2, op:"page_select"},
+    await act(cmds, "page_select", {ref:"7:99.9", value:"x"}, top).catch(e => e)));
+  assert.deepEqual(relayed, {id:2, ok:false, error:"StaleElement", tab:1, frame:{id:7, origin:CHILD}});
+  // A refusal before the frame resolved names none.
+  await assert.rejects(act(cmds, "page_select", {ref:"8:1.0", value:"x"}, top),
+    e => e.message === "StaleElement" && !("frame" in e.fields));
 });

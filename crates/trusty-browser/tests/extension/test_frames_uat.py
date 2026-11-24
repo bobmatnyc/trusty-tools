@@ -17,7 +17,10 @@ Test: `test_granted_child_is_read_and_found_with_attribution`,
 `test_include_text_reads_top_and_child_text_on_a_link_heavy_page`,
 `test_type_submit_and_read_back_in_a_granted_child_frame`,
 `test_click_in_a_granted_child_frame_lands_trusted`,
-`test_action_on_an_ungranted_child_origin_is_refused`.
+`test_action_on_an_ungranted_child_origin_is_refused`,
+`test_click_is_not_redirected_by_a_page_relaying_messages`,
+`test_click_lands_in_a_transformed_child_frame`,
+`test_press_without_a_ref_never_lands_on_the_iframe_element`.
 """
 
 import json
@@ -50,9 +53,34 @@ def pages(port):
         '<div style="height:400px"></div><iframe src="https://b.test:%d/form" '
         'style="width:520px;height:320px;padding:7px;border:5px solid"></iframe>' % port,
         ("b.test", "/form"): FORM,
+        # #11808 review: a scaled and rotated owner iframe.
+        ("a.test", "/transformed"): '<title>Top</title><div style="height:120px"></div>'
+        '<iframe src="https://b.test:%d/form" style="width:520px;height:320px;border:0;'
+        'transform:translate(60px,40px) scale(0.6) rotate(12deg);transform-origin:0 0"></iframe>' % port,
+        # #11808 review: a page that hijacks a postMessage handshake and relays it through a sibling frame.
+        ("a.test", "/spoof"): SPOOF % port,
+        ("a.test", "/sibling"): SIBLING,
     }
 
 
+SPOOF = """<title>Top</title><p id="log"></p>
+<iframe id="c" src="/sibling" style="width:600px;height:500px;border:0;display:block"></iframe>
+<iframe id="b" src="https://b.test:%d/form" style="width:520px;height:320px;border:0"></iframe>
+<script>
+addEventListener("message", e => {
+  const nonce = e.data && e.data.trustyFrameProbe;
+  if (!nonce || e.source !== b.contentWindow) return;
+  e.stopImmediatePropagation();
+  c.contentWindow.postMessage({relay: nonce}, "*");
+  b.contentWindow.postMessage({trustyFrameAck: nonce}, "*");
+}, true);
+</script>"""
+SIBLING = """<title>Sibling</title><style>body{margin:0}button{width:600px;height:500px}</style>
+<button id="decoy">Decoy</button>
+<script>
+addEventListener("message", e => { if (e.data && e.data.relay) parent.postMessage({trustyFrameProbe: e.data.relay}, "*"); });
+decoy.addEventListener("click", e => { parent.document.getElementById("log").textContent = "C clicked " + e.isTrusted; });
+</script>"""
 FORM = """<title>Child form</title><div style="height:60px"></div>
 <form id="f"><input name="q" aria-label="Question"><button type="submit">Send</button></form>
 <p id="reply"></p><button id="probe">Trusted probe</button><p id="trust"></p>
@@ -250,6 +278,40 @@ def test_action_on_an_ungranted_child_origin_is_refused(site, tmp_path):
         assert reply == {"revoked": True}
         refused = ask("page_type", {"document": top, "ref": box["ref"], "text": "x"})
         assert refused == {"error": "PermissionNeeded", "tab": refused.get("tab"),
-                           "origin": f"https://b.test:{site}"}, refused
+                           "origin": f"https://b.test:{site}",
+                           "frame": {"id": box["frame"], "origin": f"https://b.test:{site}"}}, refused
         assert child.evaluate("document.querySelector('input').value") == ""
     browse(tmp_path, site, ["a.test", "b.test"], revoked, "/form", ask_script=ASK_FIELDS)
+
+
+# #11808 review: the click's position never comes from a message the page can see or forge.
+def test_click_is_not_redirected_by_a_page_relaying_messages(site, tmp_path):
+    def body(ask, child):
+        top, probe = find(ask, "Trusted probe")
+        clicked = ask("page_click", {"document": top, "ref": probe["ref"], "dialog": "dismiss"})
+        assert clicked.get("result", {}).get("frame", {}).get("origin") == f"https://b.test:{site}", clicked
+        child.wait_for_selector("text=clicked trusted=true", timeout=3000)
+        log = child.page.evaluate("document.getElementById('log').textContent")
+        assert "C clicked" not in log, log
+    browse(tmp_path, site, ["a.test", "b.test"], body, "/spoof")
+
+
+# #11808 review: a transformed owner is mapped through its quad, never clicked at an unscaled offset.
+def test_click_lands_in_a_transformed_child_frame(site, tmp_path):
+    def body(ask, child):
+        top, probe = find(ask, "Trusted probe")
+        clicked = ask("page_click", {"document": top, "ref": probe["ref"], "dialog": "dismiss"})
+        assert clicked.get("result", {}).get("frame", {}).get("origin") == f"https://b.test:{site}", clicked
+        child.wait_for_selector("text=clicked trusted=true", timeout=3000)
+    browse(tmp_path, site, ["a.test", "b.test"], body, "/transformed")
+
+
+# #11808 review: with focus inside the child, a null-ref press would reach the <iframe> element in the top.
+def test_press_without_a_ref_never_lands_on_the_iframe_element(site, tmp_path):
+    def body(ask, child):
+        top, _ = find(ask, "Question")
+        child.focus("input")
+        refused = ask("page_press", {"document": top, "ref": None, "key": "a", "modifiers": []})
+        assert refused == {"error": "NotEditable"}, refused
+        assert child.evaluate("document.querySelector('input').value") == ""
+    browse(tmp_path, site, ["a.test", "b.test"], body, "/form")

@@ -1,115 +1,67 @@
 // Actions inside cross-origin child frames (#11808, docs/activation-codes.md "Cross-origin child frames").
-// pages.js loads this file (importScripts in the worker; a script tag or vm source in tests). Top-level code
-// touches no `chrome` API. The `page*` functions are injected by chrome.scripting.executeScript, so each one is
+// pages.js loads this file (importScripts in the worker; a vm source in tests). Top-level code touches no
+// `chrome` API. The `page*` functions are injected by chrome.scripting.executeScript, so each one is
 // self-contained: Chrome serializes the function source and runs it in the frame's isolated world.
 globalThis.TrustyFrameActs = (() => {
-  // Why: a trusted click needs top-frame coordinates, and a cross-origin child cannot see its own iframe
-  //   element (#11808). A message's `source` is the sending frame's window, which the parent can match
-  //   against each iframe's `contentWindow`; that names the exact iframe element.
-  // What: installs a one-shot isolated-world `message` listener in this frame for `nonce`. On a probe whose
-  //   source is one of this document's iframes (open shadow roots included), it records that iframe and
-  //   acknowledges to the sender. Reads no page content.
-  // Test: tests/extension/test_frames_uat.py `test_click_in_a_granted_child_frame_lands_trusted`.
-  function pageFrameHost(nonce) {
-    const hosts = globalThis.__trustyFrameHosts ??= new Map();
-    const owned = () => {
-      const out = [], roots = [document];
-      while (roots.length) {
-        for (const el of roots.pop().querySelectorAll("*")) {
-          if (el.localName === "iframe" || el.localName === "frame") out.push(el);
-          if (el.shadowRoot) roots.push(el.shadowRoot);
-        }
-      }
-      return out;
-    };
-    const entry = {frame:null, listen:null};
-    entry.listen = event => {
-      if (entry.frame || event.data?.trustyFrameProbe !== nonce) return;
-      const frame = owned().find(f => f.contentWindow === event.source);
-      if (!frame) return;
-      entry.frame = frame;
-      removeEventListener("message", entry.listen, true);
-      event.source.postMessage({trustyFrameAck:nonce}, "*");
-    };
-    addEventListener("message", entry.listen, true);
-    hosts.set(nonce, entry);
-    return true;
+  // Why: a trusted click is aimed from geometry, and a page can move, cover or transform its frames, so the
+  //   child document must confirm the click really reached the target (#11808 review).
+  // What: resolves `ref` (StaleElement when it changed) and installs isolated-world capture listeners on the
+  //   element's own window for trusted pointerdown, mousedown and click events whose path includes the
+  //   element; pageWitnessed reads and removes them. Reads no page content.
+  // Test: tests/extension/test_frames_uat.py `test_click_in_a_granted_child_frame_lands_trusted`,
+  //   `test_click_is_not_redirected_by_a_page_relaying_messages`.
+  function pageWitness(ref, nonce) {
+    const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+    if (!el) return {error:"StaleElement"};
+    const view = el.ownerDocument.defaultView, seen = {hit:false};
+    const listen = event => { if (event.isTrusted && event.composedPath().includes(el)) seen.hit = true; };
+    for (const type of ["pointerdown", "mousedown", "click"]) view.addEventListener(type, listen, true);
+    (globalThis.__trustyWitness ??= new Map()).set(nonce, {view, seen, listen});
+    return {ok:true};
   }
-
-  // Why: the child announces itself to its parent so pageFrameHost can find its iframe element.
-  // What: posts `{trustyFrameProbe: nonce}` to the parent window and resolves true once the parent
-  //   acknowledges, false after `waitMs` or in a top frame.
-  // Test: tests/extension/test_frames_uat.py `test_click_in_a_granted_child_frame_lands_trusted`.
-  function pageFramePost(nonce, waitMs) {
-    if (window.parent === window) return false;
-    return new Promise(resolve => {
-      let timer = null;
-      const listen = event => {
-        if (event.source === window.parent && event.data?.trustyFrameAck === nonce) done(true);
-      };
-      function done(value) {
-        clearTimeout(timer);
-        removeEventListener("message", listen, true);
-        resolve(value);
-      }
-      timer = setTimeout(() => done(false), waitMs);
-      addEventListener("message", listen, true);
-      window.parent.postMessage({trustyFrameProbe:nonce}, "*");
-    });
-  }
-
-  // Why: the point a child's pageTarget returned is in the child's viewport; CDP input takes the top's.
-  // What: in the frame whose pageFrameHost matched `nonce`, adds the iframe's content-box offset to `point`
-  //   (scrolling the iframe into view first when the point lies outside this viewport) and hit-tests the result
-  //   up through open shadow roots: any other element on top answers Obscured. Every other frame drops its
-  //   listener and answers null.
-  // Test: tests/extension/test_frames_uat.py `test_click_in_a_granted_child_frame_lands_trusted`.
-  function pageFrameOwner(nonce, point) {
-    const hosts = globalThis.__trustyFrameHosts, entry = hosts?.get(nonce);
-    if (!entry) return null;
-    hosts.delete(nonce);
-    removeEventListener("message", entry.listen, true);
-    const frame = entry.frame;
-    if (!frame?.isConnected) return null;
-    const at = () => {
-      const box = frame.getBoundingClientRect(), css = getComputedStyle(frame);
-      return {x:box.left + frame.clientLeft + parseFloat(css.paddingLeft) + point.x,
-        y:box.top + frame.clientTop + parseFloat(css.paddingTop) + point.y};
-    };
-    const outside = p => p.x < 0 || p.y < 0 || p.x >= innerWidth || p.y >= innerHeight;
-    let p = at();
-    if (outside(p)) {
-      frame.scrollIntoView({block:"center", inline:"center", behavior:"instant"});
-      p = at();
-      if (outside(p)) scrollBy({left:p.x - innerWidth / 2, top:p.y - innerHeight / 2, behavior:"instant"});
-      p = at();
-    }
-    for (let node = frame; ;) {
-      const root = node.getRootNode(), hit = root.elementFromPoint?.(p.x, p.y);
-      if (!hit || !(hit === node || node.contains(hit))) return {error:"Obscured"};
-      if (!root.host) return {ok:true, x:p.x, y:p.y};
-      node = root.host;
-    }
+  function pageWitnessed(nonce) {
+    const entry = globalThis.__trustyWitness?.get(nonce);
+    if (!entry) return {ok:true, hit:false};
+    globalThis.__trustyWitness.delete(nonce);
+    for (const type of ["pointerdown", "mousedown", "click"]) entry.view.removeEventListener(type, entry.listen, true);
+    return {ok:true, hit:entry.seen.hit};
   }
 
   // #11808: the frame-scoped ref grammar a read hands out (pages.js FRAME_REF).
   const FRAME_REF = /^([0-9]{1,9}):([0-9]{1,9}\.[0-9]{1,6})$/;
-  // Nested frames a click may cross on its way to the top; deeper answers PermissionNeeded.
-  const MAX_HOPS = 8, ACK_MS = 1000;
+  const bare = url => String(url ?? "").split("#")[0];
+  // The <iframe>/<frame> owners the top debugger session sees: the top document and same-process documents.
+  function owners(node, out = []) {
+    if ((node?.nodeName === "IFRAME" || node?.nodeName === "FRAME") && typeof node.frameId === "string") {
+      out.push({node:node.backendNodeId, frame:node.frameId});
+    }
+    for (const child of [...(node?.children ?? []), ...(node?.shadowRoots ?? [])]) owners(child, out);
+    if (node?.contentDocument) owners(node.contentDocument, out);
+    return out;
+  }
+  function urls(tree, out = new Map()) {
+    if (tree?.frame) out.set(tree.frame.id, tree.frame.url);
+    for (const child of tree?.childFrames ?? []) urls(child, out);
+    return out;
+  }
 
   // Why: an action on a frame-scoped ref must run only in the child document a read reported, only while the
   //   lease's top document is current and the extension holds host permission for the child's own origin
-  //   (#11808); it must never fall back to the top frame.
+  //   (#11808); it must never fall back to the top frame, and its refusals must name that child.
   // What: `of(req)` answers null for a top-document ref. For a frame ref it re-probes the top (DocumentChanged
   //   when it moved), looks up the child a read recorded under the same top document (StaleElement when none),
-  //   re-checks the child origin's permission (PermissionNeeded naming that origin) and answers
-  //   {id, local, document, origin}. `lost` turns a failed injection into StaleElement (the child document is
-  //   gone; nothing ran) or OutcomeUnknown. `locate` lifts a child point to top-frame coordinates, one parent
-  //   hop at a time.
+  //   re-checks the child origin's permission (PermissionNeeded naming the frame) and answers
+  //   {id, local, document, origin}. `tag` adds `frame` to any later refusal. `lost` turns a failed injection
+  //   into StaleElement (the child is gone; nothing ran) or OutcomeUnknown. `locate` maps a child point to
+  //   top-frame CSS pixels through CDP: the one owner whose frame URL is the child's, its transformed content
+  //   quad, and a CDP hit test; any doubt answers Obscured. `watch`/`witnessed` confirm a trusted pointer event
+  //   reached the target in the child.
   // Test: tests/extension/test_frames.mjs `a granted child frame is typed into, submitted and read back`,
   //   `an action on a child origin without permission is refused and never reaches the top`,
-  //   `a trusted click in a child frame lands at the top-frame point`.
+  //   `a trusted click in a child frame lands at the top-frame point`,
+  //   `a click is refused when the owner is ambiguous, covered or unconfirmed`.
   function worker({refuse, probe, granted, frameDocs, frameKey, pageProbe}) {
+    const named = frame => ({id:frame.id, origin:frame.origin});
     async function of(req) {
       const match = typeof req.ref === "string" ? FRAME_REF.exec(req.ref) : null;
       if (!match) return null;
@@ -119,8 +71,18 @@ globalThis.TrustyFrameActs = (() => {
       }
       const known = frameDocs.get(frameKey(req.tab, match[1]));
       if (!known || known.top !== req.document) throw refuse("StaleElement", {tab:req.tab});
-      if (!await granted(known.origin)) throw refuse("PermissionNeeded", {tab:req.tab, origin:known.origin});
-      return {id:Number(match[1]), local:match[2], document:known.document, origin:known.origin};
+      const frame = {id:Number(match[1]), local:match[2], document:known.document, origin:known.origin};
+      if (!await granted(known.origin)) {
+        throw refuse("PermissionNeeded", {tab:req.tab, origin:known.origin, frame:named(frame)});
+      }
+      return frame;
+    }
+    // A refusal raised after the frame resolved names it; an unexpected exception is OutcomeUnknown.
+    function tag(error, frame) {
+      if (!frame) return error;
+      if (!error?.fields) return refuse("OutcomeUnknown", {frame:named(frame)});
+      error.fields.frame = named(frame);
+      return error;
     }
     async function lost(req, frame) {
       try {
@@ -131,37 +93,62 @@ globalThis.TrustyFrameActs = (() => {
       }
       return refuse("OutcomeUnknown");
     }
-    const unreachable = req => refuse("PermissionNeeded", {tab:req.tab});
-    async function locate(req, frame, point) {
-      const exec = async (target, func, args) => {
-        try { return await chrome.scripting.executeScript({target:{tabId:req.tab, ...target}, func, args}); } catch {
-          throw unreachable(req);
+    async function locate(req, frame, point, cdp) {
+      const blocked = () => refuse("Obscured", {tab:req.tab});
+      const want = bare(point.url);
+      if (!want || !(point.vw > 0) || !(point.vh > 0)) throw blocked();
+      let found;
+      try { found = owners((await cdp("DOM.getDocument", {depth:-1, pierce:true})).root); } catch { throw blocked(); }
+      let known = new Map();
+      try { known = urls((await cdp("Page.getFrameTree")).frameTree); } catch { /* OOPIF targets below. */ }
+      // An out-of-process frame is its own debugger target whose id is its frame id; the CDP Target domain is
+      //   closed to extensions, so chrome.debugger.getTargets lists them.
+      try {
+        for (const t of await chrome.debugger.getTargets()) {
+          if (typeof t?.id === "string" && !known.has(t.id)) known.set(t.id, t.url);
         }
-      };
-      let doc = frame.document, at = {x:point.x, y:point.y};
-      for (let hop = 0; hop < MAX_HOPS; hop++) {
-        const nonce = crypto.randomUUID();
-        await exec({allFrames:true}, pageFrameHost, [nonce]);
-        const [posted] = await exec({documentIds:[doc]}, pageFramePost, [nonce, ACK_MS]);
-        const hits = await exec({allFrames:true}, pageFrameOwner, [nonce, at]);
-        if (posted?.result !== true) throw unreachable(req);
-        const owners = (Array.isArray(hits) ? hits : []).filter(h => h?.result);
-        if (owners.length !== 1) throw unreachable(req);
-        const [owner] = owners;
-        if (owner.result.error === "Obscured") throw refuse("Obscured", {tab:req.tab});
-        if (owner.result.ok !== true || !Number.isFinite(owner.result.x) || !Number.isFinite(owner.result.y) ||
-            typeof owner.documentId !== "string") throw refuse("OutcomeUnknown");
-        at = {x:owner.result.x, y:owner.result.y};
-        if (owner.frameId === 0) {
-          if (owner.documentId !== req.document) throw refuse("OutcomeUnknown");
-          return at;
-        }
-        doc = owner.documentId;
-      }
-      throw unreachable(req);
+      } catch { /* Only same-process frames are known. */ }
+      // Two owners with the child's URL cannot be told apart, so neither is clicked.
+      const hits = found.filter(o => bare(known.get(o.frame)) === want);
+      if (hits.length !== 1) throw blocked();
+      const [owner] = hits;
+      await cdp("DOM.scrollIntoViewIfNeeded", {backendNodeId:owner.node,
+        rect:{x:point.x, y:point.y, width:1, height:1}}).catch(() => {});
+      let q;
+      try { q = (await cdp("DOM.getBoxModel", {backendNodeId:owner.node})).model.content; } catch { throw blocked(); }
+      if (!Array.isArray(q) || q.length !== 8 || !q.every(Number.isFinite)) throw blocked();
+      // A perspective transform leaves no parallelogram, and no affine map from the child's viewport.
+      if (Math.abs(q[0] + q[4] - q[2] - q[6]) > 1 || Math.abs(q[1] + q[5] - q[3] - q[7]) > 1) throw blocked();
+      const fx = point.x / point.vw, fy = point.y / point.vh;
+      const x = Math.round(q[0] + (q[2] - q[0]) * fx + (q[6] - q[0]) * fy);
+      const y = Math.round(q[1] + (q[3] - q[1]) * fx + (q[7] - q[1]) * fy);
+      let at;
+      try {
+        at = await cdp("DOM.getNodeForLocation", {x, y, includeUserAgentShadowDOM:true, ignorePointerEventsNone:true});
+      } catch { throw blocked(); }
+      if (at?.backendNodeId !== owner.node && at?.frameId !== owner.frame) throw blocked();
+      return {x, y};
     }
-    return {of, lost, locate};
+    async function watch(req, frame) {
+      const nonce = crypto.randomUUID();
+      let hit;
+      try {
+        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[frame.document]},
+          func:pageWitness, args:[frame.local, nonce]});
+      } catch { throw await lost(req, frame); }
+      if (hit?.result?.error === "StaleElement") throw refuse("StaleElement", {tab:req.tab});
+      if (hit?.result?.ok !== true) throw refuse("OutcomeUnknown");
+      return nonce;
+    }
+    async function witnessed(req, frame, nonce) {
+      try {
+        const [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[frame.document]},
+          func:pageWitnessed, args:[nonce]});
+        return hit?.result?.hit === true;
+      } catch { return false; }
+    }
+    return {of, tag, lost, locate, watch, witnessed};
   }
 
-  return {pageFrameHost, pageFramePost, pageFrameOwner, FRAME_REF, worker};
+  return {pageWitness, pageWitnessed, FRAME_REF, worker};
 })();

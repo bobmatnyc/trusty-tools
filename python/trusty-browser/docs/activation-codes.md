@@ -457,8 +457,9 @@ Envelope:
   reply whose `email` differs (`IdentityMismatch`) or whose `tab` differs from
   the request (`TabMismatch`), as today.
 - Refusal: `{"id", "ok": false, "error": <name>, ...}`. Only the fields `tab`,
-  `origin`, `access` and `document` may accompany an error. The broker relays
-  them to the agent and drops any other field.
+  `origin`, `access` and `document` may accompany an error (plus the
+  `typed`/`accepted`/`entered` of #11352 and the `frame` of #11808, below). The
+  broker relays them to the agent and drops any other field.
 - The worker answers within 7 seconds; the broker waits 8 (existing). A
   missing answer is `BrowserDisconnected`, or `OutcomeUnknown` for
   `page_click`, `page_type`, `page_press` and `page_navigate`. A worker refusal named
@@ -699,17 +700,29 @@ origin). It then injects only into the recorded child `documentId`, never the
 top frame; a child that navigated answers `StaleElement`. The tab scope and
 write gate are the same as for any action.
 
-A click is trusted CDP input at a top-frame point: the child's point is lifted
-one parent at a time. Each hop injects a listener into every frame, the child
-posts a nonce to its parent, and the parent names the iframe whose
-`contentWindow` sent it, adds that iframe's content-box offset and hit-tests
-the point (`Obscured` when covered). A parent the extension cannot reach, or
-more than 8 hops, answers `PermissionNeeded`.
+A click is trusted CDP input at a top-frame point. No page-visible message is
+used to place it. The child reports its point, viewport size and URL; the top
+debugger session (`DOM.getDocument` with `pierce`) lists the `<iframe>` owners
+it can see, and their frame URLs come from `Page.getFrameTree` (same-process)
+or `chrome.debugger.getTargets` (out-of-process). Exactly one owner must load
+the child's URL (fragment ignored). The point maps through that owner's
+transformed content quad (`DOM.getBoxModel`); `DOM.getNodeForLocation` must
+then name the owner or its frame. Two matching owners, none, a perspective
+transform, or a covered point answer `Obscured` before any input. After the
+input, the child must confirm that a trusted pointerdown, mousedown or click
+reached the target; otherwise the click answers `OutcomeUnknown`.
+
+`page_press` with a null `ref` while focus sits inside a cross-origin child
+frame answers `NotEditable`: the keys would reach the `<iframe>` element in the
+top document. Pass the child's frame-scoped ref instead.
 
 The reply (worker `result` and agent reply) adds `"frame": {"id": int,
 "origin": str}`, the child it ran in. The broker refuses a `frame` that is not
-exactly that, with `id` above 0 and an http(s) origin (`BrowserRefused`). The
-`operation` audit line lists the child's host in `frames`, as a read does.
+exactly that, with `id` above 0 and an http(s) origin (`BrowserRefused`). Every
+refusal raised after the frame resolved (an `OutcomeUnknown` included) carries
+the same `frame`; the broker relays a well-formed one and drops any other. The
+`operation` audit line lists the child's host in `frames`, as a read does, for
+a success and a refusal alike.
 
 Child entries carry no viewport distance: they keep document order and
 `viewport_only` does not filter them. `include_text` reads the top
