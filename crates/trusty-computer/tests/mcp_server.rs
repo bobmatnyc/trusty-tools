@@ -14,7 +14,7 @@ use trusty_computer::policy::{self, Verdict};
 
 /// Plan section 5, in table order, plus `computer_screenshot` (#11694) and
 /// `computer_invoke_menu` (#11695).
-const PLAN_TOOLS: [&str; 27] = [
+const PLAN_TOOLS: [&str; 29] = [
     "computer_connect",
     "computer_status",
     "computer_release",
@@ -40,6 +40,8 @@ const PLAN_TOOLS: [&str; 27] = [
     "computer_focus",
     "computer_move_window",
     "computer_resize_window",
+    "computer_clipboard_read",
+    "computer_clipboard_write",
     "computer_wait",
     "computer_refresh",
 ];
@@ -65,6 +67,13 @@ fn tools_list_is_the_plan_table() {
                 Some("computer_invoke_menu" | "computer_read")
             );
             if banned == "invoke_menu" && menu_tool {
+                continue;
+            }
+            // #11696 Phase C: the two clipboard tools name the clipboard.
+            let clip_tool = t["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("computer_clipboard_"));
+            if banned == "clipboard" && clip_tool {
                 continue;
             }
             assert!(!text.contains(banned), "{banned} in {t}");

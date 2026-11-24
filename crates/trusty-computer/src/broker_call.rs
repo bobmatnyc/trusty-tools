@@ -22,6 +22,9 @@
 //! the window's frame read on that call, and is confirmed by read-back.
 //! A window call (#11696 Phase B) passes [`Inner::window_owner`] last, which
 //! proves the window is the granted pid's and builds its one daemon call.
+//! A clipboard call (#11696 Phase C) needs its own grant flag and is run by
+//! [`clipboard::run`] on the broker's pasteboard (size cap, redaction), not
+//! by the daemon.
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -33,6 +36,7 @@ use serde_json::{Map, Value, json};
 use crate::app_identity::check_same;
 use crate::audit::summarize_args;
 use crate::broker::{Ctx, Inner, refusal};
+use crate::clipboard;
 use crate::driver::{DriverError, is_manifest_idle};
 use crate::journal::{self, Outcome};
 use crate::launcher::Launcher;
@@ -243,9 +247,11 @@ impl<L: Launcher> Inner<L> {
         };
         rec.insert("verdict".into(), json!(verdict));
         // 2. Grant scope, per app (live was checked above).
-        // #11696: the coordinate and window tools each need their one grant flag.
+        // #11696: the coordinate, window and clipboard tools each need their grant flag.
         let needed = if window_mgmt::is_window_tool(&tool) {
             window_mgmt::GRANT_FLAG
+        } else if let Some(flag) = clipboard::grant_flag(&tool) {
+            flag
         } else {
             pointer::grant_name(&tool)
         };
@@ -333,7 +339,14 @@ impl<L: Launcher> Inner<L> {
         let shot = tool == SCREENSHOT_TOOL;
         let (driver_tool, driver_args) =
             window_call.unwrap_or_else(|| driver_request(&tool, &args_map));
-        let (mut reply, outcome) = self.drive(driver_tool, &driver_args, grant.scope);
+        let (mut reply, outcome) = if clipboard::is_clipboard_tool(&tool) {
+            // #11696 Phase C: the bounded daemon has no clipboard resource; the broker runs it.
+            let (reply, fields) = clipboard::run(&*self.pasteboard, &tool, &args_map);
+            rec.extend(fields);
+            (reply, Outcome::Known)
+        } else {
+            self.drive(driver_tool, &driver_args, grant.scope)
+        };
         if !shot {
             strip_images(&mut reply["result"]);
         }

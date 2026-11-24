@@ -81,6 +81,8 @@ pub struct Inner<L: Launcher> {
     pub(crate) lockout_marker: PathBuf,
     /// Names the app behind a pid; re-checked at confirm and at every call (#11460).
     pub(crate) resolver: Arc<dyn AppResolver>,
+    /// #11696 Phase C: the clipboard the clipboard tools read and write.
+    pub(crate) pasteboard: Arc<dyn crate::clipboard::Pasteboard>,
 }
 
 /// The broker.
@@ -123,6 +125,7 @@ impl<L: Launcher> Broker<L> {
                 consent,
                 lockout_marker,
                 resolver: Arc::new(LsappinfoResolver),
+                pasteboard: Arc::new(crate::clipboard::SystemPasteboard),
             }),
             clock,
             sessions: AtomicU64::new(0),
@@ -144,6 +147,15 @@ impl<L: Launcher> Broker<L> {
             .get_mut()
             .unwrap_or_else(|p| p.into_inner())
             .resolver = resolver;
+        self
+    }
+
+    /// The same broker using `pasteboard` for the clipboard tools (tests pass a fake).
+    pub fn with_pasteboard(mut self, pasteboard: Arc<dyn crate::clipboard::Pasteboard>) -> Self {
+        self.inner
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .pasteboard = pasteboard;
         self
     }
 
