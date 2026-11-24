@@ -70,7 +70,7 @@ fn timed_out(child: &mut Child, name: &str, timeout: Duration) -> String {
 }
 
 /// Wait for `child` until `deadline`; killed and an error past it.
-fn wait_until(
+pub(crate) fn wait_until(
     child: &mut Child,
     name: &str,
     start: Instant,

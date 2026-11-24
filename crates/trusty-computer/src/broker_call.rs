@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 
 use crate::app_identity::check_same;
+use crate::app_quit;
 use crate::audit::summarize_args;
 use crate::broker::{Ctx, Inner, refusal};
 use crate::clipboard;
@@ -252,6 +253,8 @@ impl<L: Launcher> Inner<L> {
             window_mgmt::GRANT_FLAG
         } else if let Some(flag) = clipboard::grant_flag(&tool) {
             flag
+        } else if tool == app_quit::QUIT_TOOL {
+            app_quit::GRANT_FLAG
         } else {
             pointer::grant_name(&tool)
         };
@@ -342,6 +345,11 @@ impl<L: Launcher> Inner<L> {
         let (mut reply, outcome) = if clipboard::is_clipboard_tool(&tool) {
             // #11696 Phase C: the bounded daemon has no clipboard resource; the broker runs it.
             let (reply, fields) = clipboard::run(&*self.pasteboard, &tool, &args_map);
+            rec.extend(fields);
+            (reply, Outcome::Known)
+        } else if tool == app_quit::QUIT_TOOL {
+            // #11696 Phase D: a quit Apple event to the granted pid; the daemon is not asked.
+            let (reply, fields) = app_quit::run(&*self.quitter, grant.scope.pid, &grant.bundle_id);
             rec.extend(fields);
             (reply, Outcome::Known)
         } else {

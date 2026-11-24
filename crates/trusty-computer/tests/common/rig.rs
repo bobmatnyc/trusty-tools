@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use trusty_computer::app_quit::Quitter;
 use trusty_computer::broker::{Broker, Clock, Inner};
 use trusty_computer::broker_server::BrokerServer;
 use trusty_computer::clipboard::Pasteboard;
@@ -80,6 +81,8 @@ pub struct Rig {
     pub resolver: Arc<FakeResolver>,
     /// #11696 Phase C: the clipboard the broker's clipboard tools use.
     pub pasteboard: Arc<FakePasteboard>,
+    /// #11696 Phase D: records the quit requests `quit_app` sends.
+    pub quitter: Arc<FakeQuitter>,
     codes: Mutex<HashMap<String, String>>,
 }
 
@@ -128,6 +131,34 @@ impl Pasteboard for FakePasteboard {
     }
 }
 
+/// A quitter that records each `(pid, bundle_id)` and sends nothing (#11696 Phase D).
+#[derive(Default)]
+pub struct FakeQuitter {
+    pub quits: Mutex<Vec<(u32, String)>>,
+    /// Every quit fails while set.
+    pub broken: std::sync::atomic::AtomicBool,
+}
+
+impl FakeQuitter {
+    /// The quit requests sent so far.
+    pub fn sent(&self) -> Vec<(u32, String)> {
+        self.quits.lock().expect("quits").clone()
+    }
+}
+
+impl Quitter for FakeQuitter {
+    fn quit(&self, pid: u32, bundle_id: &str) -> Result<(), String> {
+        self.quits
+            .lock()
+            .expect("quits")
+            .push((pid, bundle_id.to_owned()));
+        if self.broken.load(Ordering::SeqCst) {
+            return Err("quit refused".into());
+        }
+        Ok(())
+    }
+}
+
 /// A call request.
 pub fn call(grant: &str, tool: &str, rid: &str, args: Value) -> Value {
     json!({"op": "call", "grant_id": grant, "tool": tool, "request_id": rid, "args": args})
@@ -162,11 +193,13 @@ impl Rig {
         let dialog = FakeDialog::confirming();
         let resolver = Arc::new(FakeResolver::default());
         let pasteboard = Arc::new(FakePasteboard::default());
+        let quitter = Arc::new(FakeQuitter::default());
         let broker = Broker::new(sup, &state, clock, dialog.clone()).expect("broker");
         let broker = broker
             .with_dialog_timeout(Duration::from_millis(500))
             .with_app_resolver(resolver.clone())
-            .with_pasteboard(pasteboard.clone());
+            .with_pasteboard(pasteboard.clone())
+            .with_quitter(quitter.clone());
         let broker = Arc::new(broker);
         let mut server = BrokerServer::bind(&state).expect("bind");
         server.spawn(Arc::clone(&broker));
@@ -188,6 +221,7 @@ impl Rig {
             dialog,
             resolver,
             pasteboard,
+            quitter,
             codes: Mutex::new(HashMap::new()),
         }
     }

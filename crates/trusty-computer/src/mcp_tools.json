@@ -684,6 +684,30 @@
   }
  },
  {
+  "name": "computer_quit",
+  "description": "Ask the granted app to quit gracefully, as its own Quit menu item would, when the grant names app_quit. Refused unless pid is the granted pid and bundle_id the granted app's bundle id; never a signal or force quit, and no other app is touched. The app may ask to save or decline; the grant ends once its process is gone.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "bundle_id": {
+     "type": "string",
+     "description": "The granted app's bundle id."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "bundle_id"
+   ]
+  }
+ },
+ {
   "name": "computer_wait",
   "description": "Sleep up to 5 s in the broker; keeps the lease alive.",
   "inputSchema": {
