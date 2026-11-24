@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.11.2] — 2026-11-24
+
+### Fixed
+
+- `agents_dial_socket` resolves the tagent health socket for a dialer without creating the data directory at 0755 (#11667).
+
+### Changed
+
+- Patch release (0.11.2) to restore publish-version parity (#3366); no code change.
+
 ## [0.11.1] — 2026-11-23
 
 ### Added
