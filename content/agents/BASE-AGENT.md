@@ -2,7 +2,7 @@
 name: base-agent
 role: base
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents
@@ -184,6 +184,11 @@ script name that the checkout does not contain.
   individually.
 - A home-wide search can time out — search known dirs, or `mdfind`.
 - Confirm a drift guard's repo via `git remote -v`, not context.
+
+## Read Long Documents
+
+A document over about 2,000 tokens: do not read it whole. Run `trusty-summarizer summarize <file>` for the outline. Then use `trusty-summarizer find --query <text> <file>` and `trusty-summarizer read --lines A-B <file>` to read only the parts you need. Read a shorter document directly; `trusty-summarizer size <file>` gives `tokens_est`.
+When the outline did not lead to the content you needed, log it: `trusty-summarizer miss <file> --question "<what you sought>" [--category wrong-lines|not-in-lines|find-empty|conversion-lost]`.
 
 ## Memory & Context Routing
 
