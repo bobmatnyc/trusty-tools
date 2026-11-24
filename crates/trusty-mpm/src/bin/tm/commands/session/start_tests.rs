@@ -1319,3 +1319,21 @@ async fn connect_refuses_an_unreachable_daemon_before_any_write_10101() {
     assert!(written.is_empty(), "the refused connect wrote {written:?}");
     assert!(!log.exists(), "tmux ran");
 }
+
+/// #11077: a sandboxed `tm session start` resolves its home and framework
+/// paths under `<sandbox>/home`, never the process home.
+#[test]
+fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    let home = crate::commands::launch_home::resolve_launch_home(
+        Some(OsStr::new("1")),
+        Some(OsStr::new("/tmp/sbx/data")),
+        Some(PathBuf::from("/Users/fake")),
+    )
+    .expect("a sandbox with a data override resolves");
+    let fw = super::start_framework_paths(home.as_deref());
+    let sandbox_home = Path::new("/tmp/sbx/home");
+    assert!(fw.crate_config_root().starts_with(sandbox_home), "{fw:?}");
+    assert!(fw.root.starts_with(sandbox_home), "{fw:?}");
+}
