@@ -25,8 +25,9 @@
 #     unknown-id    turns and ask for an unlisted id are 404 naming `sandbox`
 #     bad-origin    an ask with a foreign Origin is 403 (AC3)
 #     page          GET /tools/assistants/ is 200 HTML titled Trusty
-#                   Assistants, and its asset refs are the committed bundle's
-#                   and are served (AC5)
+#                   Assistants, with one live module script and a live API
+#                   base (outside every comment); its asset refs are the
+#                   committed bundle's and are served (AC5)
 #     no-leak       no fake secret in the launcher output or under <dir> (AC4)
 #     no-daemon     after `--stop-daemon`, an ask is 503 with the
 #                   `ta ask-daemon sandbox` hint while the page still serves (AC3)
@@ -211,7 +212,20 @@ if grep -qi '^content-type: text/html' "$TMP_ROOT/page.headers" && grep -q '<tit
 else
   fail "page is the Trusty Assistants HTML (AC5)" "$(head -c 300 "$TMP_ROOT/page.html")"
 fi
-refs() { grep -oE '(src|href)="\./[^"]+"' "$1" | sed -E 's/^(src|href)="\.\///; s/"$//' | sort; }
+# live FILE: FILE's markup with every <!-- ... --> span removed (#11749 review:
+# a shell comment once swallowed the module script, and a plain grep still
+# found it).
+live() {
+  python3 -I -c 'import re, sys; print(re.sub(r"<!--.*?(-->|\Z)", "", open(sys.argv[1]).read(), flags=re.S))' "$1"
+}
+refs() { live "$1" | grep -oE '(src|href)="\./[^"]+"' | sed -E 's/^(src|href)="\.\///; s/"$//' | sort; }
+expect_eq "page has one live module script (AC5)" \
+  "$(live "$TMP_ROOT/page.html" | grep -c '<script type="module"' || true)" 1
+if live "$TMP_ROOT/page.html" | grep -q 'window.__ASSISTANTS_BASE__ ='; then
+  pass "page carries a live API base (AC5)"
+else
+  fail "page carries a live API base (AC5)" "the injected base is missing or inside a comment"
+fi
 SERVED_REFS="$(refs "$TMP_ROOT/page.html" | tr '\n' ' ')"
 expect_eq "page assets are the committed bundle's (AC5)" "$SERVED_REFS" "$(refs "$DIST_INDEX" | tr '\n' ' ')"
 for r in $SERVED_REFS; do

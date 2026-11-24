@@ -8,8 +8,9 @@
    * list says "no assistant instances", as `ta list` does), that instance's
    * turns oldest first, with a note for skipped lines, a truncated read and a
    * shortened tail, and an ask box. One ask runs at a time: submit is disabled
-   * and the box shows a pending state until it settles. A 200 appends the turn;
-   * a failure shows `errorLines` (the 503 hint verbatim, the busy text on 429).
+   * and the box shows a pending state until it settles. A 200 appends the turn
+   * (or shows it in a notice when no history is loaded, and reloads the
+   * history after a reselection mid-ask); a failure shows `errorLines` (the 503 hint verbatim, the busy text on 429).
    * Every model and console string renders as text, never as HTML. A turns or
    * ask answer for an instance no longer selected is dropped.
    * Test: `src/App.test.js`.
@@ -31,6 +32,8 @@
   let question = $state('');
   let pending = $state('');
   let askError = $state(null);
+  // An answer the history could not take (still loading, or failed to load).
+  let askAnswer = $state(null);
   // Bumped on every selection; a turns answer under an older value is dropped.
   // Not reactive: no markup reads it.
   let ticket = 0;
@@ -56,6 +59,7 @@
     history = null;
     historyError = null;
     askError = null;
+    askAnswer = null;
     try {
       const answer = await api.turns(id, TURN_LIMIT);
       if (mine !== ticket) return;
@@ -77,15 +81,25 @@
     if (!canAsk) return;
     const id = selected;
     const text = question;
+    // #11749 review: a reselection while the ask runs reloads the history,
+    // which may already hold this turn; appending it too would show it twice.
+    const mine = ticket;
     pending = id;
     askError = null;
+    askAnswer = null;
     try {
       const answer = await api.ask(id, text);
       if (selected !== id) return;
       question = '';
-      if (history && history.id === id) {
-        const turn = { at: new Date().toISOString(), question: text, answer: String(answer.answer ?? '') };
+      const reply = String(answer.answer ?? '');
+      if (mine !== ticket) {
+        choose(id);
+      } else if (history && history.id === id) {
+        const turn = { at: new Date().toISOString(), question: text, answer: reply };
         history = { ...history, turns: [...history.turns, turn], total: history.total + 1 };
+      } else {
+        // #11749 review: no history to append to; never drop the answer.
+        askAnswer = { question: text, answer: reply };
       }
     } catch (err) {
       if (selected === id) askError = errorLines(err);
@@ -196,6 +210,14 @@
                 {pending ? 'Asking…' : 'Ask'}
               </button>
             </div>
+            {#if askAnswer}
+              <div class="notice mt-3" role="status" data-testid="ask-answer">
+                <p class="text-mono text-xs">Q</p>
+                <p class="text">{askAnswer.question}</p>
+                <p class="text-mono text-xs mt-3">A</p>
+                <p class="text">{askAnswer.answer}</p>
+              </div>
+            {/if}
             {#if askError}
               <div class="notice error mt-3" role="alert" data-testid="ask-error">
                 {#each askError as line}<p>{line}</p>{/each}

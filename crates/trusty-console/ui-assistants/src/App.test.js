@@ -124,6 +124,39 @@ describe('ask', () => {
     expect(q('ask').textContent.trim()).toBe('Ask');
   });
 
+  test('an answer with no history loaded is shown in a notice, not lost', async () => {
+    await open({ turns: () => [500, { error: 'cannot read the turn log' }] });
+    expect(q('history-error')).not.toBeNull();
+    type('still there?');
+    submit();
+    await settle();
+    expect(q('ask-answer').textContent).toContain('answer to still there?');
+    expect(q('ask-answer').textContent).toContain('still there?');
+  });
+
+  test('a reselection mid-ask reloads the history instead of appending a duplicate', async () => {
+    let logged = false;
+    const fake = await open({
+      turns: ({ id }) => {
+        const extra = id === 'cto' && logged ? [{ at: 't', question: 'mid', answer: 'answer to mid' }] : [];
+        return [200, turnsBody(id, { turns: [...turnsBody(id).turns, ...extra] })];
+      },
+    });
+    type('mid');
+    const release = fake.hold('ask');
+    submit();
+    await settle();
+    // The daemon has logged the turn; its reply is still on the way.
+    logged = true;
+    instance('izzie').click();
+    await settle();
+    instance('cto').click();
+    await settle();
+    release();
+    await settle();
+    expect(texts('turn-question')).toEqual(['cto question', 'mid']);
+  });
+
   test('model output renders as text, never as HTML', async () => {
     const evil = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
     await open({ ask: () => [200, { instance: 'cto', answer: evil }] });
