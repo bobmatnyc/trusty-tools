@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,11 @@ struct Inner {
     ended: Option<DropReason>,
     /// The live window's vault blob, when unlock read one (#10524).
     held: Option<Held>,
+    /// #11786: Keychain writes begun, held blob or not; a snapshot read
+    /// across a change here is stale.
+    writes: u64,
+    /// #11786: Keychain writes begun and not yet finished.
+    in_flight: usize,
 }
 
 impl Inner {
@@ -219,6 +224,8 @@ impl Inner {
 /// Test: `grant_cache_serves_keychain_values_only_while_live`.
 pub(crate) struct GrantCache {
     inner: Mutex<Inner>,
+    /// #11786: signalled when a Keychain write finishes.
+    drained: Condvar,
     now: CacheClock,
     wall: WallClock,
     lock_mem: MemLock,
@@ -246,6 +253,7 @@ impl GrantCache {
     pub(crate) fn with_lock(now: CacheClock, wall: WallClock, lock_mem: MemLock) -> Self {
         Self {
             inner: Mutex::default(),
+            drained: Condvar::new(),
             now,
             wall,
             lock_mem,
@@ -414,15 +422,52 @@ impl GrantCache {
             .retain(|(_, held_vault, held_key), _| held_vault != vault || held_key != key);
     }
 
-    /// Hold `blob` for live grant `generation`, replacing any held blob.
+    /// The write mark to take before reading a blob to [`Self::hold`], once
+    /// no Keychain write is in flight; `None` when writes are still in
+    /// flight after `cap`, or the lock was poisoned while waiting.
     ///
-    /// What: `false`, holding nothing, when that grant is not live or any
+    /// Why: #11786 — a write in flight has an unknown outcome, so a mark
+    /// taken under it proves nothing; waiting lets a prompt-bound write
+    /// finish instead of failing the unlock at once.
+    /// Test: `grant_drained_mark_waits_for_an_in_flight_write`,
+    /// `grant_hold_refuses_a_snapshot_a_write_made_stale`.
+    pub(crate) fn drained_mark(&self, cap: Duration) -> Option<u64> {
+        let inner = self.lock();
+        // A poisoned wait is `None`; the next `lock` ends the grant.
+        let (inner, _) = self
+            .drained
+            .wait_timeout_while(inner, cap, |inner| inner.in_flight != 0)
+            .ok()?;
+        (inner.in_flight == 0).then_some(inner.writes)
+    }
+
+    /// Whether grant `generation` is the live one, settling it first.
+    pub(crate) fn is_live(&self, generation: u64) -> bool {
+        let mut inner = self.lock();
+        let now = self.stamp();
+        inner.settle(now);
+        inner.window.as_ref().map(|w| w.generation) == Some(generation)
+    }
+
+    /// Hold `blob`, read after `mark`, for live grant `generation`,
+    /// replacing any held blob.
+    ///
+    /// Why: #11786 — a write that lands while unlock reads the blob is not
+    /// in that blob; holding it would answer a fresh deny as "no deny".
+    /// What: `false`, holding nothing, when that grant is not live, any
+    /// Keychain write began since `mark` or is still in flight, or any
     /// item's page lock is refused (#10524 AC2: no lock, no cache).
-    pub(crate) fn hold(&self, generation: u64, blob: &Blob) -> bool {
+    /// Test: `grant_hold_refuses_a_snapshot_a_write_made_stale`,
+    /// `grant_held_blob_answers_reads_and_ends_with_the_grant`.
+    pub(crate) fn hold(&self, generation: u64, mark: u64, blob: &Blob) -> bool {
         let mut inner = self.lock();
         let now = self.stamp();
         inner.settle(now);
         if inner.window.as_ref().map(|w| w.generation) != Some(generation) {
+            return false;
+        }
+        // #11786: a write since the read began makes the snapshot stale.
+        if inner.writes != mark || inner.in_flight != 0 {
             return false;
         }
         let mut held = Held::default();
@@ -452,13 +497,24 @@ impl GrantCache {
     }
 
     /// Mark item `id` dirty before a write; the write's ticket, or `None`
-    /// when no blob is held.
+    /// when no blob is held. Every call is paired with [`Self::held_done`].
     pub(crate) fn held_begin(&self, id: &ItemId) -> Option<u64> {
         let mut inner = self.lock();
+        // #11786: counted even with no blob held, so `hold` sees it.
+        inner.writes = inner.writes.wrapping_add(1);
+        inner.in_flight += 1;
         let held = inner.held.as_mut()?;
         held.ticket = held.ticket.wrapping_add(1);
         held.dirty.insert(id.clone(), held.ticket);
         Some(held.ticket)
+    }
+
+    /// A write begun by [`Self::held_begin`] finished, landed or failed.
+    pub(crate) fn held_done(&self) {
+        let mut inner = self.lock();
+        inner.in_flight = inner.in_flight.saturating_sub(1);
+        drop(inner);
+        self.drained.notify_all();
     }
 
     /// The write with `ticket` on `id` landed with `value` (`None`: removed).
