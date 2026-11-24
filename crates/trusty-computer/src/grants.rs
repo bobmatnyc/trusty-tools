@@ -297,6 +297,14 @@ impl Grants {
         }
         let mut tools: BTreeSet<String> = DEFAULT_TOOLS.iter().map(|t| (*t).to_owned()).collect();
         for tool in &req.extra_tools {
+            // #11696: one flag grants both coordinate tools; neither is granted by name.
+            if tool == crate::pointer::GRANT_FLAG {
+                tools.insert(tool.clone());
+                continue;
+            }
+            if crate::pointer::is_pointer_tool(tool) {
+                return Err(GrantError::BadTool(tool.clone()));
+            }
             match policy::rule(tool) {
                 Some(rule) if rule.verdict != Verdict::Deny => {
                     tools.insert(tool.clone());

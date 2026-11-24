@@ -104,7 +104,7 @@ fn tree_complete(sc: &serde_json::Map<String, Value>) -> bool {
 /// Why: the agent gets pixels only when the broker can vouch for what they
 /// hold (#11694).
 /// What: refuses, in order: no structured part (`redaction_failed`); another
-/// window (`window_mismatch`); a tree [`tree_complete`] does not vouch for
+/// window (`window_mismatch`); a tree `tree_complete` does not vouch for
 /// (`screenshot_unverified`), since a password field
 /// could hide in the part not walked; a secure text field
 /// (`sensitive_content`); a capture error or `screenshot_frame_valid` not

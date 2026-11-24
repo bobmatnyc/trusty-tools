@@ -14,7 +14,7 @@ use trusty_computer::policy::{self, Verdict};
 
 /// Plan section 5, in table order, plus `computer_screenshot` (#11694) and
 /// `computer_invoke_menu` (#11695).
-const PLAN_TOOLS: [&str; 22] = [
+const PLAN_TOOLS: [&str; 24] = [
     "computer_connect",
     "computer_status",
     "computer_release",
@@ -35,6 +35,8 @@ const PLAN_TOOLS: [&str; 22] = [
     "computer_hotkey",
     "computer_launch",
     "computer_invoke_menu",
+    "computer_click_at",
+    "computer_drag",
     "computer_wait",
     "computer_refresh",
 ];
@@ -140,7 +142,10 @@ fn mcp_smoke_against_a_fake_broker() {
     )
     .expect("notify");
     let listed = mcp.rpc("tools/list", json!({}));
-    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(22));
+    assert_eq!(
+        listed["result"]["tools"].as_array().map(Vec::len),
+        Some(PLAN_TOOLS.len())
+    );
 
     let unbound = mcp.tool("computer_apps", json!({}));
     assert_eq!(unbound["structuredContent"]["code"], "not_connected");

@@ -35,6 +35,7 @@ pub const TOOLS: [&str; 12] = [
     "check_permissions",
     // #11695: the broker admits it only under a grant naming it, path deny list applied.
     "invoke_menu",
+    // #11696: "drag" joins this ceiling when `pointer::DRAG_ENABLED` turns on.
 ];
 
 /// The one app window a lease may touch.

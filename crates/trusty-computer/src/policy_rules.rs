@@ -4,7 +4,8 @@
 //! dict (`policy.py:161-231`) row for row.
 //! What: 6 ALLOW, 14 FILTER and 36 DENY rows. `invoke_menu` is FILTER behind
 //! a path deny list (#11695; it was DENY in Phase 2, plan section 1, item 3).
-//! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists.
+//! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists:
+//! `screenshot_window` (#11694), `click_at` and `drag_at` (#11696).
 //! Test: `every_inventory_tool_is_classified`, `verdict_counts_match_the_plan`
 //! in `tests/spike_policy.rs`; `screenshot_rule_is_filter_and_not_default`.
 
@@ -220,11 +221,22 @@ pub static RULES: [Rule; 56] = [
 ];
 
 /// Broker tools: driven through a driver tool, never named to the daemon.
-pub static BROKER_RULES: [Rule; 1] = [
+pub static BROKER_RULES: [Rule; 3] = [
     // #11694: driven as get_window_state with a screenshot; see `crate::screenshot`.
     filter(
         crate::screenshot::SCREENSHOT_TOOL,
         "image of the granted window only; refused when a password field shows",
         &[pid_in_scope, window_only],
+    ),
+    // #11696: driven as click / drag after a frame read; see `crate::pointer`.
+    filter(
+        crate::pointer::CLICK_AT_TOOL,
+        "left click at a point inside the granted window's frame at event time",
+        &[pid_in_scope, crate::pointer::click_args],
+    ),
+    filter(
+        crate::pointer::DRAG_TOOL,
+        "left drag between points inside the granted window's frame at event time",
+        &[pid_in_scope, crate::pointer::drag_args],
     ),
 ];
