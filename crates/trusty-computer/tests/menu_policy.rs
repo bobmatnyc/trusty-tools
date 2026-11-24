@@ -327,6 +327,8 @@ fn menu_paths_refuse_first_two_menus_by_position() {
 fn broker_scope_gate_is_authority_boundary_for_invoke_menu() {
     // Set up: grant with invoke_menu permission for a specific pid and window.
     let mut rig = menu_rig();
+    // #11745: baseline before any out-of-scope call, so both refusals are covered.
+    let calls_before = rig.agent_calls().len();
 
     // Out-of-scope pid: broker refuses with pid_out_of_scope, driver never called.
     let wrong_pid = json!({"pid": pid() + 1, "window_id": WINDOW, "path": ["File", "New"]});
@@ -335,7 +337,6 @@ fn broker_scope_gate_is_authority_boundary_for_invoke_menu() {
         reply["code"], "pid_out_of_scope",
         "out-of-scope pid should be refused at broker: {reply}"
     );
-    let calls_before = rig.agent_calls().len();
 
     // Out-of-scope window_id: broker refuses with window_out_of_scope, driver never called.
     let wrong_window = json!({"pid": pid(), "window_id": WINDOW + 1, "path": ["File", "New"]});
