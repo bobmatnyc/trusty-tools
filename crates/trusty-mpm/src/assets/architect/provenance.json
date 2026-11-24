@@ -1,6 +1,6 @@
 {
   "export_manifest": "scripts/architect_export_manifest.txt",
-  "export_manifest_sha256": "7d311f5645945247ad18efd84001adb9274c8a4cd7fe440f6d1d7a536b75988f",
+  "export_manifest_sha256": "1fe39a1b725d718f4ebabe5c4298982a444be370ecebf63642128664bb253c6e",
   "files": {
     "agents/drift-guard.md": "1e94d54d878bfe88c37a1a9319b94bf576f1a0aae9234aa9cd4ab1612b222b66",
     "agents/event-extractor.md": "474a1373fa089e151d239f4f43c6aeb32cbdab362b985ca4db16ef59998ced2a",
