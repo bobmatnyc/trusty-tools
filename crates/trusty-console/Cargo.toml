@@ -60,6 +60,8 @@ include = [
     "ui-analyze-dist/**/*",
     # #9067: the Secrets page the console serves at /tools/secrets/.
     "ui-secrets-dist/**/*",
+    # #11749: the Trusty Assistants page the console serves at /tools/assistants/.
+    "ui-assistants-dist/**/*",
     "Cargo.toml",
     "README.md",
 ]

@@ -173,6 +173,14 @@ const ENFORCED = [
     darkSelector: /:root\s*,\s*\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/,
   },
   {
+    // #11749: a copy of ui-secrets' token file, same selectors.
+    name: "trusty-console-assistants",
+    file: "crates/trusty-console/ui-assistants/src/lib/styles/tokens.css",
+    mode: "hex",
+    lightSelector: /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/,
+    darkSelector: /:root\s*,\s*\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/,
+  },
+  {
     // Plain CSS `--trusty-*: #hex`, light under `:root`, dark under
     // `[data-theme='dark']` (#3487).
     name: "trusty-search",

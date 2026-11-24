@@ -1,11 +1,13 @@
 //! build.rs — build the UIs before compiling so rust-embed has assets.
 //!
-//! Why: The web console ships FIVE embedded Svelte SPAs. Its own management UI
+//! Why: The web console ships SIX embedded Svelte SPAs. Its own management UI
 //! lives in `ui/src/` and builds to `ui/dist/`; the search dashboard lives in
 //! `ui-search/src/` and builds to `ui-search-dist/`; the memory dashboard lives
 //! in `ui-memory/src/` and builds to `ui-memory-dist/`; the analyze dashboard
 //! lives in `ui-analyze/src/` and builds to `ui-analyze-dist/`; the Secrets
-//! page lives in `ui-secrets/src/` and builds to `ui-secrets-dist/` (#9067).
+//! page lives in `ui-secrets/src/` and builds to `ui-secrets-dist/` (#9067);
+//! the Trusty Assistants page lives in `ui-assistants/src/` and builds to
+//! `ui-assistants-dist/` (#11749).
 //! `src/tools_ui.rs` serves the latter three at `/tools/search/`,
 //! `/tools/memory/` and `/tools/analyze/`. Running `pnpm build` here means a
 //! plain `cargo build` always produces a binary with up-to-date assets, with no
@@ -67,6 +69,11 @@ fn main() {
     println!("cargo:rerun-if-changed=ui-secrets/vite.config.js");
     println!("cargo:rerun-if-changed=ui-secrets/index.html");
     println!("cargo:rerun-if-changed=ui-secrets/src");
+    // #11749: the Trusty Assistants page is this crate's sixth UI project.
+    println!("cargo:rerun-if-changed=ui-assistants/package.json");
+    println!("cargo:rerun-if-changed=ui-assistants/vite.config.js");
+    println!("cargo:rerun-if-changed=ui-assistants/index.html");
+    println!("cargo:rerun-if-changed=ui-assistants/src");
 
     // The console's own management UI, embedded from `ui/dist/`.
     build_bundle(
@@ -114,6 +121,15 @@ fn main() {
         &crate_root.join("ui-secrets-dist"),
         "trusty-console-secrets",
     );
+
+    // #11749: the Trusty Assistants page, embedded from `ui-assistants-dist/`.
+    // Same shape as the secrets bundle above.
+    build_bundle(
+        &crate_root,
+        &crate_root.join("ui-assistants"),
+        &crate_root.join("ui-assistants-dist"),
+        "trusty-console-assistants",
+    );
 }
 
 /// Rebuild one committed UI bundle, unless it already matches its source.
@@ -129,7 +145,8 @@ fn main() {
 /// key — `trusty-console` for `ui/dist/`, `trusty-console-search` for
 /// `ui-search-dist/`, `trusty-console-memory` for `ui-memory-dist/`, and
 /// `trusty-console-analyze` for `ui-analyze-dist/`, and `trusty-console-secrets`
-/// for `ui-secrets-dist/` (#9067). The five keys must differ:
+/// for `ui-secrets-dist/` (#9067), and `trusty-console-assistants` for
+/// `ui-assistants-dist/` (#11749). The six keys must differ:
 /// `stamp-ui-bundle.sh` stamps every row matching the name it is given, so a
 /// shared key would have one bundle's build certify another.
 /// Test: `git status --porcelain` is empty after `cargo test -p trusty-console`;

@@ -78,3 +78,6 @@ trusty-console-analyze	crates/trusty-console/ui-analyze,crates/trusty-analyze/ui
 # #9067: the Secrets page the console serves at /tools/secrets/, the fifth
 # console bundle. New source, so no pre-move path.
 trusty-console-secrets	crates/trusty-console/ui-secrets	crates/trusty-console/ui-secrets-dist
+# #11749: the Trusty Assistants page the console serves at /tools/assistants/,
+# the sixth console bundle. New source, so no pre-move path.
+trusty-console-assistants	crates/trusty-console/ui-assistants	crates/trusty-console/ui-assistants-dist
