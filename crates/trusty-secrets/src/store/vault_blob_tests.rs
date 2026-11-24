@@ -154,49 +154,55 @@ fn corrupt_blobs() -> Vec<String> {
     vec![truncated, random]
 }
 
-/// Why: #11738 AC1 — a truncated or random-bytes blob read falls back to
-/// the backup (ahead of the stale per-item item), returns its value, and
-/// leaves the corrupt blob as it was. Before the fix every read failed.
+/// Asserts `got` is the fixed fail-closed error: it names the key and the
+/// `--rollback` recovery and carries no value bytes.
+fn assert_fails_closed(got: Result<Option<Zeroizing<String>>, SecretsError>, key: &str) {
+    let err = got.expect_err("a corrupt blob served a value");
+    let shown = format!("{err} / {err:?}");
+    assert!(shown.contains("vault blob is corrupt"), "{shown}");
+    assert!(shown.contains("--rollback"), "{shown}");
+    assert!(shown.contains(key), "{shown}");
+    for value in [VALUE, "stale", "sk-per-item-7f", "sk-tampered"] {
+        assert!(!shown.contains(value), "{shown}");
+    }
+}
+
+/// Why: #11786 — a truncated or random-bytes blob read fails closed even
+/// with a backup present: the backup may hold a key rotated or deleted
+/// since migration. The corrupt blob is left as it was.
 /// Test: itself.
 #[test]
-fn blob_store_corrupt_blob_reads_the_backup() {
+fn blob_store_corrupt_blob_with_backup_fails_closed() {
     for bad in corrupt_blobs() {
         let items = Arc::new(MemItems::with(&[(&item(1), "stale")]));
         items.put_raw(&ItemId::backup(), &encoded(&[(&item(1), VALUE)]));
         items.put_raw(&ItemId::blob(), &bad);
         let store = store_over(&items);
-        let got = store.get(&item(1)).expect("a corrupt blob failed the read");
-        assert_eq!(got.as_deref().map(String::as_str), Some(VALUE));
+        assert_fails_closed(store.get(&item(1)), "KEY_1");
         assert_eq!(items.raw(&ItemId::blob()).as_deref(), Some(bad.as_str()));
     }
 }
 
-/// Why: #11738 AC1 — with no backup a corrupt blob read falls back to the
-/// per-item item; a key neither source holds is a fixed error naming the
-/// key, never `None` and never a value.
+/// Why: #11786 — with no backup a corrupt blob read fails closed too; the
+/// per-item item is never served.
 /// Test: itself.
 #[test]
-fn blob_store_corrupt_blob_without_backup_reads_per_item() {
+fn blob_store_corrupt_blob_without_backup_fails_closed() {
     for bad in corrupt_blobs() {
         let items = Arc::new(MemItems::with(&[(&item(1), "sk-per-item-7f")]));
         items.put_raw(&ItemId::blob(), &bad);
         let store = store_over(&items);
-        let got = store.get(&item(1)).expect("a corrupt blob failed the read");
-        assert_eq!(got.as_deref().map(String::as_str), Some("sk-per-item-7f"));
-        let err = store.get(&item(2)).unwrap_err();
-        let shown = format!("{err} / {err:?}");
-        assert!(shown.contains("vault blob is corrupt"), "{shown}");
-        assert!(shown.contains("KEY_2"), "{shown}");
-        assert!(!shown.contains(VALUE) && !shown.contains("sk-per-item-7f"));
+        assert_fails_closed(store.get(&item(1)), "KEY_1");
+        assert_fails_closed(store.get(&item(2)), "KEY_2");
     }
 }
 
-/// Why: #11738 AC2 — a blob that parses but whose value was changed after
-/// encoding fails its digest, counts as corrupt, and the read returns the
-/// backup's value, not the tampered one.
+/// Why: #11738 digest verify, kept by #11786 — a blob that parses but whose
+/// value changed after encoding fails its digest and the read fails; neither
+/// the tampered nor the backup value is served.
 /// Test: itself.
 #[test]
-fn blob_store_tampered_blob_reads_the_backup() {
+fn blob_store_tampered_blob_fails_closed() {
     let signed = encoded_with_digest(&[(&item(1), VALUE)]);
     assert!(Blob::decode(&ItemId::blob(), &signed).is_ok());
     let tampered = signed.replace(VALUE, "sk-tampered");
@@ -205,10 +211,7 @@ fn blob_store_tampered_blob_reads_the_backup() {
     items.put_raw(&ItemId::backup(), &encoded(&[(&item(1), VALUE)]));
     items.put_raw(&ItemId::blob(), &tampered);
     let store = store_over(&items);
-    let got = store
-        .get(&item(1))
-        .expect("a tampered blob failed the read");
-    assert_eq!(got.as_deref().map(String::as_str), Some(VALUE));
+    assert_fails_closed(store.get(&item(1)), "KEY_1");
 }
 
 /// Why: #11738 — a blob written before the digest existed still decodes.

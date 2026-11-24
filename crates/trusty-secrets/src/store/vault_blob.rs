@@ -14,9 +14,9 @@
 //! blob may carry a SHA-256 `digest` of its items, checked on read when
 //! present; this build writes none yet, so older readers still decode what
 //! it writes (#11738). A corrupt or tampered
-//! blob fails every write and is never rewritten; a read falls back to the
-//! migration backup, then to the per-item items, and notes a
-//! [`BlobFallback`] (#11738). Writes are read-modify-write under one lock and land
+//! blob fails every read and write and is never rewritten; a read never
+//! falls back to the backup or per-item items, which can hold a revoked
+//! value (#11786). Writes are read-modify-write under one lock and land
 //! as one item write, so a write is never partial and two writes in this
 //! process never lose each other. Values are zeroed on drop.
 //! Test: `vault_blob_tests.rs` beside this file.
@@ -140,8 +140,9 @@ fn digest_of<T: AsRef<str>>(items: &[(T, T, T)]) -> Result<String, ()> {
 
 /// Which source a read used because the vault blob was corrupt (#11738).
 ///
-/// What: a typed warning; it names a source, never a value. Printed to
-/// stderr when it happens and put on the call's audit record.
+/// What: a typed warning; it names a source, never a value. Kept so audit
+/// logs written by 0.9.x builds with #11738 still decode; this build never
+/// records one, since a corrupt blob fails closed (#11786).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -256,8 +257,6 @@ impl Blob {
 pub struct BlobStore {
     items: Arc<dyn ItemStore>,
     writes: Mutex<()>,
-    // #11738: the latest read fallback, until the audit takes it.
-    fallback: Mutex<Option<BlobFallback>>,
 }
 
 impl fmt::Debug for BlobStore {
@@ -272,27 +271,7 @@ impl BlobStore {
         Self {
             items,
             writes: Mutex::new(()),
-            fallback: Mutex::new(None),
         }
-    }
-
-    /// Note `fallback` (#11738): one stderr warning naming the blob item and
-    /// the source, and the note the server's audit takes.
-    fn note_fallback(&self, fallback: BlobFallback) {
-        eprintln!(
-            "trusty-secrets: warning: the vault blob ({BLOB_SERVICE}/{BLOB_ACCOUNT}) is \
-             corrupt; read from {fallback:?}; {fallback:?} may be older than the \
-             current blob; the blob item is left as it is"
-        );
-        *self.fallback.lock().unwrap_or_else(PoisonError::into_inner) = Some(fallback);
-    }
-
-    /// Take the fallback noted since the last take, if any (#11738).
-    pub(crate) fn take_fallback(&self) -> Option<BlobFallback> {
-        self.fallback
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
     }
 
     /// The raw item store, for migration.
@@ -321,39 +300,28 @@ impl BlobStore {
 
     /// Item `id`'s value under the current layout.
     ///
-    /// Why: #11738 — one damaged blob item failed every read until a manual
-    /// `tm secrets migrate --rollback`.
-    /// What: reads the blob. When it is corrupt or tampered, reads the
-    /// backup, else the per-item item, and notes a [`BlobFallback`]; the
-    /// blob item is left untouched. A key the fallback source does not hold
-    /// is the blob's fixed corrupt error naming `id`, never `None`, because
-    /// the corrupt blob may hold it.
-    /// Test: `blob_store_corrupt_blob_reads_the_backup`,
-    /// `blob_store_corrupt_blob_without_backup_reads_per_item`,
-    /// `blob_store_tampered_blob_reads_the_backup`.
+    /// Why: #11786 — a corrupt blob must fail closed. The migration backup
+    /// and the per-item items can hold a key rotated or deleted since the
+    /// migration, so serving either brings a revoked value back.
+    /// What: reads the blob. When it is corrupt or tampered (digest
+    /// mismatch), the read is a fixed error naming `id` and the
+    /// `tm secrets migrate --rollback` recovery, with no value bytes. The
+    /// blob item is left untouched.
+    /// Test: `blob_store_corrupt_blob_with_backup_fails_closed`,
+    /// `blob_store_corrupt_blob_without_backup_fails_closed`,
+    /// `blob_store_tampered_blob_fails_closed`.
     pub(crate) fn get(&self, id: &ItemId) -> Result<Option<Zeroizing<String>>, SecretsError> {
         let Some(text) = self.items.read(&ItemId::blob())? else {
             return self.items.read(id);
         };
-        if let Ok(blob) = Blob::decode(&ItemId::blob(), &text) {
-            return Ok(blob.get(id).map(|v| Zeroizing::new(v.to_owned())));
-        }
-        // #11738: a corrupt blob falls back to the backup, then per-item.
-        let missing = || {
+        // #11786: no backup or per-item fallback; a corrupt blob fails closed.
+        let blob = Blob::decode(&ItemId::blob(), &text).map_err(|_| {
             item_error(
                 id,
-                "the vault blob is corrupt and neither the backup nor a per-item item holds this key",
+                "the vault blob is corrupt; recover with `tm secrets migrate --rollback`",
             )
-        };
-        if let Ok(Some(backup)) = self.read_blob_at(&ItemId::backup()) {
-            self.note_fallback(BlobFallback::Backup);
-            if let Some(value) = backup.get(id) {
-                return Ok(Some(Zeroizing::new(value.to_owned())));
-            }
-        } else {
-            self.note_fallback(BlobFallback::PerItem);
-        }
-        self.items.read(id)?.map(Some).ok_or_else(missing)
+        })?;
+        Ok(blob.get(id).map(|v| Zeroizing::new(v.to_owned())))
     }
 
     /// Set (`Some`) or remove (`None`) item `id` under the current layout;
