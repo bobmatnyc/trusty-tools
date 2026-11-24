@@ -323,7 +323,8 @@ pub struct AuditRecord {
     pub migration: Option<MigrationAudit>,
     /// On the extra record a call writes when a Keychain read fell back
     /// from a corrupt vault blob: the source it read (#11738). Never a
-    /// value. `None` otherwise, and then not written.
+    /// value. `None` otherwise, and then not written. #11786: this build
+    /// never sets it; kept so older logs still decode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_fallback: Option<crate::store::BlobFallback>,
 }
