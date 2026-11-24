@@ -227,6 +227,22 @@ install_argv() {
     INSTALL+=(--bin "$BIN_NAME" --locked --root "$ROOT" --target-dir "$1")
 }
 
+TARGET_DIR=""
+# Remove the install's scratch target dir; safe to call twice or when unset.
+# shellcheck disable=SC2329  # invoked through the trap in main
+cleanup_target() {
+    if [ -n "$TARGET_DIR" ]; then rm -rf "$TARGET_DIR"; fi
+    TARGET_DIR=""
+}
+
+# #11733: one EXIT handler for every scratch resource, so INT/TERM during
+# `cargo install` cannot strand a build dir in $TMPDIR.
+# shellcheck disable=SC2329  # invoked through the trap in main
+cleanup_all() {
+    cleanup_target
+    restore_staged
+}
+
 run_cargo_install() {
     section "Step 1: install \`$BIN_NAME\` only (source: $SOURCE)"
     local tmp="${TMPDIR:-/tmp}" target rc=0
@@ -237,10 +253,11 @@ run_cargo_install() {
         return 0
     fi
     target="$(mktemp -d "$tmp/ta-install-target.XXXXXX")"
+    TARGET_DIR="$target"
     install_argv "$target"
     info "${INSTALL[*]}"
     "${INSTALL[@]}" || rc=$?
-    rm -rf "$target"
+    cleanup_target
     [ "$rc" -eq 0 ] || exit "$rc"
     [ -f "$BIN_DIR/$BIN_NAME" ] || { error "$BIN_DIR/$BIN_NAME missing after cargo install"; exit 1; }
     info "installed $BIN_DIR/$BIN_NAME"
@@ -313,10 +330,13 @@ main() {
     before="$(fingerprint "$guarded")" || exit 1
     info "$GUARDED_BIN guard: $guarded is $before"
 
-    trap restore_staged EXIT
+    # INT/TERM exit through the EXIT trap (bash runs it after the foreground child).
+    trap cleanup_all EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     run_cargo_install
     run_sign_ta
-    trap - EXIT
+    trap - EXIT INT TERM
 
     after="$(fingerprint "$guarded")" || exit 1
     if [ "$after" != "$before" ]; then

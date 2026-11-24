@@ -31,6 +31,9 @@
 #     fresh-target      cargo install gets CARGO_NET_GIT_FETCH_WITH_CLI=true,
 #                       no inherited CARGO_TARGET_DIR, and a `--target-dir`
 #                       that is new, empty and removed afterwards (#11733)
+#     target-cleanup    a failing cargo (exit code kept) and a TERM sent to the
+#                       script mid-install both leave no --target-dir behind
+#                       and a non-zero exit (#11733)
 #     dry-run           runs neither stub and creates nothing; the printed
 #                       command shows git-CLI fetch and the fresh target dir
 #
@@ -99,6 +102,10 @@ done
     echo "target-dir-state=missing-or-used"
   fi
 } > "$STUB_LOG/cargo.env"
+# #11733: STUB_CARGO_FAIL=<code> fails the install; STUB_CARGO_TERM=1 sends
+# TERM to the script (our parent) as a Ctrl-C / kill would, then exits 0.
+if [ -n "${STUB_CARGO_FAIL:-}" ]; then exit "$STUB_CARGO_FAIL"; fi
+if [ "${STUB_CARGO_TERM:-0}" = "1" ]; then kill -TERM "$PPID"; exit 0; fi
 mkdir -p "$root/bin"
 printf 'ta-binary\n' > "$root/bin/ta"
 chmod +x "$root/bin/ta"
@@ -288,6 +295,23 @@ target="$(printf '%s\n' "$env_log" | sed -n 's/^target-dir=//p')"
 printf '%s\n' "$env_log" | grep -qx 'target-dir-state=empty' \
   || fail "fresh-target: --target-dir was not a new empty dir [$env_log]"
 [ -z "$target" ] || [ ! -e "$target" ] || fail "fresh-target: $target left behind"
+
+# --- target-cleanup (#11733) ---------------------------------------------
+# The scratch --target-dir must go on a failed install and on an interrupt.
+root="$WORK/tc-fail/root"
+mkdir -p "$root"
+STUB_CARGO_FAIL=7 run tc-fail --git-rev 0123abcd --root "$root"
+[ "$RC" -eq 7 ] || fail "target-cleanup fail: exit $RC, want cargo's 7"
+target="$(sed -n 's/^target-dir=//p' "$WORK/tc-fail/cargo.env")"
+[ -n "$target" ] && [ ! -e "$target" ] || fail "target-cleanup fail: [$target] left behind"
+[ ! -e "$WORK/tc-fail/tctl.dir" ] || fail "target-cleanup fail: signing ran after a failed install"
+root="$WORK/tc-term/root"
+mkdir -p "$root"
+STUB_CARGO_TERM=1 run tc-term --git-rev 0123abcd --root "$root"
+[ "$RC" -ne 0 ] || fail "target-cleanup term: exit 0 after TERM"
+target="$(sed -n 's/^target-dir=//p' "$WORK/tc-term/cargo.env")"
+[ -n "$target" ] && [ ! -e "$target" ] || fail "target-cleanup term: [$target] left behind"
+[ ! -e "$WORK/tc-term/tctl.dir" ] || fail "target-cleanup term: signing ran after TERM"
 
 # --- dry-run ------------------------------------------------------------
 root="$WORK/dry/never"
