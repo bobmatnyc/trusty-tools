@@ -376,14 +376,23 @@ enum Commands {
     /// Examples:
     ///   trusty-search list
     ///   trusty-search list --json
+    ///   trusty-search list --details --json   # MCP `list_indexes` parity
     #[command(alias = "ls", display_order = 10)]
-    List,
+    List {
+        /// Return `{id, size_bytes, …}` rows instead of bare ids (#11625)
+        #[arg(long)]
+        details: bool,
+    },
 
     /// Search across all or named indexes  [alias: q]
     ///
     /// Examples:
     ///   trusty-search query "fn authenticate" --indexes "*"
     ///   trusty-search query "database pool" --indexes proj-a,proj-b
+    ///
+    /// `query "<text>" --indexes "*"` is the basic form of the MCP `search_all`
+    /// fan-out: both call `search.query.all`, but the CLI lacks `mode`,
+    /// `path_prefix` and `compact` (#11625).
     #[command(alias = "q", display_order = 11)]
     Query {
         /// Search query
@@ -401,6 +410,10 @@ enum Commands {
         #[arg(short, long)]
         full: bool,
     },
+
+    // #11625: `similar`, `call-chain`, `grep` and `typeahead`.
+    #[command(flatten)]
+    Verb(commands::search_verbs::SearchVerb),
 
     /// Check daemon liveness (alias for `status`)
     ///
@@ -1224,7 +1237,9 @@ async fn run() -> Result<()> {
             commands::reindex::handle_reindex(&cli.index, index_source, path, timeout).await?;
         }
 
-        Commands::List => commands::list::handle_list(cli.json).await?,
+        Commands::List { details } => commands::list::handle_list(cli.json, details).await?,
+
+        Commands::Verb(verb) => commands::search_verbs::handle(verb, &cli.index, cli.json).await?,
 
         Commands::Query {
             query,

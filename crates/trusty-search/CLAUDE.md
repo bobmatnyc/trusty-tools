@@ -1726,6 +1726,11 @@ trusty-search index [path] [--name <id>] [--force]  # register + index (primary 
                                                      # (see docs/trusty-search/examples/trusty-search.yaml)
 trusty-search query <text> [--index <id>] [--top-k N] [--json]
 trusty-search status                                 # daemon + index overview (alias: health)
+trusty-search similar <file> [--function F] [-k N]   # MCP search_similar (#11625)
+trusty-search call-chain <entry> [--direction D] [--max-depth N] [--no-source]  # get_call_chain
+trusty-search grep <pattern> [--all] [-F -w -l -A/-B/-C N --glob G ...]  # MCP grep
+trusty-search typeahead <prefix> [--limit N] [--mode lexical|blended]   # MCP typeahead
+trusty-search list [--details]                       # --details --json = MCP list_indexes
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search

@@ -84,6 +84,8 @@ pub mod query;
 pub mod reindex;
 pub mod remove;
 pub mod search;
+pub mod search_verbs;
+mod search_verbs_render;
 pub mod serve;
 // #5264: working-directory index scoping for a bare `serve` MCP session.
 pub mod serve_scope;
