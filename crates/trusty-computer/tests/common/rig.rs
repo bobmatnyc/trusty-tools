@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use trusty_computer::app_quit::Quitter;
+use trusty_computer::app_quit::{QuitOutcome, Quitter};
 use trusty_computer::broker::{Broker, Clock, Inner};
 use trusty_computer::broker_server::BrokerServer;
 use trusty_computer::clipboard::Pasteboard;
@@ -137,6 +137,8 @@ pub struct FakeQuitter {
     pub quits: Mutex<Vec<(u32, String)>>,
     /// Every quit fails while set.
     pub broken: std::sync::atomic::AtomicBool,
+    /// Every quit answers `Pending` (a save prompt) while set.
+    pub pending: std::sync::atomic::AtomicBool,
 }
 
 impl FakeQuitter {
@@ -147,7 +149,7 @@ impl FakeQuitter {
 }
 
 impl Quitter for FakeQuitter {
-    fn quit(&self, pid: u32, bundle_id: &str) -> Result<(), String> {
+    fn quit(&self, pid: u32, bundle_id: &str) -> Result<QuitOutcome, String> {
         self.quits
             .lock()
             .expect("quits")
@@ -155,7 +157,10 @@ impl Quitter for FakeQuitter {
         if self.broken.load(Ordering::SeqCst) {
             return Err("quit refused".into());
         }
-        Ok(())
+        if self.pending.load(Ordering::SeqCst) {
+            return Ok(QuitOutcome::Pending);
+        }
+        Ok(QuitOutcome::Accepted)
     }
 }
 

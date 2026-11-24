@@ -4,12 +4,17 @@
 
 mod common;
 
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
 
 use common::rig::{BUNDLE, Rig, WINDOW, consent, grant_req, pid};
 use serde_json::{Value, json};
 
-use trusty_computer::app_quit::{GRANT_FLAG, QUIT_TOOL};
+use std::time::{Duration, Instant};
+
+use trusty_computer::app_quit::{
+    CHECKED_MARK, GRANT_FLAG, PENDING_HINT, QUIT_TOOL, QuitOutcome, Quitter, SystemQuitter,
+};
 use trusty_computer::grants::DEFAULT_TOOLS;
 use trusty_computer::policy::{Scope, Verdict, check_call, rule};
 
@@ -103,7 +108,7 @@ fn quit_runs_only_for_the_granted_app() {
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(
         reply["result"]["structuredContent"],
-        json!({"quit_requested": true, "pid": pid(), "bundle_id": BUNDLE})
+        json!({"quit_requested": true, "status": "accepted", "pid": pid(), "bundle_id": BUNDLE})
     );
     assert_eq!(rig.quitter.sent(), [(pid(), BUNDLE.to_owned())]);
     // A retry of the same request is answered from the journal, not re-sent.
@@ -133,4 +138,68 @@ fn quitter_failure_is_reported() {
     rig.quitter.broken.store(true, Ordering::SeqCst);
     let reply = quit(&mut rig, "q1", BUNDLE);
     assert_eq!(reply["code"], "quit_error", "{reply}");
+}
+
+/// A save prompt: the quit was delivered but the app has not answered.
+/// It is `ok` with status `pending` and a hint, never `quit_error`.
+#[test]
+fn pending_quit_is_not_an_error() {
+    let mut rig = Rig::with(&[GRANT_FLAG], WINDOW);
+    rig.quitter.pending.store(true, Ordering::SeqCst);
+    let reply = quit(&mut rig, "q1", BUNDLE);
+    assert_eq!(reply["ok"], true, "{reply}");
+    let sc = &reply["result"]["structuredContent"];
+    assert_eq!(sc["quit_requested"], true, "{reply}");
+    assert_eq!(sc["status"], "pending", "{reply}");
+    assert_eq!(sc["hint"], PENDING_HINT, "{reply}");
+    let done = rig
+        .audit()
+        .into_iter()
+        .rfind(|r| r["tool"] == QUIT_TOOL && r["phase"] == "done")
+        .expect("done line");
+    assert_eq!(done["quit_status"], "pending");
+}
+
+/// A stand-in for `osascript`: a shell script that ignores its arguments.
+fn fake_osascript(dir: &tempfile::TempDir, body: &str) -> SystemQuitter {
+    let path = dir.path().join("osascript");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    SystemQuitter {
+        program: path.to_string_lossy().into_owned(),
+        timeout: Duration::from_millis(300),
+    }
+}
+
+/// The live save-prompt case: the bundle id was checked and quit sent, then
+/// no answer before the deadline. The script is killed and the quit is `Pending`.
+#[test]
+fn system_quitter_timeout_after_check_is_pending() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let q = fake_osascript(&dir, &format!("echo {CHECKED_MARK} >&2\nexec sleep 30"));
+    let start = Instant::now();
+    assert_eq!(q.quit(1, "x.y"), Ok(QuitOutcome::Pending));
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "killed at the deadline"
+    );
+}
+
+/// No mark before the deadline: the check never ran, so it is an error.
+/// A clean exit is `Accepted`; a failed one (mismatch, declined) is an error.
+#[test]
+fn system_quitter_timeout_before_check_is_an_error() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let hung = fake_osascript(&dir, "exec sleep 30");
+    assert!(
+        hung.quit(1, "x.y")
+            .expect_err("timeout")
+            .contains("timed out")
+    );
+    let dir = tempfile::tempdir().expect("tmp");
+    let ok = fake_osascript(&dir, &format!("echo {CHECKED_MARK} >&2"));
+    assert_eq!(ok.quit(1, "x.y"), Ok(QuitOutcome::Accepted));
+    let dir = tempfile::tempdir().expect("tmp");
+    let failed = fake_osascript(&dir, &format!("echo {CHECKED_MARK} >&2\nexit 1"));
+    assert!(failed.quit(1, "x.y").is_err());
 }

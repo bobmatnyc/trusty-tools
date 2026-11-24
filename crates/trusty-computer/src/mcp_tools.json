@@ -685,7 +685,7 @@
  },
  {
   "name": "computer_quit",
-  "description": "Ask the granted app to quit gracefully, as its own Quit menu item would, when the grant names app_quit. Refused unless pid is the granted pid and bundle_id the granted app's bundle id; never a signal or force quit, and no other app is touched. The app may ask to save or decline; the grant ends once its process is gone.",
+  "description": "Ask the granted app to quit gracefully, as its own Quit menu item would, when the grant names app_quit. Refused unless pid is the granted pid and bundle_id the granted app's bundle id; never a signal or force quit, and no other app is touched. status is accepted when the app answered, or pending when it has not answered within 10 s (typically a save prompt shown to the user); neither means the app has exited. The grant ends once its process is gone.",
   "inputSchema": {
    "type": "object",
    "properties": {
