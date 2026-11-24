@@ -1,0 +1,2 @@
+Changed
+- The skills, agents and instructions no longer carve out an MCP exception for the 21 verbs that now have native commands. `tm memory recall-deep|recall-all|list|prompt-context|task|kg` and `trusty-search semantic|lexical|kg|similar|call-chain|grep|typeahead|health|index-status|list --details` replace the `mcp__trusty-memory__*` and `mcp__trusty-search__*` names, and `memory-manager` drops its stale `memory_forget`/`memory_list` examples (#11625).

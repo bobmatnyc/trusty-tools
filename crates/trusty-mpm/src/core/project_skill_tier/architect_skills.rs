@@ -205,7 +205,11 @@ const TMUX_OPS: ShippedSkill = ShippedSkill {
 /// bands, r-191).
 const HOST_ADMIN: ShippedSkill = ShippedSkill {
     stem: "architect-host-admin",
-    previous: &["e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e"],
+    previous: &[
+        "e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e",
+        // #11625: the text that named `mcp__trusty-search__search_health`.
+        "cf0becdbacdcdc405f9c0f7b93bd8643973aecfa29bc04fdecd638003a0107fb",
+    ],
 };
 
 /// `architect-improvements`, edited since its first release.
@@ -246,7 +250,11 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
 const SEARCH_MEMORY: ShippedSkill = ShippedSkill {
     stem: "architect-search-memory",
     // IN0055: the text that kept the MCP tools for memory and search.
-    previous: &["dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303"],
+    previous: &[
+        "dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303",
+        // #11625: the text that kept `list_indexes` and `index_status` on MCP.
+        "c2947716d1e2e238e41de5db982bfdda187adf0fb93d7274dda3631c8c40e733",
+    ],
 };
 
 /// `architect-macos`, edited since its first release.

@@ -3557,7 +3557,7 @@ fn bug_fix_chain_sweeps_related_paths_10577() {
     ));
     let sweep = plain(chains);
     for needle in [
-        "get_call_chain",
+        "call-chain",
         "Data states",
         "Shared-behaviour paths:",
         "Low-risk text edit",

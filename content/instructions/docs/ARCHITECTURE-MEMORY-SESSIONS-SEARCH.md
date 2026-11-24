@@ -235,7 +235,7 @@ For deeper protocol details, implementation decisions, and operational guidance:
 **Search query returning wrong results?**
 - Verify the session's `.mcp.json` contains `"args": ["serve", "--index", "<id>"]`.
   If missing, the pinning failed; check session launch logs.
-- Run `trusty-search index_status <id>` to confirm the index exists and has
+- Run `trusty-search index-status <id>` to confirm the index exists and has
   recent file metadata.
 - If the index is stale, trigger a manual reindex via the daemon API.
 

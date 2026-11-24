@@ -3,7 +3,7 @@ name: tm-session-management
 description: PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration
 user-invocable: true
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
 category: pm-workflow
 tags: [session, context, pause, resume, worktree, pm-recommended]
 effort: medium
@@ -241,11 +241,11 @@ worktree, its branch, and its associated search index atomically.
 Pause/resume snapshots capture the PM's own `TodoWrite` state, but for
 work items that should survive across the pause/resume boundary as durable,
 queryable tasks (not just prose in a snapshot), use
-`mcp__trusty-memory__task_add` / `task_list` / `task_complete` — these
+`tm memory task add` / `list` / `complete` — these
 persist independent of the session snapshot file and are visible to any
 future session, not just a resumed one. Prefer `TodoWrite` for
 in-session-only progress tracking; promote a todo to
-`mcp__trusty-memory__task_add` when it needs to survive past this session's
+`tm memory task add` when it needs to survive past this session's
 resume boundary.
 
 ## Session and PR State Go in Memory Slots (#9142)

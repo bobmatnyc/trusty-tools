@@ -3,7 +3,7 @@ name: tm-verification-protocols
 description: QA verification gate and evidence requirements for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 category: pm-workflow
 tags: [qa, verification, evidence, pm-required]
 effort: high
@@ -43,7 +43,7 @@ coverage. Rule: `tm-workflow`, "Demo and POC Work" in
 | Local server UI | `web-qa` | Browser navigation + snapshot + console check | "page loads correctly" |
 | Deployed web UI | `web-qa` | Screenshot + console logs | "UI works" |
 | API / server | `api-qa` | HTTP responses + logs | "API deployed" |
-| Local backend / daemon | `local-ops`, or `mcp__trusty-search__search_health` / `tm memory recall` for trusty-* services | Process status, health-check response | "running on localhost" |
+| Local backend / daemon | `local-ops`, or `trusty-search health` / `tm memory recall` for trusty-* services | Process status, health-check response | "running on localhost" |
 | Code diff quality | `mcp__trusty-review__review_diff` / `review_pr` | Review verdict (APPROVE/WARN/BLOCK) with findings | "the diff looks fine" |
 | CLI tools | Engineer / Local Ops | Command output + exit code | "tool installed" |
 

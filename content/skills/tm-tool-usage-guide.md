@@ -3,7 +3,7 @@ name: tm-tool-usage-guide
 description: Detailed tool usage patterns and examples for the trusty-mpm PM agent
 user-invocable: false
 metadata:
-  version: "1.0.2"
+  version: "1.0.3"
 category: pm-reference
 tags: [tools, mcp, delegation, pm-required]
 effort: medium
@@ -12,10 +12,9 @@ effort: medium
 # tm Tool Usage Guide
 
 Detailed usage patterns for the PM's real tool families: the native `tm
-memory` and `trusty-search` commands, plus `mcp__trusty-mpm__*`,
-`mcp__trusty-memory__*`, `mcp__trusty-search__*` and `mcp__trusty-review__*`
-for the verbs with no native command. MCP adapters are for non-mpm callers
-only. This is the concrete "how" behind the constraints in
+memory` and `trusty-search` commands, plus `mcp__trusty-mpm__*` and
+`mcp__trusty-review__*`. MCP adapters for memory and search are for non-mpm
+callers only. This is the concrete "how" behind the constraints in
 `tm-circuit-breaker`.
 
 ## Deferred MCP Tool Loading (Mandatory Before Any "Unavailable" Fallback)
@@ -47,11 +46,11 @@ that applies to every skill instructing a direct MCP call, including
 Before delegating to Research or reading any file:
 
 1. `tm memory recall "<q>"` — check what is already known. For a
-   cross-palace sweep, `memory_recall_deep` (MCP; no native command yet).
+   cross-palace sweep, `tm memory recall-deep` or `recall-all`.
 2. `trusty-search search "<q>" --json` from the repo, or
    `trusty-search query "<q>" -i <index>` from elsewhere (hybrid BM25+vector).
-   The narrower `search_semantic` / `search_lexical`, `search_similar` and
-   `list_indexes` stay MCP tools.
+   The narrower `trusty-search semantic` / `lexical`, `similar` and
+   `list` are native verbs too.
 3. Only if both are insufficient — delegate to Research.
 
 Both tools are mandatory-first, not optional. Skipping straight to Read/Grep
@@ -68,18 +67,17 @@ trusty-search query "skill deploy no-op" -i <index-id>  # from elsewhere
 ```
 
 A `TRUSTY_INDEX` variable in the environment can override the index; pass
-`-i` from outside the repo. The verbs below have no native command and stay
-on `mcp__trusty-search__*`:
+`-i` from outside the repo. The other verbs are native too:
 
-| Tool | Use |
+| Command | Use |
 |---|---|
-| `search_semantic` / `search_lexical` | Narrower single-strategy search when hybrid over- or under-matches |
-| `search_all` | Cross-project search when the scope is unclear |
-| `search_similar` | Find code semantically similar to a known snippet |
-| `search_kg` / `get_call_chain` | Structural queries — call graphs, symbol relationships |
-| `grep` / `typeahead` | Lexical lookup once you already know the token to find |
-| `search_health` | Health check — **use instead of `curl`/`lsof`** (CB#7). Returns `Ok` even when the daemon is down; branch on the response's `healthy` field, never on the call succeeding |
-| `list_indexes` / `index_status` | Discover what projects are indexed and their freshness |
+| `trusty-search semantic` / `lexical` | Narrower single-strategy search when hybrid over- or under-matches |
+| `trusty-search query "<q>" --indexes "*"` | Cross-project search when the scope is unclear |
+| `trusty-search similar <file> [--function <fn>]` | Find code semantically similar to a known snippet |
+| `trusty-search kg <symbol>` / `call-chain <symbol>` | Structural queries — call graphs, symbol relationships |
+| `trusty-search grep <pattern> [--all]` / `typeahead <prefix>` | Lexical lookup once you already know the token to find |
+| `trusty-search health` | Health check — **use instead of `curl`/`lsof`** (CB#7) |
+| `trusty-search list --details` / `index-status` | Discover what projects are indexed and their freshness |
 
 **Index Pinning (Automatic, MCP tools):** In managed sessions, your `.mcp.json` pinpoints
 the session's own project index (via `trusty-search serve --index <id>`) so bare
@@ -107,14 +105,14 @@ envelope (`verb`, `palace`, `socket`, `count`, `result`). With trusty-memory
 down each exits non-zero naming the socket. Store findings as you learn them,
 not at session end.
 
-The verbs below have no native command and stay on `mcp__trusty-memory__*`:
+The other memory verbs are native too:
 
-| Tool | Use |
+| Command | Use |
 |---|---|
-| `memory_recall_deep` / `memory_recall_all` | Cross-palace / exhaustive recall |
-| `task_add` / `task_list` / `task_complete` | Lightweight session-local task tracking (see `tm-session-management`, `tm-ticketing`) |
-| `get_prompt_context` | Load current aliases/conventions at turn start — pass a `query` to scope it |
-| `kg_assert` / `kg_query` / `kg_gaps` | Knowledge-graph assertions and structural recall |
+| `tm memory recall-deep` / `recall-all` / `list` | Deep, cross-palace and listing recall |
+| `tm memory task add` / `list` / `complete` | Lightweight session-local task tracking (see `tm-session-management`, `tm-ticketing`) |
+| `tm memory prompt-context ["<q>"]` | Load current aliases/conventions at turn start — pass a query to scope it |
+| `tm memory kg assert` / `query` / `gaps` | Knowledge-graph assertions and structural recall |
 
 ## mcp__trusty-mpm__* — Orchestration
 
