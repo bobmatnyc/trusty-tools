@@ -21,6 +21,7 @@ use std::thread;
 use serde_json::{Value, json};
 
 pub mod dialog;
+pub mod live;
 pub mod rig;
 
 /// A pid (or window id) the fake answers with a bounded `isError` refusal, as the real daemon does.
@@ -168,6 +169,10 @@ struct Shared {
     /// or answers a tree with a password field (`"secure"`) or a degraded
     /// tree (`"degraded"`).
     snapshot_mode: Option<&'static str>,
+    /// #11696: `screenshot_width` and `screenshot_height` of every later capture.
+    frame: Option<(f64, f64)>,
+    /// #11696 Phase B: `structuredContent.windows` of every later `list_windows`.
+    windows: Option<Value>,
 }
 
 /// A fake daemon serving NDJSON on a Unix socket.
@@ -189,6 +194,8 @@ impl FakeDaemon {
             readback_broken: false,
             effect: None,
             snapshot_mode: None,
+            frame: None,
+            windows: None,
         }));
         let (state, version_owned) = (Arc::clone(&shared), version.to_owned());
         thread::spawn(move || {
@@ -236,6 +243,16 @@ impl FakeDaemon {
     /// Answer every later `get_window_state` as [`Shared::snapshot_mode`] says.
     pub fn set_snapshot_mode(&self, mode: &'static str) {
         self.lock().snapshot_mode = Some(mode);
+    }
+
+    /// Report a `width` x `height` window in every later capture (#11696).
+    pub fn set_frame(&self, width: f64, height: f64) {
+        self.lock().frame = Some((width, height));
+    }
+
+    /// Answer every later `list_windows` with `windows` (#11696 Phase B).
+    pub fn set_windows(&self, windows: Value) {
+        self.lock().windows = Some(windows);
     }
 
     /// The fixture's current state.
@@ -324,6 +341,10 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
         let mut snap = with_capture(window_state(clicks), &args, force_image);
         let sc = &mut snap["structuredContent"];
+        if let (Some((w, h)), Some(_)) = (state.frame, sc.get("screenshot_width")) {
+            sc["screenshot_width"] = json!(w);
+            sc["screenshot_height"] = json!(h);
+        }
         match state.snapshot_mode {
             Some("secure") => {
                 // #11694: the 0.23.2 shape — no subrole, a localized description.
@@ -355,6 +376,9 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
             _ => {}
         }
         return json!({"ok": true, "result": snap});
+    }
+    if let (true, Some(windows)) = (name == "list_windows", &state.windows) {
+        return json!({"ok": true, "result": {"structuredContent": {"windows": windows}}});
     }
     let token = args.get("element_token").and_then(Value::as_str);
     if let Some(fixture) = state.fixture.as_mut() {

@@ -471,6 +471,219 @@
   }
  },
  {
+  "name": "computer_click_at",
+  "description": "Left click at a window coordinate of the granted window, when the grant names coordinate_input; x and y are window-local with a top-left origin, in the coordinate space of the granted window image; refused unless the point lies inside the window's frame as the broker reads it just before the click.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "x": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Window-local X, top-left origin."
+    },
+    "y": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Window-local Y, top-left origin."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "x",
+    "y"
+   ]
+  }
+ },
+ {
+  "name": "computer_drag",
+  "description": "Currently refused (drag_unavailable_needs_window_on_top_check) until the broker can check the granted window is on top. Left-button drag between two window coordinates of the granted window, when the grant names coordinate_input; activates the target app for the drag (brings it to the front, then restores the prior app); both points are window-local with a top-left origin, in the coordinate space of the granted window image; refused unless both lie inside the window's frame as the broker reads it just before the drag.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "from_x": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Start X, window-local."
+    },
+    "from_y": {
+     "type": "number",
+     "minimum": 0,
+     "description": "Start Y, window-local."
+    },
+    "to_x": {
+     "type": "number",
+     "minimum": 0,
+     "description": "End X, window-local."
+    },
+    "to_y": {
+     "type": "number",
+     "minimum": 0,
+     "description": "End Y, window-local."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "from_x",
+    "from_y",
+    "to_x",
+    "to_y"
+   ]
+  }
+ },
+ {
+  "name": "computer_focus",
+  "description": "Bring the granted window to the front, when the grant names window_management; activates the target app (takes the foreground from the user's current app). Refused unless window_id is the granted window and the daemon lists it under the granted pid at call time; no other window, app or the desktop is touched.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_move_window",
+  "description": "Move the granted window so its top-left corner is at x, y in desktop points (the space computer_windows reports), keeping its size, when the grant names window_management. Refused unless window_id is the granted window and the daemon lists it under the granted pid at call time; no other window, app or the desktop is touched.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "x": {
+     "type": "number",
+     "minimum": -16384,
+     "maximum": 16384,
+     "description": "Desktop X of the window's top-left corner."
+    },
+    "y": {
+     "type": "number",
+     "minimum": -16384,
+     "maximum": 16384,
+     "description": "Desktop Y of the window's top-left corner."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "x",
+    "y"
+   ]
+  }
+ },
+ {
+  "name": "computer_resize_window",
+  "description": "Resize the granted window to width x height desktop points, keeping its top-left corner, when the grant names window_management. Refused unless window_id is the granted window and the daemon lists it under the granted pid at call time; no other window, app or the desktop is touched.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "width": {
+     "type": "number",
+     "minimum": 1,
+     "maximum": 16384,
+     "description": "New width in desktop points."
+    },
+    "height": {
+     "type": "number",
+     "minimum": 1,
+     "maximum": 16384,
+     "description": "New height in desktop points."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "width",
+    "height"
+   ]
+  }
+ },
+ {
+  "name": "computer_clipboard_read",
+  "description": "Read the clipboard's plain text, when the grant names clipboard_read. Refused above 102400 bytes; passwords, API keys, tokens and private keys are replaced with [REDACTED] before the text is returned. Only text is returned, never types, images or files.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_clipboard_write",
+  "description": "Replace the clipboard with plain text, when the grant names clipboard_write. Refused above 102400 bytes; text only, never an image or a file.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "text": {
+     "type": "string",
+     "description": "Plain text to place on the clipboard, at most 102400 UTF-8 bytes."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "text"
+   ]
+  }
+ },
+ {
   "name": "computer_wait",
   "description": "Sleep up to 5 s in the broker; keeps the lease alive.",
   "inputSchema": {

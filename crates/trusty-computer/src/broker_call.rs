@@ -18,6 +18,13 @@
 //! `get_window_state` capture and reduced to one image by
 //! [`screenshot::bound`]; the read tools are asked for no screenshot, and
 //! every other reply loses any image part the driver sends (#11694).
+//! A coordinate call (#11696) passes [`Inner::pointer_bounds`] last, against
+//! the window's frame read on that call, and is confirmed by read-back.
+//! A window call (#11696 Phase B) passes [`Inner::window_owner`] last, which
+//! proves the window is the granted pid's and builds its one daemon call.
+//! A clipboard call (#11696 Phase C) needs its own grant flag and is run by
+//! [`clipboard::run`] on the broker's pasteboard (size cap, redaction), not
+//! by the daemon.
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -29,14 +36,17 @@ use serde_json::{Map, Value, json};
 use crate::app_identity::check_same;
 use crate::audit::summarize_args;
 use crate::broker::{Ctx, Inner, refusal};
+use crate::clipboard;
 use crate::driver::{DriverError, is_manifest_idle};
 use crate::journal::{self, Outcome};
 use crate::launcher::Launcher;
 use crate::menu;
+use crate::pointer;
 use crate::policy::{self, Verdict};
 use crate::redact::{redact_reply, strip_markdown};
 use crate::screenshot::{self, SCREENSHOT_TOOL};
 use crate::supervisor::READ_ONLY_TOOLS;
+use crate::window_mgmt;
 
 /// Tools that must name a token from the last redacted snapshot.
 pub const TOKEN_TOOLS: [&str; 6] = [
@@ -87,6 +97,9 @@ fn strip_images(result: &mut Value) {
 fn driver_request(tool: &str, args: &Map<String, Value>) -> (&'static str, Value) {
     if tool == SCREENSHOT_TOOL {
         return (screenshot::DRIVER_TOOL, screenshot::driver_args(args));
+    }
+    if pointer::is_pointer_tool(tool) {
+        return pointer::driver_args(tool, args);
     }
     let mut args = args.clone();
     if IMAGE_READ_TOOLS.contains(&tool) {
@@ -208,10 +221,18 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "bad_args", "args must be an object");
         };
         rec.insert("args".into(), summarize_args(&args_map));
+        // #11696: drag_at is off until a window-on-top check exists; no gate or driver call runs.
+        if let Some((code, detail)) = pointer::disabled(&tool) {
+            return self.refuse(rec, code, detail);
+        }
         if tool == "invoke_menu" {
             // #11695: every menu invocation, refused or run, names its path in the audit.
             rec.insert("menu_path".into(), audit_path(&args_map));
             // #11695: the driver brings the target app to the front to press a menu item.
+            rec.insert("activates_app".into(), json!(true));
+        }
+        if pointer::activates_app(&tool) || window_mgmt::activates_app(&tool) {
+            // #11696: the driver fronts the app for a drag or a focus.
             rec.insert("activates_app".into(), json!(true));
         }
         // 1. Policy verdict and argument filter, on the grant's app.
@@ -226,7 +247,15 @@ impl<L: Launcher> Inner<L> {
         };
         rec.insert("verdict".into(), json!(verdict));
         // 2. Grant scope, per app (live was checked above).
-        if !grant.tools.contains(&tool) {
+        // #11696: the coordinate, window and clipboard tools each need their grant flag.
+        let needed = if window_mgmt::is_window_tool(&tool) {
+            window_mgmt::GRANT_FLAG
+        } else if let Some(flag) = clipboard::grant_flag(&tool) {
+            flag
+        } else {
+            pointer::grant_name(&tool)
+        };
+        if !grant.tools.contains(needed) {
             return self.refuse(rec, "tool_not_granted", &tool);
         }
         if args_map
@@ -281,6 +310,24 @@ impl<L: Launcher> Inner<L> {
                 return self.refuse(rec, "menu_path_not_exposed", detail);
             }
         }
+        // #11696: the last gate before the event; the window's frame as it is now.
+        if pointer::is_pointer_tool(&tool) {
+            match self.pointer_bounds(&tool, &args_map, grant.scope) {
+                Ok(frame) => rec.insert("frame".into(), frame),
+                Err((code, detail)) => return self.refuse(rec, code, &detail),
+            };
+        }
+        // #11696 Phase B: the window must be listed under the granted pid now.
+        let mut window_call = None;
+        if window_mgmt::is_window_tool(&tool) {
+            match self.window_owner(&tool, &args_map, grant.scope) {
+                Ok((bounds, call)) => {
+                    rec.insert("window_bounds".into(), bounds);
+                    window_call = Some(call);
+                }
+                Err((code, detail)) => return self.refuse(rec, code, &detail),
+            }
+        }
         // 5. Audit `forward`; a failure refuses before the daemon is called.
         let mut forward = rec.clone();
         forward.insert("phase".into(), json!("forward"));
@@ -290,8 +337,16 @@ impl<L: Launcher> Inner<L> {
         self.grants.touch(grant_id, now);
         // 6. The driver call, then strip, confirm, journal, audit `done`.
         let shot = tool == SCREENSHOT_TOOL;
-        let (driver_tool, driver_args) = driver_request(&tool, &args_map);
-        let (mut reply, outcome) = self.drive(driver_tool, &driver_args, grant.scope);
+        let (driver_tool, driver_args) =
+            window_call.unwrap_or_else(|| driver_request(&tool, &args_map));
+        let (mut reply, outcome) = if clipboard::is_clipboard_tool(&tool) {
+            // #11696 Phase C: the bounded daemon has no clipboard resource; the broker runs it.
+            let (reply, fields) = clipboard::run(&*self.pasteboard, &tool, &args_map);
+            rec.extend(fields);
+            (reply, Outcome::Known)
+        } else {
+            self.drive(driver_tool, &driver_args, grant.scope)
+        };
         if !shot {
             strip_images(&mut reply["result"]);
         }
@@ -348,7 +403,7 @@ impl<L: Launcher> Inner<L> {
                 if let Some(k) = key {
                     self.snaps.insert(k, (red.tokens, red.fingerprint, paths));
                 }
-            } else if CONFIRM_TOOLS.contains(&tool.as_str()) {
+            } else if CONFIRM_TOOLS.contains(&tool.as_str()) || pointer::is_pointer_tool(&tool) {
                 let confirmation = self.confirm(key, &reply["result"]);
                 let confirmed = confirmation["confirmed"] == json!(true);
                 rec.insert("confirmed".into(), json!(confirmed));
@@ -386,7 +441,7 @@ impl<L: Launcher> Inner<L> {
     /// Test: `tool_error_is_driver_refused`, `mutating_call_cut_by_session_end_is_outcome_unknown`,
     /// `idle_timeout_lockout_restarts_and_retries_read_only`,
     /// `idle_timeout_lockout_does_not_rerun_mutating_call`.
-    fn drive(
+    pub(crate) fn drive(
         &mut self,
         tool: &str,
         args: &Value,

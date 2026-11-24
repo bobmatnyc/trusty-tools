@@ -4,7 +4,10 @@
 //! dict (`policy.py:161-231`) row for row.
 //! What: 6 ALLOW, 14 FILTER and 36 DENY rows. `invoke_menu` is FILTER behind
 //! a path deny list (#11695; it was DENY in Phase 2, plan section 1, item 3).
-//! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists.
+//! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists:
+//! `screenshot_window` (#11694), `click_at` and `drag_at` (#11696), and
+//! `focus_window`, `move_window` and `resize_window` (#11696 Phase B), and
+//! `read_clipboard` and `write_clipboard` (#11696 Phase C).
 //! Test: `every_inventory_tool_is_classified`, `verdict_counts_match_the_plan`
 //! in `tests/spike_policy.rs`; `screenshot_rule_is_filter_and_not_default`.
 
@@ -220,11 +223,49 @@ pub static RULES: [Rule; 56] = [
 ];
 
 /// Broker tools: driven through a driver tool, never named to the daemon.
-pub static BROKER_RULES: [Rule; 1] = [
+pub static BROKER_RULES: [Rule; 8] = [
     // #11694: driven as get_window_state with a screenshot; see `crate::screenshot`.
     filter(
         crate::screenshot::SCREENSHOT_TOOL,
         "image of the granted window only; refused when a password field shows",
         &[pid_in_scope, window_only],
+    ),
+    // #11696: driven as click / drag after a frame read; see `crate::pointer`.
+    filter(
+        crate::pointer::CLICK_AT_TOOL,
+        "left click at a point inside the granted window's frame at event time",
+        &[pid_in_scope, crate::pointer::click_args],
+    ),
+    filter(
+        crate::pointer::DRAG_TOOL,
+        "left drag between points inside the granted window's frame at event time",
+        &[pid_in_scope, crate::pointer::drag_args],
+    ),
+    // #11696 Phase B: driven as bring_to_front / set_window_frame after an owner read.
+    filter(
+        crate::window_mgmt::FOCUS_TOOL,
+        "bring the granted window of the granted pid to the front",
+        &[pid_in_scope, crate::window_mgmt::focus_args],
+    ),
+    filter(
+        crate::window_mgmt::MOVE_TOOL,
+        "move the granted window of the granted pid, size kept",
+        &[pid_in_scope, crate::window_mgmt::move_args],
+    ),
+    filter(
+        crate::window_mgmt::RESIZE_TOOL,
+        "resize the granted window of the granted pid, origin kept",
+        &[pid_in_scope, crate::window_mgmt::resize_args],
+    ),
+    // #11696 Phase C: driven as clipboard_read / clipboard_write, text only.
+    filter(
+        crate::clipboard::READ_TOOL,
+        "clipboard text, size-capped and redacted; grant flag clipboard_read",
+        &[crate::clipboard::read_args],
+    ),
+    filter(
+        crate::clipboard::WRITE_TOOL,
+        "plain text to the clipboard, size-capped; grant flag clipboard_write",
+        &[crate::clipboard::write_args],
     ),
 ];

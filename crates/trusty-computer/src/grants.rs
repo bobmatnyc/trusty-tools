@@ -297,6 +297,26 @@ impl Grants {
         }
         let mut tools: BTreeSet<String> = DEFAULT_TOOLS.iter().map(|t| (*t).to_owned()).collect();
         for tool in &req.extra_tools {
+            // #11696: one flag grants both coordinate tools; neither is granted by name.
+            if tool == crate::pointer::GRANT_FLAG {
+                tools.insert(tool.clone());
+                continue;
+            }
+            // #11696 Phase B/C: one flag grants the three window tools; each
+            // clipboard flag grants its one tool. Checked before the policy
+            // row, since a clipboard flag shares the driver tool's DENY name.
+            if tool == crate::window_mgmt::GRANT_FLAG
+                || crate::clipboard::FLAGS.contains(&tool.as_str())
+            {
+                tools.insert(tool.clone());
+                continue;
+            }
+            if crate::pointer::is_pointer_tool(tool)
+                || crate::window_mgmt::is_window_tool(tool)
+                || crate::clipboard::is_clipboard_tool(tool)
+            {
+                return Err(GrantError::BadTool(tool.clone()));
+            }
             match policy::rule(tool) {
                 Some(rule) if rule.verdict != Verdict::Deny => {
                     tools.insert(tool.clone());

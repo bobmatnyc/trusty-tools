@@ -3,7 +3,7 @@
 // main executable owns the window, so LaunchServices and the code signature
 // both attest bundle id com.trusty.spike.signedcheck.
 // State file (argv[1], or $SIGNEDCHECK_STATE): "pid N", "window W", then one
-// "click N" per press of the "Press Me" button.
+// "click N" per press of the "Press Me" button; "drag N", "shrunk", "moved" (#11696).
 import Cocoa
 
 let args = CommandLine.arguments
@@ -28,8 +28,11 @@ final class Target: NSObject {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
+// #11696 Phase B: SIGNEDCHECK_RESIZABLE=1 makes the window resizable (settable AXSize).
+var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
+if ProcessInfo.processInfo.environment["SIGNEDCHECK_RESIZABLE"] == "1" { style.insert(.resizable) }
 let win = NSWindow(contentRect: NSMakeRect(520, 400, 420, 220),
-                   styleMask: [.titled, .closable, .miniaturizable],
+                   styleMask: style,
                    backing: .buffered, defer: false)
 #if IMPOSTOR
 win.title = "Impostor Fixture"
@@ -80,6 +83,44 @@ if ProcessInfo.processInfo.environment["SIGNEDCHECK_MENU"] == "1" {
     fixtureItem.submenu = fixtureMenu
     bar.addItem(fixtureItem)
     app.mainMenu = bar
+}
+// #11696: SIGNEDCHECK_POINTER=1 adds a drag pad ("drag N" per press-drag-release),
+// SIGUSR1 shrinks the window to 200x100 and SIGUSR2 moves it by (60, -40).
+if ProcessInfo.processInfo.environment["SIGNEDCHECK_POINTER"] == "1" {
+    final class DragPad: NSView {
+        var n = 0
+        var dragged = false
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseDown(with event: NSEvent) { dragged = false }
+        override func mouseDragged(with event: NSEvent) { dragged = true }
+        override func mouseUp(with event: NSEvent) {
+            if dragged {
+                n += 1
+                log += "drag \(n)\n"
+                flush()
+            }
+        }
+    }
+    win.contentView?.addSubview(DragPad(frame: NSMakeRect(10, 10, 140, 100)))
+    signal(SIGUSR1, SIG_IGN)
+    signal(SIGUSR2, SIG_IGN)
+    let shrink = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    shrink.setEventHandler {
+        var f = win.frame
+        f.size = win.frameRect(forContentRect: NSMakeRect(0, 0, 200, 100)).size
+        win.setFrame(f, display: true)
+        log += "shrunk\n"
+        flush()
+    }
+    shrink.resume()
+    let move = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+    move.setEventHandler {
+        win.setFrameOrigin(NSMakePoint(win.frame.origin.x + 60, win.frame.origin.y - 40))
+        log += "moved\n"
+        flush()
+    }
+    move.resume()
+    objc_setAssociatedObject(app, "pointerSources", [shrink, move], .OBJC_ASSOCIATION_RETAIN)
 }
 win.makeKeyAndOrderFront(nil)
 log += "window \(win.windowNumber)\n"

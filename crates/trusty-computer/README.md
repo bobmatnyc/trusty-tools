@@ -4,7 +4,9 @@ A broker that lets local AI agents drive one operator-granted macOS app
 through a bounded [Cua Driver](https://github.com/trycua/cua) 0.23.2 daemon.
 An agent reads the app's Accessibility (AX) tree with the menu bar removed and
 acts on elements by token. The broker checks, audits and journals every call.
-It never returns a screenshot, pixels or the clipboard.
+It never returns a screenshot or pixels, except the bounded window screenshot.
+The clipboard is read only under the `clipboard_read` grant flag, capped at
+100 KiB and with passwords, API keys and tokens replaced by `[REDACTED]`.
 
 macOS only. Two binaries:
 

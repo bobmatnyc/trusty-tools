@@ -21,6 +21,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use trusty_computer::broker::{Broker, Clock, Inner};
 use trusty_computer::broker_server::BrokerServer;
+use trusty_computer::clipboard::Pasteboard;
 use trusty_computer::grants::Grant;
 use trusty_computer::supervisor::Supervisor;
 
@@ -77,7 +78,54 @@ pub struct Rig {
     pub readback: PathBuf,
     pub dialog: Arc<FakeDialog>,
     pub resolver: Arc<FakeResolver>,
+    /// #11696 Phase C: the clipboard the broker's clipboard tools use.
+    pub pasteboard: Arc<FakePasteboard>,
     codes: Mutex<HashMap<String, String>>,
+}
+
+/// An in-memory clipboard that counts its accesses (#11696 Phase C).
+#[derive(Default)]
+pub struct FakePasteboard {
+    pub text: Mutex<Vec<u8>>,
+    /// Every read and write fails while set.
+    pub broken: std::sync::atomic::AtomicBool,
+    /// Reads and writes attempted.
+    pub uses: AtomicU64,
+}
+
+impl FakePasteboard {
+    /// Hold `text`.
+    pub fn set(&self, text: &[u8]) {
+        *self.text.lock().expect("pasteboard") = text.to_vec();
+    }
+
+    /// The text held.
+    pub fn get(&self) -> Vec<u8> {
+        self.text.lock().expect("pasteboard").clone()
+    }
+
+    fn used(&self) -> Result<(), String> {
+        self.uses.fetch_add(1, Ordering::SeqCst);
+        if self.broken.load(Ordering::SeqCst) {
+            return Err("pasteboard unavailable".into());
+        }
+        Ok(())
+    }
+}
+
+impl Pasteboard for FakePasteboard {
+    fn read(&self, limit: usize) -> Result<Vec<u8>, String> {
+        self.used()?;
+        let mut text = self.get();
+        text.truncate(limit);
+        Ok(text)
+    }
+
+    fn write(&self, text: &str) -> Result<(), String> {
+        self.used()?;
+        self.set(text.as_bytes());
+        Ok(())
+    }
 }
 
 /// A call request.
@@ -113,10 +161,12 @@ impl Rig {
         let clock: Clock = Arc::new(move || m.load(Ordering::SeqCst) as f64 / 1000.0);
         let dialog = FakeDialog::confirming();
         let resolver = Arc::new(FakeResolver::default());
+        let pasteboard = Arc::new(FakePasteboard::default());
         let broker = Broker::new(sup, &state, clock, dialog.clone()).expect("broker");
         let broker = broker
             .with_dialog_timeout(Duration::from_millis(500))
-            .with_app_resolver(resolver.clone());
+            .with_app_resolver(resolver.clone())
+            .with_pasteboard(pasteboard.clone());
         let broker = Arc::new(broker);
         let mut server = BrokerServer::bind(&state).expect("bind");
         server.spawn(Arc::clone(&broker));
@@ -137,6 +187,7 @@ impl Rig {
             readback,
             dialog,
             resolver,
+            pasteboard,
             codes: Mutex::new(HashMap::new()),
         }
     }
