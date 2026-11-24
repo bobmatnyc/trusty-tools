@@ -80,8 +80,9 @@ pub fn apply_launch_sandbox(
         return Err(SandboxSettingsError::Refused(
             "#8928 sandbox settings: this launch has no tm-owned Claude config dir \
              (`CLAUDE_CONFIG_DIR` is unset), so the sandbox's user-level settings would land \
-             in your own `~/.claude`. Run `tm doctor` to repair the tm-managed config dir, or \
-             launch from a session whose `CLAUDE_CONFIG_DIR` is set"
+             in your own `~/.claude`. Start the session with `tm launch` or `tm connect`, which \
+             use the tm-managed config dir, or export `CLAUDE_CONFIG_DIR` to a tm-owned \
+             directory; `tm doctor` names it"
                 .to_owned(),
         ));
     };

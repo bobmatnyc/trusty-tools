@@ -360,16 +360,17 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     let content = crate::core::content_source::framework_content_for(&repo_path)
         .context("cannot compose the PM instructions")?;
     let cli = crate::core::session_launch::cli_launch(&content, &repo_path, None);
+    // #10102: the PM sandbox is written and verified, or `tm run` refuses, before
+    // the prompt file is written so a refusal leaves none behind.
+    let home = dirs::home_dir().context("no home directory resolved")?;
+    run_sandbox(&repo_path, &home, claude_config_dir, cli.profile)?;
+
     let prompt_file = crate::core::model_inject::write_pm_prompt_file_in(
         &std::env::temp_dir(),
         &cli.prompt,
         &repo_path,
         "run",
     )?;
-
-    // #10102: the PM sandbox is written and verified, or `tm run` refuses.
-    let home = dirs::home_dir().context("no home directory resolved")?;
-    run_sandbox(&repo_path, &home, claude_config_dir, cli.profile)?;
 
     // #8988: the owner MCP policy for the `.claude.json` this launch reads;
     // #8992: `cli.profile` decides whether the skill and tool parts apply.
