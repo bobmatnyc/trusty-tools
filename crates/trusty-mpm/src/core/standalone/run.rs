@@ -367,6 +367,10 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         "run",
     )?;
 
+    // #10102: the PM sandbox is written and verified, or `tm run` refuses.
+    let home = dirs::home_dir().context("no home directory resolved")?;
+    run_sandbox(&repo_path, &home, claude_config_dir, cli.profile)?;
+
     // #8988: the owner MCP policy for the `.claude.json` this launch reads;
     // #8992: `cli.profile` decides whether the skill and tool parts apply.
     // #11821: a broken install.toml refuses `tm run` (df-D1w).
@@ -403,6 +407,31 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     // A non-zero exit from an attended interactive session (Ctrl-C → 130,
     // `/exit` → 0, etc.) is normal end-of-session, not a tm error.
     Ok(())
+}
+
+/// Write and verify the sandbox for a `tm run` launch (#10102).
+///
+/// Why: #8928 step 6 — `tm run` starts a PM `claude`, so it starts only inside
+/// the PM's verified sandbox, like every other launch path.
+/// What: [`crate::core::session_launch::apply_launch_sandbox`] for `profile`'s
+/// role in `repo_path`, with `claude_config_dir` as the user tier.
+/// FAIL-CLOSED: an error refuses the run.
+/// Test: `run_sandbox_applies_and_verifies_the_pm_policy`,
+/// `run_sandbox_refuses_a_workspace_that_does_not_verify`.
+pub fn run_sandbox(
+    repo_path: &Path,
+    home: &Path,
+    claude_config_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+) -> anyhow::Result<()> {
+    use crate::core::session_launch as sl;
+    let inputs = sl::launch_sandbox_inputs(repo_path, home);
+    sl::apply_launch_sandbox(
+        sl::sandbox_role_for(profile),
+        &inputs,
+        Some(claude_config_dir),
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 /// Resolve the repo path for an alias without launching it.
@@ -852,6 +881,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "run_sandbox_tests.rs"]
+mod sandbox_tests;
 
 #[cfg(test)]
 #[path = "run_trim_tests.rs"]

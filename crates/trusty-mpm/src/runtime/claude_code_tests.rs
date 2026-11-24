@@ -2284,3 +2284,41 @@ fn spawn_refuses_when_the_sandbox_does_not_verify() {
         "a refused launch must type nothing into the pane"
     );
 }
+
+/// #10102 fix round: the in-place relaunch writes the PM sandbox into a good
+/// workspace, and refuses — building no command — on one that does not verify.
+#[test]
+#[serial_test::serial]
+fn inplace_relaunch_applies_the_sandbox_and_refuses_an_unverified_one() {
+    // #9123: the relaunch resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let fw = FrameworkPaths::from_root(home.home().join(".trusty-mpm"));
+    let prompts = home.home().join("prompts");
+    std::fs::create_dir_all(&prompts).expect("mkdir prompts");
+
+    let good = home.home().join("good");
+    std::fs::create_dir_all(&good).expect("mkdir good");
+    build_inplace_resume_command_with(&fw, &prompts, &good, None).expect("a good workspace");
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(good.join(".claude/settings.json")).expect("settings"),
+    )
+    .expect("json");
+    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
+
+    let bad = home.home().join("bad");
+    std::fs::create_dir_all(bad.join(".claude")).expect("mkdir bad");
+    std::fs::write(
+        bad.join(".claude/settings.local.json"),
+        r#"{"sandbox":{"enabled":false}}"#,
+    )
+    .expect("plant override");
+    let err = build_inplace_resume_command_with(&fw, &prompts, &bad, None)
+        .map(|_| ())
+        .expect_err("an unverified sandbox refuses the relaunch");
+    assert!(err.to_string().contains("settings.local.json"), "{err}");
+}

@@ -242,3 +242,27 @@ fn only_the_architect_gets_the_sccache_client_env() {
     let pm = project_policy(SandboxRole::Pm, &inputs);
     assert_eq!(pm["env"], json!({ "RUSTC_WRAPPER": "" }));
 }
+
+/// #10102 fix round, Fail-Open Check: a corrupt role record refuses the
+/// launch, naming the file, and never lets an Architect flip a PM's sandbox.
+#[test]
+fn a_corrupt_role_record_refuses_the_launch() {
+    let fx = Fx::new();
+    let pm = fx.inputs("/t/pm-socket");
+    apply_launch_sandbox(SandboxRole::Pm, &pm, Some(&fx.config)).expect("pm");
+    let record = record_path(&pm.workspace);
+    for corrupt in ["{not json", "[]"] {
+        std::fs::write(&record, corrupt).expect("corrupt the record");
+        match apply_launch_sandbox(SandboxRole::Architect, &pm, Some(&fx.config)) {
+            Err(SandboxSettingsError::Record { path, source }) => {
+                assert_eq!(path, record);
+                assert!(
+                    source.to_string().contains("sandbox-roles.json"),
+                    "{source}"
+                );
+            }
+            other => panic!("{corrupt}: a corrupt record must refuse, got {other:?}"),
+        }
+        assert_eq!(fx.project().pointer("/sandbox/enabled"), Some(&json!(true)));
+    }
+}

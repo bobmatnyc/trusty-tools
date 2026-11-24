@@ -1337,3 +1337,48 @@ fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
     assert!(fw.crate_config_root().starts_with(sandbox_home), "{fw:?}");
     assert!(fw.root.starts_with(sandbox_home), "{fw:?}");
 }
+
+/// #10102 Fail-Open Check: a `tm connect` whose sandbox does not verify — a
+/// `settings.local.json` turning it off — is refused after registering, rolls
+/// the registration back, and types nothing into the pane.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_connect_whose_sandbox_does_not_verify_is_refused_10102() {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    std::fs::create_dir_all(target.path().join(".claude")).expect("mkdir");
+    std::fs::write(
+        target.path().join(".claude/settings.local.json"),
+        r#"{"sandbox":{"enabled":false}}"#,
+    )
+    .expect("plant the override");
+    let tmux_dir = tempfile::TempDir::new().expect("tmux dir");
+    let (bin, log) = scripted_fake_tmux(tmux_dir.path(), "has-session");
+    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let client = reqwest::Client::new();
+    let err = trusty_mpm::core::tmux::with_tmux_binary(
+        bin,
+        crate::commands::launch::connect(
+            &client,
+            &url,
+            Some(target.path().display().to_string()),
+            Some(home.path()),
+            crate::commands::launch_handoff::Handoff::Detach,
+        ),
+    )
+    .await
+    .expect_err("an unverified sandbox refuses the connect");
+    assert!(
+        format!("{err:#}").contains("settings.local.json"),
+        "{err:#}"
+    );
+    let seen = seen.lock().expect("seen");
+    assert_eq!(seen.posts.len(), 1, "the connect registered first: {err:#}");
+    assert_eq!(
+        seen.deletes,
+        [crate::test_support::launch_stub::STUB_ID],
+        "the registration must be removed: {err:#}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!calls.contains("send-keys"), "typed into the pane: {calls}");
+}

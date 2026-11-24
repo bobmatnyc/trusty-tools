@@ -69,13 +69,7 @@ pub(super) fn write_project_tier(
         std::fs::create_dir_all(dir).map_err(io)?;
     }
     crate::core::settings_lock::with_settings_lock(&path, || {
-        let mut record =
-            super::super::malformed_backup::load_settings_object(&path).map_err(|e| {
-                SandboxSettingsError::Record {
-                    path: path.clone(),
-                    source: std::io::Error::other(e.to_string()),
-                }
-            })?;
+        let mut record = load_record(&path)?;
         if let Some(other) = conflicting_role(&record, role) {
             return Err(conflict(role, other, &inputs.workspace));
         }
@@ -85,6 +79,34 @@ pub(super) fn write_project_tier(
         crate::core::settings_lock::publish(&path, &record).map_err(io)
     })
     .map_err(io)?
+}
+
+/// Read the role record; a missing file is an empty record.
+///
+/// Why: #10102 fix round — resetting a corrupt record to `{}` would forget a
+/// recorded PM and let an Architect launch flip its `sandbox.enabled`.
+/// What: `{}` when the file does not exist; FAIL-CLOSED otherwise — an
+/// unreadable, unparseable or non-object file is a
+/// [`SandboxSettingsError::Record`] naming the file.
+/// Test: `a_corrupt_role_record_refuses_the_launch`.
+fn load_record(path: &Path) -> Result<Value, SandboxSettingsError> {
+    let fail = |why: String| SandboxSettingsError::Record {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(format!(
+            "{why}; fix or remove `{}` (it records which roles share this workspace)",
+            path.display()
+        )),
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
+        Err(e) => return Err(fail(format!("cannot be read: {e}"))),
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) if value.is_object() => Ok(value),
+        Ok(_) => Err(fail("is not a JSON object".to_owned())),
+        Err(e) => Err(fail(format!("is not JSON: {e}"))),
+    }
 }
 
 /// The recorded role whose `sandbox.enabled` differs from `role`'s, if any.
