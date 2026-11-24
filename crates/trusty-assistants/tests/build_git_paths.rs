@@ -94,3 +94,27 @@ fn returns_none_with_no_git_dir_anywhere() {
 
     assert_eq!(resolve_git_watch_paths(&crate_dir), None);
 }
+
+/// #11733: cargo's own `.cargo-ok` marker in a `cargo install --git`
+/// checkout is not a change to the source, so it alone is clean.
+#[test]
+fn cargo_ok_marker_alone_is_clean() {
+    assert!(!porcelain_is_dirty("?? .cargo-ok"));
+    assert!(!porcelain_is_dirty("?? .cargo-ok\n"));
+    assert!(!porcelain_is_dirty(""));
+}
+
+/// #4260 semantics kept: a modified or untracked source is dirty, also when
+/// it appears beside the `.cargo-ok` marker.
+#[test]
+fn real_changes_are_dirty() {
+    for porcelain in [
+        " M src/x.rs",
+        "M src/x.rs",
+        "?? src/new.rs",
+        "?? .cargo-ok\n M src/x.rs",
+        "?? src/.cargo-ok",
+    ] {
+        assert!(porcelain_is_dirty(porcelain), "{porcelain:?} must be dirty");
+    }
+}

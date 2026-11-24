@@ -13,6 +13,7 @@
 // `//!` doc comment: `include!` splices it into two different crate roots,
 // where a `use` would collide with the includer's own imports and an inner
 // attribute is not in a legal position.
+// #11733: `porcelain_is_dirty`, the `GIT_DIRTY` decision, lives here too.
 // Test: `crates/trusty-assistants/tests/build_git_paths.rs`.
 
 /// Resolve the real `HEAD` and `index` paths this crate's checkout should
@@ -65,4 +66,23 @@ fn resolve_git_watch_paths(
             return None;
         }
     }
+}
+
+/// Whether `git status --porcelain` output means the build tree differs from
+/// the commit it reports.
+///
+/// Why (#11733): a `cargo install --git` checkout holds an untracked
+/// `.cargo-ok` marker that cargo writes itself, so every git-rev install was
+/// stamped `-dirty` even from a clean commit. #4260's rule still holds for
+/// any other path: a modified or untracked source means the SHA describes
+/// only part of the binary.
+/// What: `true` when any non-blank line names a change other than cargo's
+/// untracked `?? .cargo-ok`. Lines are compared trimmed, because the caller's
+/// `git` helper trims the whole output (and with it a leading ` M`'s space).
+/// Test: `cargo_ok_marker_alone_is_clean`, `real_changes_are_dirty`.
+fn porcelain_is_dirty(porcelain: &str) -> bool {
+    porcelain
+        .lines()
+        .map(str::trim)
+        .any(|line| !line.is_empty() && line != "?? .cargo-ok")
 }
