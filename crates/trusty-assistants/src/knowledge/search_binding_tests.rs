@@ -14,6 +14,8 @@ use crate::knowledge::KnowledgeStore;
 use crate::stores::AgentStoreBinding;
 
 /// Point the assistants root at `dir` under `ENV_LOCK`, restoring on drop.
+/// Every test using it is also `#[serial]`, the key every other
+/// `TA_ASSISTANTS_DIR` mutator holds (CI run 45338865592).
 struct AssistantsRoot {
     prev: Option<std::ffi::OsString>,
     // Dropped last, so the lock outlives the restore.
@@ -67,6 +69,7 @@ fn agent_with(binding: &AgentStoreBinding) -> AgentConfig {
 /// #7902 regression: a declared store keeps the default slot after provisioning,
 /// and the protected index stays queryable by id instead of vanishing.
 #[test]
+#[serial_test::serial]
 fn declared_store_index_holds_the_default_slot_after_provisioning() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -95,6 +98,7 @@ fn declared_store_index_holds_the_default_slot_after_provisioning() {
 
 /// #7902 error arm: a declaration naming the protected index id is refused.
 #[test]
+#[serial_test::serial]
 fn a_declared_store_cannot_name_the_protected_index() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -117,6 +121,7 @@ fn a_declared_store_cannot_name_the_protected_index() {
 
 /// The protected binding itself cannot be pointed at another index.
 #[test]
+#[serial_test::serial]
 fn retargeting_the_protected_binding_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
