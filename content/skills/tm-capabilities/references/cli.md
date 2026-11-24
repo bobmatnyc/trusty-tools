@@ -150,6 +150,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `merge` — Squash-merge a PR with its validated body as the commit message
   - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
+  - `watch` — Track a PR's required checks; the daemon wakes the owner on a CI change
+    - `add` — Track a PR: one wake per CI transition on its required checks
+    - `ls` — List the tracked PRs
+    - `rm` — Stop tracking a PR
 - `presence` — Prove you are at the Studio, so the Architect may write trust anchors
   - `devices` — Enrolled presence devices (passkeys)
     - `add` — Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no browser path finishes the ceremony yet)
