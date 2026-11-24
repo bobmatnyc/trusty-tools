@@ -84,6 +84,9 @@ path = "src/main.rs"
 tokio              = { workspace = true }
 axum               = { workspace = true }
 tower-http         = { workspace = true }
+# #11754: the ask route tells a body over its cap from a read error.
+# Already in the graph through axum, so this compiles nothing new.
+http-body-util     = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 anyhow             = { workspace = true }
@@ -136,4 +139,3 @@ tokio          = { workspace = true, features = ["test-util"] }
 serial_test    = { workspace = true }
 trusty-common  = { workspace = true, features = ["credential-test-sandbox"] }
 tower          = { workspace = true }
-http-body-util = { workspace = true }
