@@ -56,20 +56,20 @@ fn redaction_strips_passwords_and_keys() {
         ("id AKIAIOSFODNN7EXAMPLE end", "id [REDACTED] end"),
         // URL credentials: scheme and host stay, `user:pass` goes.
         (
-            "DATABASE_URL=postgres://app:s3cr3t@db.internal:5432/prod",
-            "DATABASE_URL=postgres://[REDACTED]@db.internal:5432/prod",
+            "DATABASE_URL=postgres://app:s3cr3t@db.example.com:5432/prod",
+            "DATABASE_URL=postgres://[REDACTED]@db.example.com:5432/prod",
         ),
         (
-            "clone https://bob:ghtoken@github.com/o/r.git now",
-            "clone https://[REDACTED]@github.com/o/r.git now",
+            "clone https://bob:ghtoken@git.example.org/o/r.git now",
+            "clone https://[REDACTED]@git.example.org/o/r.git now",
         ),
         (
             "redis://:hunter2@cache:6379/0",
             "redis://[REDACTED]@cache:6379/0",
         ),
         (
-            "mongodb+srv://u:p%40ss@cluster0.x.net/db",
-            "mongodb+srv://[REDACTED]@cluster0.x.net/db",
+            "mongodb+srv://u:p%40ss@cluster0.example.net/db",
+            "mongodb+srv://[REDACTED]@cluster0.example.net/db",
         ),
         ("key sk-ant-api03-abcdefghijklmnop0123", "key [REDACTED]"),
         ("ghp_0123456789abcdefABCDEF here", "[REDACTED] here"),
@@ -99,7 +99,7 @@ fn redaction_keeps_plain_text() {
         "the password field is empty",
         "the token is expired; Basic setup done",
         "compass=north bypass:yes",
-        "https://git@github.com/o/r.git https://example.com/a@b ssh://host:22/x",
+        "https://git@git.example.org/o/r.git https://example.com/a@b ssh://host:22/x",
         "sk-short ghp_tiny AKIA123",
         "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
         "héllo wörld 日本語",
