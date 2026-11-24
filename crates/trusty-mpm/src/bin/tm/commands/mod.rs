@@ -210,6 +210,8 @@ pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
 // own file so the dispatcher stays a translation layer and stays under cap.
 pub(crate) mod memory_verbs;
+// #11625: the MCP-only memory tools as `tm memory` verbs.
+pub(crate) mod memory_tool_verbs;
 pub(crate) mod meta;
 pub(crate) mod misc;
 // #6276: the one decision about a repository's origin remote — a local-only

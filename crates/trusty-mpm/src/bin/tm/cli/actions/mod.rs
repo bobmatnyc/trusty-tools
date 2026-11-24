@@ -41,6 +41,8 @@ mod hooks;
 mod issue;
 mod mcp;
 mod memory;
+// #11625: split from `memory` so it stays under the SLOC cap.
+mod memory_tools;
 mod meta;
 mod optimizer;
 mod overseer;
@@ -83,6 +85,7 @@ pub(crate) use hooks::HooksAction;
 pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
+pub(crate) use memory_tools::{MemoryKgAction, MemoryTaskAction, MemoryToolAction, ToolOutput};
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;

@@ -34,6 +34,8 @@ mod manager_cli_client;
 mod manager_inference;
 mod manager_routes;
 mod manager_routing;
+// #11625: the MCP-only memory tools as `tm memory` verbs.
+mod memory_tool_verbs_socket;
 mod memory_verbs_socket;
 mod meta_demo_e2e;
 mod no_content_single_error;
