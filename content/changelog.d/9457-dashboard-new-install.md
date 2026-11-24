@@ -1,2 +1,2 @@
 Fixed
-- The architect-dashboard skill's "New installation" section says `tm fleet init` starts the dashboard server on macOS, and that only `--no-launch` or another OS needs a hand start (#9457).
+- The architect-dashboard skill's "New installation" section now lists when `tm fleet init` starts the dashboard server on macOS and when it reports `skipped` or `failed`, and says to start it by hand then (#9457).

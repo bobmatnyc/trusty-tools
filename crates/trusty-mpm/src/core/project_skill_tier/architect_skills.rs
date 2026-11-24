@@ -241,6 +241,8 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
         "b5ecfccf1c8e988b05995d2b316282770d5c8570d69b21744022e8591f0c4388",
         // #9457: the text before `fleet init` started the dashboard on macOS.
         "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
+        // #9457: the text that said `fleet init` always started the dashboard on macOS.
+        "09b554985b017a035fd9b44b91f0102fd2fd0881f942f9fdb0d03d1d7d5efb50",
     ],
 };
 
