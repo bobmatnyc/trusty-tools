@@ -28,8 +28,10 @@ ROOT = os.path.dirname(HERE)
 STATE = os.environ.get("EFFORT_STATE") or os.path.join(ROOT, "inbox", "effort-state.json")
 # ar-T2f: the Architect and its poller are never governed. #10571 S1: the names come from
 # ARCHITECT_SESSION / ARCHITECT_POLL_SESSION as in fleet_poll_cfg.py, never an instance list.
+# tm-supervisor-collector is fleet infrastructure, not an instance name, so it stays fixed.
 ARCHITECT = os.environ.get("ARCHITECT_SESSION") or "tm-architect"
-SKIP = {ARCHITECT, os.environ.get("ARCHITECT_POLL_SESSION") or f"{ARCHITECT}-poll"}
+SKIP = {ARCHITECT, os.environ.get("ARCHITECT_POLL_SESSION") or f"{ARCHITECT}-poll",
+        "tm-supervisor-collector"}
 MEDIUM_AT, LOW_AT = 90, 95
 LEVELS = ("medium", "low", "auto")
 

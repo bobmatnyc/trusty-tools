@@ -110,7 +110,7 @@ const STILL_REFUSED_10570: &[(&str, &str)] = &[
     (
         "token_watch.py",
         "#10571 S1: STATE_PATH, HOURLY_PATH and THRESHOLDS_PATH name `token-*.json[l]` files, \
-         read as token files; the Rust watcher shares the names (#11629)",
+         read as token files; the Rust watcher shares the names (#11629, #10598)",
     ),
 ];
 

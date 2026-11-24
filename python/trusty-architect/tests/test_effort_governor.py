@@ -85,7 +85,7 @@ def test_skipped_sessions_follow_the_architect_session_env(monkeypatch):
     """#10571 S1: the skip set is ARCHITECT_SESSION and its poll session, never an instance list."""
     monkeypatch.setenv("ARCHITECT_SESSION", "tm-arch2")
     renamed = _load("effort_governor_env", "effort-governor.py")
-    assert renamed.SKIP == {"tm-arch2", "tm-arch2-poll"}
+    assert renamed.SKIP == {"tm-arch2", "tm-arch2-poll", "tm-supervisor-collector"}
     rd = renamed.reading([row(10, 99)], NOW)
     assert [c["session"] for c in renamed.decide(["tm-arch2", "tm-arch2-poll", "tm-architect"], rd, {})] == \
         ["tm-architect"]
@@ -144,3 +144,10 @@ def test_send_skips_when_busy_or_draft(tmp_path, lines, box, why):
     r, st, es = send(tmp_path, lines=lines, box=box)
     assert r.returncode == 1 and f"tm-a SKIP {why}" in r.stdout
     assert st["sent"] == [] and not es.exists()
+
+
+def test_collector_session_is_never_governed():
+    """#10571 S1: tm-supervisor-collector is fleet infrastructure, so it stays in SKIP."""
+    assert "tm-supervisor-collector" in eg.SKIP
+    rd = eg.reading([row(10, 99)], NOW)
+    assert eg.decide(["tm-supervisor-collector"], rd, {}) == []
