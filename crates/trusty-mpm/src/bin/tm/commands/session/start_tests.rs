@@ -1329,7 +1329,7 @@ fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
     let home = crate::commands::launch_home::resolve_launch_home(
         Some(OsStr::new("1")),
         Some(OsStr::new("/tmp/sbx/data")),
-        Some(PathBuf::from("/Users/fake")),
+        Some(PathBuf::from("/Users/example")),
     )
     .expect("a sandbox with a data override resolves");
     let fw = super::start_framework_paths(home.as_deref());

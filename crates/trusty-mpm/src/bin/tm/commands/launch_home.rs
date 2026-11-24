@@ -170,7 +170,7 @@ mod tests {
         let got = super::resolve_launch_home(
             Some(OsStr::new("1")),
             Some(OsStr::new("/tmp/sbx/data")),
-            Some(PathBuf::from("/Users/fake")),
+            Some(PathBuf::from("/Users/example")),
         )
         .expect("a sandbox with a data override resolves");
         assert_eq!(got, Some(PathBuf::from("/tmp/sbx/home")));
@@ -181,7 +181,7 @@ mod tests {
     fn sandboxed_launch_home_refuses_without_a_data_override() {
         use std::ffi::OsStr;
         use std::path::PathBuf;
-        let home = Some(PathBuf::from("/Users/fake"));
+        let home = Some(PathBuf::from("/Users/example"));
         for data in [
             None,
             Some(OsStr::new("")),
@@ -198,7 +198,7 @@ mod tests {
     fn unsandboxed_launch_home_is_the_process_home() {
         use std::ffi::OsStr;
         use std::path::PathBuf;
-        let home = Some(PathBuf::from("/Users/fake"));
+        let home = Some(PathBuf::from("/Users/example"));
         for flag in [None, Some(OsStr::new("0"))] {
             let got =
                 super::resolve_launch_home(flag, Some(OsStr::new("/tmp/sbx/data")), home.clone());
