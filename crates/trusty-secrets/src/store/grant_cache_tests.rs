@@ -418,9 +418,13 @@ fn grant_hold_refuses_a_snapshot_a_write_made_stale() {
     let cache = Clocks::new().cache();
     let a = ItemId::new("trusty/acme/web", "KEY_A");
     let generation = cache.open(TTL, alive());
-    let mark = cache.write_mark().unwrap();
+    let mark = cache.drained_mark(Duration::ZERO).unwrap();
     assert_eq!(cache.held_begin(&a), None, "no blob held yet");
-    assert_eq!(cache.write_mark(), None, "a mark taken mid-write");
+    assert_eq!(
+        cache.drained_mark(Duration::ZERO),
+        None,
+        "a mark taken mid-write"
+    );
     assert!(
         !cache.hold(generation, mark, &blob_of("old")),
         "held over a write in flight"
@@ -431,8 +435,29 @@ fn grant_hold_refuses_a_snapshot_a_write_made_stale() {
         "held over a landed write"
     );
     assert!(!cache.holds_blob());
-    let fresh = cache.write_mark().unwrap();
+    let fresh = cache.drained_mark(Duration::ZERO).unwrap();
     assert!(cache.hold(generation, fresh, &blob_of("new")));
+}
+
+/// Why: #11786 fix round — a write in flight must be waited for, up to the
+/// cap, rather than failing unlock at once; past the cap there is no mark.
+/// What: no mark within a short cap while the write is open; a waiter with
+/// a long cap gets the mark once another thread finishes the write.
+/// Test: itself.
+#[test]
+fn grant_drained_mark_waits_for_an_in_flight_write() {
+    let cache = Arc::new(Clocks::new().cache());
+    let a = ItemId::new("trusty/acme/web", "KEY_A");
+    let before = cache.drained_mark(Duration::ZERO).unwrap();
+    assert_eq!(cache.held_begin(&a), None);
+    assert_eq!(cache.drained_mark(Duration::from_millis(20)), None);
+    let finisher = {
+        let cache = Arc::clone(&cache);
+        std::thread::spawn(move || cache.held_done())
+    };
+    let after = cache.drained_mark(Duration::from_secs(30));
+    finisher.join().unwrap();
+    assert_eq!(after, Some(before + 1), "the drained mark missed the write");
 }
 
 /// Why: #10524 — a write in flight, or one that failed, must never leave a

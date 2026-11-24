@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -224,6 +224,8 @@ impl Inner {
 /// Test: `grant_cache_serves_keychain_values_only_while_live`.
 pub(crate) struct GrantCache {
     inner: Mutex<Inner>,
+    /// #11786: signalled when a Keychain write finishes.
+    drained: Condvar,
     now: CacheClock,
     wall: WallClock,
     lock_mem: MemLock,
@@ -251,6 +253,7 @@ impl GrantCache {
     pub(crate) fn with_lock(now: CacheClock, wall: WallClock, lock_mem: MemLock) -> Self {
         Self {
             inner: Mutex::default(),
+            drained: Condvar::new(),
             now,
             wall,
             lock_mem,
@@ -419,11 +422,31 @@ impl GrantCache {
             .retain(|(_, held_vault, held_key), _| held_vault != vault || held_key != key);
     }
 
-    /// The write mark to take before reading a blob to [`Self::hold`];
-    /// `None` while a Keychain write is in flight (its outcome is unknown).
-    pub(crate) fn write_mark(&self) -> Option<u64> {
+    /// The write mark to take before reading a blob to [`Self::hold`], once
+    /// no Keychain write is in flight; `None` when writes are still in
+    /// flight after `cap`, or the lock was poisoned while waiting.
+    ///
+    /// Why: #11786 — a write in flight has an unknown outcome, so a mark
+    /// taken under it proves nothing; waiting lets a prompt-bound write
+    /// finish instead of failing the unlock at once.
+    /// Test: `grant_drained_mark_waits_for_an_in_flight_write`,
+    /// `grant_hold_refuses_a_snapshot_a_write_made_stale`.
+    pub(crate) fn drained_mark(&self, cap: Duration) -> Option<u64> {
         let inner = self.lock();
+        // A poisoned wait is `None`; the next `lock` ends the grant.
+        let (inner, _) = self
+            .drained
+            .wait_timeout_while(inner, cap, |inner| inner.in_flight != 0)
+            .ok()?;
         (inner.in_flight == 0).then_some(inner.writes)
+    }
+
+    /// Whether grant `generation` is the live one, settling it first.
+    pub(crate) fn is_live(&self, generation: u64) -> bool {
+        let mut inner = self.lock();
+        let now = self.stamp();
+        inner.settle(now);
+        inner.window.as_ref().map(|w| w.generation) == Some(generation)
     }
 
     /// Hold `blob`, read after `mark`, for live grant `generation`,
@@ -490,6 +513,8 @@ impl GrantCache {
     pub(crate) fn held_done(&self) {
         let mut inner = self.lock();
         inner.in_flight = inner.in_flight.saturating_sub(1);
+        drop(inner);
+        self.drained.notify_all();
     }
 
     /// The write with `ticket` on `id` landed with `value` (`None`: removed).

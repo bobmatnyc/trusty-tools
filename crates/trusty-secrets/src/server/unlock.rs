@@ -166,10 +166,14 @@ pub(crate) fn person_only(
 /// that fails or outlasts [`KEYCHAIN_CALL_TIMEOUT`], or a blob the grant
 /// cannot hold (a refused page lock), is an error. A Keychain write during
 /// the read refuses the snapshot (#11786); the read runs once more, and a
-/// second refusal is [`ErrorKind::Internal`], never a stale grant.
+/// second refusal is [`ErrorKind::Internal`], never a stale grant. Each
+/// read first waits up to [`KEYCHAIN_CALL_TIMEOUT`] for writes in flight
+/// to finish; past that it is [`ErrorKind::KeychainAccessPrompt`].
 /// Test: `migrate_then_unlock_reads_the_keychain_once`,
 /// `unlock_with_an_unreadable_blob_opens_no_grant`,
-/// `deny_written_during_the_unlock_read_is_honoured_under_the_grant`.
+/// `deny_written_during_the_unlock_read_is_honoured_under_the_grant`,
+/// `writes_during_both_unlock_reads_open_no_grant`,
+/// `unlock_waits_for_a_write_in_flight_then_holds`.
 fn hold_blob(state: &State, generation: u64) -> Result<bool, ErrorKind> {
     if state.sandboxed || !state.keychain_compiled {
         return Ok(false);
@@ -182,14 +186,21 @@ fn hold_blob(state: &State, generation: u64) -> Result<bool, ErrorKind> {
         return Ok(false);
     };
     // #11786: a write during the read makes the snapshot stale; read once
-    // more, then fail closed rather than hold stale state.
+    // more, then fail closed rather than hold stale state. Only reads count.
+    let grant = state.cache.grant();
     for _ in 0..2 {
-        let Some(mark) = state.cache.grant().write_mark() else {
-            continue;
+        // #11786: a write still in flight after the read deadline is a
+        // Keychain call left waiting, most often on a prompt.
+        let Some(mark) = grant.drained_mark(KEYCHAIN_CALL_TIMEOUT) else {
+            return Err(ErrorKind::KeychainAccessPrompt);
         };
+        // #11786: a grant that ended is not worth a second read.
+        if !grant.is_live(generation) {
+            return Err(ErrorKind::Internal);
+        }
         match read_blob(&store)? {
             None => return Ok(false),
-            Some(blob) if state.cache.grant().hold(generation, mark, &blob) => return Ok(true),
+            Some(blob) if grant.hold(generation, mark, &blob) => return Ok(true),
             Some(_) => {}
         }
     }

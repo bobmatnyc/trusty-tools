@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use super::blob_keychain::{control_item_id, value_item};
-use super::grant_cache::HeldRead;
+use super::grant_cache::{GrantCache, HeldRead};
 use super::keychain::AGENTS_MARKER;
 use super::vault_blob::{BlobStore, ItemId};
 use super::{Capabilities, ControlItem, SecretBackend, SecretCache};
@@ -43,13 +43,26 @@ impl HeldKeychain {
         write: impl FnOnce() -> Result<T, SecretsError>,
     ) -> Result<T, SecretsError> {
         let ticket = self.cache.grant().held_begin(id);
+        // #11786: ends the in-flight count `hold` checks on every exit,
+        // a panic in `write` included.
+        let _in_flight = InFlight(self.cache.grant());
         let result = write();
         if let (Ok(_), Some(ticket)) = (&result, ticket) {
             self.cache.grant().held_end(id, ticket, landed);
         }
-        // #11786: ends the in-flight count `hold` checks, on every outcome.
-        self.cache.grant().held_done();
         result
+    }
+}
+
+/// One Keychain write in flight; dropping it calls
+/// [`GrantCache::held_done`], so an unwinding write never leaves the count
+/// raised and every later unlock refused (#11786).
+/// Test: `held_write_that_panics_ends_its_in_flight_count`.
+struct InFlight<'a>(&'a GrantCache);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.held_done();
     }
 }
 

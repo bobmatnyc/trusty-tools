@@ -396,3 +396,102 @@ fn deny_written_during_the_unlock_read_is_honoured_under_the_grant() {
         "the grant answered no deny over a deny just written"
     );
 }
+
+/// A read hook on the blob that toggles the deny on [`KEYS`]`[0]`, then
+/// arms itself again `rearm` more times.
+fn toggling_deny(items: &Arc<MemItems>, writer: Arc<dyn SecretBackend>, rearm: usize) -> ReadHook {
+    let again = Arc::clone(items);
+    ReadHook(
+        ItemId::blob(),
+        Box::new(move || {
+            let deny = (ControlItem::AgentDeny, vault(PROJECT_VAULT), key(KEYS[0]));
+            let on = !writer.control_item(deny.0, &deny.1, Some(&deny.2)).unwrap();
+            writer
+                .set_control_item(deny.0, &deny.1, Some(&deny.2), on)
+                .unwrap();
+            if rearm > 0 {
+                let next = toggling_deny(&again, Arc::clone(&writer), rearm - 1);
+                *again.read_hook.lock().unwrap() = Some(next);
+            }
+        }),
+    )
+}
+
+/// Why: #11786 fix round — when a write lands during both unlock reads,
+/// unlock fails closed: an error, no held blob and no live grant. A variant
+/// that held the second stale snapshot fails every assertion.
+/// Test: itself.
+#[test]
+fn writes_during_both_unlock_reads_open_no_grant() {
+    let fx = fixture();
+    let (items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let keychain = state.open(&BackendId::keychain()).unwrap();
+    *items.read_hook.lock().unwrap() = Some(toggling_deny(&items, keychain, 1));
+    let refused = unlock::unlock(&state, caller(), json!({"project": "ignored"}));
+    assert!(
+        items.read_hook.lock().unwrap().is_none(),
+        "a read ran without its write"
+    );
+    assert_eq!(refused, Err(ErrorKind::Internal));
+    assert!(!state.cache.grant().holds_blob(), "a stale blob is held");
+    assert_eq!(state.cache.grant().check(), Status::Off);
+}
+
+/// Why: #11786 fix round — a Keychain write in flight when unlock starts
+/// (a prompt can hold it 20 s) is waited for; it never costs a read
+/// attempt or fails the unlock at once.
+/// What: a write stays open while unlock starts; another thread ends it a
+/// little later, and unlock then holds the blob. The delay only makes the
+/// wait likely; the result is the same if the write ends first.
+/// Test: itself.
+#[test]
+fn unlock_waits_for_a_write_in_flight_then_holds() {
+    let fx = fixture();
+    let (_items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let cache = Arc::clone(&state.cache);
+    assert_eq!(cache.grant().held_begin(&ItemId::blob()), None);
+    let finisher = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cache.grant().held_done();
+    });
+    let answer = unlock::unlock(&state, caller(), json!({"project": "ignored"}));
+    finisher.join().unwrap();
+    assert_eq!(answer.unwrap()["blob_held"], true);
+    assert!(state.cache.grant().holds_blob());
+}
+
+/// Why: #11786 fix round — a write that panics must still end its
+/// in-flight count, or every later unlock waits out the deadline and
+/// fails until the server restarts.
+/// What: a read hook panics inside a `set` (the blob write rereads the
+/// blob); afterwards no write is in flight.
+/// Test: itself.
+#[test]
+fn held_write_that_panics_ends_its_in_flight_count() {
+    let fx = fixture();
+    let (items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let keychain = state.open(&BackendId::keychain()).unwrap();
+    *items.read_hook.lock().unwrap() = Some(ReadHook(
+        ItemId::blob(),
+        Box::new(|| panic!("injected panic inside a Keychain write")),
+    ));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        keychain.set(
+            &vault(PROJECT_VAULT),
+            &key(KEYS[0]),
+            &SecretValue::new("v2"),
+        )
+    }));
+    assert!(panicked.is_err(), "the write did not panic");
+    assert!(
+        state
+            .cache
+            .grant()
+            .drained_mark(std::time::Duration::ZERO)
+            .is_some(),
+        "a panicked write left the in-flight count raised"
+    );
+}
