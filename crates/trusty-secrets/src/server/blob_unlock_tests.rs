@@ -495,3 +495,48 @@ fn held_write_that_panics_ends_its_in_flight_count() {
         "a panicked write left the in-flight count raised"
     );
 }
+
+/// Why: #11786 fix round — unlock waited the full Keychain timeout for a
+/// write in flight, past the request deadline. The router then answered
+/// `deadline_exceeded`, and a write landing later let the body hold the
+/// blob: a live grant behind a failed reply.
+/// What: unlock runs through the router's `run_blocking` with a short
+/// deadline while a write stays open past it. The reply is
+/// `keychain_access_prompt`; the write then ends, the body's permit comes
+/// back, and the grant is `Off`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unlock_past_its_deadline_answers_the_prompt_and_opens_no_grant() {
+    let fx = fixture();
+    let (_items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let state = Arc::new(state);
+    let grant = || state.cache.grant();
+    assert_eq!(grant().held_begin(&ItemId::blob()), None);
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    let answer = crate::server::router::run_blocking(
+        Arc::clone(&state),
+        Arc::clone(&admission),
+        deadline,
+        unlock::unlock,
+        caller(),
+        json!({"project": "ignored"}),
+    )
+    .await;
+    assert_eq!(answer, Err(ErrorKind::KeychainAccessPrompt));
+    grant().held_done();
+    // The body holds the one permit until it returns.
+    let permit = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        admission.acquire_owned(),
+    )
+    .await;
+    assert!(permit.is_ok(), "the unlock body never returned");
+    assert_eq!(
+        grant().check(),
+        Status::Off,
+        "a grant opened after the reply"
+    );
+    assert!(!grant().holds_blob());
+}
