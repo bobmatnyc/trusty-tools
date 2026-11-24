@@ -93,16 +93,19 @@ fn a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245() {
 fn every_embedded_seed_is_in_the_shipped_history() {
     let rows: Vec<_> = refresh::history().collect();
     let mut checked = 0;
-    for file in seeded_files() {
-        if file.dest == "CLAUDE.md" || file.dest.starts_with(".claude/skills/") {
-            continue; // content-sourced; the launch deploy owns the skills' refresh
-        }
-        let hash = refresh::sha256_hex(file.contents.as_bytes());
+    // #11773: CLAUDE.md, the skills and the agents have rows too, so an
+    // unedited older copy reads stale instead of getting a `.shipped` sibling.
+    let agents = seed()
+        .agents
+        .iter()
+        .map(|a| (format!(".claude/agents/{}.md", a.stem), a.contents.as_str()));
+    let files = seeded_files().into_iter().map(|f| (f.dest, f.contents));
+    for (dest, contents) in files.chain(agents) {
+        let hash = refresh::sha256_hex(contents.as_bytes());
         assert!(
-            rows.contains(&(file.dest.as_str(), hash.as_str())),
-            "{}: current bytes missing from seed_history.tsv; run \
-             scripts/architect_bundle_meta.py history",
-            file.dest
+            rows.contains(&(dest.as_str(), hash.as_str())),
+            "{dest}: current bytes missing from seed_history.tsv; run \
+             scripts/architect_bundle_meta.py history"
         );
         checked += 1;
     }
@@ -110,6 +113,27 @@ fn every_embedded_seed_is_in_the_shipped_history() {
     // A pre-#10571 install holds an earlier datg.py; the refresh must know it.
     let datg = rows.iter().filter(|(d, _)| *d == "scripts/datg.py").count();
     assert!(datg >= 2, "only {datg} datg.py version(s) in the history");
+}
+
+/// Every earlier shipped skill text `architect_skills.rs` lists in `previous`
+/// is a history row, so `tm fleet init` refreshes it (#11773).
+#[test]
+fn every_shipped_skill_previous_hash_is_in_the_history() {
+    use trusty_mpm::core::project_skill_tier::architect_skills::SHIPPED;
+    let rows: Vec<_> = refresh::history().collect();
+    let mut checked = 0;
+    for skill in SHIPPED {
+        let dest = format!(".claude/skills/{}/SKILL.md", skill.stem);
+        for hash in skill.previous {
+            assert!(
+                rows.contains(&(dest.as_str(), *hash)),
+                "{dest} {hash}: missing from seed_history.tsv; run \
+                 scripts/architect_bundle_meta.py history"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 40, "checked only {checked} previous hashes");
 }
 
 /// `init` and `status` both name the prototype commit and the content manifest.
