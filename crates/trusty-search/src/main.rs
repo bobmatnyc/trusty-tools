@@ -415,6 +415,10 @@ enum Commands {
     #[command(flatten)]
     Verb(commands::search_verbs::SearchVerb),
 
+    // #11625: `lexical`, `semantic` and `kg` (the MCP lane tools).
+    #[command(flatten)]
+    Lane(commands::search_lane_verbs::LaneVerb),
+
     /// Check daemon liveness (alias for `status`)
     ///
     /// Kept for backward compatibility. Both `health` and `status` produce
@@ -1240,6 +1244,10 @@ async fn run() -> Result<()> {
         Commands::List { details } => commands::list::handle_list(cli.json, details).await?,
 
         Commands::Verb(verb) => commands::search_verbs::handle(verb, &cli.index, cli.json).await?,
+
+        Commands::Lane(verb) => {
+            commands::search_lane_verbs::handle(verb, &cli.index, cli.json).await?
+        }
 
         Commands::Query {
             query,
