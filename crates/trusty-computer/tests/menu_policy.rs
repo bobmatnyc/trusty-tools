@@ -311,3 +311,62 @@ fn menu_paths_refuse_first_two_menus_by_position() {
     let listed = menu_paths(&json!({"structuredContent": {"elements": elements}}));
     assert_eq!(listed["paths"], json!([["Ablage", "Neu"]]), "{listed}");
 }
+
+/// Authority check: the broker's scope gate is the authority boundary (#11745).
+///
+/// Why: cua-driver 0.23.2's `invoke_menu` activates the target app before
+/// checking menu path availability. The broker checks pid/window scope BEFORE
+/// the driver call, so out-of-scope invocations never reach the driver.
+///
+/// What: Proves that `invoke_menu` with an out-of-scope pid or window_id is
+/// refused at the broker level with `pid_out_of_scope` or `window_out_of_scope`,
+/// and the driver is never called.
+///
+/// Test: `broker_scope_gate_is_authority_boundary_for_invoke_menu`
+#[test]
+fn broker_scope_gate_is_authority_boundary_for_invoke_menu() {
+    // Set up: grant with invoke_menu permission for a specific pid and window.
+    let mut rig = menu_rig();
+    // #11745: baseline before any out-of-scope call, so both refusals are covered.
+    let calls_before = rig.agent_calls().len();
+
+    // Out-of-scope pid: broker refuses with pid_out_of_scope, driver never called.
+    let wrong_pid = json!({"pid": pid() + 1, "window_id": WINDOW, "path": ["File", "New"]});
+    let reply = rig.call("invoke_menu", "r1", wrong_pid);
+    assert_eq!(
+        reply["code"], "pid_out_of_scope",
+        "out-of-scope pid should be refused at broker: {reply}"
+    );
+
+    // Out-of-scope window_id: broker refuses with window_out_of_scope, driver never called.
+    let wrong_window = json!({"pid": pid(), "window_id": WINDOW + 1, "path": ["File", "New"]});
+    let reply = rig.call("invoke_menu", "r2", wrong_window);
+    assert_eq!(
+        reply["code"], "window_out_of_scope",
+        "out-of-scope window should be refused at broker: {reply}"
+    );
+
+    // Verify: driver was never invoked for either out-of-scope call.
+    assert_eq!(
+        rig.agent_calls().len(),
+        calls_before,
+        "driver should never be called for out-of-scope invoke_menu"
+    );
+
+    // Audit: both refusals are recorded.
+    let audit = rig.audit();
+    let pid_refused = audit.iter().any(|l| {
+        l["tool"] == "invoke_menu"
+            && l["refused"] == "pid_out_of_scope"
+            && l["activates_app"] == true
+    });
+    let window_refused = audit.iter().any(|l| {
+        l["tool"] == "invoke_menu"
+            && l["refused"] == "window_out_of_scope"
+            && l["activates_app"] == true
+    });
+    assert!(
+        pid_refused && window_refused,
+        "both refusals should be audited with activates_app flag"
+    );
+}
