@@ -189,3 +189,100 @@ async fn the_handler_alone_refuses_an_unmarked_request() {
         "the daemon's one reply went elsewhere: {reply:?}"
     );
 }
+
+/// #11754: an ungated request is refused before its body stream is polled.
+#[tokio::test]
+async fn the_handler_alone_never_polls_an_unmarked_body() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tower::ServiceExt;
+    let (_root, _data, state) = seed("unpolled", "LEAK");
+    let polled = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&polled);
+    let stream = futures_util::stream::once(async move {
+        flag.store(true, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(br#"{"question":"q"}"#))
+    });
+    let app = axum::Router::new()
+        .route(
+            "/ask/{id}",
+            axum::routing::post(super::ask_route::ask_handler),
+        )
+        .with_state(state);
+    let resp = app
+        .oneshot(
+            axum::http::Request::post("/ask/unpolled")
+                .header("origin", "http://127.0.0.1:1")
+                .body(axum::body::Body::from_stream(stream))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status().as_u16(), 403);
+    assert!(
+        !polled.load(Ordering::SeqCst),
+        "the body was read before the admission check"
+    );
+}
+
+/// Post `body` to the bare handler as an admitted loopback request, with no
+/// `DefaultBodyLimit` layer; the status and the JSON body.
+async fn post_admitted(
+    state: AppState,
+    id: &str,
+    body: axum::body::Body,
+) -> (u16, serde_json::Value) {
+    use tower::ServiceExt;
+    let app = axum::Router::new()
+        .route(
+            "/ask/{id}",
+            axum::routing::post(super::ask_route::ask_handler),
+        )
+        .with_state(state);
+    let mut req = axum::http::Request::post(format!("/ask/{id}"))
+        .header("origin", "http://127.0.0.1:1")
+        .body(body)
+        .expect("request");
+    req.extensions_mut().insert(AdmittedBy::Loopback);
+    let resp = app.oneshot(req).await.expect("response");
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, serde_json::from_slice(&bytes).expect("json"))
+}
+
+/// The error body a body-read refusal carries.
+fn body_refusal() -> serde_json::Value {
+    json!({ "error": format!(
+        "the request body is over {} bytes or unreadable",
+        super::ask_route::MAX_ASK_BODY_BYTES
+    ) })
+}
+
+/// #11754: the handler's own read enforces the cap without the route layer.
+#[tokio::test]
+async fn an_admitted_body_over_the_cap_is_413() {
+    let (_root, _data, state) = seed("overcap", "LEAK");
+    let huge = format!(
+        r#"{{"question":"{}"}}"#,
+        "x".repeat(super::ask_route::MAX_ASK_BODY_BYTES)
+    );
+    let (status, body) = post_admitted(state, "overcap", axum::body::Body::from(huge)).await;
+    assert_eq!(status, 413, "{body}");
+    assert_eq!(body, body_refusal());
+}
+
+/// #11754 fail-open check: a body that errors mid-read is `400`, never an
+/// answer or a default question.
+#[tokio::test]
+async fn an_admitted_body_read_error_is_400() {
+    let (_root, _data, state) = seed("broken", "LEAK");
+    let stream = futures_util::stream::iter([
+        Ok(axum::body::Bytes::from_static(br#"{"question":"q"}"#)),
+        Err(std::io::Error::other("reset")),
+    ]);
+    let (status, body) =
+        post_admitted(state, "broken", axum::body::Body::from_stream(stream)).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body, body_refusal());
+}

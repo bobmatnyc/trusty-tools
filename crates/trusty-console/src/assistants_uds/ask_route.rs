@@ -15,8 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Request, State};
 use axum::http::{StatusCode, header::ORIGIN};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
@@ -49,7 +48,7 @@ pub const MAX_QUESTION_BYTES: usize = 16 * 1024;
 /// only piles up timeouts. Four leaves room for a few tabs and devices.
 pub const MAX_CONCURRENT_ASKS: usize = 4;
 
-/// Largest request body read; past it axum answers `413` before the handler.
+/// Largest request body read; past it the ask is `413`.
 /// Four times the question cap leaves room for JSON escaping.
 pub const MAX_ASK_BODY_BYTES: usize = 4 * MAX_QUESTION_BYTES;
 
@@ -161,13 +160,16 @@ struct AskLog {
 /// #11748 review: the handler fails closed by itself — no [`AdmittedBy`] is
 /// `403` before any parse or dial — and a full ask pool
 /// ([`MAX_CONCURRENT_ASKS`]) is `429` `{"error":"assistants busy","kind":"busy"}`
-/// before any dial.
-/// Test: `tests/assistants_ask.rs`, `gate_tests::the_handler_alone_refuses_an_unmarked_request`.
+/// before any dial. The body is read only once the request is admitted, and
+/// before the permit is taken (#11754).
+/// Test: `tests/assistants_ask.rs`, `gate_tests::the_handler_alone_refuses_an_unmarked_request`,
+/// `gate_tests::the_handler_alone_never_polls_an_unmarked_body`.
 pub(crate) async fn ask_handler(
     State(state): State<AppState>,
     AxumPath(raw_id): AxumPath<String>,
     admitted: Option<Extension<AdmittedBy>>,
-    body: Result<Bytes, BytesRejection>,
+    // #11754: the raw body, read only after the admission check below.
+    body: Body,
 ) -> Response {
     let started = Instant::now();
     let mut log = AskLog {
@@ -203,12 +205,7 @@ pub(crate) async fn ask_handler(
 }
 
 /// The ask itself; records its outcome in `log`.
-async fn ask(
-    state: &AppState,
-    raw_id: &str,
-    body: Result<Bytes, BytesRejection>,
-    log: &mut AskLog,
-) -> Response {
+async fn ask(state: &AppState, raw_id: &str, body: Body, log: &mut AskLog) -> Response {
     // #11748: validate before any filesystem or socket access.
     let id = match InstanceId::parse(raw_id) {
         Ok(id) => id,
@@ -218,6 +215,9 @@ async fn ask(
         }
     };
     log.instance = Some(id.clone());
+    // #11754: read the body after admission and before the permit; a read
+    // error is kept and refused by `parse_question`, never parsed as a question.
+    let body = read_body(body).await;
     // #11748 review: bound concurrent asks; held until this fn returns,
     // timeout path included, and taken before any dial.
     let Ok(_permit) = Arc::clone(&state.assistants_ask_permits).try_acquire_owned() else {
@@ -289,20 +289,43 @@ async fn ask(
 /// A refusal before any dial: status, log outcome, message.
 type Refusal = (StatusCode, &'static str, String);
 
+/// Read `body`, at most [`MAX_ASK_BODY_BYTES`]: `413` past the cap, `400` on
+/// any other read error.
+///
+/// Why: #11754 — the handler reads the body itself, after its admission check,
+/// so the cap holds even without the route's `DefaultBodyLimit` layer.
+/// Test: `gate_tests::an_admitted_body_over_the_cap_is_413`,
+/// `gate_tests::an_admitted_body_read_error_is_400`.
+async fn read_body(body: Body) -> Result<Bytes, Refusal> {
+    axum::body::to_bytes(body, MAX_ASK_BODY_BYTES)
+        .await
+        .map_err(|e| {
+            let inner = e.into_inner();
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(inner.as_ref());
+            let mut over_cap = false;
+            while let Some(err) = source {
+                if err.is::<http_body_util::LengthLimitError>() {
+                    over_cap = true;
+                    break;
+                }
+                source = err.source();
+            }
+            let (status, outcome) = if over_cap {
+                (StatusCode::PAYLOAD_TOO_LARGE, "body_too_large")
+            } else {
+                (StatusCode::BAD_REQUEST, "body_unreadable")
+            };
+            let message =
+                format!("the request body is over {MAX_ASK_BODY_BYTES} bytes or unreadable");
+            (status, outcome, message)
+        })
+}
+
 /// The question in `body`, or why it is refused.
 /// Test: `ask_with_an_oversize_question_is_413`, `ask_with_a_blank_question_is_400`
 /// (`tests/assistants_ask.rs`).
-fn parse_question(body: Result<Bytes, BytesRejection>) -> Result<String, Refusal> {
-    let bytes = body.map_err(|rejection| {
-        let status = rejection.status();
-        let outcome = if status == StatusCode::PAYLOAD_TOO_LARGE {
-            "body_too_large"
-        } else {
-            "body_unreadable"
-        };
-        let message = format!("the request body is over {MAX_ASK_BODY_BYTES} bytes or unreadable");
-        (status, outcome, message)
-    })?;
+fn parse_question(body: Result<Bytes, Refusal>) -> Result<String, Refusal> {
+    let bytes = body?;
     let parsed: AskBody = serde_json::from_slice(&bytes).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
