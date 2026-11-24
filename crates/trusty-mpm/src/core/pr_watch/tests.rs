@@ -26,6 +26,7 @@ pub(crate) fn row(head: &str) -> WatchRow {
         emitted_key: None,
         ledger_key: None,
         last_woken_key: None,
+        seq: 0,
         added_at: "2026-11-23T00:00:00Z".into(),
     }
 }
@@ -79,8 +80,8 @@ fn detect_names_each_transition() {
     assert_eq!(detect("a", Some(Red), "a", Pending), Some(Kind::Rerun));
     assert_eq!(detect("a", Some(Green), "b", Pending), Some(Kind::NewHead));
     assert_eq!(
-        dedupe_key("O/R", 7, "ABC", Kind::NewHead),
-        "o/r#7@abc:new_head"
+        dedupe_key("O/R", 7, "ABC", Kind::NewHead, 3),
+        "o/r#7@abc:new_head#3"
     );
 }
 

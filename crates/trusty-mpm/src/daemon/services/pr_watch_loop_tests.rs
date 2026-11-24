@@ -60,6 +60,10 @@ struct Port {
     fail: AtomicBool,
     lines: Mutex<Vec<String>>,
     events: Mutex<Vec<HarnessEvent>>,
+    /// Request ids the fake ledger has seen (#11673).
+    seen: Mutex<std::collections::HashSet<String>>,
+    /// Verdicts the fake ledger actually wrote.
+    written: Mutex<Vec<String>>,
 }
 
 impl Port {
@@ -87,8 +91,14 @@ impl Emitter for E {
 }
 #[async_trait::async_trait]
 impl LedgerPort for L {
-    async fn set_ci_wait(&self, _row: &WatchRow, _t: &Transition) -> anyhow::Result<()> {
-        self.0.hit()
+    /// As `mpm.dbatg.batch`: the request id derives from the key, and a seen
+    /// id answers `Ok` with no write (trusty-architect writer, #11673).
+    async fn set_ci_wait(&self, _row: &WatchRow, t: &Transition) -> anyhow::Result<()> {
+        self.0.hit()?;
+        if self.0.seen.lock().insert(t.key.clone()) {
+            self.0.written.lock().push(t.verdict.as_str().to_string());
+        }
+        Ok(())
     }
 }
 #[async_trait::async_trait]
@@ -155,6 +165,7 @@ fn row(pr: u64, head: &str) -> WatchRow {
         emitted_key: None,
         ledger_key: None,
         last_woken_key: None,
+        seq: 0,
         added_at: "2026-11-23T00:00:00Z".into(),
     }
 }
@@ -187,10 +198,10 @@ async fn a_green_head_wakes_the_owner_once_across_ticks_and_restart() {
         panic!("not a Hook payload");
     };
     assert_eq!(kind, EVENT_KIND);
-    assert_eq!(data["key"], "o/r#1@h1:green");
+    assert_eq!(data["key"], "o/r#1@h1:green#1");
     assert_eq!(data["verdict"], "green");
     let r = rig.row();
-    assert_eq!(r.last_woken_key.as_deref(), Some("o/r#1@h1:green"));
+    assert_eq!(r.last_woken_key.as_deref(), Some("o/r#1@h1:green#1"));
     assert_eq!(r.verdict, Some(Verdict::Green));
 }
 
@@ -238,7 +249,7 @@ async fn a_failed_wake_retries_next_tick_and_never_re_emits() {
     let row = rig.row();
     assert_eq!(row.last_woken_key, None, "a refused wake advances nothing");
     assert_eq!(row.verdict, Some(Verdict::Pending), "verdict not advanced");
-    assert_eq!(row.emitted_key.as_deref(), Some("o/r#1@h1:green"));
+    assert_eq!(row.emitted_key.as_deref(), Some("o/r#1@h1:green#1"));
     rig.wake.fail.store(false, Ordering::SeqCst);
     assert_eq!(rig.driver().tick(2).await.woken, 1, "retried after restart");
     assert_eq!((rig.emit.n(), rig.ledger.n(), rig.wake.n()), (1, 1, 2));
@@ -311,7 +322,8 @@ async fn a_publisherless_emit_lands_in_the_spool() {
         kind: Kind::Green,
         head: "h1".into(),
         verdict: Verdict::Green,
-        key: "o/r#1@h1:green".into(),
+        key: "o/r#1@h1:green#1".into(),
+        seq: 1,
         required: vec!["ci".into()],
     };
     e.emit(transition_event(&row(1, "h1"), &t))
@@ -343,6 +355,7 @@ fn ledger_rows_replace_only_this_prs_ci_row() {
         head: "abcdef0123456".into(),
         verdict: Verdict::Red,
         key: "k".into(),
+        seq: 1,
         required: vec![],
     };
     let rows = vec![
@@ -368,4 +381,32 @@ fn parse_interval_defaults_on_junk_and_zero() {
     assert_eq!(parse_interval_secs(Some("x")), DEFAULT_INTERVAL_SECS);
     assert_eq!(parse_interval_secs(Some(" 30 ")), 30);
     assert!(!parse_enabled(Some("off")));
+}
+
+/// #11673: red, rerun, red on one head writes the ledger three times; the
+/// second red must not reuse the first red's key, which the ledger replays.
+#[tokio::test]
+async fn red_rerun_red_writes_the_ledger_each_time() {
+    let rig = Rig::new(1);
+    let mut l = rig.driver();
+    for (now, rollup) in [(1, RED), (2, RUNNING), (3, RED)] {
+        rig.reader.set("OPEN", "h1", rollup);
+        assert_eq!(l.tick(now).await.woken, 1, "tick {now}");
+    }
+    assert_eq!(*rig.ledger.written.lock(), ["red", "pending", "red"]);
+    let keys: Vec<String> = rig
+        .emit
+        .events
+        .lock()
+        .iter()
+        .filter_map(|e| match &e.payload {
+            HarnessPayload::Hook { data, .. } => data["key"].as_str().map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        ["o/r#1@h1:red#1", "o/r#1@h1:rerun#2", "o/r#1@h1:red#3"]
+    );
+    assert_eq!(rig.row().seq, 3);
 }

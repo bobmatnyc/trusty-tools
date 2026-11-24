@@ -68,6 +68,9 @@ pub struct WatchRow {
     /// The transition key whose pane wake was delivered.
     #[serde(default)]
     pub last_woken_key: Option<String>,
+    /// #11673: transitions delivered; the next key carries `seq + 1`.
+    #[serde(default)]
+    pub seq: u64,
     /// RFC 3339 time the row was added.
     pub added_at: String,
 }

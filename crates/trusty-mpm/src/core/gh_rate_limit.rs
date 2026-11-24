@@ -54,6 +54,35 @@ pub fn classify(err: &anyhow::Error) -> Option<RateLimited> {
     Some(RateLimited { reset_epoch })
 }
 
+/// Real `gh` rate-limit texts the daemon backs off on (#11673).
+///
+/// Why: the daemon's `gh` runs bound to the real binary (#9750), not a pinned
+/// session's shim, so the shim's line never reaches it.
+const GH_RATE_LIMIT_TEXTS: &[&str] = &[
+    "api rate limit exceeded",
+    "api rate limit already exceeded",
+    "secondary rate limit",
+    "http 429",
+];
+
+/// [`classify`], plus the real `gh` rate-limit refusals.
+///
+/// Why: #11673 — the daemon's PR watch must back off on a live limit too.
+/// `tm wait` keeps [`classify`], whose contract (#10550) counts an unmarked
+/// refusal as a generic probe error.
+/// What: the shim's line first (with its reset epoch); else any
+/// [`GH_RATE_LIMIT_TEXTS`] entry, or `HTTP 403` beside "rate limit", in the
+/// error chain, case-insensitive, with no reset epoch. A bare 403 is not one.
+/// Test: `classify_any_reads_real_gh_rate_limit_stderr`.
+pub fn classify_any(err: &anyhow::Error) -> Option<RateLimited> {
+    classify(err).or_else(|| {
+        let text = format!("{err:#}").to_ascii_lowercase();
+        let hit = GH_RATE_LIMIT_TEXTS.iter().any(|n| text.contains(n))
+            || (text.contains("http 403") && text.contains("rate limit"));
+        hit.then_some(RateLimited { reset_epoch: None })
+    })
+}
+
 /// Seconds to wait before the next poll after a rate-limited one.
 ///
 /// Why: re-polling before the reset spends a call the limit will refuse.
@@ -75,5 +104,38 @@ pub fn backoff_secs(hit: RateLimited, now: u64, interval_s: u64, consecutive: u3
                 .min(UNKNOWN_RESET_BACKOFF_CAP_SECS)
                 .max(interval_s)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_any_reads_real_gh_rate_limit_stderr() {
+        let hit = |s: &str| {
+            classify_any(&anyhow::anyhow!(
+                "`gh pr view 7` failed (exit status: 1): {s}"
+            ))
+        };
+        for real in [
+            "GraphQL: API rate limit exceeded for user ID 1234.",
+            "gh: API rate limit exceeded for user ID 1234. (HTTP 403)",
+            "GraphQL: API rate limit already exceeded for user ID 1234.",
+            "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+            "HTTP 429: Too Many Requests (https://api.github.com/graphql)",
+        ] {
+            assert_eq!(hit(real), Some(RateLimited { reset_epoch: None }), "{real}");
+        }
+        for other in [
+            "HTTP 403: Resource not accessible by integration",
+            "connection reset",
+        ] {
+            assert_eq!(hit(other), None, "{other}");
+        }
+        assert_eq!(
+            classify(&anyhow::anyhow!("gh: API rate limit exceeded (HTTP 403)")),
+            None
+        );
     }
 }

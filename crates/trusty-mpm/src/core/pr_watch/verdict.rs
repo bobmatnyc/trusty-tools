@@ -6,7 +6,7 @@
 //! What: [`judge`] reduces the required contexts to a [`Verdict`] through
 //! [`deciding_runs`], so a superseded run never decides. [`detect`] compares
 //! the stored (head, verdict) with the observed pair and names the
-//! [`Kind`]. [`dedupe_key`] is the (repo, PR, head, kind) key.
+//! [`Kind`]. [`dedupe_key`] is the (repo, PR, head, kind, seq) key.
 //! Test: `judge_*` and `detect_*` in `tests.rs`.
 
 use serde::{Deserialize, Serialize};
@@ -126,12 +126,17 @@ pub fn detect(
     }
 }
 
-/// The dedupe key: `<repo>#<pr>@<head>:<kind>`.
+/// The dedupe key: `<repo>#<pr>@<head>:<kind>#<seq>`.
 ///
-/// Test: `detect_names_each_transition`.
-pub fn dedupe_key(repo: &str, pr: u64, head: &str, kind: Kind) -> String {
+/// Why: #11673 — red, rerun, red on one head is two red transitions; without
+/// `seq` they shared a key, and the ledger replayed the first red's
+/// `request_id` as done without writing. `seq` is the row's delivered count
+/// plus one, so it is stable across a retry and unique per delivery.
+/// Test: `detect_names_each_transition`,
+/// `red_rerun_red_writes_the_ledger_each_time`.
+pub fn dedupe_key(repo: &str, pr: u64, head: &str, kind: Kind, seq: u64) -> String {
     format!(
-        "{}#{pr}@{}:{}",
+        "{}#{pr}@{}:{}#{seq}",
         repo.to_ascii_lowercase(),
         head.to_ascii_lowercase(),
         kind.as_str()

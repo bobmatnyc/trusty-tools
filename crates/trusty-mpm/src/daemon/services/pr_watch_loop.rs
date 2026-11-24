@@ -31,7 +31,7 @@ use serde_json::json;
 use tracing::{info, warn};
 use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessSource};
 
-use crate::core::gh_rate_limit::{backoff_secs, classify};
+use crate::core::gh_rate_limit::{backoff_secs, classify_any};
 use crate::core::pr_watch::gh::PrReader;
 use crate::core::pr_watch::table::{Table, WatchRow};
 use crate::core::pr_watch::verdict::{Kind, Verdict, dedupe_key, detect, judge};
@@ -65,6 +65,8 @@ pub struct Transition {
     pub verdict: Verdict,
     /// The (repo, PR, head, kind) dedupe key.
     pub key: String,
+    /// #11673: the row's `seq` once this transition is delivered.
+    pub seq: u64,
     /// The required contexts judged on `head`.
     pub required: Vec<String>,
 }
@@ -171,7 +173,8 @@ impl PrWatchLoop {
             report.read += 1;
             match self.check_row(&row, &mut report).await {
                 Ok(()) => self.streak = 0,
-                Err(e) => match classify(&e) {
+                // #11673: the daemon's gh is the real one; real limit texts count too.
+                Err(e) => match classify_any(&e) {
                     Some(hit) => {
                         self.streak += 1;
                         let wait = backoff_secs(hit, now, self.interval_s, self.streak);
@@ -230,7 +233,8 @@ impl PrWatchLoop {
         };
         let t = Transition {
             kind,
-            key: dedupe_key(&row.repo, row.pr, &snap.head, kind),
+            key: dedupe_key(&row.repo, row.pr, &snap.head, kind, row.seq + 1),
+            seq: row.seq + 1,
             head: snap.head,
             verdict,
             required,
@@ -287,6 +291,7 @@ impl PrWatchLoop {
         let t = t.clone();
         self.record(row, move |r| {
             r.last_woken_key = Some(t.key);
+            r.seq = t.seq;
             r.head = t.head;
             r.required = t.required;
             // #11673: a new head starts unjudged, so its first verdict is a transition.

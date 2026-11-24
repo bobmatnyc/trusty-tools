@@ -130,6 +130,7 @@ pub(crate) fn register_with<R: GhRunner>(
         emitted_key: None,
         ledger_key: None,
         last_woken_key: None,
+        seq: 0,
         added_at: chrono::Utc::now().to_rfc3339(),
     };
     let done = match table.upsert(row)? {
