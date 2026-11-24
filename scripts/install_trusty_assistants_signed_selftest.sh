@@ -28,7 +28,14 @@
 #                       is built and signs the staging dir (only `ta`)
 #     source-argv       `--git-rev` and the registry default build the
 #                       expected `cargo install` argv
-#     dry-run           runs neither stub and creates nothing
+#     fresh-target      cargo install gets CARGO_NET_GIT_FETCH_WITH_CLI=true,
+#                       no inherited CARGO_TARGET_DIR, and a `--target-dir`
+#                       that is new, empty and removed afterwards (#11733)
+#     target-cleanup    a failing cargo (exit code kept) and a TERM sent to the
+#                       script mid-install both leave no --target-dir behind
+#                       and a non-zero exit (#11733)
+#     dry-run           runs neither stub and creates nothing; the printed
+#                       command shows git-CLI fetch and the fresh target dir
 #
 # Usage: ./scripts/install_trusty_assistants_signed_selftest.sh
 # Exit:  0 when every case behaves (or skipped off macOS); 1 naming each
@@ -78,10 +85,27 @@ case "${1:-}" in
   *) exit 97 ;;
 esac
 root=""
+target=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--root" ]; then root="$2"; fi
+  if [ "$1" = "--target-dir" ]; then target="$2"; fi
   shift
 done
+# #11733: the env and target dir this install was given.
+{
+  printf 'CARGO_NET_GIT_FETCH_WITH_CLI=%s\n' "${CARGO_NET_GIT_FETCH_WITH_CLI:-}"
+  printf 'CARGO_TARGET_DIR=%s\n' "${CARGO_TARGET_DIR:-}"
+  printf 'target-dir=%s\n' "$target"
+  if [ -n "$target" ] && [ -d "$target" ] && [ -z "$(ls -A "$target")" ]; then
+    echo "target-dir-state=empty"
+  else
+    echo "target-dir-state=missing-or-used"
+  fi
+} > "$STUB_LOG/cargo.env"
+# #11733: STUB_CARGO_FAIL=<code> fails the install; STUB_CARGO_TERM=1 sends
+# TERM to the script (our parent) as a Ctrl-C / kill would, then exits 0.
+if [ -n "${STUB_CARGO_FAIL:-}" ]; then exit "$STUB_CARGO_FAIL"; fi
+if [ "${STUB_CARGO_TERM:-0}" = "1" ]; then kill -TERM "$PPID"; exit 0; fi
 mkdir -p "$root/bin"
 printf 'ta-binary\n' > "$root/bin/ta"
 chmod +x "$root/bin/ta"
@@ -149,7 +173,7 @@ grep -q 'signed' "$root/bin/ta" 2>/dev/null || fail "tagent-untouched: ta was no
 [ "$(cat "$WORK/tagent-untouched/tctl.dir" 2>/dev/null)" = "ta" ] \
   || fail "tagent-untouched: tctl saw [$(cat "$WORK/tagent-untouched/tctl.dir" 2>/dev/null)], not only ta"
 argv="$(cat "$WORK/tagent-untouched/cargo.argv")"
-case "$argv" in *"--bin ta --locked --root $root"*) ;; *) fail "tagent-untouched: cargo argv [$argv]" ;; esac
+case "$argv" in *"--bin ta --locked --root $root --target-dir "*) ;; *) fail "tagent-untouched: cargo argv [$argv]" ;; esac
 for word in $argv; do
   [ "$word" != "tagent" ] || fail "tagent-untouched: cargo argv names tagent [$argv]"
 done
@@ -238,16 +262,56 @@ grep -q 'signed' "$root/bin/ta" || fail "old-tctl: ta not signed"
 root="$WORK/git/root"
 mkdir -p "$root"
 run git --git-rev 0123abcd --root "$root"
-[ "$(cat "$WORK/git/cargo.argv")" = "install --git https://github.com/bobmatnyc/trusty-tools --rev 0123abcd trusty-assistants --bin ta --locked --root $root" ] \
-  || fail "source-argv git: [$(cat "$WORK/git/cargo.argv")]"
+case "$(cat "$WORK/git/cargo.argv")" in
+  "install --git https://github.com/bobmatnyc/trusty-tools --rev 0123abcd trusty-assistants --bin ta --locked --root $root --target-dir "?*) ;;
+  *) fail "source-argv git: [$(cat "$WORK/git/cargo.argv")]" ;;
+esac
 root="$WORK/registry/root"
 mkdir -p "$root"
 run registry --root "$root"
 want_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$SCRIPT_DIR/../crates/trusty-assistants/Cargo.toml" | head -n 1)"
-[ "$(cat "$WORK/registry/cargo.argv")" = "install trusty-assistants --version $want_version --bin ta --locked --root $root" ] \
-  || fail "source-argv registry: [$(cat "$WORK/registry/cargo.argv")]"
+case "$(cat "$WORK/registry/cargo.argv")" in
+  "install trusty-assistants --version $want_version --bin ta --locked --root $root --target-dir "?*) ;;
+  *) fail "source-argv registry: [$(cat "$WORK/registry/cargo.argv")]" ;;
+esac
 run bad-rev --git-rev 'main;rm' --root "$root"
 [ "$RC" -eq 2 ] || fail "source-argv: a non-hex --git-rev exit $RC, want 2"
+
+# --- fresh-target (#11733) ----------------------------------------------
+# Git-CLI fetch authenticates where libgit2 cannot; a fresh target dir keeps
+# a previous rev's build-script output (its commit stamp) out of the build.
+root="$WORK/fresh/root"
+mkdir -p "$root" "$WORK/parent-target"
+CARGO_TARGET_DIR="$WORK/parent-target" run fresh --git-rev 0123abcd --root "$root"
+[ "$RC" -eq 0 ] || fail "fresh-target: exit $RC: $(cat "$WORK/fresh.out")"
+env_log="$(cat "$WORK/fresh/cargo.env" 2>/dev/null || true)"
+printf '%s\n' "$env_log" | grep -qx 'CARGO_NET_GIT_FETCH_WITH_CLI=true' \
+  || fail "fresh-target: git-CLI fetch not set [$env_log]"
+printf '%s\n' "$env_log" | grep -qx 'CARGO_TARGET_DIR=' \
+  || fail "fresh-target: cargo inherited CARGO_TARGET_DIR [$env_log]"
+target="$(printf '%s\n' "$env_log" | sed -n 's/^target-dir=//p')"
+[ -n "$target" ] && [ "$target" != "$WORK/parent-target" ] \
+  || fail "fresh-target: --target-dir [$target] is missing or the parent's"
+printf '%s\n' "$env_log" | grep -qx 'target-dir-state=empty' \
+  || fail "fresh-target: --target-dir was not a new empty dir [$env_log]"
+[ -z "$target" ] || [ ! -e "$target" ] || fail "fresh-target: $target left behind"
+
+# --- target-cleanup (#11733) ---------------------------------------------
+# The scratch --target-dir must go on a failed install and on an interrupt.
+root="$WORK/tc-fail/root"
+mkdir -p "$root"
+STUB_CARGO_FAIL=7 run tc-fail --git-rev 0123abcd --root "$root"
+[ "$RC" -eq 7 ] || fail "target-cleanup fail: exit $RC, want cargo's 7"
+target="$(sed -n 's/^target-dir=//p' "$WORK/tc-fail/cargo.env")"
+[ -n "$target" ] && [ ! -e "$target" ] || fail "target-cleanup fail: [$target] left behind"
+[ ! -e "$WORK/tc-fail/tctl.dir" ] || fail "target-cleanup fail: signing ran after a failed install"
+root="$WORK/tc-term/root"
+mkdir -p "$root"
+STUB_CARGO_TERM=1 run tc-term --git-rev 0123abcd --root "$root"
+[ "$RC" -ne 0 ] || fail "target-cleanup term: exit 0 after TERM"
+target="$(sed -n 's/^target-dir=//p' "$WORK/tc-term/cargo.env")"
+[ -n "$target" ] && [ ! -e "$target" ] || fail "target-cleanup term: [$target] left behind"
+[ ! -e "$WORK/tc-term/tctl.dir" ] || fail "target-cleanup term: signing ran after TERM"
 
 # --- dry-run ------------------------------------------------------------
 root="$WORK/dry/never"
@@ -255,7 +319,10 @@ run dry --git-rev 0123abcd --root "$root" --dry-run
 [ "$RC" -eq 0 ] || fail "dry-run: exit $RC"
 [ ! -e "$root" ] || fail "dry-run: created $root"
 [ ! -e "$WORK/dry/cargo.argv" ] && [ ! -e "$WORK/dry/tctl.argv" ] || fail "dry-run: a stub ran"
-grep -q '\[DRY RUN\] cargo install --git' "$WORK/dry.out" || fail "dry-run: install command not printed"
+dry_line="$(grep '\[DRY RUN\] .*cargo install --git' "$WORK/dry.out" || true)"
+[ -n "$dry_line" ] || fail "dry-run: install command not printed"
+case "$dry_line" in *"CARGO_NET_GIT_FETCH_WITH_CLI=true"*) ;; *) fail "dry-run: no git-CLI fetch [$dry_line]" ;; esac
+case "$dry_line" in *"-u CARGO_TARGET_DIR"*"--target-dir <"*) ;; *) fail "dry-run: no fresh target dir [$dry_line]" ;; esac
 
 if [ -n "$FAILED" ]; then
   echo "install_trusty_assistants_signed_selftest: FAILED:$FAILED" >&2

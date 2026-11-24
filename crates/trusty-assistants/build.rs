@@ -116,11 +116,11 @@ fn emit_git_provenance() {
     let short = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     let full = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     let date = git(&["log", "-1", "--format=%cI"]).unwrap_or_else(|| "unknown".to_string());
-    // #4260: `--porcelain` prints one line per changed or untracked path, so
-    // any output at all means the tree does not match the SHA above.
+    // #4260: `--porcelain` prints one line per changed or untracked path.
+    // #11733: cargo's own `.cargo-ok` marker in a `--git` checkout is not one.
     let dirty = match git(&["status", "--porcelain"]) {
-        Some(_) => "1",
-        None => "0",
+        Some(out) if porcelain_is_dirty(&out) => "1",
+        _ => "0",
     };
 
     println!("cargo:rustc-env=GIT_COMMIT_HASH={short}");

@@ -40,6 +40,12 @@
 #                     the cargo home, so a path install only ever lands in a
 #                     scratch root.
 #
+#   The cargo install (#11733) runs with git-CLI fetch, so a host whose `git`
+#   authenticates but whose ssh-agent holds no identity can still fetch, and
+#   with a new `--target-dir` removed afterwards, never an inherited
+#   CARGO_TARGET_DIR, so no earlier rev's build-script output (its commit
+#   stamp) is reused.
+#
 #   Fail-soft signing: a cargo failure exits non-zero; a signing failure (no
 #   certificate, or any codesign error) is a warning and the run exits 0.
 #
@@ -208,25 +214,51 @@ resolve_root() {
     fi
 }
 
+# install_argv TARGET_DIR: the cargo install command, into INSTALL.
 install_argv() {
-    INSTALL=(cargo install)
+    # #11733: git-CLI fetch for this command only; a fresh target dir, not the
+    # caller's CARGO_TARGET_DIR, so a previous rev's build.rs output is not reused.
+    INSTALL=(env -u CARGO_TARGET_DIR CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install)
     case "$SOURCE" in
         registry) INSTALL+=("$CRATE" --version "${VERSION:-$(checkout_version)}") ;;
         git) INSTALL+=(--git "$REPO_URL" --rev "$GIT_REV" "$CRATE") ;;
         path) INSTALL+=(--path "$(repo_root)/crates/$CRATE") ;;
     esac
-    INSTALL+=(--bin "$BIN_NAME" --locked --root "$ROOT")
+    INSTALL+=(--bin "$BIN_NAME" --locked --root "$ROOT" --target-dir "$1")
+}
+
+TARGET_DIR=""
+# Remove the install's scratch target dir; safe to call twice or when unset.
+# shellcheck disable=SC2329  # invoked through the trap in main
+cleanup_target() {
+    if [ -n "$TARGET_DIR" ]; then rm -rf "$TARGET_DIR"; fi
+    TARGET_DIR=""
+}
+
+# #11733: one EXIT handler for every scratch resource, so INT/TERM during
+# `cargo install` cannot strand a build dir in $TMPDIR.
+# shellcheck disable=SC2329  # invoked through the trap in main
+cleanup_all() {
+    cleanup_target
+    restore_staged
 }
 
 run_cargo_install() {
     section "Step 1: install \`$BIN_NAME\` only (source: $SOURCE)"
-    install_argv
+    local tmp="${TMPDIR:-/tmp}" target rc=0
+    tmp="${tmp%/}"
     if [ "$DRY_RUN" = "1" ]; then
+        install_argv "<$tmp/ta-install-target.XXXXXX>"
         info "[DRY RUN] ${INSTALL[*]}"
         return 0
     fi
+    target="$(mktemp -d "$tmp/ta-install-target.XXXXXX")"
+    TARGET_DIR="$target"
+    install_argv "$target"
     info "${INSTALL[*]}"
-    "${INSTALL[@]}"
+    "${INSTALL[@]}" || rc=$?
+    cleanup_target
+    [ "$rc" -eq 0 ] || exit "$rc"
     [ -f "$BIN_DIR/$BIN_NAME" ] || { error "$BIN_DIR/$BIN_NAME missing after cargo install"; exit 1; }
     info "installed $BIN_DIR/$BIN_NAME"
 }
@@ -298,10 +330,13 @@ main() {
     before="$(fingerprint "$guarded")" || exit 1
     info "$GUARDED_BIN guard: $guarded is $before"
 
-    trap restore_staged EXIT
+    # INT/TERM exit through the EXIT trap (bash runs it after the foreground child).
+    trap cleanup_all EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     run_cargo_install
     run_sign_ta
-    trap - EXIT
+    trap - EXIT INT TERM
 
     after="$(fingerprint "$guarded")" || exit 1
     if [ "$after" != "$before" ]; then
