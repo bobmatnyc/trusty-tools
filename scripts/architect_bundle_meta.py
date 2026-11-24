@@ -15,7 +15,9 @@ What: two subcommands, each with --check (exit 1 and name what is stale; write n
   history [--from-git] [--from-repo PATH [--paths DEST ...]]
                              writes crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv:
       one "DEST<TAB>SHA256" line per byte-version tm fleet init has shipped for each
-      embedded seed row of the table files in TABLES. Without --from-git the existing lines
+      embedded seed row of the table files in TABLES, and (#11773) of the content-sourced rows: CLAUDE.md,
+      .claude/skills/<stem>/SKILL.md and .claude/agents/<name>.md, plus every hash a skill's `previous`
+      list in SKILLS_TABLE names. Without --from-git the existing lines
       are kept and the current shipped bytes are added; --from-git also adds every version of
       each asset in git history. --from-repo adds, for every seeded scripts/ DEST, one line
       per distinct blob that DEST has had in any commit of the git repo at PATH (the live
@@ -42,6 +44,10 @@ FLEET = ROOT / "crates" / "trusty-mpm" / "src" / "bin" / "tm" / "commands" / "fl
 # #10571: the seed table spans these files; seed_rows() reads every one, in write order.
 TABLES = (FLEET / "seed_table.rs", FLEET / "seed_table_scripts.rs")
 HISTORY = FLEET / "seed_history.tsv"
+# #11773: content-sourced seed rows (CLAUDE.md, the skills, the agents) and the skills' shipped-hash table.
+CONTENT = "content/instructions/architect"
+SKILLS_TABLE = ROOT / "crates" / "trusty-mpm" / "src" / "core" / "project_skill_tier" / "architect_skills.rs"
+PREVIOUS = re.compile(r'stem:\s*"([^"]+)",.*?previous:\s*&\[(.*?)\]', re.S)
 # Test fixtures the bundle's behaviour is checked against (#10579): recorded, not shipped.
 FIXTURES = ("crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md",)
 ROW = re.compile(r'(embedded|template|schema|page|script)!\(\s*"([^"]+)"(?:\s*,\s*"([^"]+)")?')
@@ -119,15 +125,54 @@ def seed_rows(root):
             rows.append((f"templates/dashboard/{a}", f"{ASSETS}/dashboard/{a}"))
     if not rows:
         raise Bad(f"no seed rows found in {', '.join(t.name for t in TABLES)}")
+    return rows + content_rows(root)
+
+
+def content_rows(root):
+    """(dest, content path) for the seed rows tm reads from content at runtime (#11773).
+
+    Why: CLAUDE.md and the .claude/ files had no history rows, so an unedited older copy read as an edit and got a
+      .shipped sibling each release. What: CLAUDE.md, then each skill and agent file, sorted by stem.
+    Test: test_seed_rows_include_the_content_sourced_rows
+    """
+    base = root / CONTENT
+    if not (base / "templates" / "CLAUDE.md").is_file():
+        raise Bad(f"content seed missing: {CONTENT}/templates/CLAUDE.md")
+    rows = [("CLAUDE.md", f"{CONTENT}/templates/CLAUDE.md")]
+    rows += [(f".claude/skills/{p.stem}/SKILL.md", f"{CONTENT}/skills/{p.name}")
+             for p in sorted((base / "skills").glob("*.md"))]
+    rows += [(f".claude/agents/{p.name}", f"{CONTENT}/agents/{p.name}") for p in sorted((base / "agents").glob("*.md"))]
     return rows
 
 
+def skill_previous(root):
+    """(dest, sha256) for every earlier shipped skill text the skills table lists in `previous` (#11773).
+
+    Test: test_history_records_every_skill_previous_hash
+    """
+    path = root / SKILLS_TABLE.relative_to(ROOT)
+    if not path.is_file():
+        raise Bad(f"skills table missing: {SKILLS_TABLE.relative_to(ROOT)}")
+    return {(f".claude/skills/{stem}/SKILL.md", h)
+            for stem, body in PREVIOUS.findall(path.read_text(encoding="utf-8"))
+            for h in re.findall(r'"([0-9a-f]{64})"', body)}
+
+
 def git_versions(root, rel):
-    """sha256 of every committed version of `rel` (empty when git is unavailable)."""
-    log = subprocess.run(["git", "-C", str(root), "log", "--format=%H", "--", rel], capture_output=True, text=True)
+    """sha256 of every committed version of `rel` (empty when git is unavailable).
+
+    #11773: a content row follows renames, since #9132 moved CLAUDE.md and the skills out of the crate assets.
+    """
+    follow = rel.startswith(CONTENT + "/")
+    argv = ["git", "-C", str(root), "log", "--format=%x00%H", "--name-only"] + (["--follow"] if follow else [])
+    log = subprocess.run(argv + ["--", rel], capture_output=True, text=True)
     out = set()
-    for commit in log.stdout.split():
-        blob = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{rel}"], capture_output=True)
+    for block in log.stdout.split("\0")[1:]:
+        lines = block.split()
+        if not lines:
+            continue
+        path = lines[1] if follow and len(lines) > 1 else rel
+        blob = subprocess.run(["git", "-C", str(root), "show", f"{lines[0]}:{path}"], capture_output=True)
         if blob.returncode == 0:
             out.add(sha(blob.stdout))
     return out
@@ -196,6 +241,9 @@ def history(args, root=ROOT):
             raise Bad(f"--from-repo: not a git repository: {repo}")
         for dest in repo_dests(args, rows):
             want |= {(dest, h) for h in repo_versions(repo, dest)}
+    previous = skill_previous(root)   # #11773: the skills' pre-content shipped texts
+    missing += sorted({d for d, h in previous - have})
+    want |= previous
     for dest, asset in rows:
         cur = (dest, sha((root / asset).read_bytes()))
         if cur not in have:

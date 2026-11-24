@@ -1,0 +1,3 @@
+Added
+- `tm architect drift [--json] [--dir DIR]` reports, read-only, how each file `tm fleet init` manages relates to this binary's bundle: `current`, `stale` (an earlier shipped copy), `edited`, `absent`, `extra` (an unseeded file under `scripts/` or `.claude/skills/`, or an orphaned `*.shipped`), `owner` (`AGENTS.md`) or `instance` (a changed `local/` file), with the disk, provenance and embedded sha per path. It exits 1 when any file is edited (Refs #11773).
+- `tm architect up --strict` refuses with exit 1, before it writes or locks anything, when a managed `scripts/*` file is edited. Without `--strict`, `up` behaves as before (Refs #11773).

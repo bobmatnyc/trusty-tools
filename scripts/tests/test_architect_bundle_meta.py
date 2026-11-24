@@ -37,6 +37,9 @@ def seed_tree(tmp_path):
     for table in meta.FLEET.glob("seed_table*.rs"):   # #10571: the table spans several files
         shutil.copy(table, fleet / table.name)
     shutil.copy(meta.HISTORY, fleet / "seed_history.tsv")
+    table = tmp_path / meta.SKILLS_TABLE.relative_to(ROOT)   # #11773: the skills' `previous` hashes
+    table.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(meta.SKILLS_TABLE, table)
     for _, asset in rows:
         dst = tmp_path / asset
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +52,40 @@ def test_seed_rows_reads_every_table_file():
     assert "templates/dashboard/index.html" in dests   # seed_table.rs
     assert "scripts/fleet-poll.py" in dests            # seed_table_scripts.rs
     assert len(dests) == len(set(dests))
+
+
+def test_seed_rows_include_the_content_sourced_rows():
+    rows = dict(meta.seed_rows(ROOT))
+    assert rows["CLAUDE.md"] == "content/instructions/architect/templates/CLAUDE.md"
+    assert rows[".claude/skills/tm-fleet-check/SKILL.md"] == "content/instructions/architect/skills/tm-fleet-check.md"
+    assert rows[".claude/agents/runner.md"] == "content/instructions/architect/agents/runner.md"
+    skills = [d for d in rows if d.startswith(".claude/skills/")]
+    assert len(skills) == len(list((ROOT / meta.CONTENT / "skills").glob("*.md")))
+
+
+def test_history_records_every_skill_previous_hash(tmp_path):
+    previous = meta.skill_previous(ROOT)
+    assert (".claude/skills/tm-fleet-check/SKILL.md",
+            "3de7f63492d03ef3d7b0ca613c04ef977b82f4349e9e3d379240c323f6b91db6") in previous
+    assert len(previous) >= 40
+    assert previous <= history_lines(ROOT)
+    seed_tree(tmp_path)
+    hist = tmp_path / meta.HISTORY.relative_to(ROOT)
+    dropped = "\t".join(sorted(previous)[0])
+    hist.write_text("".join(line for line in hist.read_text(encoding="utf-8").splitlines(True)
+                            if line.rstrip("\n") != dropped), encoding="utf-8")
+    assert meta.history(args(), root=tmp_path) == 1
+    assert meta.history(args(check=False), root=tmp_path) == 0
+    assert meta.history(args(), root=tmp_path) == 0
+
+
+def test_history_check_fails_when_a_content_seed_changes(tmp_path):
+    seed_tree(tmp_path)
+    assert meta.history(args(), root=tmp_path) == 0
+    (tmp_path / meta.CONTENT / "templates" / "CLAUDE.md").write_bytes(b"changed\n")
+    assert meta.history(args(), root=tmp_path) == 1
+    assert meta.history(args(check=False), root=tmp_path) == 0
+    assert ("CLAUDE.md", meta.sha(b"changed\n")) in history_lines(tmp_path)
 
 
 def test_history_check_fails_when_a_seed_changes(tmp_path):

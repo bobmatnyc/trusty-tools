@@ -1,0 +1,2 @@
+Changed
+- `seed_history.tsv` now records the shipped versions of the Architect `CLAUDE.md`, its `.claude/skills/*/SKILL.md` and its `.claude/agents/*.md`, so `tm fleet init` refreshes an unedited older copy in place instead of keeping it as an edit with a `.shipped` sibling each release. `scripts/architect_bundle_meta.py history` generates these rows from content and the skills' `previous` hashes (Refs #11773).

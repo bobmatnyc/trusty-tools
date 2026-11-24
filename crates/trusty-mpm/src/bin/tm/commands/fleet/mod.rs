@@ -45,6 +45,8 @@ pub(crate) mod restart; // #11365
 mod seed;
 // #10161 D3c: the Architect agents, under the skills' deploy rule.
 mod seed_agents;
+// #11773: the read-only drift report and `up --strict`'s classifier.
+pub(crate) mod seed_drift;
 mod session_name;
 pub(crate) mod up; // #11364
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
