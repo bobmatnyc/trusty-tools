@@ -211,6 +211,18 @@ fn render_lines_cover_each_verb_shape() {
         lines(&parse(&["grep", "x"]), &grep),
         Some(vec!["a.rs:3:fn x".into()])
     );
+    // #11625: `-A`/`-B`/`-C` context prints ripgrep-style `file-N-text` lines.
+    let ctx = json!({"matches": [{"file": "a.rs", "line": 3, "text": "fn x",
+        "context_before": ["// a", "// b"], "context_after": ["}"]}], "truncated": false});
+    assert_eq!(
+        lines(&parse(&["grep", "x", "-C", "2"]), &ctx),
+        Some(vec![
+            "a.rs-1-// a".into(),
+            "a.rs-2-// b".into(),
+            "a.rs:3:fn x".into(),
+            "a.rs-4-}".into(),
+        ])
+    );
     let hits = json!({"hits": [{"label": "go", "path": "a.rs", "start_line": 1, "source": "lexical", "score": 1.0}]});
     assert_eq!(
         lines(&parse(&["typeahead", "g"]), &hits),

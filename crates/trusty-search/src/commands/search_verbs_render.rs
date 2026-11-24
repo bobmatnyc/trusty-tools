@@ -33,6 +33,14 @@ fn f(v: &Value, key: &str) -> f64 {
     v.get(key).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
+/// A match's context lines under `key`; absent reads as none.
+fn context<'a>(m: &'a Value, key: &str) -> Vec<&'a str> {
+    m.get(key)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
 /// The text lines for `body`, or `None` when it has no shape this knows.
 pub(crate) fn lines(verb: &SearchVerb, body: &Value) -> Option<Vec<String>> {
     match verb {
@@ -55,21 +63,30 @@ pub(crate) fn lines(verb: &SearchVerb, body: &Value) -> Option<Vec<String>> {
         }
         SearchVerb::Grep(g) => {
             let rows = body.get("matches")?.as_array()?;
-            let mut out: Vec<String> = rows
-                .iter()
-                .map(|m| {
-                    let tag = m
-                        .get("index_id")
-                        .and_then(Value::as_str)
-                        .map(|id| format!("[{id}] "))
-                        .unwrap_or_default();
-                    if g.files_with_matches {
-                        format!("{tag}{}", s(m, "file"))
-                    } else {
-                        format!("{tag}{}:{}:{}", s(m, "file"), n(m, "line"), s(m, "text"))
-                    }
-                })
-                .collect();
+            let mut out: Vec<String> = Vec::new();
+            for m in rows {
+                let tag = m
+                    .get("index_id")
+                    .and_then(Value::as_str)
+                    .map(|id| format!("[{id}] "))
+                    .unwrap_or_default();
+                let file = s(m, "file");
+                if g.files_with_matches {
+                    out.push(format!("{tag}{file}"));
+                    continue;
+                }
+                // #11625: ripgrep-style context, `file-N-text` around `file:N:text`.
+                let line = n(m, "line");
+                let before = context(m, "context_before");
+                let first = line.saturating_sub(before.len() as u64);
+                for (i, t) in before.iter().enumerate() {
+                    out.push(format!("{tag}{file}-{}-{t}", first + i as u64));
+                }
+                out.push(format!("{tag}{file}:{line}:{}", s(m, "text")));
+                for (i, t) in context(m, "context_after").iter().enumerate() {
+                    out.push(format!("{tag}{file}-{}-{t}", line + 1 + i as u64));
+                }
+            }
             if body.get("truncated").and_then(Value::as_bool) == Some(true) {
                 out.push(format!("(truncated at {} matches)", rows.len()));
             }

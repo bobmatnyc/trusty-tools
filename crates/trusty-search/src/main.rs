@@ -390,8 +390,9 @@ enum Commands {
     ///   trusty-search query "fn authenticate" --indexes "*"
     ///   trusty-search query "database pool" --indexes proj-a,proj-b
     ///
-    /// `query "<text>" --indexes "*"` is the CLI form of the MCP `search_all`
-    /// fan-out: both call `search.query.all` (#11625).
+    /// `query "<text>" --indexes "*"` is the basic form of the MCP `search_all`
+    /// fan-out: both call `search.query.all`, but the CLI lacks `mode`,
+    /// `path_prefix` and `compact` (#11625).
     #[command(alias = "q", display_order = 11)]
     Query {
         /// Search query
