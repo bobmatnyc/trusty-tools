@@ -302,12 +302,19 @@ impl Grants {
                 tools.insert(tool.clone());
                 continue;
             }
-            // #11696 Phase B: one flag grants the three window tools, as above.
-            if tool == crate::window_mgmt::GRANT_FLAG {
+            // #11696 Phase B/C: one flag grants the three window tools; each
+            // clipboard flag grants its one tool. Checked before the policy
+            // row, since a clipboard flag shares the driver tool's DENY name.
+            if tool == crate::window_mgmt::GRANT_FLAG
+                || crate::clipboard::FLAGS.contains(&tool.as_str())
+            {
                 tools.insert(tool.clone());
                 continue;
             }
-            if crate::pointer::is_pointer_tool(tool) || crate::window_mgmt::is_window_tool(tool) {
+            if crate::pointer::is_pointer_tool(tool)
+                || crate::window_mgmt::is_window_tool(tool)
+                || crate::clipboard::is_clipboard_tool(tool)
+            {
                 return Err(GrantError::BadTool(tool.clone()));
             }
             match policy::rule(tool) {

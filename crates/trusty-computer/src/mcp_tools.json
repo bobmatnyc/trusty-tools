@@ -650,6 +650,40 @@
   }
  },
  {
+  "name": "computer_clipboard_read",
+  "description": "Read the clipboard's plain text, when the grant names clipboard_read. Refused above 102400 bytes; passwords, API keys, tokens and private keys are replaced with [REDACTED] before the text is returned. Only text is returned, never types, images or files.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_clipboard_write",
+  "description": "Replace the clipboard with plain text, when the grant names clipboard_write. Refused above 102400 bytes; text only, never an image or a file.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "text": {
+     "type": "string",
+     "description": "Plain text to place on the clipboard, at most 102400 UTF-8 bytes."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "text"
+   ]
+  }
+ },
+ {
   "name": "computer_wait",
   "description": "Sleep up to 5 s in the broker; keeps the lease alive.",
   "inputSchema": {
