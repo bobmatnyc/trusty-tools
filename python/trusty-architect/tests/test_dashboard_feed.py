@@ -60,9 +60,9 @@ def test_non_email_ledger_line_skipped_and_stale_accounts_doc_removed(tmp_path, 
 def test_build_feed_without_token_watch_names_the_missing_file(monkeypatch, tmp_path, capsys):
     # #10571 S2: the module loads without token_watch.py; the feed refuses with the path, never a partial feed.
     monkeypatch.setattr(df, "tw", None)
-    with pytest.raises(df.TokenWatchMissing, match="token_watch.py"):
+    with pytest.raises(df.TokenWatchMissing, match="usage watcher module"):
         df.build_feed(0.0, names={}, live={})
     out = tmp_path / "feed.json"
     assert df.main(["--out", str(out), "--ledger", str(tmp_path / "none.jsonl"),
                     "--store-root", str(tmp_path / "store")]) == 2
-    assert "token_watch.py" in capsys.readouterr().err and not out.exists()
+    assert "usage watcher module" in capsys.readouterr().err and not out.exists()

@@ -13,12 +13,14 @@
 # 600 s stands; fleet-poll.py then refuses the same config itself.
 # Test: tests/test_poll_supervise.py, tests/test_poll_cadence.py
 ROOT=${ARCHITECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+# #10571 S2: siblings by literal path so the pm-guard resolves them
+HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE=${POLL_STATE_FILE:-$ROOT/inbox/poll-state.json}
 LOG=${POLL_LOG:-$ROOT/inbox/poll.log}
 interval=""; prev=""
 for a in "$@"; do [ "$prev" = "--interval" ] && interval="$a"; prev="$a"; done
 cfg_err=""
-[ -n "$interval" ] || interval=$(python3 "$ROOT/scripts/architect_config.py" poll-interval 2>&1) || { cfg_err="$interval"; interval=""; }
+[ -n "$interval" ] || interval=$(python3 "$HERE/architect_config.py" poll-interval 2>&1) || { cfg_err="$interval"; interval=""; }
 case "$interval" in ''|*[!0-9]*) STALE_DEFAULT=600 ;; *) STALE_DEFAULT=$((interval * 2 > 600 ? interval * 2 : 600)) ;; esac
 STALE=${POLL_STALE_S:-$STALE_DEFAULT}
 TICK=${POLL_SUPERVISE_TICK:-30}
@@ -26,7 +28,7 @@ MATCH=${POLL_MATCH:-fleet-poll.py}
 MAX_TICKS=${POLL_SUPERVISE_MAX_TICKS:-0}   # 0 = run forever (tests bound it)
 log(){ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor $1" >> "$LOG"; }
 mtime(){ stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
-start(){ if [ -n "${POLL_CMD:-}" ]; then $POLL_CMD & else python3 "$ROOT/scripts/fleet-poll.py" "$@" & fi
+start(){ if [ -n "${POLL_CMD:-}" ]; then $POLL_CMD & else python3 "$HERE/fleet-poll.py" "$@" & fi
   pid=$!; started=$(date +%s); }
 ours(){ [ -n "${pid:-}" ] && ps -p "$pid" -o command= 2>/dev/null | grep -qF -- "$MATCH"; }
 stop_child(){ ours || return 0; kill -TERM "$pid" 2>/dev/null

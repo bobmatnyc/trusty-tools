@@ -2,19 +2,19 @@
 """dashboard_feed.py: per-session agent and token usage feed for the dashboard (stdlib only).
 
 Why: the owner (2026-10-08): show active/parked subagents and token usage per session
-(local/briefs/2026-10-08-dashboard-agents-tokens.md, Part B).
+(the 2026-10-08 dashboard agents brief, Part B).
 What: reads the token watcher's outputs (hourly rollup, open-hour state, per-file
-context state, via token_watch.report/load_state) plus the mtimes and last
+context state, via the watcher's report and load_state) plus the mtimes and last
 assistant turn of subagent transcripts, maps each Claude session id to its tmux
-session name with token_watch.session_names (the watcher's own registry lookup),
+session name with the watcher's session_names (its own registry lookup),
 and writes inbox/dashboard-feed.json = {"sessions": {<tmux name>: usage}, "fleet": usage}.
-No network, no artifact call, no message text read. Does not change token_watch.
+No network, no artifact call, no message text read. Does not change the watcher.
 Agents: a subagent is finished when its last assistant turn has a stop_reason
 other than tool_use. Unfinished and written within PARK_AFTER seconds (age <= 120)
 is active; unfinished and older is parked, until PARK_MAX seconds (the watcher's
 subagent-directory window), after which it is treated as abandoned.
-Windows: out_tokens_1h / _24h use token_watch.report(), so they match
-`token_watch.py report --since 1h` (hour buckets from hour_of(now - since)).
+Windows: out_tokens_1h / _24h use the watcher's report(), so they match its
+`report --since 1h` verb (hour buckets from hour_of(now - since)).
 The fleet block sums every session, including ones with no tmux name. Its agent counts cover
 both kinds: agents_sub (unfinished subagents, any depth, across every transcript root), agents_main
 (one per live, non-exited session passed in --live; active when its state is working, else parked),
@@ -32,7 +32,7 @@ Accounts: latest_accounts(ledger) takes the newest line per account from
 local/usage/ledger.jsonl; write_accounts(store_root, accounts) writes one accounts/<slug>
 doc each (account, pct5h, reset5h, pctwk, resetwk, ts, source), only when the content
 changed, so the dashboard's Accounts section follows the ledger. Nothing is invented.
-CLI: `dashboard_feed.py [--out PATH] [--live FILE] [--ledger FILE] [--store-root DIR]`; exit 2 without token_watch.py.
+CLI: `dashboard_feed.py [--out PATH] [--live FILE] [--ledger FILE] [--store-root DIR]`; exit 2 without the watcher module.
 Test: tests/test_dashboard_feed.py
 """
 import argparse
@@ -48,8 +48,8 @@ if HERE not in sys.path:     # python3 -I drops the script directory
     sys.path.insert(0, HERE)
 import dashboard_store as ds  # noqa: E402
 
-# #10571 S2: token_watch.py ships with the usage ledger (S1). Until it is present the module loads, the accounts
-# path works, and build_feed() raises TokenWatchMissing naming the file.
+# #10571 S2: the watcher module ships with the usage ledger (S1). Without it this module still loads, the accounts
+# path works, and build_feed() raises TokenWatchMissing naming the directory.
 try:
     import token_watch as tw  # noqa: E402
 except ImportError:
@@ -57,12 +57,12 @@ except ImportError:
 
 
 class TokenWatchMissing(RuntimeError):
-    """build_feed() needs scripts/token_watch.py beside this file."""
+    """build_feed() needs the usage watcher module (S1) beside this file."""
 
 
 def _tw():
     if tw is None:
-        raise TokenWatchMissing(f"dashboard_feed: {os.path.join(HERE, 'token_watch.py')} is missing; "
+        raise TokenWatchMissing(f"dashboard_feed: the usage watcher module is missing from {HERE}; "
                                 "the per-session usage feed needs it")
     return tw
 
@@ -70,7 +70,7 @@ def _tw():
 PARK_AFTER = 120             # seconds without a write before an unfinished agent is parked
 PARK_MAX = 6 * 3600          # older unfinished agents count as abandoned
 TAIL = 512 * 1024
-# The watcher's inbox (token_watch.INBOX), computed here so the module loads without it.
+# The watcher's inbox (its INBOX), computed here so the module loads without it.
 OUT_PATH = os.path.join(os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ds.REPO, "inbox"), "dashboard-feed.json")
 LEDGER = os.path.join(ds.REPO, "local", "usage", "ledger.jsonl")
 # Transcript roots the fleet's sessions may write under (checked 2026-10-19: only the first has live
