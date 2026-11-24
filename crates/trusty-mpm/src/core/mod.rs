@@ -198,6 +198,8 @@ pub mod gh_login_verify;
 pub mod gh_org_accounts;
 // #8914: `--account` sessions run gh and HTTPS git as the account named.
 pub mod gh_session_account;
+// #11673: the gh shim's rate-limit refusal, shared by `tm wait` and the PR watch.
+pub mod gh_rate_limit;
 // #9750: the per-call gh credential shim a pinned session runs (D6e).
 pub mod gh_session_shim;
 // #9750: tm's own gh children run the real gh, not a pinned session's shim.
@@ -314,6 +316,12 @@ pub mod policy_labels;
 // `tm pr cleanup <n>`, shared by `tm pr merge`'s final step and the
 // supervisor's periodic merged-PR sweep.
 pub mod pr_cleanup;
+// #11673: protection and ruleset required checks, shared with the PR watch.
+pub mod pr_required;
+// #8638, #11673: the rollup entry and latest-run rule, shared with the daemon.
+pub mod pr_rollup;
+// #11673: the tracked-PR table and the head-aware CI transition rule.
+pub mod pr_watch;
 pub mod process;
 pub mod project;
 /// `[accounts]` in `.trusty-mpm.toml` and the ops-prompt block it renders (#11390).

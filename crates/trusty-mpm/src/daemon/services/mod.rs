@@ -31,6 +31,9 @@ pub(crate) mod ledger_reclaim;
 // plus the daemon loop that runs it automatically after a merge.
 pub mod merged_pr_reclaim;
 pub mod pairing_service;
+// #11673: the PR watch loop and its production ports.
+pub mod pr_watch_loop;
+pub mod pr_watch_ports;
 pub mod session_service;
 // #8451: the disk-budget sweep over the builder slot pool.
 pub(crate) mod slot_pool_evict;

@@ -21,6 +21,7 @@ use serde::Deserialize;
 
 // #8638: one rollup entry shape and one latest-run rule, shared with queue-check.
 use crate::commands::pr::rollup::{RollupEntry, deciding_per_check};
+use trusty_mpm::core::pr_watch::verdict::{Verdict, judge};
 
 /// One poll's verdict.
 ///
@@ -309,6 +310,8 @@ pub(crate) struct CheckCondition<P: ChecksProbe> {
     repo: Option<String>,
     /// Whether an empty rollup counts as settled (off by default).
     allow_empty: bool,
+    /// #11673: `--required-only` judges only these contexts.
+    required: Option<Vec<String>>,
 }
 
 impl<P: ChecksProbe> CheckCondition<P> {
@@ -319,7 +322,14 @@ impl<P: ChecksProbe> CheckCondition<P> {
             pr,
             repo,
             allow_empty,
+            required: None,
         }
+    }
+
+    /// Judge only `required` (`--required-only`, #11673); `None` judges all.
+    pub(crate) fn with_required(mut self, required: Option<Vec<String>>) -> Self {
+        self.required = required;
+        self
     }
 }
 
@@ -331,7 +341,7 @@ impl<P: ChecksProbe> Condition for CheckCondition<P> {
             .pr_view_json(self.pr, self.repo.as_deref(), budget)?;
         let view: PrView = serde_json::from_str(&json)
             .with_context(|| format!("cannot parse `gh pr view {}` JSON", self.pr))?;
-        Ok(settle(&view, self.allow_empty))
+        Ok(settle(&view, self.allow_empty, self.required.as_deref()))
     }
 }
 
@@ -354,10 +364,13 @@ pub(crate) struct PrView {
 /// `Pending` unless `allow_empty`; otherwise the deciding run of every check
 /// name (see [`deciding_per_check`]) must be [`RollupEntry::settled`], and only
 /// those runs are counted.
+/// #11673: with `required`, only those contexts are judged, through the PR
+/// watch's [`judge`]: met once every one settled, or one failed.
 /// Test: the `check_condition_*` family, including
 /// `check_condition_duplicate_run_uses_latest`,
-/// `check_condition_duplicate_queued_rerun_is_pending`.
-fn settle(view: &PrView, allow_empty: bool) -> Poll {
+/// `check_condition_duplicate_queued_rerun_is_pending`,
+/// `check_condition_required_only_ignores_other_checks`.
+fn settle(view: &PrView, allow_empty: bool, required: Option<&[String]>) -> Poll {
     let pr_state = view.state.as_deref().unwrap_or("UNKNOWN");
     if pr_state.eq_ignore_ascii_case("MERGED") || pr_state.eq_ignore_ascii_case("CLOSED") {
         return Poll::Met(format!(
@@ -367,6 +380,19 @@ fn settle(view: &PrView, allow_empty: bool) -> Poll {
     }
 
     let entries = view.status_check_rollup.as_deref().unwrap_or(&[]);
+    if let Some(required) = required {
+        return match judge(entries, required) {
+            Verdict::Pending => Poll::Pending(format!(
+                "required context(s) not yet settled: {}",
+                required.join(", ")
+            )),
+            v => Poll::Met(format!(
+                "{} required context(s) settled: {} (state={pr_state})",
+                required.len(),
+                v.as_str()
+            )),
+        };
+    }
     if entries.is_empty() {
         return if allow_empty {
             Poll::Met("no checks reported; --allow-empty-checks was passed".to_string())
@@ -436,12 +462,17 @@ pub(crate) fn build(args: &crate::cli::WaitArgs) -> anyhow::Result<Box<dyn Condi
             let pr = args
                 .pr
                 .context("`tm wait --for check` needs --pr <number>")?;
-            Ok(Box::new(CheckCondition::new(
-                GhChecksProbe,
-                pr,
-                args.repo.clone(),
-                args.allow_empty_checks,
-            )))
+            // #11673: `--required-only` reads the base's required contexts once.
+            let required = super::required::resolve(args, pr)?;
+            Ok(Box::new(
+                CheckCondition::new(
+                    GhChecksProbe,
+                    pr,
+                    args.repo.clone(),
+                    args.allow_empty_checks,
+                )
+                .with_required(required),
+            ))
         }
     }
 }
@@ -477,7 +508,9 @@ pub(crate) fn spec(args: &crate::cli::WaitArgs) -> String {
         }
         WaitFor::Check => {
             let repo = args.repo.as_deref().unwrap_or("<cwd-remote>");
-            format!("check:{repo}#{}", args.pr.unwrap_or_default())
+            // #11673: a required-only wait keeps its own budget.
+            let only = if args.required_only { ":required" } else { "" };
+            format!("check:{repo}#{}{only}", args.pr.unwrap_or_default())
         }
     }
 }

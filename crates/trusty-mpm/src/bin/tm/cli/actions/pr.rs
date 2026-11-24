@@ -38,6 +38,66 @@ pub(crate) enum PrCmd {
     /// Reclaim everything a merged PR made obsolete: branches, worktrees, claims.
     #[command(long_about = CLEANUP_LONG_ABOUT)]
     Cleanup(PrCleanupArgs),
+    /// Track a PR's required checks; the daemon wakes the owner on a CI change.
+    Watch(PrWatchArgs),
+}
+
+/// `tm pr watch` (#11673).
+///
+/// Why: the daemon's PR watch reads a table of tracked PRs; these verbs are
+/// how a PM adds, lists and drops its rows.
+/// What: `add <pr>` (records the head, base, required contexts and owner),
+/// `ls`, `rm <pr>`.
+/// Test: `cli_parses_pr_watch`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct PrWatchArgs {
+    #[command(subcommand)]
+    pub(crate) cmd: PrWatchCmd,
+}
+
+/// The `tm pr watch` verbs.
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum PrWatchCmd {
+    /// Track a PR: one wake per CI transition on its required checks.
+    Add(PrWatchAddArgs),
+    /// List the tracked PRs.
+    Ls(PrWatchLsArgs),
+    /// Stop tracking a PR.
+    Rm(PrWatchRmArgs),
+}
+
+/// Flags for `tm pr watch add`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct PrWatchAddArgs {
+    /// PR number.
+    pub(crate) pr: u64,
+
+    /// `owner/repo` (defaults to the cwd's git remote).
+    #[arg(long)]
+    pub(crate) repo: Option<String>,
+
+    /// The tmux session to wake (defaults to this pane's tmux session).
+    #[arg(long)]
+    pub(crate) owner: Option<String>,
+}
+
+/// Flags for `tm pr watch ls`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct PrWatchLsArgs {
+    /// Emit the rows as JSON.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// Flags for `tm pr watch rm`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct PrWatchRmArgs {
+    /// PR number.
+    pub(crate) pr: u64,
+
+    /// `owner/repo` (defaults to the cwd's git remote).
+    #[arg(long)]
+    pub(crate) repo: Option<String>,
 }
 
 /// `tm pr cleanup --help` text.

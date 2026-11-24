@@ -48,6 +48,8 @@ pub(crate) mod queue_check;
 pub(crate) mod rollup;
 // Dr4: the `rung:N` label `tm pr open` writes and `tm pr queue-check` reads.
 pub(crate) mod rung_label;
+// #11673: `tm pr watch add|ls|rm`, the daemon PR watch's table verbs.
+pub(crate) mod watch;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -280,6 +282,7 @@ fn repo_arg(cmd: &PrCmd) -> Option<&str> {
         PrCmd::Merge(args) => args.repo.as_deref(),
         PrCmd::QueueCheck(args) => args.repo.as_deref(),
         PrCmd::Cleanup(args) => args.repo.as_deref(),
+        PrCmd::Watch(args) => watch::repo_arg(args),
     }
 }
 
@@ -320,5 +323,6 @@ async fn run_inner(cmd: PrCmd, daemon: &trusty_mpm::client::DaemonClient) -> any
         PrCmd::QueueCheck(args) => queue_check::run(&gh, &args),
         // #7275: the executor every cleanup trigger shares.
         PrCmd::Cleanup(args) => cleanup::run(&args, daemon).await,
+        PrCmd::Watch(args) => watch::run(&gh, &args),
     }
 }

@@ -204,6 +204,9 @@ pr open	SKIP	-	-	-	-	-	opens a pull request
 pr merge	SKIP	-	-	-	-	-	squash-merges a PR
 pr queue-check	NETWORK	$H	pr queue-check N --repo O/R	-	0	-	excluded (rule 4: only content update runs). 3 calls with an explicit PR (pr view, branch, required_status_checks); without PR: 1 list + 3 per open PR
 pr cleanup	SKIP	-	-	-	-	-	deletes branches and worktrees
+pr watch add	NETWORK	$H	pr watch add N --repo O/R --owner S	-	0	-	#11673: pr view plus the two required-check reads, then a local table write
+pr watch ls	NETWORK	$H	pr watch ls	-	0	tm pr watch	#11673: reads only the local table, but loads tm pr's gh identity first; not verified in the sandbox lane
+pr watch rm	NETWORK	$H	pr watch rm N --repo O/R	-	0	tm pr watch	#11673: local table write; loads tm pr's gh identity, and resolves the repo through gh without --repo
 watch poll	SKIP	-	-	-	-	-	dispatches agents for matched issues
 watch listen	SKIP	-	-	-	-	-	long-running dispatcher
 ls	SANDBOX	$H	ls --plain --no-prune	-	0	-	D: non-interactive flags only; bare `ls` is a picker
