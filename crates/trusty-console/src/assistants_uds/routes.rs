@@ -6,7 +6,8 @@
 //! What: two handlers. Both resolve the root through
 //! [`AppState::assistants_root`], run their filesystem work on the blocking
 //! pool, and answer JSON. They sit in the console router's core, so the
-//! per-listener peer gate and the router-wide middleware cover them.
+//! per-listener peer gate and the router-wide middleware cover them; #11748
+//! mounts them through `ask_route::router`, which refuses an ungated listener.
 //! Test: `tests/assistants_routes.rs`.
 
 use std::path::PathBuf;
@@ -38,12 +39,12 @@ pub struct TurnsQuery {
 }
 
 /// A JSON error body with `status`.
-fn error(status: StatusCode, message: impl Into<String>) -> Response {
+pub(super) fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
 /// Run `work` on the blocking pool; a panicked task is a `500`.
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, Response> + Send + 'static,
 ) -> Result<T, Response> {
     match tokio::task::spawn_blocking(work).await {
@@ -56,7 +57,7 @@ async fn blocking<T: Send + 'static>(
 }
 
 /// The listed instances under `root`, or a `500` naming the read failure.
-fn instances_or_500(root: &std::path::Path) -> Result<Vec<InstanceId>, Response> {
+pub(super) fn instances_or_500(root: &std::path::Path) -> Result<Vec<InstanceId>, Response> {
     list_instances(root).map_err(|e| {
         warn!(root = %root.display(), error = %e, "assistants: cannot read the assistants root");
         error(
@@ -127,12 +128,7 @@ pub async fn turns_handler(
     let read = blocking(move || {
         let available = instances_or_500(&root)?;
         if !available.contains(&work_id) {
-            let body = json!({
-                "error": format!("unknown assistant instance `{}`", work_id.as_str()),
-                "id": work_id,
-                "available": available,
-            });
-            return Err((StatusCode::NOT_FOUND, Json(body)).into_response());
+            return Err(unknown_instance(&work_id, &available));
         }
         let log = turn_log_path(&root.join(work_id.as_str()));
         read_tail(&log, limit).map_err(|e| {
@@ -166,6 +162,18 @@ pub async fn turns_handler(
         "turns": tail.turns,
     }))
     .into_response()
+}
+
+/// `404` for an id `ta list` does not name, with the names it does.
+/// Test: `turns_for_an_unknown_id_is_404_with_names` (`tests/assistants_routes.rs`),
+/// `ask_for_an_unknown_id_is_404` (`tests/assistants_ask.rs`).
+pub(super) fn unknown_instance(id: &InstanceId, available: &[InstanceId]) -> Response {
+    let body = json!({
+        "error": format!("unknown assistant instance `{}`", id.as_str()),
+        "id": id,
+        "available": available,
+    });
+    (StatusCode::NOT_FOUND, Json(body)).into_response()
 }
 
 /// The effective `limit`: default, clamp, or the reason it is refused.

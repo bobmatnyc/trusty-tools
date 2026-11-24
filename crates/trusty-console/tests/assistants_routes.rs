@@ -5,7 +5,7 @@
 //! listing rule `ta list` applies, the turn tail, and the refusals.
 //! What: a temp assistants root per case, seeded with fake instance homes and
 //! turn logs, and a `build_router` pointed at it through
-//! `AppState::with_assistants_root`.
+//! `AppState::with_assistants_root`, served behind the loopback guard.
 //! Test: this file IS the test.
 
 use std::path::Path;
@@ -15,14 +15,30 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use trusty_console::server::{AppState, build_router};
+use trusty_console::server::{AppState, build_router, guard_loopback_listener};
+
+/// Serve `router` as a real loopback listener's guard would (#11748: the
+/// assistants routes answer only a request a gated listener admitted).
+/// Returns the guarded router and the `Host` it answers to.
+async fn on_loopback(router: axum::Router) -> (axum::Router, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let host = listener.local_addr().expect("addr").to_string();
+    let router = guard_loopback_listener(router, &listener).expect("loopback guard");
+    (router, host)
+}
 
 async fn get(root: &Path, uri: &str) -> (StatusCode, Value) {
-    let router = build_router(AppState::new(vec![]).with_assistants_root(root.to_path_buf()));
+    let (router, host) = on_loopback(build_router(
+        AppState::new(vec![]).with_assistants_root(root.to_path_buf()),
+    ))
+    .await;
     let resp = router
         .oneshot(
             Request::builder()
                 .uri(uri)
+                .header("host", host)
                 .body(Body::empty())
                 .expect("request"),
         )

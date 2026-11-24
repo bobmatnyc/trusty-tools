@@ -168,6 +168,13 @@ pub struct AppState {
     /// #11747: override for the assistants root; `None` resolves it as `ta`
     /// does. Test: `tests/assistants_routes.rs` sets it on every case.
     pub(crate) assistants_root: Option<Arc<PathBuf>>,
+    /// #11748: override for the ask-socket directory; `None` resolves it as
+    /// `ta` does. Test: `tests/assistants_ask.rs` sets it on every case.
+    pub(crate) assistants_data_dir: Option<Arc<PathBuf>>,
+    /// #11748: the bounds every ask runs under.
+    pub(crate) assistants_ask_limits: crate::assistants_uds::ask::AskLimits,
+    /// #11748 review: one permit per in-flight ask.
+    pub(crate) assistants_ask_permits: Arc<tokio::sync::Semaphore>,
     /// #9076: what console's `trusty-events` client has seen — its state and
     /// the events it relays. `Starting` until `run_serve` starts the client.
     events: Arc<crate::events_uds::EventsRelay>,
@@ -293,6 +300,11 @@ impl AppState {
             memory_socket: None,
             analyze_socket: None,
             assistants_root: None,
+            assistants_data_dir: None,
+            assistants_ask_limits: crate::assistants_uds::ask::AskLimits::default(),
+            assistants_ask_permits: Arc::new(tokio::sync::Semaphore::new(
+                crate::assistants_uds::ask_route::MAX_CONCURRENT_ASKS,
+            )),
             events: Arc::new(crate::events_uds::EventsRelay::new()),
             #[cfg(unix)]
             secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),
@@ -479,7 +491,10 @@ impl AppState {
 // routes pushed this file over the 500-SLOC cap. The re-export keeps every
 // call site — `main`, `lib::run_serve`, and every test — unchanged.
 mod router;
-pub use router::{build_router, build_router_with_self_origins, build_router_with_webhooks};
+pub use router::{
+    build_router, build_router_with_self_origins, build_router_with_webhooks,
+    guard_loopback_listener,
+};
 
 // ─── handlers ────────────────────────────────────────────────────────────────
 

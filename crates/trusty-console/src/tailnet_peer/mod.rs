@@ -245,7 +245,7 @@ pub struct TailnetGuard {
 /// `foreign_origin_is_refused_on_get`, `self_origin_is_served`.
 pub async fn guard_tailnet_peer(
     State(guard): State<TailnetGuard>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
@@ -273,7 +273,38 @@ pub async fn guard_tailnet_peer(
         tracing::warn!(peer = %peer, reason, "tailnet listener refused a request not addressed to itself");
         return forbidden();
     }
+    // #11748: mark the request as gated, with the (cached) whois result the
+    // assistants ask route logs as the peer.
+    let identity = guard.gate.identity(peer.ip()).await.ok();
+    req.extensions_mut()
+        .insert(AdmittedBy::Tailnet { peer, identity });
     next.run(req).await
+}
+
+/// Which gated listener admitted a request (#11748).
+///
+/// Why: the assistants routes may only be served on a listener whose guard
+/// ran — loopback ([`guard_loopback`]) or the tailnet peer gate
+/// ([`guard_tailnet_peer`]). A router served any other way carries no
+/// `AdmittedBy`, and those routes refuse it.
+/// What: inserted into the request extensions by each guard once it admits
+/// the request. Every variant is `#[non_exhaustive]`, so only this crate can
+/// construct one.
+/// Test: `assistants_uds::gate_tests`, `ungated_listener_cannot_reach_assistants`
+/// (`tests/assistants_ask.rs`).
+#[derive(Debug, Clone)]
+pub enum AdmittedBy {
+    /// The loopback listener's Host/Origin guard admitted it.
+    #[non_exhaustive]
+    Loopback,
+    /// The tailnet peer gate admitted it.
+    #[non_exhaustive]
+    Tailnet {
+        /// The peer's socket address.
+        peer: SocketAddr,
+        /// The peer's whois result, when the cache still holds one.
+        identity: Option<PeerIdentity>,
+    },
 }
 
 /// The tag on every request the tailnet listener serves (#9066).

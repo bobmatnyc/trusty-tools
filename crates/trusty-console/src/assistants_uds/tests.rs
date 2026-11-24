@@ -102,6 +102,44 @@ fn the_mirrored_constants_match_the_source() {
         INSTANCE,
         "c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')",
     );
+    // #11748: the reply cap is the daemon's own line cap, 1 MiB.
+    assert_eq!(ask::MAX_REPLY_BYTES, 1024 * 1024);
+    declares(DAEMON, "pub const MAX_LINE_BYTES: u64 = 1024 * 1024;");
+    // #11748: the client keeps its write half open; EOF cancels the ask.
+    declares(DAEMON, "keeps its write half OPEN");
+}
+
+/// #11748 review (ruling (a)): the 503 hint names a verb `ta` accepts, which
+/// runs a daemon that stays while its terminal holds stdin.
+#[test]
+fn the_daemon_hint_names_the_real_verb() {
+    declares(
+        DAEMON,
+        &format!("pub const DAEMON_VERB: &str = \"{DAEMON_VERB}\";"),
+    );
+    declares(
+        "trusty-assistants/Cargo.toml",
+        &format!("[[bin]]\nname = \"{TA_BIN_NAME}\"\npath = \"src/main.rs\""),
+    );
+    // `ta ask-daemon <instance>`: the verb routes, and the id is the next argument.
+    declares(
+        "trusty-assistants/src/cli.rs",
+        "Some(crate::ask::daemon::DAEMON_VERB) => Command::AskDaemon,",
+    );
+    declares(
+        "trusty-assistants/src/cli.rs",
+        "let Some(id) = args.get(2) else {",
+    );
+    declares(
+        "trusty-assistants/src/ask/daemon/run.rs",
+        "daemon run by hand from a terminal stays until that terminal closes stdin",
+    );
+    let id = InstanceId::parse("izzie").expect("id");
+    assert!(
+        daemon_hint(&id).contains("`ta ask-daemon izzie`"),
+        "{}",
+        daemon_hint(&id)
+    );
 }
 
 #[test]

@@ -10,17 +10,24 @@
 //! - the assistants root and the instance rule `ta list` applies
 //!   ([`assistants_root`], [`list_instances`], [`InstanceId`]);
 //! - the ask daemon's wire structs and socket path ([`AskRequest`],
-//!   [`AskReply`], [`PROTOCOL_VERSION`], [`socket_path_in`]) — PR1 does not
-//!   dial the socket; #11748 does;
+//!   [`AskReply`], [`PROTOCOL_VERSION`], [`socket_path_in`]);
+//! - `ask` and `ask_route`, the #11748 ask client and
+//!   `POST /api/console/assistants/{id}/ask`, with the guards on every route;
 //! - `turns`, the tolerant tail read of `<home>/stores/ask-turns.jsonl`;
 //! - `routes`, the two `GET /api/console/assistants…` handlers.
 //!
 //! Test: `tests.rs` (rules and contract) and `tests/assistants_routes.rs`
 //! (the routes through the real router).
 
+pub mod ask;
+pub mod ask_route;
 pub mod routes;
 pub mod turns;
 
+#[cfg(test)]
+mod ask_tests;
+#[cfg(all(test, unix))]
+mod gate_tests;
 #[cfg(test)]
 mod tests;
 
@@ -59,6 +66,30 @@ pub const INSTRUCTIONS_FILE: &str = "instructions.md";
 /// (`trusty-agents-common/src/health.rs` `AGENTS_APP_NAME`).
 /// Test: `tests::the_mirrored_constants_match_the_source`.
 pub const AGENTS_APP_NAME: &str = "trusty-agents";
+
+/// The `ta` binary's name (`trusty-assistants/Cargo.toml` `[[bin]] name`).
+/// Test: `tests::the_daemon_hint_names_the_real_verb`.
+pub const TA_BIN_NAME: &str = "ta";
+
+/// The verb that runs one instance's ask daemon in the foreground
+/// (`ask/daemon/mod.rs` `DAEMON_VERB`).
+/// Test: `tests::the_daemon_hint_names_the_real_verb`.
+pub const DAEMON_VERB: &str = "ask-daemon";
+
+/// The 503 hint when no daemon serves `id`'s socket.
+///
+/// Why: #11748 review (ruling (a)) — `ta ask` releases the daemon it starts,
+/// and the daemon then exits when idle, so it never leaves one for the
+/// console. A daemon run by hand keeps its terminal's stdin open, which is
+/// the lease its idle exit waits for (`ask/daemon/run.rs`), so it stays.
+/// Test: `tests::the_daemon_hint_names_the_real_verb`,
+/// `ask_with_no_socket_is_503_with_the_hint` (`tests/assistants_ask.rs`).
+pub fn daemon_hint(id: &InstanceId) -> String {
+    format!(
+        "run `{TA_BIN_NAME} {DAEMON_VERB} {}` in a terminal and leave it running; the console never starts an assistant",
+        id.as_str()
+    )
+}
 
 /// Longest accepted instance id (`assistants/instance.rs` `MAX_ID_LEN`).
 const MAX_ID_LEN: usize = 64;
