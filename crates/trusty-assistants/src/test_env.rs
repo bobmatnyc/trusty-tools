@@ -422,6 +422,7 @@ mod tests {
         // setter run mid-read. Scrubbed vars are set under `#[serial]`,
         // `agents::tests::loading::ENV_LOCK`, `ENV_LOCK` or `HOME_LOCK`; take
         // all four, in that order (the order every holder of two uses).
+        // Every `TA_ASSISTANTS_DIR` reader (`assistants_root`, `for_instance`) is `#[serial]`.
         let _config_env = crate::agents::tests::loading::ENV_LOCK.blocking_lock();
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
