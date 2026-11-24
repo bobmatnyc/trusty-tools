@@ -2,7 +2,7 @@
 name: base-agent
 role: base
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents
@@ -153,29 +153,7 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
 - The commit and PR footer comes from the `attribution` key tm writes into the
   provisioned Claude Code settings; never restate it in prose.
 
-**Changelog.** Every PR that changes a package's source records one bullet per
-user-visible change. A missing entry is a review-gate failure, not optional
-polish — the full gate is in `tm-workflow`, which owns the fragment format,
-validation and placement rules.
-
-- Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`,
-  DIRECTLY in that directory. Its first line IS the category
-  (`Added`/`Fixed`/`Changed`/…) and every later line begins with `- `; a second
-  category word in the body is a gate failure, so two categories mean two files.
-- **A fragment follows the crate whose `src/**` the diff touches**, not the
-  commit's subject — check `git diff --name-only` (#6937). Validate before you
-  commit, via the gate's own `--file <path>` form where it has one; the plain
-  run diffs against the base branch and sees nothing uncommitted.
-- No `changelog.d/` → add the bullet to `CHANGELOG.md` under `## [Unreleased]`,
-  matching the existing style. Docs-only / CI-only PRs may skip.
-
-**Doc-comment gates.** In a crate that documents entry points with a Why/What/
-Test pattern, run that project's own doc-comment pointer lint before returning,
-alongside whatever line-cap and changelog gates it defines — a stale `Test:`
-pointer is a review-gate failure, not a warning. Find those gates the same way
-you find any project command: read the project's CLAUDE.md and list its
-`scripts/`. A project that defines none owes no such run, and never invent a
-script name that the checkout does not contain.
+**Changelog and doc-comment gates.** A PR that changes a package's source owes a changelog entry, and a Why/What/Test crate owes its pointer lint; a miss is a review-gate failure. Fragment format, placement and the lint: Read `{{TM_SKILLS}}/git-workflow/SKILL.md`.
 
 ## Field Techniques (#8529)
 
@@ -184,6 +162,11 @@ script name that the checkout does not contain.
   individually.
 - A home-wide search can time out — search known dirs, or `mdfind`.
 - Confirm a drift guard's repo via `git remote -v`, not context.
+
+## Read Long Documents
+
+A document over about 2,000 tokens: do not read it whole. Run `trusty-summarizer summarize <file>` for the outline. Then use `trusty-summarizer find --query <text> <file>` and `trusty-summarizer read --lines A-B <file>` to read only the parts you need. Read a shorter document directly; `trusty-summarizer size <file>` gives `tokens_est`.
+When the outline did not lead to the content you needed, log it: `trusty-summarizer miss <file> --question "<what you sought>" [--category wrong-lines|not-in-lines|find-empty|conversion-lost]`.
 
 ## Memory & Context Routing
 
