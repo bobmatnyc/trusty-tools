@@ -1,9 +1,10 @@
-//! Live check: a bounded cua-driver daemon on a private socket, scoped to the JXA fixture.
+//! Live check: a bounded cua-driver daemon on a private socket, scoped to the SignedCheck fixture.
 //!
 //! Why: the fake driver cannot prove LaunchServices launch, the pin, bounded
 //! scoping or the restart cost (issue #11460, Phase 2).
-//! What: launches `tests/fixtures/fixture.js` (it writes its pid and window id
-//! to a state file), writes `<dir>/state/scope.json`, starts `trusty-computer
+//! What: builds and opens `tests/fixtures/signedapp` (it writes its pid and
+//! window id to a state file; #11699: cua-driver 0.23.2 sees no AXWindow in
+//! the osascript `fixture.js`), writes `<dir>/state/scope.json`, starts `trusty-computer
 //! serve` through `scripts/sandbox_computer_daemon.sh`, then over the private
 //! socket does one `get_window_state` and one element click confirmed by the
 //! fixture's state file. Two SIGHUP rescopes (window +1, then back) time the
@@ -12,17 +13,20 @@
 //! Run: `cargo test -p trusty-computer --test live_supervisor -- --ignored --nocapture`.
 //! Test: this file.
 
+mod common;
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use common::live::wait_for;
 use serde_json::{Value, json};
 use trusty_computer::driver::DriverClient;
 
 struct Live {
     dir: PathBuf,
-    fixture: Child,
+    _apps: common::live::Live,
     sandbox: Option<Child>,
 }
 
@@ -34,30 +38,12 @@ impl Drop for Live {
         if let Some(mut s) = self.sandbox.take() {
             let _ = s.wait();
         }
-        let _ = self.fixture.kill();
-        let _ = self.fixture.wait();
+        // Dropping `_apps` after this terminates the fixture by pid.
     }
 }
 
 fn script() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/sandbox_computer_daemon.sh")
-}
-
-fn wait_for<T>(what: &str, secs: u64, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    loop {
-        if let Some(v) = probe() {
-            return v;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn state_value(path: &Path, key: &str) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix(key)?.trim().parse().ok())
 }
 
 fn clicks(path: &Path) -> usize {
@@ -92,34 +78,17 @@ fn hup(dir: &Path) {
 }
 
 #[test]
-#[ignore = "live: launches CuaDriver.app bounded and the JXA fixture; run explicitly"]
+#[ignore = "live: launches CuaDriver.app bounded and the SignedCheck fixture; run explicitly"]
 fn live_bounded_daemon_drives_fixture() {
-    let out = Command::new("/usr/bin/mktemp")
-        .args(["-d", "/tmp/tcomp-live.XXXXXX"])
-        .output()
-        .expect("mktemp");
-    let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
-        .canonicalize()
-        .expect("canonical temp dir");
+    let mut apps = common::live::Live::new("tcomp-live");
+    let dir = apps.dir.clone();
     std::fs::create_dir_all(dir.join("state")).expect("state dir");
-    let state_file = dir.join("fixture-state.txt");
-    let js = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fixture.js");
-    let fixture = Command::new("/usr/bin/osascript")
-        .args(["-l", "JavaScript"])
-        .arg(&js)
-        .arg(&state_file)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("launch fixture");
+    let (pid, wid, state_file) = apps.launch("fixture", &[]);
     let mut live = Live {
         dir: dir.clone(),
-        fixture,
+        _apps: apps,
         sandbox: None,
     };
-    let pid = wait_for("fixture pid", 15, || state_value(&state_file, "pid "));
-    let wid = wait_for("fixture window", 15, || state_value(&state_file, "window "));
-    println!("fixture pid={pid} window={wid}");
     write_scope(&dir, pid, wid);
 
     let mut sandbox = Command::new(script())
