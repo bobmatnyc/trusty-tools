@@ -85,6 +85,8 @@ pub struct Inner<L: Launcher> {
     pub(crate) pasteboard: Arc<dyn crate::clipboard::Pasteboard>,
     /// #11696 Phase D: sends the granted app its quit request.
     pub(crate) quitter: Arc<dyn crate::app_quit::Quitter>,
+    /// #11756: the on-screen window order a drag is checked against.
+    pub(crate) windows: Arc<dyn crate::window_order::WindowLister>,
 }
 
 /// The broker.
@@ -129,6 +131,7 @@ impl<L: Launcher> Broker<L> {
                 resolver: Arc::new(LsappinfoResolver),
                 pasteboard: Arc::new(crate::clipboard::SystemPasteboard::default()),
                 quitter: Arc::new(crate::app_quit::SystemQuitter::default()),
+                windows: Arc::new(crate::window_order::SystemWindowLister),
             }),
             clock,
             sessions: AtomicU64::new(0),
@@ -168,6 +171,18 @@ impl<L: Launcher> Broker<L> {
             .get_mut()
             .unwrap_or_else(|p| p.into_inner())
             .quitter = quitter;
+        self
+    }
+
+    /// The same broker reading the window order from `windows` (tests pass a fake).
+    pub fn with_window_lister(
+        mut self,
+        windows: Arc<dyn crate::window_order::WindowLister>,
+    ) -> Self {
+        self.inner
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .windows = windows;
         self
     }
 

@@ -19,7 +19,8 @@
 //! [`screenshot::bound`]; the read tools are asked for no screenshot, and
 //! every other reply loses any image part the driver sends (#11694).
 //! A coordinate call (#11696) passes [`Inner::pointer_bounds`] last, against
-//! the window's frame read on that call, and is confirmed by read-back.
+//! the window's frame read on that call (a drag also against the window order,
+//! #11756), and is confirmed by read-back.
 //! A window call (#11696 Phase B) passes [`Inner::window_owner`] last, which
 //! proves the window is the granted pid's and builds its one daemon call.
 //! A clipboard call (#11696 Phase C) needs its own grant flag and is run by
@@ -222,7 +223,7 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "bad_args", "args must be an object");
         };
         rec.insert("args".into(), summarize_args(&args_map));
-        // #11696: drag_at is off until a window-on-top check exists; no gate or driver call runs.
+        // #11696: while `DRAG_ENABLED` is false drag_at runs no gate and no driver call.
         if let Some((code, detail)) = pointer::disabled(&tool) {
             return self.refuse(rec, code, detail);
         }

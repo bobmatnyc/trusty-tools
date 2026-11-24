@@ -1,0 +1,2 @@
+Added
+- `computer_drag` is on. Before each drag the broker reads the on-screen window order from the window server and refuses `drag_blocked_window_not_on_top` when the granted window is not on screen or any other window, of any app or layer, is in front of it on the drag path (the Dock counts along the display edges); an unreadable order refuses `window_order_unavailable`. Bring the window to the front with `computer_focus` first (#11756).
