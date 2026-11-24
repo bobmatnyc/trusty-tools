@@ -66,6 +66,42 @@ async fn a_read_retries_once_after_a_stalled_first_exchange() {
     assert_eq!(methods(&calls), vec!["memory_recall", "memory_recall"]);
 }
 
+/// The repro: `run_verb`'s own door, a 900 ms stall against a 300 ms budget.
+#[tokio::test]
+async fn call_with_timeout_retries_a_stalled_first_recall() {
+    let (daemon, calls) = stalling_daemon("memory_recall", 1).await;
+    let out = super::memory_checked::call_with_timeout(
+        daemon.socket(),
+        "memory_recall",
+        json!({ "palace": "p", "query": "q" }),
+        BUDGET,
+    )
+    .await
+    .expect("the retry must succeed");
+    assert_eq!(out, json!({ "ok": true }));
+    let recalls = methods(&calls)
+        .iter()
+        .filter(|m| *m == "memory_recall")
+        .count();
+    assert_eq!(recalls, 2, "one stalled attempt, one retry");
+}
+
+#[tokio::test]
+async fn a_read_stalled_twice_is_an_error() {
+    let (daemon, calls) = stalling_daemon("memory_recall", 2).await;
+    let err = call_verb(
+        daemon.socket(),
+        "memory_recall",
+        json!({ "palace": "p", "query": "q" }),
+        false,
+        BUDGET,
+    )
+    .await
+    .expect_err("a read that stalls twice must fail, not succeed");
+    assert!(format!("{err:#}").contains("did not complete the exchange"));
+    assert_eq!(methods(&calls), vec!["memory_recall", "memory_recall"]);
+}
+
 #[tokio::test]
 async fn a_write_warms_its_palace_then_sends_once() {
     // The cold open stalls the warm-up, not the write.
