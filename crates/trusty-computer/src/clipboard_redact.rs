@@ -8,7 +8,8 @@
 //! key (`password=`, `pwd:`, `"api_key": "..."`, `AWS_SECRET_ACCESS_KEY=`);
 //! the credential after `Bearer`, or after `Basic` / `Token` as an
 //! `Authorization` value; and a word with a
-//! known secret shape (AWS access key ids, `sk-`, `ghp_`, `github_pat_`,
+//! known secret shape (URL credentials `scheme://user:pass@`, AWS access
+//! key ids, `sk-`, `ghp_`, `github_pat_`,
 //! `xox?-`, `glpat-`, `AIza` keys, JWTs). A value is one word, the run of
 //! characters up to whitespace, a quote, or one of `,;()[]{}<>|&?`; a
 //! passphrase with spaces keeps its later words.
@@ -124,6 +125,17 @@ fn secret_shape(word: &str) -> bool {
     aws || jwt
 }
 
+/// The byte range of the `user:pass` part of a URL word (`scheme://user:pass@host`).
+///
+/// Test: `redaction_strips_passwords_and_keys`.
+fn url_userinfo(word: &str) -> Option<(usize, usize)> {
+    let from = word.find("://")? + 3;
+    let authority = &word[from..];
+    let authority = &authority[..authority.find(['/', '#']).unwrap_or(authority.len())];
+    let at = authority.rfind('@')?;
+    authority[..at].contains(':').then_some((from, from + at))
+}
+
 /// Byte ranges of the PEM private key blocks in `text`; an unterminated one runs to the end.
 fn pem_blocks(text: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
@@ -213,7 +225,10 @@ pub fn redact_text(text: &str) -> Redacted {
             }
             Next::Delim | Next::Plain => {}
         }
-        if key == BARE_SCHEME && delim.is_none() {
+        if let Some((a, b)) = url_userinfo(word) {
+            // #11696 Phase C: `postgres://user:pass@host` keeps scheme and host.
+            spans.push((s + a, s + b));
+        } else if key == BARE_SCHEME && delim.is_none() {
             next = Next::Value;
         } else if let Some(d) = delim.filter(|_| secret_key(&key)) {
             let value = value_at(d);

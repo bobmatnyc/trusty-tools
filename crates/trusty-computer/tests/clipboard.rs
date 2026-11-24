@@ -9,8 +9,11 @@ use std::sync::atomic::Ordering;
 
 use common::rig::{Rig, WINDOW, consent, grant_req};
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
+
 use trusty_computer::clipboard::{
-    FLAGS, MAX_BYTES, READ_FLAG, READ_TOOL, WRITE_FLAG, WRITE_TOOL, grant_flag,
+    FLAGS, MAX_BYTES, Pasteboard, READ_FLAG, READ_TOOL, SystemPasteboard, WRITE_FLAG, WRITE_TOOL,
+    grant_flag,
 };
 use trusty_computer::clipboard_redact::{MARKER, redact_text};
 use trusty_computer::grants::DEFAULT_TOOLS;
@@ -51,6 +54,23 @@ fn redaction_strips_passwords_and_keys() {
             "Authorization: [REDACTED] [REDACTED]",
         ),
         ("id AKIAIOSFODNN7EXAMPLE end", "id [REDACTED] end"),
+        // URL credentials: scheme and host stay, `user:pass` goes.
+        (
+            "DATABASE_URL=postgres://app:s3cr3t@db.internal:5432/prod",
+            "DATABASE_URL=postgres://[REDACTED]@db.internal:5432/prod",
+        ),
+        (
+            "clone https://bob:ghtoken@github.com/o/r.git now",
+            "clone https://[REDACTED]@github.com/o/r.git now",
+        ),
+        (
+            "redis://:hunter2@cache:6379/0",
+            "redis://[REDACTED]@cache:6379/0",
+        ),
+        (
+            "mongodb+srv://u:p%40ss@cluster0.x.net/db",
+            "mongodb+srv://[REDACTED]@cluster0.x.net/db",
+        ),
         ("key sk-ant-api03-abcdefghijklmnop0123", "key [REDACTED]"),
         ("ghp_0123456789abcdefABCDEF here", "[REDACTED] here"),
         ("xoxb-1234567890-abcdefghijkl", "[REDACTED]"),
@@ -79,6 +99,7 @@ fn redaction_keeps_plain_text() {
         "the password field is empty",
         "the token is expired; Basic setup done",
         "compass=north bypass:yes",
+        "https://git@github.com/o/r.git https://example.com/a@b ssh://host:22/x",
         "sk-short ghp_tiny AKIA123",
         "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
         "héllo wörld 日本語",
@@ -294,4 +315,40 @@ fn pasteboard_failure_returns_no_text() {
     assert!(!reply.to_string().contains("hunter2"));
     let reply = rig.call(WRITE_TOOL, "w1", json!({"text": "x"}));
     assert_eq!(reply["code"], "clipboard_error", "{reply}");
+}
+
+/// A pasteboard command that never finishes is killed at its deadline, for a
+/// read and for a write; `/bin/sleep` stands in for a hung `pbpaste`/`pbcopy`.
+#[test]
+fn pasteboard_command_is_killed_at_its_deadline() {
+    let hung = vec!["/bin/sleep".to_owned(), "30".to_owned()];
+    let pb = SystemPasteboard {
+        paste: hung.clone(),
+        copy: hung,
+        timeout: Duration::from_millis(300),
+    };
+    let start = Instant::now();
+    let read = pb.read(MAX_BYTES + 1);
+    assert!(
+        read.as_ref().is_err_and(|e| e.contains("timed out")),
+        "{read:?}"
+    );
+    let write = pb.write("x");
+    assert!(
+        write.as_ref().is_err_and(|e| e.contains("timed out")),
+        "{write:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    // A command that ends in time is not cut off.
+    let quick = SystemPasteboard {
+        paste: vec!["/bin/echo".to_owned(), "-n".to_owned(), "hi".to_owned()],
+        copy: vec!["/bin/cat".to_owned()],
+        timeout: Duration::from_secs(5),
+    };
+    assert_eq!(quick.read(MAX_BYTES + 1).as_deref(), Ok(&b"hi"[..]));
+    assert_eq!(quick.write("x"), Ok(()));
 }

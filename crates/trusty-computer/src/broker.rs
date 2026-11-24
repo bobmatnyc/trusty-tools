@@ -125,7 +125,7 @@ impl<L: Launcher> Broker<L> {
                 consent,
                 lockout_marker,
                 resolver: Arc::new(LsappinfoResolver),
-                pasteboard: Arc::new(crate::clipboard::SystemPasteboard),
+                pasteboard: Arc::new(crate::clipboard::SystemPasteboard::default()),
             }),
             clock,
             sessions: AtomicU64::new(0),

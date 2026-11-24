@@ -39,7 +39,7 @@ fn pbcopy(text: &[u8]) {
 
 fn run(tool: &str, args: Value) -> (Value, Map<String, Value>) {
     let args = args.as_object().expect("object").clone();
-    clipboard::run(&SystemPasteboard, tool, &args)
+    clipboard::run(&SystemPasteboard::default(), tool, &args)
 }
 
 #[test]
