@@ -1,0 +1,2 @@
+Added
+- `tm fleet init` seeds the Architect's usage ledger and token watcher: `usage.py` (with `usage_calc.py`), `token_watch.py` (with `token_watch_rules.py`), `effort-governor.py`, `ctx_bar.py`, `usage-probe.sh`, `effort-send.sh`, `statusline-tee.sh` and the `rc-lib.sh` helper `usage-probe.sh` sources, from prototype tag `architect-target-2026-11-24`. The Architect session name comes from `ARCHITECT_SESSION` instead of a built-in list (#10571).

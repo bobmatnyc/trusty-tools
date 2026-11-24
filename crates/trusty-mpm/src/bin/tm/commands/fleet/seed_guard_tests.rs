@@ -20,10 +20,16 @@ use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_in;
 use crate::commands::pm_guard_secret_script::evaluate_script_body_secret_read;
 
 /// Guard false positives tracked in #10598 (script, reason); empty when none trips.
-const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[(
-    "self-clear.sh",
-    "#10599 owns its ROOT: `$ROOT/scripts/...` is a computed path the guard cannot judge (guard false positives: #10598)",
-)];
+const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "self-clear.sh",
+        "#10599 owns its ROOT: `$ROOT/scripts/...` is a computed path the guard cannot judge (guard false positives: #10598)",
+    ),
+    (
+        "token_watch.py",
+        "#10571 S1: its data files are named `token-*.json[l]`, read as token files; the Rust watcher shares the names (#11629, #10598)",
+    ),
+];
 
 /// The credential verdict for a Bash `command` run from `cwd`.
 fn verdict(command: &str, cwd: &Path) -> Option<String> {
@@ -79,8 +85,9 @@ fn every_seeded_script_passes_the_guard_at_its_installed_path() {
 
 /// Seeded scripts that still refuse under the unchanged guard, with the exact
 /// reason each cannot be changed without changing what it does (#10570).
-/// The four Python rows are modules with no `__main__`; the commands that
-/// import them (`datg.py`, `dashboard-serve.py`) pass.
+/// The first four rows are modules with no `__main__`; the commands that
+/// import them (`datg.py`, `dashboard-serve.py`) pass. `token_watch.py` is a
+/// command; fleet-poll.py loads it in-process (#10571 S1).
 const STILL_REFUSED_10570: &[(&str, &str)] = &[
     (
         "datg_ops.py",
@@ -99,6 +106,11 @@ const STILL_REFUSED_10570: &[(&str, &str)] = &[
     (
         "dashboard_projects.py",
         "SECRET_NAME is the secret-name regex the project scan skips; it is the script's own deny list",
+    ),
+    (
+        "token_watch.py",
+        "#10571 S1: STATE_PATH, HOURLY_PATH and THRESHOLDS_PATH name `token-*.json[l]` files, \
+         read as token files; the Rust watcher shares the names (#11629)",
     ),
 ];
 
@@ -119,6 +131,7 @@ const REFUSAL_TEXT_10570: &[(&str, &str)] = &[
         "dashboard_projects.py",
         "names a secret-bearing file (#7266)",
     ),
+    ("token_watch.py", "names a secret-bearing file (#7266)"),
 ];
 
 /// 🔴 REGRESSION (#10570, #10598): every script `tm fleet init` seeds under

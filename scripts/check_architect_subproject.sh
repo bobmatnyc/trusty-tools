@@ -116,6 +116,16 @@ agents/drift-guard.md|content/instructions/architect/agents/drift-guard.md
 scripts/verify-claim.py|crates/trusty-mpm/src/assets/architect/scripts/verify-claim.py
 scripts/verify_claim_input.py|crates/trusty-mpm/src/assets/architect/scripts/verify_claim_input.py
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
+scripts/usage.py|crates/trusty-mpm/src/assets/architect/scripts/usage.py
+scripts/usage_calc.py|crates/trusty-mpm/src/assets/architect/scripts/usage_calc.py
+scripts/token_watch.py|crates/trusty-mpm/src/assets/architect/scripts/token_watch.py
+scripts/token_watch_rules.py|crates/trusty-mpm/src/assets/architect/scripts/token_watch_rules.py
+scripts/effort-governor.py|crates/trusty-mpm/src/assets/architect/scripts/effort-governor.py
+scripts/ctx_bar.py|crates/trusty-mpm/src/assets/architect/scripts/ctx_bar.py
+scripts/usage-probe.sh|crates/trusty-mpm/src/assets/architect/scripts/usage-probe.sh
+scripts/effort-send.sh|crates/trusty-mpm/src/assets/architect/scripts/effort-send.sh
+scripts/statusline-tee.sh|crates/trusty-mpm/src/assets/architect/scripts/statusline-tee.sh
+scripts/rc-lib.sh|crates/trusty-mpm/src/assets/architect/scripts/rc-lib.sh
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/fleet_poll_cfg.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_cfg.py
 scripts/fleet_poll_io.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_io.py

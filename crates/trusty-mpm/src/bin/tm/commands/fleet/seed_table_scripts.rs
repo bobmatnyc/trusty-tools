@@ -133,4 +133,17 @@ pub(super) const SCRIPTS: &[Embedded] = &[
     // input module, imported by name from the same directory.
     script!("verify-claim.py", true),
     script!("verify_claim_input.py", false),
+    // #10571 S1: the usage ledger, token watcher, effort governor and context bar;
+    // usage.py and token_watch.py import their split halves by name, usage-probe.sh
+    // sources rc-lib.sh.
+    script!("usage.py", true),
+    script!("usage_calc.py", false),
+    script!("token_watch.py", false),
+    script!("token_watch_rules.py", false),
+    script!("effort-governor.py", true),
+    script!("ctx_bar.py", false),
+    script!("usage-probe.sh", true),
+    script!("effort-send.sh", true),
+    script!("statusline-tee.sh", true),
+    script!("rc-lib.sh", false),
 ];
