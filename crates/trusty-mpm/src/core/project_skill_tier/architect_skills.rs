@@ -239,6 +239,8 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
         "dc478edef52c66eb4cd420504a639d2b45f99765784d26a25f37135666bff3e8",
         // IN0055: the text that stored a ruling with MCP `memory_remember`.
         "b5ecfccf1c8e988b05995d2b316282770d5c8570d69b21744022e8591f0c4388",
+        // #9457: the text before `fleet init` started the dashboard on macOS.
+        "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
     ],
 };
 
