@@ -397,15 +397,42 @@ fn grant_held_blob_answers_reads_and_ends_with_the_grant() {
         ItemId::new("trusty/acme/web", "KEY_A"),
         ItemId::new("trusty/acme/web", "KEY_B"),
     );
-    assert!(!cache.hold(1, &blob_of("v")), "held with no grant");
+    assert!(!cache.hold(1, 0, &blob_of("v")), "held with no grant");
     let generation = cache.open(TTL, alive());
-    assert!(!cache.hold(generation + 1, &blob_of("v")));
-    assert!(cache.hold(generation, &blob_of("v")));
+    assert!(!cache.hold(generation + 1, 0, &blob_of("v")));
+    assert!(cache.hold(generation, 0, &blob_of("v")));
     assert_eq!(held_value(&cache, &a).as_deref(), Some("v"));
     assert_eq!(held_value(&cache, &b).as_deref(), Some("<absent>"));
     clocks.both(8 * 3600);
     assert_eq!(held_value(&cache, &a), None, "served past expiry");
     assert!(!cache.holds_blob());
+}
+
+/// Why: #11786 M2 — a Keychain write that began after the unlock read's
+/// mark, or is still in flight, must refuse the snapshot, so a fresh deny is
+/// never answered from stale memory. A `hold` that checked only the
+/// generation holds in every case below.
+/// Test: itself.
+#[test]
+fn grant_hold_refuses_a_snapshot_a_write_made_stale() {
+    let cache = Clocks::new().cache();
+    let a = ItemId::new("trusty/acme/web", "KEY_A");
+    let generation = cache.open(TTL, alive());
+    let mark = cache.write_mark().unwrap();
+    assert_eq!(cache.held_begin(&a), None, "no blob held yet");
+    assert_eq!(cache.write_mark(), None, "a mark taken mid-write");
+    assert!(
+        !cache.hold(generation, mark, &blob_of("old")),
+        "held over a write in flight"
+    );
+    cache.held_done();
+    assert!(
+        !cache.hold(generation, mark, &blob_of("old")),
+        "held over a landed write"
+    );
+    assert!(!cache.holds_blob());
+    let fresh = cache.write_mark().unwrap();
+    assert!(cache.hold(generation, fresh, &blob_of("new")));
 }
 
 /// Why: #10524 — a write in flight, or one that failed, must never leave a
@@ -419,7 +446,7 @@ fn grant_held_write_in_flight_or_failed_reads_the_keychain() {
     let cache = Clocks::new().cache();
     let a = ItemId::new("trusty/acme/web", "KEY_A");
     let generation = cache.open(TTL, alive());
-    assert!(cache.hold(generation, &blob_of("old")));
+    assert!(cache.hold(generation, 0, &blob_of("old")));
     let first = cache.held_begin(&a).unwrap();
     assert_eq!(held_value(&cache, &a), None, "served during a write");
     cache.held_end(&a, first, Some("new"));
@@ -444,6 +471,6 @@ fn grant_held_blob_with_a_refused_page_lock_holds_nothing() {
     let (now, wall) = Clocks::new().pair();
     let cache = GrantCache::with_lock(now, wall, |_, _| false);
     let generation = cache.open(TTL, alive());
-    assert!(!cache.hold(generation, &blob_of("v")));
+    assert!(!cache.hold(generation, 0, &blob_of("v")));
     assert!(!cache.holds_blob());
 }

@@ -43,11 +43,13 @@ impl HeldKeychain {
         write: impl FnOnce() -> Result<T, SecretsError>,
     ) -> Result<T, SecretsError> {
         let ticket = self.cache.grant().held_begin(id);
-        let result = write()?;
-        if let Some(ticket) = ticket {
+        let result = write();
+        if let (Ok(_), Some(ticket)) = (&result, ticket) {
             self.cache.grant().held_end(id, ticket, landed);
         }
-        Ok(result)
+        // #11786: ends the in-flight count `hold` checks, on every outcome.
+        self.cache.grant().held_done();
+        result
     }
 }
 

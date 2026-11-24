@@ -161,6 +161,10 @@ fn assert_fails_closed(got: Result<Option<Zeroizing<String>>, SecretsError>, key
     let shown = format!("{err} / {err:?}");
     assert!(shown.contains("vault blob is corrupt"), "{shown}");
     assert!(shown.contains("--rollback"), "{shown}");
+    assert!(
+        shown.contains("only when a migration backup exists"),
+        "{shown}"
+    );
     assert!(shown.contains(key), "{shown}");
     for value in [VALUE, "stale", "sk-per-item-7f", "sk-tampered"] {
         assert!(!shown.contains(value), "{shown}");

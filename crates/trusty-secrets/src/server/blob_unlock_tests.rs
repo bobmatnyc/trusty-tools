@@ -13,8 +13,9 @@ use crate::server::audit::MigrationAudit;
 use crate::server::migrate;
 use crate::server::unlock;
 use crate::store::BlobKeychain;
+use crate::store::ControlItem;
 use crate::store::grant_cache::{DropReason, Status};
-use crate::store::mem_items::MemItems;
+use crate::store::mem_items::{MemItems, ReadHook};
 use crate::store::vault_blob::{BlobStore, ItemId, ItemStore};
 
 use super::*;
@@ -348,4 +349,50 @@ fn resolve_with_a_corrupt_blob_fails_closed_despite_the_backup() {
     let log = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
     assert!(!log.contains(SENTINEL_VALUE));
     assert_eq!(items.raw(&ItemId::blob()).as_deref(), Some("{\"format\":"));
+}
+
+/// Why: #11786 M2 — an `AgentDeny` written while unlock reads the blob (a
+/// Keychain prompt can hold that read for 20 s) must be honoured under the
+/// grant. Before the fix the grant held the pre-deny snapshot and answered
+/// "no deny" from memory.
+/// What: a read hook writes the deny inside the unlock's blob read; after
+/// unlock the grant holds the blob and reports the deny.
+/// Test: itself.
+#[test]
+fn deny_written_during_the_unlock_read_is_honoured_under_the_grant() {
+    let fx = fixture();
+    let (items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let keychain = state.open(&BackendId::keychain()).unwrap();
+    let writer = Arc::clone(&keychain);
+    *items.read_hook.lock().unwrap() = Some(ReadHook(
+        ItemId::blob(),
+        Box::new(move || {
+            writer
+                .set_control_item(
+                    ControlItem::AgentDeny,
+                    &vault(PROJECT_VAULT),
+                    Some(&key(KEYS[0])),
+                    true,
+                )
+                .unwrap();
+        }),
+    ));
+    let answer = unlock::unlock(&state, caller(), json!({"project": "ignored"})).unwrap();
+    assert!(
+        items.read_hook.lock().unwrap().is_none(),
+        "the deny was not written inside the read"
+    );
+    assert_eq!(answer["blob_held"], true);
+    let denied = keychain
+        .control_item(
+            ControlItem::AgentDeny,
+            &vault(PROJECT_VAULT),
+            Some(&key(KEYS[0])),
+        )
+        .unwrap();
+    assert!(
+        denied,
+        "the grant answered no deny over a deny just written"
+    );
 }

@@ -305,7 +305,8 @@ impl BlobStore {
     /// migration, so serving either brings a revoked value back.
     /// What: reads the blob. When it is corrupt or tampered (digest
     /// mismatch), the read is a fixed error naming `id` and the
-    /// `tm secrets migrate --rollback` recovery, with no value bytes. The
+    /// `tm secrets migrate --rollback` recovery and that it needs a
+    /// migration backup, with no value bytes. The
     /// blob item is left untouched.
     /// Test: `blob_store_corrupt_blob_with_backup_fails_closed`,
     /// `blob_store_corrupt_blob_without_backup_fails_closed`,
@@ -316,9 +317,11 @@ impl BlobStore {
         };
         // #11786: no backup or per-item fallback; a corrupt blob fails closed.
         let blob = Blob::decode(&ItemId::blob(), &text).map_err(|_| {
+            // #11786: rollback needs a migration backup and restores its values.
             item_error(
                 id,
-                "the vault blob is corrupt; recover with `tm secrets migrate --rollback`",
+                "the vault blob is corrupt; `tm secrets migrate --rollback` recovers it \
+                 only when a migration backup exists, and restores the backup's values",
             )
         })?;
         Ok(blob.get(id).map(|v| Zeroizing::new(v.to_owned())))
