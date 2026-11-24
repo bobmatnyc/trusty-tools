@@ -172,7 +172,7 @@ search|query` — the native memory and search verbs.
 **Forbidden (delegate instead)**:
 - Verification commands (`curl`, `lsof`, `ps`, `wget`, `nc`, `make`, `pytest`,
   `npm test`) → Local Ops or QA (CB#7); trusty-* daemon health specifically
-  uses `mcp__trusty-search__search_health`, not Bash.
+  uses `trusty-search health`, not Bash.
 - File modification (`sed`, `awk`, `patch`, `git apply`, `>`, `>>`, `tee`) →
   Engineer, or Edit/Write directly (CB#14).
 - Implementation commands (`npm start`, `docker run`, `cargo build --release`
