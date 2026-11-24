@@ -1,4 +1,4 @@
-//! The `trusty-computer-mcp` server: 29 static `computer_*` tools over stdio JSON-RPC.
+//! The `trusty-computer-mcp` server: 30 static `computer_*` tools over stdio JSON-RPC.
 //!
 //! Why: agents speak MCP; the broker speaks newline JSON on `agent.sock`.
 //! This is a thin translator with a fixed tool list, so the exposed surface
@@ -15,7 +15,7 @@
 //! window-bounded coordinate tools. `computer_focus`, `computer_move_window`
 //! and `computer_resize_window` (#11696 Phase B) map to the broker's window tools;
 //! `computer_clipboard_read` and `computer_clipboard_write` (#11696 Phase C) to
-//! its clipboard tools.
+//! its clipboard tools; `computer_quit` (#11696 Phase D) to its `quit_app`.
 //! Test: `tools_list_is_the_plan_table`, `mcp_smoke_against_a_fake_broker`,
 //! `screenshot_result_is_an_image_part`.
 
@@ -66,6 +66,7 @@ pub fn driver_tool(name: &str) -> Option<&'static str> {
         "computer_resize_window" => crate::window_mgmt::RESIZE_TOOL,
         "computer_clipboard_read" => crate::clipboard::READ_TOOL,
         "computer_clipboard_write" => crate::clipboard::WRITE_TOOL,
+        "computer_quit" => crate::app_quit::QUIT_TOOL,
         _ => return None,
     })
 }

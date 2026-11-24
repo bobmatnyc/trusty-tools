@@ -7,7 +7,8 @@
 //! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists:
 //! `screenshot_window` (#11694), `click_at` and `drag_at` (#11696), and
 //! `focus_window`, `move_window` and `resize_window` (#11696 Phase B), and
-//! `read_clipboard` and `write_clipboard` (#11696 Phase C).
+//! `read_clipboard` and `write_clipboard` (#11696 Phase C), and `quit_app`
+//! (#11696 Phase D).
 //! Test: `every_inventory_tool_is_classified`, `verdict_counts_match_the_plan`
 //! in `tests/spike_policy.rs`; `screenshot_rule_is_filter_and_not_default`.
 
@@ -223,7 +224,7 @@ pub static RULES: [Rule; 56] = [
 ];
 
 /// Broker tools: driven through a driver tool, never named to the daemon.
-pub static BROKER_RULES: [Rule; 8] = [
+pub static BROKER_RULES: [Rule; 9] = [
     // #11694: driven as get_window_state with a screenshot; see `crate::screenshot`.
     filter(
         crate::screenshot::SCREENSHOT_TOOL,
@@ -267,5 +268,11 @@ pub static BROKER_RULES: [Rule; 8] = [
         crate::clipboard::WRITE_TOOL,
         "plain text to the clipboard, size-capped; grant flag clipboard_write",
         &[crate::clipboard::write_args],
+    ),
+    // #11696 Phase D: a quit Apple event to the granted pid and bundle id; never a signal.
+    filter(
+        crate::app_quit::QUIT_TOOL,
+        "graceful quit of the granted app only; grant flag app_quit",
+        &[pid_in_scope, crate::app_quit::quit_args],
     ),
 ];
