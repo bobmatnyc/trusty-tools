@@ -4,7 +4,8 @@ Why: architect-start.sh said --interval 600 while the running poller logged 60 s
 route got another cadence. poll_interval_s in local/architect.json is now the one source.
 What: in a scratch Architect tree (copies of the shipped scripts, a stub start-fleet-poll.sh and tmux), the interval
 architect-start.sh prints, the one poll-supervise.sh logs and the one fleet-poll.py's loader resolves are equal for
-the same config; no start path passes its own --interval; a bad config stops architect-start.sh before any start.
+the same config; no start path passes its own --interval; a bad config stops architect-start.sh before any start;
+a failed start-fleet-poll.sh makes it exit nonzero without the interval line (#10571).
 Test: python3 -m pytest -q tests/test_poll_cadence.py
 """
 import os
@@ -112,3 +113,12 @@ def test_config_cli_prints_one_value_or_fails_with_the_key(tmp_path):
     good.write_text('{"poll_interval_s": "ten"}')
     r = run("poll-interval")
     assert r.returncode == 2 and "poll_interval_s" in r.stderr and r.stdout == ""
+
+
+def test_a_failed_poll_start_exits_nonzero_without_the_interval_line(tree):
+    root, env = tree
+    _config(root, '{"poll_interval_s": 60}')
+    _exe(root / "scripts" / "start-fleet-poll.sh", "#!/usr/bin/env bash\necho 'stub: start failed' >&2\nexit 1\n")
+    r = _start(root, env)
+    assert r.returncode != 0, r.stdout
+    assert "poll interval:" not in r.stdout
