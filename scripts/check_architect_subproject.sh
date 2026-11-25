@@ -33,6 +33,12 @@
 #                       or under content/instructions/architect/skills/ or
 #                       templates/, is no pair's shipped copy, so no source
 #                       guards it
+#     HYBRID            a monolith in SPLITS holds more than 500 SLOC (the
+#                       scripts/check_line_cap.sh Python rule) and sits beside
+#                       the split modules it was split into, under the
+#                       sub-project or the assets dir: the 2026-11-15 deploy
+#                       left fleet-poll.py (2213 SLOC) beside fleet_poll_*.py
+#                       it no longer loaded (#11370)
 #     EMPTY             the sub-project holds no files (a vacuous pass)
 #   Runtime state (inbox/, __pycache__/, .pytest_cache/) is not scanned.
 #   The leak classes (#9996) come from scripts/architect_leak_patterns.txt,
@@ -42,10 +48,13 @@
 #   another pattern file; ARCHITECT_LEAK_DENY_FILE names an optional
 #   out-of-tree file of private names (unset = skipped; CI leaves it unset).
 #
-# Usage: scripts/check_architect_subproject.sh [--root <repo-root>] [--list-pairs]
-#   --root points the gate at another tree; the selftest uses it.
+# Usage: scripts/check_architect_subproject.sh [--root <repo-root>] [--list-pairs] [--list-splits]
+#   --root points the gate at another tree; the selftest uses it. A host
+#   layout checks the same way when it keeps the repo-relative directories.
 #   --list-pairs prints the shipped-copy pairs, one "<source>|<copy>" per
 #   line, and exits 0; the selftest plants a drift in each copy it names.
+#   --list-splits prints the SPLITS rows, one "<monolith>|<prefix>" per line,
+#   and exits 0; the selftest plants a hybrid for each monolith it names.
 #
 # Test: scripts/check_architect_subproject_selftest.sh plants each violation
 #   class in a temporary tree and asserts the gate fails on it.
@@ -54,16 +63,19 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$SCRIPT_DIR")"
 LIST_PAIRS=0
+LIST_SPLITS=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root)
-      [ -n "${2:-}" ] || { echo "usage: $0 [--root <repo-root>] [--list-pairs]" >&2; exit 2; }
+      [ -n "${2:-}" ] || { echo "usage: $0 [--root <repo-root>] [--list-pairs] [--list-splits]" >&2; exit 2; }
       ROOT="$(cd "$2" && pwd)"
       shift 2 ;;
     --list-pairs) LIST_PAIRS=1; shift ;;
-    *) echo "usage: $0 [--root <repo-root>] [--list-pairs]" >&2; exit 2 ;;
+    --list-splits) LIST_SPLITS=1; shift ;;
+    *) echo "usage: $0 [--root <repo-root>] [--list-pairs] [--list-splits]" >&2; exit 2 ;;
   esac
 done
 
@@ -271,6 +283,21 @@ scripts/dashboard_updates.py|crates/trusty-mpm/src/assets/architect/scripts/dash
 scripts/il_remind.py|crates/trusty-mpm/src/assets/architect/scripts/il_remind.py
 scripts/dashboard_feed.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_feed.py
 "
+# Monoliths the bundle replaced with a facade plus split modules (#11370):
+# "<script under scripts/>|<split-module prefix>", one per line. A facade
+# stays under the cap; the same file over the cap beside its split modules is
+# the old monolith, which the bundle no longer loads.
+SPLITS="
+fleet-poll.py|fleet_poll_
+datg.py|datg_
+dashboard-serve.py|dashboard_
+dashboard_harness.py|dashboard_harness_
+"
+SLOC_CAP=500
+if [ "$LIST_SPLITS" -eq 1 ]; then
+  for split in $SPLITS; do echo "$split"; done
+  exit 0
+fi
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done
   exit 0
@@ -456,6 +483,25 @@ for pair in $PAIRS; do
   elif ! cmp -s "$src" "$dst"; then
     report DRIFT "${pair#*|} differs from $SUB_REL/${pair%%|*}"
   fi
+done
+
+# #11370: a monolith over the cap beside its split modules is a hybrid. The
+# SLOC rule is scripts/check_line_cap.sh's own Python counter.
+# shellcheck source=lib/sloc_awk.sh
+. "$SCRIPT_DIR/lib/sloc_awk.sh"
+for dir_rel in "$SUB_REL/scripts" "$ASSETS_REL/scripts"; do
+  for split in $SPLITS; do
+    mono="$ROOT/$dir_rel/${split%%|*}"
+    prefix="${split#*|}"
+    [ -f "$mono" ] || continue
+    sloc="$(awk "$SLOC_PY_AWK" "$mono")"
+    [ "$sloc" -gt "$SLOC_CAP" ] || continue
+    for mod in "$ROOT/$dir_rel/$prefix"*.py; do
+      [ -f "$mod" ] || continue
+      report HYBRID "$dir_rel/${split%%|*} holds $sloc SLOC (cap $SLOC_CAP) beside split modules ($(basename "$mod") and others named $prefix*.py)"
+      break
+    done
+  done
 done
 
 # #8436 P4 fix: a new asset file with no pair would ship unguarded. #9997:

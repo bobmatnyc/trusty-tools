@@ -1227,7 +1227,7 @@ pub(crate) async fn fallback_protected(
         url,
         cwd,
         &trusty_mpm::core::disk_usage_guard::DiskGate::MeasureTarget,
-        dirs::home_dir().as_deref(),
+        super::launch_home::launch_home()?.as_deref(), // #11077
     )
     .await
 }

@@ -40,7 +40,7 @@ def run(rows, state=None, sessions=("tm-a", "tm-b")):
 def test_thresholds_use_weekly_only(pct, want):
     got = {c["level"] for c in run([row(5, pct)])}
     assert got == ({want} if want else set())
-    assert run([row(pct, 5)]) == []  # a 5-hour figure never drives a decision (owner 2026-10-31: "no 5 hour limits")
+    assert run([row(pct, 5)]) == []  # a 5-hour figure never drives a decision (the owner: "no 5 hour limits")
     assert run([row(None, pct, r5=None)]) == run([row(5, pct)])  # a missing 5h value is normal
 
 

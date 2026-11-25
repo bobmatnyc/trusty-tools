@@ -138,9 +138,8 @@ pub(crate) fn write_fake_binary(
     name: &str,
     body: &str,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // #10248: no write fd to the stub in this process.
+    trusty_common::exec_stub::write_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     path
 }

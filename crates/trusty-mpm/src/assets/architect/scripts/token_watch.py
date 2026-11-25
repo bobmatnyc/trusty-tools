@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """token_watch.py: deterministic fleet token watcher (no LLM, stdlib only).
 
-Why: the owner (2026-10-07): "only inference if action needed". The watcher decides
+Why: the owner (see #10571): "only inference if action needed". The watcher decides
 when token behaviour needs attention; the token-optimizer agent then suggests.
 Spec: local/briefs/2026-10-07-token-watch-spec.md.
 What: reads Claude Code transcripts incrementally (main and subagent files of

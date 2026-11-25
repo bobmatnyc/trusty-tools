@@ -4,7 +4,7 @@
 # Why: Claude Code passes `rate_limits` (five_hour / seven_day used_percentage and
 # resets_at) in the statusLine stdin JSON; `tm statusline` renders only part of
 # it, and the status line is cut off in narrow panes. The Architect needs the
-# figures without typing /usage (the owner, 2026-10-07: track usage to plan cutovers).
+# figures without typing /usage (the owner: track usage to plan cutovers; see #10571).
 # What: reads stdin once; when it carries rate_limits, writes
 # inbox/statusline-usage.json (line 1: the logged-in account from .claude.json,
 # the rest: the payload) atomically; then feeds the same stdin to

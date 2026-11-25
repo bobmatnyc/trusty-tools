@@ -16,7 +16,8 @@
 //! space the driver takes, so a window that moves keeps them valid (the
 //! driver anchors them to the window at event time); a window that shrinks
 //! between the agent's view and the call is caught by the fresh read.
-//! [`DRAG_TOOL`] is refused by [`disabled`] until a window-on-top check exists.
+//! A [`DRAG_TOOL`] call also needs the granted window on top along its path
+//! ([`crate::window_order::on_top`], #11756); [`DRAG_ENABLED`] is the switch.
 //! Test: `tests/pointer.rs`; live: `tests/live_pointer.rs`.
 
 use serde_json::{Map, Value, json};
@@ -31,19 +32,20 @@ pub const DRAG_TOOL: &str = "drag_at";
 pub const TOOLS: [&str; 2] = [CLICK_AT_TOOL, DRAG_TOOL];
 /// The one grant name that admits both coordinate tools.
 pub const GRANT_FLAG: &str = "coordinate_input";
-/// False until a window-on-top check exists; `drag_at` is refused while false.
+/// The switch of `drag_at`; while false every drag is refused [`DRAG_REFUSAL`].
 ///
 /// #11696 (architect decision fc7ec9af2b6d): cua-driver 0.23.2 drags only in
-/// the foreground, posted as global screen input, so a covered or unfocused
-/// granted window lets the drag reach another app. A click is posted to the
-/// pid and is unaffected.
-pub const DRAG_ENABLED: bool = false;
+/// the foreground, posted as global screen input, so a covered granted window
+/// lets the drag reach another app. #11756 turns it on behind the
+/// window-on-top gate ([`crate::window_order::on_top`]). A click is posted to
+/// the pid and is unaffected.
+pub const DRAG_ENABLED: bool = true;
 /// The refusal code of a `drag_at` call while [`DRAG_ENABLED`] is false.
 pub const DRAG_REFUSAL: &str = "drag_unavailable_needs_window_on_top_check";
 
 /// The refusal of `tool` before any gate, when it is a disabled coordinate tool.
 ///
-/// Test: `drag_is_refused_before_any_check_or_driver_call`.
+/// Test: `drag_at_reaches_driver_when_on_top`.
 pub fn disabled(tool: &str) -> Option<(&'static str, &'static str)> {
     (tool == DRAG_TOOL && !DRAG_ENABLED).then_some((
         DRAG_REFUSAL,
@@ -224,7 +226,7 @@ pub fn within(frame: Frame, points: &[(f64, f64)]) -> Result<(), Refusal> {
 /// `drag` from `from_x`, `from_y` to `to_x`, `to_y`. Both name the pid and
 /// window and a `delivery_mode` from [`activates_app`]; no other daemon
 /// argument is set.
-/// Test: `click_at_reaches_driver_inside_the_frame`, `drag_is_refused_before_any_check_or_driver_call`.
+/// Test: `click_at_reaches_driver_inside_the_frame`, `drag_at_reaches_driver_when_on_top`.
 pub fn driver_args(tool: &str, args: &Map<String, Value>) -> (&'static str, Value) {
     let mut out = Map::new();
     for key in ["pid", "window_id"]
@@ -249,7 +251,7 @@ pub fn driver_args(tool: &str, args: &Map<String, Value>) -> (&'static str, Valu
 /// (`background_unavailable`), so a drag is delivered `foreground`: the
 /// driver fronts the app, drags, then restores the prior front app. A click
 /// stays background. The audit records `activates_app` as for `invoke_menu`.
-/// Test: `drag_is_refused_before_any_check_or_driver_call`.
+/// Test: `drag_at_reaches_driver_when_on_top`.
 pub fn activates_app(tool: &str) -> bool {
     tool == DRAG_TOOL
 }

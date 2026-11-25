@@ -534,14 +534,12 @@ mod tests {
     fn resolve_binary_path_install_dir_fallback_detects_executable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin_path = dir.path().join("fake-trusty-search");
-        std::fs::write(&bin_path, b"#!/bin/sh\necho hi\n").expect("write fake binary");
+        // #10248: no write fd to the stub in this process.
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&bin_path, perms).unwrap();
-        }
+        trusty_common::exec_stub::write_executable(&bin_path, b"#!/bin/sh\necho hi\n")
+            .expect("write fake binary");
+        #[cfg(not(unix))]
+        std::fs::write(&bin_path, b"#!/bin/sh\necho hi\n").expect("write fake binary");
         assert!(is_executable(&bin_path));
 
         let non_exec = dir.path().join("not-a-binary.txt");

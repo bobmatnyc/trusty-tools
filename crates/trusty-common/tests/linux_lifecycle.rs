@@ -897,12 +897,12 @@ async fn start_from_another_process_spawns_the_install_dir_binary_and_it_outlive
     fs::create_dir(&decoy_dir).expect("decoy dir");
     let decoy_ran = fx.path("decoy-ran");
     let decoy = decoy_dir.join(DAEMON);
-    fs::write(
+    // #10248: no write fd to the stub in this process.
+    trusty_common::exec_stub::write_executable(
         &decoy,
         format!("#!/bin/sh\ntouch '{}'\n", decoy_ran.display()),
     )
     .expect("decoy");
-    fs::set_permissions(&decoy, fs::Permissions::from_mode(0o755)).expect("chmod decoy");
     let path = format!(
         "{}:{}",
         decoy_dir.display(),

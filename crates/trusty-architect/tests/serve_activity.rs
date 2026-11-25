@@ -4,11 +4,12 @@
 //! The fake tmux is a shell script in a tempdir; no tmux server is touched.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+mod exec_stub;
 
 use trusty_architect::SystemTmux;
 use trusty_architect::poller::Config;
@@ -35,8 +36,8 @@ fn fake_tmux(dir: &Path) -> TestResult<SystemTmux> {
          esac\n"
     );
     let path = dir.join("tmux");
-    fs::write(&path, script)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    // #10248: no write fd to the stub in this process.
+    exec_stub::write_executable(&path, script)?;
     Ok(SystemTmux::new().with_program(path))
 }
 

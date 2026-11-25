@@ -165,9 +165,11 @@ pub fn expand_tilde(template: &str, home: &Path) -> PathBuf {
 /// What: applies **`TRUSTY_MPM_WORKSPACE_ROOT` env > `template` > built-in
 /// `~/trusty-mpm-projects`**, expanding a leading `~`. Falls back to
 /// `/tmp/trusty-mpm-projects` only when the home directory is unresolvable AND
-/// nothing absolute was supplied.
+/// nothing absolute was supplied. With neither env nor template set, the
+/// built-in default rung defers to `install_paths` (#11821), so a
+/// `projects_root` in `~/.trusty-tools/install.toml` sits below the template.
 /// Test: `default_root_is_trusty_mpm_projects`, `env_overrides_config_and_default`,
-/// `config_template_used_when_no_env`.
+/// `config_template_used_when_no_env`, `process_env_wrappers_match_today`.
 pub fn resolve_workspace_root(template: Option<&str>) -> PathBuf {
     let home = dirs::home_dir();
 
@@ -183,8 +185,9 @@ pub fn resolve_workspace_root(template: Option<&str>) -> PathBuf {
     match (chosen, &home) {
         (Some(raw), Some(h)) => expand_tilde(raw, h),
         (Some(raw), None) => PathBuf::from(raw),
-        (None, Some(h)) => h.join(DEFAULT_WORKSPACE_DIR),
-        (None, None) => PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR),
+        // See #11821: the default slot now reads `install.toml` before the
+        // built-in default; with no file the result is unchanged.
+        (None, _) => crate::install_paths::projects_root_for_legacy_wrapper(),
     }
 }
 
