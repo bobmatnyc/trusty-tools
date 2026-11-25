@@ -133,8 +133,15 @@ async fn rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated() 
     let created = fx
         .tool("palace_create", json!({"name": "rw-src", "force": true}))
         .await;
-    let refused = created.expect_err("creating the old id must be refused");
-    assert!(format!("{refused:#}").contains("alias"), "{refused:#}");
+    // #11823: the old id is a live alias, which a create reports as
+    // existing; it must still never recreate (shadow) the old palace.
+    let created = created.expect("creating the old id answers exists");
+    assert_eq!(created["status"], "exists", "{created}");
+    assert_eq!(created["alias_of"], "rw-dst", "{created}");
+    assert!(
+        !root.join("rw-src").exists(),
+        "the create recreated the old dir"
+    );
     fx.shutdown().await;
 }
 

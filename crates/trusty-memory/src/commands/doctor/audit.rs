@@ -10,7 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::project_root::{PERSONAL_PALACE, PIN_FILE_REL, project_slug_at, read_project_pin};
+use crate::project_root::{
+    PERSONAL_PALACE, PIN_FILE_REL, read_project_pin, resolve_palace_for_project,
+};
 
 /// Outcome of a single palace audit entry for `doctor --fix-palaces`.
 ///
@@ -84,6 +86,9 @@ pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
     let Ok(entries) = std::fs::read_dir(registry_dir) else {
         return Vec::new();
     };
+    // #11823: the shared resolver's name for the project around the registry,
+    // resolved once; read-only (no pin write).
+    let ancestor_palace = resolve_palace_for_project(registry_dir).ok().map(|p| p.id);
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -114,11 +119,9 @@ pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
             continue;
         }
         // Check whether any ancestor of `registry_dir` is a project root
-        // whose slug matches the palace id. This catches the case where the
-        // user runs the daemon from inside a project tree.
-        let matches_ancestor = project_slug_at(registry_dir)
-            .map(|slug| slug == id)
-            .unwrap_or(false);
+        // whose palace matches the id. This catches the case where the user
+        // runs the daemon from inside a project tree.
+        let matches_ancestor = ancestor_palace.as_deref() == Some(id.as_str());
         if matches_ancestor {
             out.push(PalaceAuditEntry {
                 id,

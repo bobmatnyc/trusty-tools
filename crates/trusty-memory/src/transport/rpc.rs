@@ -863,9 +863,10 @@ mod tests {
         );
     }
 
-    /// Why (#9544): a `palace_create` refused because the id is a live alias
-    /// answered `-32603`, so a caller read a resolvable state clash as a daemon
-    /// fault. The refusal is `-32006`, matched by type, never by message.
+    /// Why (#9544): a `LiveAliasError` answered `-32603`, so a caller read a
+    /// resolvable state clash as a daemon fault. The refusal is `-32006`,
+    /// matched by type, never by message. #11823: `palace_create` itself now
+    /// answers `exists` for a live alias name instead of refusing.
     /// What: maps a context-wrapped `LiveAliasError` directly, then sends a
     /// `palace_create` for a live alias name through `dispatch`.
     /// Test: itself.
@@ -909,8 +910,11 @@ mod tests {
             method: "palace_create".to_string(),
             params: Some(json!({"name": "personal"})),
         };
-        let err = dispatch(&state, req).await.error.expect("error");
-        assert_eq!(err.code, error_codes::REFUSED, "{}", err.message);
+        let resp = dispatch(&state, req).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(result["status"], "exists", "{result}");
+        assert_eq!(result["alias_of"], "rpc-target", "{result}");
         assert!(!state.data_root.join("personal/palace.json").exists());
     }
 

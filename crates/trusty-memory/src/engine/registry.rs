@@ -35,6 +35,10 @@ use std::time::Duration;
 #[path = "registry_rename.rs"]
 mod rename;
 pub use rename::PalaceRenameError;
+// #11823: create never overwrites an existing palace; split out for the cap.
+#[path = "registry_create.rs"]
+mod create;
+pub use create::PalaceCreateOutcome;
 // #10989: an unload answers unloaded only once the palace's files are closed.
 #[cfg(feature = "server")]
 pub(crate) use rename::await_files_closed;
@@ -945,56 +949,6 @@ impl PalaceRegistry {
             Some(target) => PalaceId::new(target),
             None => palace_id.clone(),
         }
-    }
-
-    /// Create and persist a new palace, then open it.
-    ///
-    /// Why: `palace new` saves metadata and immediately wants a working handle
-    /// for further operations; combining the steps avoids a TOCTOU between
-    /// save and open.
-    /// What: Refuses with [`trusty_common::palace_alias::LiveAliasError`] when the id is
-    /// a live alias (#9544), since a new palace would shadow it, and fails when
-    /// the alias file cannot be read. Otherwise
-    /// computes `data_dir = data_root/<id>`, writes `palace.json`, and
-    /// returns a freshly opened handle (registered in the LRU cache, possibly
-    /// evicting the LRU entry if at capacity).
-    /// Test: `registry_create_and_open`, `palace_create_refuses_a_live_alias_name`,
-    /// `palace_create_fails_when_the_alias_file_is_unreadable`.
-    pub fn create_palace(&self, data_root: &Path, mut palace: Palace) -> Result<Arc<PalaceHandle>> {
-        // #9659: an observer registry never creates a palace.
-        anyhow::ensure!(
-            self.open_intent != OpenIntent::Observer,
-            "palace {} does not exist; a read-only observer never creates one",
-            palace.id
-        );
-        // #9544: a live alias name stays an alias; creating it would shadow it.
-        // An unreadable alias file fails the create rather than skipping the check.
-        if let Some(target) =
-            trusty_common::palace_alias::try_alias_target_if_absent(data_root, palace.id.as_str())
-                .with_context(|| format!("check palace id {} against the alias map", palace.id))?
-        {
-            return Err(trusty_common::palace_alias::LiveAliasError {
-                alias: palace.id.as_str().to_string(),
-                target,
-            }
-            .into());
-        }
-        // Always anchor data_dir under data_root/<id> so callers can pass a
-        // bare Palace without worrying about path layout.
-        let palace_dir = data_root.join(palace.id.as_str());
-        palace.data_dir = palace_dir.clone();
-        std::fs::create_dir_all(&palace_dir)
-            .with_context(|| format!("create palace dir {}", palace_dir.display()))?;
-        PalaceStore::save_palace(&palace)
-            .with_context(|| format!("save palace metadata for {}", palace.id))?;
-        // Issue #1487: honour the registry's open intent (Writer on the HTTP
-        // daemon) so a freshly-created palace is opened under the same
-        // fail-loud contract as a re-opened one.
-        let handle = self.open_handle(&palace)?;
-        // ADR-0027 T2: name the rooms this palace's drawers already sit in.
-        Self::backfill_rooms(&handle);
-        self.register_arc(handle.clone());
-        Ok(handle)
     }
 
     /// List every palace persisted under `data_root`.

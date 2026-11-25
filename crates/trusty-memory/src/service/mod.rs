@@ -22,6 +22,8 @@ pub mod core_recall;
 pub mod helpers;
 // #11255: per-instance operation limits and their `AppState` builders.
 pub mod op_limits;
+// #11823: the one palace-create flow behind MCP and `create_palace`.
+pub mod palace_create;
 // #7125: the bounded batch fan-out the recall-all family runs on.
 pub mod recall_stream;
 // #9544: `palace_rename`, kept out of `core.rs` for the SLOC cap.
