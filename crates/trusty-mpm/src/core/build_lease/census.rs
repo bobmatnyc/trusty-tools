@@ -24,6 +24,7 @@ use super::config::BuildLeaseConfig;
 use super::slots::HolderRecord;
 use crate::core::build_probe::{
     BuildGroup, ProcessSampler, ProcessSnapshot, SysinfoSampler, build_groups, is_compiler_process,
+    thread_leader,
 };
 
 /// Bound on one ancestry walk, as in `build_probe`.
@@ -254,24 +255,6 @@ fn lease_processes() -> Result<LeaseProcesses, String> {
         thread_of: thread_leader(proc_.thread_kind(), proc_.parent().map(Pid::as_u32)),
     });
     Ok(select_lease_processes(me, my_start, rows))
-}
-
-/// The process a table row is a thread of, or `None` for a process row.
-///
-/// Why: on Linux sysinfo lists each non-leader thread as a row of its own,
-/// marked `ThreadKind::Userland` with its leader as parent (#10260). On every
-/// other OS `Process::thread_kind` is always `None`, and macOS fills the table
-/// from `proc_listallpids`, which returns process ids only, so no thread row
-/// exists there to over-count.
-/// What: a `Userland` row with a parent maps to that parent; anything else is a
-/// process. A `Userland` row with no parent stays a process, so no real process
-/// is ever dropped.
-/// Test: `only_userland_rows_with_a_parent_are_threads`.
-fn thread_leader(kind: Option<sysinfo::ThreadKind>, parent: Option<u32>) -> Option<u32> {
-    match kind {
-        Some(sysinfo::ThreadKind::Userland) => parent,
-        _ => None,
-    }
 }
 
 /// One process-table row, as [`select_lease_processes`] reads it.
