@@ -1,11 +1,16 @@
-//! The secret-shape test of `ilio check`.
+//! The secret-shape test of `ilio check` and of the IL packet path.
 //!
 //! Why: an IL block records where a secret lives, never its value. `ilio.py`
 //! rejects a field matching
 //! `(?i)(ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY|(?:password|secret|token|api[_-]?key)\s*[:=]\s*\S{8,})`.
+//! The crate once had two ports of it (this one and `ledger/il/secret.rs`);
+//! #10571 keeps one, the union of what both caught.
 //! What: [`looks_secret`] runs the six alternatives by hand, anywhere in the text,
-//! caselessly, with Python's `\s` and `\S`.
-//! Test: `secret_shapes_match`, `near_misses_do_not`.
+//! caselessly (`re.IGNORECASE` folding), and tries the assignment alternative
+//! under both whitespace classes the two ports used: Python's `\s`/`\S` and
+//! Rust's `char::is_whitespace`.
+//! Test: `secret_shapes_match`, `near_misses_do_not`,
+//! `merged_detector_catches_every_input_either_old_detector_caught`.
 
 use crate::pystr::{contains_ci, is_space, starts_with_ci};
 
@@ -20,6 +25,17 @@ fn alnum(c: char) -> bool {
     c.is_ascii_alphanumeric()
 }
 
+/// `\s*[:=]\s*\S{8,}` from `j`, with `space` as the `\s` class.
+fn assigned(t: &[char], mut j: usize, space: fn(char) -> bool) -> bool {
+    j += run(t, j, space);
+    if !matches!(t.get(j), Some(':' | '=')) {
+        return false;
+    }
+    j += 1;
+    j += run(t, j, space);
+    run(t, j, |c| !space(c)) >= 8
+}
+
 fn assignment(t: &[char], i: usize) -> bool {
     let mut after = None;
     for kw in [
@@ -30,14 +46,10 @@ fn assignment(t: &[char], i: usize) -> bool {
             break;
         }
     }
-    let Some(mut j) = after else { return false };
-    j += run(t, j, is_space);
-    if !matches!(t.get(j), Some(':' | '=')) {
-        return false;
-    }
-    j += 1;
-    j += run(t, j, is_space);
-    run(t, j, |c| !is_space(c)) >= 8
+    let Some(j) = after else { return false };
+    // #10571: Python `\s` (the ilio check port) or Rust whitespace (the IL
+    // packet port); each caught a `\x1c`-`\x1f` case the other missed.
+    assigned(t, j, is_space) || assigned(t, j, char::is_whitespace)
 }
 
 /// True when `text` carries a secret-shaped value.
@@ -101,6 +113,41 @@ mod tests {
             "",
         ] {
             assert!(!looks_secret(no), "{no}");
+        }
+    }
+
+    /// #10571: every alternative of both old ports, plus the inputs only one
+    /// of them caught, must still be caught by the one detector left.
+    #[test]
+    fn merged_detector_catches_every_input_either_old_detector_caught() {
+        for (why, yes) in [
+            // Both ports: one input per alternative and keyword spelling.
+            ("ghp_", "x ghp_ABCDEFGHIJ0123456789 y"),
+            ("sk-", "used sk-abcdefghij0123456789"),
+            ("sk- with _ and -", "sk-abc_def-ghi_jkl-mno_pq"),
+            ("AKIA", "AKIA0123456789ABCDEF"),
+            ("xoxa", "xoxa-0123456789"),
+            ("xoxb", "XOXB-abc-def-ghij"),
+            ("xoxp", "xoxp-0123456789"),
+            ("private key", "-----begin rsa private key"),
+            ("private key, ec", "-----BEGIN EC PRIVATE KEY-----"),
+            ("password", "act: rotated, password: hunter2hunter2"),
+            ("secret", "secret=abcdefgh"),
+            ("token", "TOKEN : abcdefgh"),
+            ("api_key", "api_key=abcdefgh"),
+            ("api-key", "act: set API-KEY = abcdefgh1234"),
+            ("apikey", "apikey:abcdefgh"),
+            // Only the old ilio-check port (Python `\s`, `re` folding).
+            ("\\x1c as \\s", "password\u{1c}: abcdefgh"),
+            ("\\x1f before the =", "token\u{1f}=abcdefgh"),
+            ("Kelvin sign folds to k", "to\u{212a}en: abcdefgh"),
+            ("long s folds to s", "\u{17f}ecret: abcdefgh"),
+            ("dotless i folds to i", "AP\u{131}KEY=abcdefgh"),
+            // Only the old IL packet port (Rust whitespace: `\x1c` is `\S`).
+            ("\\x1c inside the value", "password: abc\u{1c}defgh"),
+            ("\\x1d inside the value", "secret=ab\u{1d}cdefgh"),
+        ] {
+            assert!(looks_secret(yes), "{why}: {yes:?}");
         }
     }
 }

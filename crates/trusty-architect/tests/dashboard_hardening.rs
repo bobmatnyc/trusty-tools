@@ -4,10 +4,13 @@
 //! the daemon (owner ruling D34). #11064: a technical level outside the six
 //! is refused on every write path, whatever the schema mode.
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+use common::no_secret;
 use serde_json::{Map, Value, json};
 use trusty_architect::dashboard::rpc::METHODS;
 use trusty_architect::dashboard::store::{Versioned, dir, jsonl};
@@ -16,10 +19,6 @@ use trusty_architect::dashboard::{DashError, DeleteArchive, Format, Op, PruneLog
 type R = Result<(), Box<dyn std::error::Error>>;
 
 const FORMATS: [Format; 2] = [Format::Dir, Format::Jsonl];
-
-fn no_secret(_: &str) -> Option<String> {
-    None
-}
 
 fn obj(v: Value) -> Map<String, Value> {
     match v {

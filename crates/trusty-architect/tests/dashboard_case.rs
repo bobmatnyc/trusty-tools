@@ -3,9 +3,11 @@
 //! overwrote `A01` (code-critic repro). Both formats refuse such a write, and
 //! a read never answers one name with another name's body.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+mod common;
 
+use std::path::Path;
+
+use common::{no_secret, snapshot};
 use serde_json::json;
 use trusty_architect::dashboard::{DashError, DeleteArchive, Format, Op, Removed, Store};
 
@@ -21,33 +23,10 @@ impl DeleteArchive for Accept {
     }
 }
 
-/// A test scanner: nothing is secret-shaped.
-fn no_secret(_: &str) -> Option<String> {
-    None
-}
-
 fn store(root: &Path, format: Format) -> Store {
     Store::new(root, format)
         .with_archive(Box::new(Accept))
         .with_secret_scan(no_secret)
-}
-
-/// Every file under `root` with its bytes, `.lock` excluded.
-fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.file_name().is_some_and(|n| n != ".lock") {
-                out.push((path.clone(), fs::read(&path).unwrap_or_default()));
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 fn is_case_refusal(got: &Result<impl std::fmt::Debug, DashError>, other: &str) -> bool {

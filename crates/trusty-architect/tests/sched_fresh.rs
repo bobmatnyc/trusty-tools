@@ -1,21 +1,13 @@
 //! Artifact freshness: glob mtimes and stamp files (MB1595). The escalation
 //! flow lives in tests/sched_engine.rs.
 
+mod common;
 mod sched_support;
 
-use std::time::{Duration, UNIX_EPOCH};
-
+use common::stamp_file;
 use sched_support::*;
 use trusty_architect::sched::config::Registry;
 use trusty_architect::sched::fresh::{Freshness, check};
-
-fn stamp_file(path: &std::path::Path, mtime: i64) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, "x").unwrap();
-    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    f.set_modified(UNIX_EPOCH + Duration::from_secs(mtime as u64))
-        .unwrap();
-}
 
 fn check_job(kind: &str, path: &str) -> Registry {
     let check =
