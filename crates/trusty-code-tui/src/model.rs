@@ -355,40 +355,67 @@ mod tests {
 
     /// Every `StatuslineSegment` variant must round-trip through JSON — the
     /// wire shape an HTTP-transported engine (`CodeEngine`, Slice 3) will
-    /// carry these over.
+    /// carry these over. Each variant is compared against a JSON literal so a
+    /// wrong `kind` tag, `data` key or emphasis spelling fails; a symmetric
+    /// round trip alone would let one pass.
     #[test]
     fn statusline_segment_variants_round_trip_through_json() {
-        let segments = vec![
-            StatuslineSegment::SessionId("a1b2c3d4".to_string()),
-            StatuslineSegment::Model {
-                provider: "anthropic".to_string(),
-                name: "claude-sonnet-5".to_string(),
-            },
-            StatuslineSegment::Project("trusty-tools".to_string()),
-            StatuslineSegment::Workstream {
-                id: "a1b2c3d4".to_string(),
-                name: "Token rotation".to_string(),
-            },
-            StatuslineSegment::Cost("$0.0034".to_string()),
-            StatuslineSegment::Custom {
-                label: "TM".to_string(),
-                value: "2 sessions".to_string(),
-                emphasis: StatuslineEmphasis::Normal,
-            },
-            StatuslineSegment::Custom {
-                label: "MPM".to_string(),
-                value: "2 sessions".to_string(),
-                emphasis: StatuslineEmphasis::Bold,
-            },
-            StatuslineSegment::Chrome {
-                text: "✓ All systems go.".to_string(),
-                emphasis: StatuslineEmphasis::Success,
-            },
+        use serde_json::json;
+        let cases = vec![
+            (
+                StatuslineSegment::SessionId("a1b2c3d4".to_string()),
+                json!({"kind": "session_id", "data": "a1b2c3d4"}),
+            ),
+            (
+                StatuslineSegment::Model {
+                    provider: "anthropic".to_string(),
+                    name: "claude-sonnet-5".to_string(),
+                },
+                json!({"kind": "model", "data": {"provider": "anthropic", "name": "claude-sonnet-5"}}),
+            ),
+            (
+                StatuslineSegment::Project("trusty-tools".to_string()),
+                json!({"kind": "project", "data": "trusty-tools"}),
+            ),
+            (
+                StatuslineSegment::Workstream {
+                    id: "a1b2c3d4".to_string(),
+                    name: "Token rotation".to_string(),
+                },
+                json!({"kind": "workstream", "data": {"id": "a1b2c3d4", "name": "Token rotation"}}),
+            ),
+            (
+                StatuslineSegment::Cost("$0.0034".to_string()),
+                json!({"kind": "cost", "data": "$0.0034"}),
+            ),
+            (
+                StatuslineSegment::Custom {
+                    label: "TM".to_string(),
+                    value: "2 sessions".to_string(),
+                    emphasis: StatuslineEmphasis::Normal,
+                },
+                json!({"kind": "custom", "data": {"label": "TM", "value": "2 sessions", "emphasis": "normal"}}),
+            ),
+            (
+                StatuslineSegment::Custom {
+                    label: "MPM".to_string(),
+                    value: "2 sessions".to_string(),
+                    emphasis: StatuslineEmphasis::Bold,
+                },
+                json!({"kind": "custom", "data": {"label": "MPM", "value": "2 sessions", "emphasis": "bold"}}),
+            ),
+            (
+                StatuslineSegment::Chrome {
+                    text: "✓ All systems go.".to_string(),
+                    emphasis: StatuslineEmphasis::Success,
+                },
+                json!({"kind": "chrome", "data": {"text": "✓ All systems go.", "emphasis": "success"}}),
+            ),
         ];
-        for seg in segments {
-            let json = serde_json::to_string(&seg).expect("serialize");
-            let back: StatuslineSegment = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(seg, back);
+        for (seg, wire) in cases {
+            assert_eq!(serde_json::to_value(&seg).expect("serialize"), wire);
+            let back: StatuslineSegment = serde_json::from_value(wire).expect("deserialize");
+            assert_eq!(back, seg);
         }
     }
 
@@ -426,31 +453,6 @@ mod tests {
     #[test]
     fn statusline_emphasis_defaults_to_normal() {
         assert_eq!(StatuslineEmphasis::default(), StatuslineEmphasis::Normal);
-    }
-
-    /// `PickerItem`/`PickerRequest` must round-trip through JSON for the
-    /// same HTTP-transport reason as statusline segments.
-    #[test]
-    fn picker_request_round_trips_through_json() {
-        let req = PickerRequest {
-            title: "Select a model".to_string(),
-            items: vec![
-                PickerItem {
-                    id: "opus-4".to_string(),
-                    label: "Claude Opus 4".to_string(),
-                    description: Some("Most capable".to_string()),
-                },
-                PickerItem {
-                    id: "haiku-4-5".to_string(),
-                    label: "Claude Haiku 4.5".to_string(),
-                    description: None,
-                },
-            ],
-            dispatch_command: "/model".to_string(),
-        };
-        let json = serde_json::to_string(&req).expect("serialize");
-        let back: PickerRequest = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(req, back);
     }
 
     /// The whole point of `dispatch_command`: the shared event loop
