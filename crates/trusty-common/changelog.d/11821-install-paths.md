@@ -1,0 +1,3 @@
+Added
+- `install_paths` module: `InstallPaths::resolve()` returns the absolute projects root, config dir (holding `.trusty-tools` and `.trusty-mpm`), Claude config dir and Codex home, with the winning source per key (flag, env, install file or default). Reads the new `TRUSTY_MPM_CONFIG_DIR` env var and `~/.trusty-tools/install.toml`; a relative, empty or unknown value is a typed error. `write_install_file` is the one writer (#11821).
+- `workspace_layout::resolve_workspace_root` and `crate_config::crate_config_dir` / `crate_config_path` now read those sources too; with no new env var or install file their results are unchanged. `thiserror` and `toml` become unconditional dependencies.

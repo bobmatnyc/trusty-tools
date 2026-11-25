@@ -40,7 +40,8 @@ use serde::de::DeserializeOwned;
 /// convention cannot drift to `.trusty_tools` / `.trustytools` variants.
 /// What: `".trusty-tools"`.
 /// Test: `crate_config_path_layout`.
-pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+// See #11821: one definition, shared with `install_paths`.
+pub const TRUSTY_TOOLS_DIR: &str = crate::install_paths::TOOLS_DIR_NAME;
 
 /// Canonical config filename within a crate's directory.
 ///
@@ -267,21 +268,28 @@ pub fn crate_config_path_at(base: &Path, crate_name: &str) -> PathBuf {
 ///
 /// Why: production callers want `~/.trusty-tools/<crate>` without resolving the
 /// home directory themselves.
-/// What: `~/.trusty-tools/<crate_name>`. Returns `None` only when the home
-/// directory cannot be determined (a stripped CI environment).
-/// Test: covered indirectly via `crate_config_dir_at`.
+/// What: `<config_dir>/.trusty-tools/<crate_name>`, where the config dir is
+/// `$HOME` unless `TRUSTY_MPM_CONFIG_DIR` or `install.toml` moves it (#11821).
+/// Returns `None` only when the home directory cannot be determined (a
+/// stripped CI environment).
+/// Test: `process_env_wrappers_match_today`.
 pub fn crate_config_dir(crate_name: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|home| crate_config_dir_at(&home, crate_name))
+    // See #11821
+    crate::install_paths::config_dir_for_legacy_wrapper()
+        .map(|base| crate_config_dir_at(&base, crate_name))
 }
 
 /// Resolve the canonical config file for `crate_name`.
 ///
 /// Why: the single path every crate reads/writes; surfacing it lets binaries log
 /// "edit this file" hints.
-/// What: `~/.trusty-tools/<crate_name>/config.yaml`. `None` when home is unknown.
-/// Test: covered indirectly via `crate_config_path_at`.
+/// What: `<config_dir>/.trusty-tools/<crate_name>/config.yaml`, the config
+/// dir resolved as in [`crate_config_dir`]. `None` when home is unknown.
+/// Test: `process_env_wrappers_match_today`.
 pub fn crate_config_path(crate_name: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|home| crate_config_path_at(&home, crate_name))
+    // See #11821
+    crate::install_paths::config_dir_for_legacy_wrapper()
+        .map(|base| crate_config_path_at(&base, crate_name))
 }
 
 /// Load and deserialise the config at an explicit path.
