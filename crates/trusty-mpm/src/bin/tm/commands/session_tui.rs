@@ -50,7 +50,9 @@
 
 pub(crate) mod layout;
 pub(crate) mod new_session;
+pub(crate) mod new_session_cwd;
 pub(crate) mod new_session_entry;
+pub(crate) mod new_session_label;
 pub(crate) mod new_session_name;
 pub(crate) mod new_session_order;
 pub(crate) mod render;
@@ -59,6 +61,10 @@ pub(crate) mod state;
 #[cfg(test)]
 #[path = "session_tui/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_tui/new_session_cwd_tests.rs"]
+mod new_session_cwd_tests;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use trusty_mpm::client::ManagedSessionSummary;
@@ -176,10 +182,15 @@ pub(crate) async fn run_session_tui(
             // the picker's rows, so no second daemon read is made for it.
             Action::NewSession => match new_session::fetch_targets(client, url, &sessions).await {
                 Ok(targets) => {
-                    // #7406: open on the project of the row the cursor is on.
+                    // #11822: open on the cwd repo; #7406's cursor rule is the
+                    // fallback when the cwd is no GitHub-backed checkout.
                     let cursor = sessions.get(state.selected());
+                    let cwd = scope
+                        .repo_url
+                        .as_deref()
+                        .and_then(new_session::derive_identity);
                     state.open_new_session(
-                        new_session::NewSessionFlow::new(targets).preselected_for(cursor),
+                        new_session::NewSessionFlow::new(targets).preselected(cwd, cursor),
                     );
                     continue;
                 }

@@ -1658,7 +1658,7 @@ fn new_session_preselects_the_cursor_sessions_project() {
     let flow = NewSessionFlow::with_resolver(targets.clone(), stub_identity)
         .preselected_for(Some(&cursor));
     let rows = flow.rows();
-    assert_eq!(rows[2], "▸ contoso/ledger", "{rows:?}");
+    assert_eq!(rows[2], "▸ contoso/ledger · registered", "{rows:?}");
     assert!(!rows[0].starts_with('▸'), "{rows:?}");
 
     // A session with no `repo_url` is matched on its `owner/repo` source id.
@@ -1699,9 +1699,9 @@ fn new_session_rows_show_owner_repo_only() {
     assert_eq!(
         flow.rows(),
         vec![
-            "▸ bobmatnyc/trusty-tools".to_string(),
-            "  widgets (local)".to_string(),
-            "  nameless (local)".to_string(),
+            "▸ bobmatnyc/trusty-tools · registered".to_string(),
+            "  widgets (local) · registered".to_string(),
+            "  nameless (local) · registered".to_string(),
             "  other — type a project path…".to_string(),
         ]
     );
@@ -1789,10 +1789,13 @@ fn render_new_session_rows_at_eighty_columns() {
         );
     }
     assert!(
-        rows.contains(&"▸ bobmatnyc/trusty-tools".to_string()),
+        rows.contains(&"▸ bobmatnyc/trusty-tools · registered".to_string()),
         "{rows:?}"
     );
-    assert!(rows.contains(&"  widgets (local)".to_string()), "{rows:?}");
+    assert!(
+        rows.contains(&"  widgets (local) · registered".to_string()),
+        "{rows:?}"
+    );
     let joined = screen.join("\n");
     assert!(
         !joined.contains("https://"),
@@ -1912,7 +1915,7 @@ fn new_session_typing_filters_the_rows() {
     assert_eq!(
         flow.rows(),
         vec![
-            "▸ zed/zeta".to_string(),
+            "▸ zed/zeta · registered".to_string(),
             "  other — type a project path…".to_string(),
         ],
         "the filter did not narrow the rows"
