@@ -88,7 +88,8 @@ CASES = [
     ("r5_not_local", "#[test] fn t() { let n = compute(); assert_eq!(n, MAX); }", []),
     # R6 ignore
     ("r6_bare_ignore", "#[test]\n#[ignore]\nfn t() { assert_eq!(f(), 1); }", ["R6"]),
-    ("r6_demo_intent", '#[test]\n#[ignore = "intent(demo): wire later"]\nfn t() { assert_eq!(f(), 1); }', ["R6"]),
+    # The marker is split so check_demo_intentions.sh does not match this fixture.
+    ("r6_demo_intent", '#[test]\n#[ignore = "intent(demo' + '): wire later"]\nfn t() { assert_eq!(f(), 1); }', ["R6"]),
     ("r6_not_reasoned", '#[test]\n#[ignore = "touches the real Keychain"]\nfn t() { assert_eq!(f(), 1); }', []),
 ]
 
