@@ -230,9 +230,14 @@ mod tests {
         assert!(Priority::P2 < Priority::P3);
     }
 
+    /// `Workstream` is the ledger's on-disk record, so the JSON field names
+    /// and enum spellings are pinned against a literal; a symmetric round
+    /// trip would let a wrong `rename_all` pass.
     #[test]
     fn workstream_serde_round_trip() {
-        let now = Utc::now();
+        let at = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let ws = Workstream {
             id: "ws-1".into(),
             ticket_ref: "#3008".into(),
@@ -240,15 +245,29 @@ mod tests {
             assigned_harness: Harness::Tm,
             session_ids: vec!["sess-1".into()],
             status: WorkstreamStatus::InProgress,
-            created_at: now,
+            created_at: at,
             target_date: None,
             priority: Priority::P1,
-            blockers: vec![],
-            dependencies: vec![],
-            last_updated: now,
+            blockers: vec!["#1".into()],
+            dependencies: vec!["ws-0".into()],
+            last_updated: at,
         };
-        let json = serde_json::to_string(&ws).unwrap();
-        let back: Workstream = serde_json::from_str(&json).unwrap();
-        assert_eq!(ws, back);
+        let wire = serde_json::json!({
+            "id": "ws-1",
+            "ticket_ref": "#3008",
+            "title": "heterogeneous ledger",
+            "assigned_harness": "tm",
+            "session_ids": ["sess-1"],
+            "status": "in_progress",
+            "created_at": "2026-01-02T03:04:05Z",
+            "target_date": null,
+            "priority": "P1",
+            "blockers": ["#1"],
+            "dependencies": ["ws-0"],
+            "last_updated": "2026-01-02T03:04:05Z",
+        });
+        assert_eq!(serde_json::to_value(&ws).unwrap(), wire);
+        let back: Workstream = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, ws);
     }
 }

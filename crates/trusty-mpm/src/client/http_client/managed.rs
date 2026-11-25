@@ -178,7 +178,9 @@ impl DaemonClient {
     ///
     /// Why: drive a harness with a prompt without attaching to tmux.
     /// What: POSTs `{ text }` and returns the [`ManagedSendInputResponse`].
-    /// Test: live HTTP via `tests/session_manager_mvp.rs`.
+    /// #11796: a refusal (409 `sent: false`) keeps the daemon's reason, so
+    /// `tm sessions send` exits non-zero and prints why nothing was sent.
+    /// Test: `rest_send_refuses_a_typed_draft` (the route half).
     pub async fn send_to_managed_session(
         &self,
         id: &str,
@@ -191,11 +193,8 @@ impl DaemonClient {
                 text: text.to_string(),
             })
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
-        Ok(resp)
+        response_or_body_error(resp).await?.json().await
     }
 
     /// Answer a pending decision via `POST .../{id}/answer`.

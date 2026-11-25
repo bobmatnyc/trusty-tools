@@ -3,7 +3,10 @@
 Why: Phase 0 flags candidates for review without a model; every rule must be
   reproducible from source text alone so a re-run fires the same set.
 What: `per_test_rules(test, asset_names)` returns `{rule_id: detail}` for one
-  test. R1 (duplicates) needs every test at once and lives in dupes.py.
+  test, over the `ACTIVE` rules only. R1 (duplicates) needs every test at
+  once and lives in dupes.py. R2 and R4 are `DROPPED` (100% false flags in
+  the pilot, Architect 2026-11-25): defined below for history, never run by
+  default.
   R2 text pin: a compared assertion argument references embedded prose — an
      `include_str!` of a .md/.txt/.prompt-style file (directly, through a
      file-level const/static/loader fn, or through a local bound from one), or
@@ -315,14 +318,25 @@ def rule_r6(test: TestFn) -> str | None:
     return None
 
 
+ALL_RULES = frozenset({"R2", "R3", "R4", "R5", "R6"})
+# #11268: R2 and R4 were 100% false flags in the pilot; dropped (Architect
+# 2026-11-25). Their definitions stay for history and are reachable with
+# `enabled=ALL_RULES`.
+DROPPED = frozenset({"R2", "R4"})
+ACTIVE = ALL_RULES - DROPPED
+
+
 def per_test_rules(test: TestFn, asset_names: dict[str, str],
-                   helpers: frozenset[str] = frozenset()) -> dict[str, str]:
+                   helpers: frozenset[str] = frozenset(),
+                   enabled: frozenset[str] = ACTIVE) -> dict[str, str]:
+    """`{rule_id: detail}` for the rules in `enabled` that fire on `test`."""
     asserts = scan_assertions(test.body, test.attrs, helpers)
-    found = {
-        "R2": rule_r2(test, asserts, asset_names),
-        "R3": rule_r3(asserts),
-        "R4": rule_r4(test, asserts),
-        "R5": rule_r5(test, asserts),
-        "R6": rule_r6(test),
+    checks = {
+        "R2": lambda: rule_r2(test, asserts, asset_names),
+        "R3": lambda: rule_r3(asserts),
+        "R4": lambda: rule_r4(test, asserts),
+        "R5": lambda: rule_r5(test, asserts),
+        "R6": lambda: rule_r6(test),
     }
+    found = {k: check() for k, check in checks.items() if k in enabled}
     return {k: v for k, v in found.items() if v}

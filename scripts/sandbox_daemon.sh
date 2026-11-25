@@ -89,6 +89,7 @@
 # Usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR]
 #                                  [--credential NAME=<ref>]
 #                                  [--allow-stale] [--dry-run]
+#                                  [--projects-root PATH] [--config-dir PATH]
 #   --bin PATH  the tm binary (default: `tm` on PATH). A build-lease slot's
 #               binary is <slot>/debug/tm; the lease prints <slot> on stderr
 #   --allow-stale  run a build artifact older than its sources, with a warning
@@ -100,6 +101,11 @@
 #   --credential NAME=<ref>  admit one provider key, resolved from <ref> by
 #               `tm secrets exec` (#10721); the ref is never printed
 #   --dry-run   validate and print what would run; create and start nothing
+#   --projects-root PATH, --config-dir PATH  move the sandbox's install paths
+#               (#11821): written to <dir>/home/.trusty-tools/install.toml;
+#               each must be absolute and inside --dir, which they require.
+#               Without them, an existing install.toml there must name only
+#               paths inside <dir>. scripts/lib/sandbox_install_paths.sh.
 # Exit: the daemon's status; 1 on a refusal, or when teardown leaves a process
 #   under <dir>, refuses a symlinked socket dir, or cannot run its survivor
 #   check, after a clean daemon exit; 2 on a usage error.
@@ -114,6 +120,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bin_fresh.sh
 . "$SCRIPT_DIR/lib/bin_fresh.sh"
+# shellcheck source=scripts/lib/sandbox_install_paths.sh
+. "$SCRIPT_DIR/lib/sandbox_install_paths.sh"
 
 # Always set by this script. Keep in step with the exec below.
 # #9178: TRUSTY_SANDBOX=1 stops trusty-common loading any `.env.local`.
@@ -132,6 +140,7 @@ die() {
 
 usage() {
   echo "usage: scripts/sandbox_daemon.sh [--bin PATH] [--port N] [--dir DIR] [--credential NAME=<ref>] [--allow-stale] [--dry-run]" >&2
+  echo "                                   [--projects-root PATH] [--config-dir PATH]" >&2
   exit 2
 }
 
@@ -173,6 +182,9 @@ while [ "$#" -gt 0 ]; do
       CRED_SPEC="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --allow-stale) ALLOW_STALE=1; shift ;;
+    # #11821 P6a: validated by sip_check once the sandbox dir is known.
+    --projects-root) [ "$#" -ge 2 ] || usage; SIP_PROJECTS="$2"; shift 2 ;;
+    --config-dir) [ "$#" -ge 2 ] || usage; SIP_CONFIG="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "sandbox_daemon: unknown argument: $1" >&2; usage ;;
   esac
@@ -252,6 +264,9 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
   done
 fi
 
+# #11821 P6a: admit only install paths inside the sandbox dir.
+sip_check sandbox_daemon "$SANDBOX" || exit 1
+
 # #9557: the sandbox's own tmux socket directory and socket.
 TMUX_DIR="$SANDBOX/data/tmux"
 SOCK="$TMUX_DIR/tmux-$(id -u)/default"
@@ -304,6 +319,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
+sip_write sandbox_daemon "$SANDBOX" || exit 1
 # #9161: never the caller's cwd; see the Working directory note in the header.
 # CDPATH stays set: the path is absolute, and CDPATH never rewrites one.
 cd "$SANDBOX/home" || die "cannot enter <dir>/home: $SANDBOX/home"

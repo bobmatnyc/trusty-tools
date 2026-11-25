@@ -277,7 +277,9 @@ impl WorkstreamConnector for TmConnector {
     ///
     /// Why: mirrors `daemon::managed_routes::send_to_session`.
     /// What: a 404 (unknown session) maps to
-    /// [`ConnectorError::NotFound`]; success is `()` — the daemon's
+    /// [`ConnectorError::NotFound`]; a 409 (#11796: the send was refused or
+    /// not delivered) maps to [`ConnectorError::Backend`] carrying the
+    /// daemon's reason; success is `()` — the daemon's
     /// `tmux_name` confirmation field is not surfaced through this trait.
     /// Test: `tm_tests::send_input_unknown_id_is_not_found`.
     async fn send_input(&self, session_id: &str, input: &str) -> Result<(), ConnectorError> {
@@ -292,7 +294,13 @@ impl WorkstreamConnector for TmConnector {
         if !resp.status().is_success() {
             return Err(map_error_response(resp).await);
         }
-        let _ack: ManagedSendInputResponse = resp.json().await.map_err(decode_err)?;
+        let ack: ManagedSendInputResponse = resp.json().await.map_err(decode_err)?;
+        if !ack.sent {
+            // #11796: fail closed on a body that says nothing was delivered.
+            return Err(ConnectorError::Backend(format!(
+                "session {session_id}: daemon reported sent=false"
+            )));
+        }
         Ok(())
     }
 

@@ -140,13 +140,9 @@ pub fn resolve(w: &Where) -> IlResult<Paths> {
 
 /// An exclusive lock on `.lock`, released when dropped.
 #[derive(Debug)]
-pub struct LockGuard(File);
-
-impl LockGuard {
-    /// The lock file's descriptor, for tests.
-    pub fn raw_fd(&self) -> i32 {
-        self.0.as_raw_fd()
-    }
+pub struct LockGuard {
+    // Held only so the lock lives until drop.
+    _file: File,
 }
 
 /// Takes `LOCK_EX` on `<dir>/.lock`, creating the directory and file, waiting at most `wait`.
@@ -165,7 +161,7 @@ pub fn lock(paths: &Paths, wait: Duration) -> IlResult<LockGuard> {
     loop {
         // SAFETY: the descriptor is open for the life of `file`; flock touches nothing else.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(LockGuard(file));
+            return Ok(LockGuard { _file: file });
         }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::WouldBlock {

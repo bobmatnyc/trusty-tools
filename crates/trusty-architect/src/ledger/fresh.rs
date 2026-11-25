@@ -95,7 +95,7 @@ fn code_ok(code: &str) -> bool {
 fn parse_ts(v: Option<&Value>) -> Option<i64> {
     let norm = super::limits::normalize_ts(v?.as_str()?).ok()?;
     let n = |r: std::ops::Range<usize>| norm.get(r)?.parse::<i64>().ok();
-    let days = crate::dashboard::derive::days_from_civil(n(0..4)?, n(5..7)?, n(8..10)?);
+    let days = crate::classify::alerts::days_from_civil(n(0..4)?, n(5..7)?, n(8..10)?);
     Some(days * 86_400 + n(11..13)? * 3_600 + n(14..16)? * 60 + n(17..19)?)
 }
 

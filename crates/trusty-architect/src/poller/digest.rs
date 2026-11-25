@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::classify::Alert;
-use crate::classify::alerts::iso;
+use crate::classify::alerts::{days_from_civil, iso};
 use crate::pystr::{is_digit, is_space, is_word};
 
 /// A typed wake longer than this cannot be confirmed in the input box.
@@ -281,15 +281,6 @@ fn parse_ts(text: &str) -> Option<f64> {
     let days = days_from_civil(y, mo, d);
     let t = (days * 86_400 + h * 3600 + mi * 60 + s) as f64;
     (iso(t) == text).then_some(t)
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 /// `wake_digest(alerts, msgs, path)`: one `<session> <kind>: <text>` item per

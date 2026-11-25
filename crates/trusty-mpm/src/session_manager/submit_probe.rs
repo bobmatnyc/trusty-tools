@@ -56,6 +56,21 @@ const ECHO_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// Rows the echo check reads; the input box sits at the bottom of the pane.
 const ECHO_PROBE_LINES: usize = 40;
 
+/// Interval between post-Enter reads while a paste still shows (#11798).
+const SUBMIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Longest wait for the receiver to commit a paste after Enter (#11798).
+///
+/// Why: the #11798 receiver committed its queued paste about 1 s after the
+/// Enter; three seconds covers that with margin and costs nothing on a send
+/// that commits at once.
+const SUBMIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Pane copy meaning the receiver is mid-turn, so it may still commit a
+/// queued paste (#11798). Mirrors `trusty_architect`'s `is_active` and
+/// `has_waiting` status matchers.
+const BUSY_MARKERS: &[&str] = &["esc to interrupt", "background agent"];
+
 /// What a post-send pane read could establish about the message's submission.
 ///
 /// Why: the pre-#5699 `sent: true` boolean conflated three distinct facts —
@@ -71,7 +86,9 @@ pub enum SubmitState {
     /// The pane still shows a collapsed bracketed paste — the text was typed
     /// but never committed.
     UnsubmittedPaste,
-    /// The pane could not be read, so neither outcome was established.
+    /// The pane could not be read, or (#11798) a busy receiver still showed
+    /// the paste when the re-read window closed; neither outcome was
+    /// established, so the sender must not resend.
     Unverified,
     /// #10747: the input box never showed the typed text (or a paste
     /// placeholder for it), so Enter was NOT pressed and the box was cleared.
@@ -93,7 +110,8 @@ impl SubmitState {
         }
     }
 
-    /// Why the message was not delivered; `None` when it may have been.
+    /// Why the message was not delivered, or (#11798) why delivery is
+    /// unconfirmed; `None` only for `Submitted`.
     pub fn reason(self) -> Option<&'static str> {
         match self {
             Self::UnsubmittedPaste => Some("the text sits unsubmitted as a collapsed paste"),
@@ -105,7 +123,12 @@ impl SubmitState {
                 "input_not_empty: the input box was not provably empty before typing; \
                  nothing was typed",
             ),
-            Self::Submitted | Self::Unverified => None,
+            // #11798: the sender must not resend; a resend delivers twice.
+            Self::Unverified => Some(
+                "unverified: submission could not be confirmed and the receiver may \
+                 still commit it; do not resend - read the pane first",
+            ),
+            Self::Submitted => None,
         }
     }
 
@@ -172,7 +195,8 @@ impl SessionManager {
     /// No echo by the deadline: `C-u` clears the box and the answer is
     /// [`SubmitState::NotEchoed`]. After Enter it re-captures the tail of the
     /// pane that gate proved (#9101: never a fresh, ungated lookup) and runs
-    /// [`classify_submit`] over it. A send that was REFUSED never reaches the
+    /// [`classify_submit`] over it, re-reading while a paste lingers (#11798,
+    /// [`Self::probe_after_enter`]). A send that was REFUSED never reaches the
     /// probe — the `Err` already says nothing was typed. A capture error
     /// yields an empty string, which [`classify_submit`] reads as
     /// [`SubmitState::Unverified`].
@@ -192,7 +216,7 @@ impl SessionManager {
         // have none, so they keep the type-plus-Enter send.
         if record.runtime != crate::runtime::RuntimeKind::ClaudeCode {
             let (name, pane) = self.inject_into_owned(id, text, Submit::Enter).await?;
-            return Ok(self.probe_after_enter(&name, &pane));
+            return Ok(self.probe_after_enter(&name, &pane).await);
         }
         let (record, pane) = self.live_owned_pane(id, record).await?;
         let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
@@ -225,16 +249,53 @@ impl SessionManager {
             }
         }
         key("Enter")?;
-        Ok(self.probe_after_enter(&name, &pane))
+        Ok(self.probe_after_enter(&name, &pane).await)
     }
 
-    /// The #5699 read after Enter: [`classify_submit`] over the pane's tail.
-    fn probe_after_enter(&self, name: &str, pane: &str) -> SubmitState {
-        let tail = self
-            .tmux
-            .capture_pane(name, pane, SUBMIT_PROBE_LINES)
-            .unwrap_or_default();
-        classify_submit(&tail)
+    /// The #5699 read after Enter, re-read while a paste lingers (#11798).
+    ///
+    /// Why: a busy receiver commits a queued paste about a second after the
+    /// Enter. One read taken before that reported `unsubmitted_paste`, and
+    /// the sender resent a message that was then delivered twice.
+    /// What: runs [`classify_submit`] over the pane's tail; while it reads
+    /// [`SubmitState::UnsubmittedPaste`], re-reads every [`SUBMIT_POLL`] for
+    /// up to [`SUBMIT_DEADLINE`]. The first `Submitted` read wins. A paste
+    /// still showing at the deadline goes through [`settle_paste`].
+    /// Test: `send_input_observed_waits_for_a_busy_receiver_to_commit_the_paste`,
+    /// `send_input_observed_is_unverified_when_a_busy_receiver_keeps_the_paste`
+    /// in `send_input_gate_tests.rs`.
+    async fn probe_after_enter(&self, name: &str, pane: &str) -> SubmitState {
+        let deadline = tokio::time::Instant::now() + SUBMIT_DEADLINE;
+        loop {
+            let tail = self
+                .tmux
+                .capture_pane(name, pane, SUBMIT_PROBE_LINES)
+                .unwrap_or_default();
+            let state = classify_submit(&tail);
+            // #11798: only a lingering paste is worth another read.
+            if state != SubmitState::UnsubmittedPaste {
+                return state;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return settle_paste(&tail);
+            }
+            tokio::time::sleep(SUBMIT_POLL).await;
+        }
+    }
+}
+
+/// The verdict for a paste still showing when [`SUBMIT_DEADLINE`] passes (#11798).
+///
+/// Why: a receiver mid-turn may still commit the paste after the window, so
+/// its lingering paste proves nothing; an idle receiver's does (#5699).
+/// What: [`SubmitState::Unverified`] when the tail shows a running turn (any
+/// [`BUSY_MARKERS`] entry), else [`SubmitState::UnsubmittedPaste`].
+/// Test: `settle_paste_*` in this module's `tests`.
+fn settle_paste(tail: &str) -> SubmitState {
+    if BUSY_MARKERS.iter().any(|m| tail.contains(m)) {
+        SubmitState::Unverified
+    } else {
+        SubmitState::UnsubmittedPaste
     }
 }
 
@@ -280,5 +341,25 @@ mod tests {
         assert_eq!(state, SubmitState::Unverified);
         assert!(state.delivered());
         assert_eq!(state.as_str(), "unverified");
+        // #11798: the reason tells the sender not to resend.
+        assert!(state.reason().is_some_and(|r| r.contains("do not resend")));
+    }
+
+    /// #11798: a paste on a receiver mid-turn may still be committed.
+    /// Test: itself.
+    #[test]
+    fn settle_paste_on_a_busy_receiver_is_unverified() {
+        let tail = "✻ Waiting for 1 background agent (esc to interrupt)\n❯ [Pasted text #1]";
+        assert_eq!(settle_paste(tail), SubmitState::Unverified);
+    }
+
+    /// #5699: a paste on an idle prompt is stuck; it stays a failure.
+    /// Test: itself.
+    #[test]
+    fn settle_paste_on_an_idle_prompt_is_unsubmitted() {
+        assert_eq!(
+            settle_paste("❯ [Pasted text #1][Pasted text #2]"),
+            SubmitState::UnsubmittedPaste
+        );
     }
 }
