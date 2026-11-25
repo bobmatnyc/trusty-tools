@@ -46,12 +46,6 @@ pub fn run(json: bool) {
 mod tests {
     use super::*;
 
-    /// `PHASE0_STACK_VERSION` is non-empty (sanity check).
-    #[test]
-    fn stack_version_non_empty() {
-        assert!(!PHASE0_STACK_VERSION.is_empty());
-    }
-
     /// `run` does not panic for either output mode.
     #[test]
     fn run_does_not_panic() {

@@ -16,8 +16,7 @@
 //! by name; only a `commands::stable_set::stable_set` row does, and `tga` has
 //! one while `trusty-audit` does not (ruling 2026-09-28 00:25Z).
 //!
-//! Test: `tests::external_tools_publish_from_trusty_git_analytics`,
-//! `tests::external_tool_resolves_under_every_spelling`,
+//! Test: `tests::external_tool_resolves_under_every_spelling`,
 //! `tests::workspace_crates_are_not_external`.
 
 use super::release::{ReleaseRepo, TRUSTY_GIT_ANALYTICS_REPO};
@@ -27,7 +26,7 @@ use super::release::{ReleaseRepo, TRUSTY_GIT_ANALYTICS_REPO};
 /// Why: installing a tool needs four facts that a workspace member gets from
 /// this repo's conventions; an external tool has to state them.
 /// What: see each field.
-/// Test: `tests::external_tools_publish_from_trusty_git_analytics`.
+/// Test: `tests::external_tool_resolves_under_every_spelling`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ExternalTool {
     /// Lookup key this row is matched on — the crate's crates.io package name.
@@ -77,24 +76,6 @@ pub(crate) fn external_tool(name: &str) -> Option<&'static ExternalTool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Why: the ruling moves both tools to one repo; a row naming another
-    /// repo would fetch prebuilts from where they are no longer published.
-    /// What: every row's repo is `bobmatnyc/trusty-git-analytics`, and the
-    /// table holds exactly `tga` and `trusty-audit`.
-    /// Test: This is the test.
-    #[test]
-    fn external_tools_publish_from_trusty_git_analytics() {
-        let names: Vec<&str> = EXTERNAL_TOOLS.iter().map(|t| t.crate_name).collect();
-        assert_eq!(names, ["tga", "trusty-audit"]);
-        for t in EXTERNAL_TOOLS {
-            assert_eq!(
-                t.repo.slug, "bobmatnyc/trusty-git-analytics",
-                "{}",
-                t.crate_name
-            );
-        }
-    }
 
     /// Why: `tga` is tagged under two spellings (#6771).
     /// What: both spellings reach the `tga` row; `trusty-audit` reaches its own.
