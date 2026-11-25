@@ -238,7 +238,7 @@ impl InstallPaths {
     ///
     /// Why: the zero-argument entry point for code with no CLI flags to pass.
     /// What: [`Self::resolve_overridden`] with empty [`PathOverrides`].
-    /// Test: `process_env_wrappers_match_today` (via the wrappers).
+    /// Test: `defaults_match_today` and the other `resolve_with` tests.
     pub fn resolve() -> Result<Self, InstallPathsError> {
         Self::resolve_overridden(&PathOverrides::default())
     }
@@ -257,11 +257,13 @@ impl InstallPaths {
     /// Resolve against an injected env lookup and home dir.
     ///
     /// Why: the pure core, so tests never mutate process-global env.
-    /// What: reads `<home>/.trusty-tools/install.toml` once (absent means no
-    /// file rung), then per key takes the first of override, env, file,
-    /// default. Override and env values are trimmed (empty env means unset)
+    /// What: per key takes the first of override, env, file, default. The
+    /// install file is read at most once, and only when some key is not decided
+    /// by an override or env (#11821), so a broken file cannot block a valid
+    /// env value. Override and env values are trimmed (empty env means unset)
     /// and `~`-expanded; every winning value must be absolute.
     /// Test: `flag_beats_env_file_and_default`, `env_beats_file_and_default`,
+    /// `env_wins_over_broken_file`,
     /// `file_beats_default`, `missing_file_means_default`,
     /// `relative_env_value_is_rejected`, `relative_flag_value_is_rejected`.
     pub fn resolve_with(
@@ -269,17 +271,21 @@ impl InstallPaths {
         home: &Path,
         overrides: &PathOverrides,
     ) -> Result<Self, InstallPathsError> {
-        let file = read_install_file(home)?;
-        let one = |key: Key| resolve_key(key, &env, home, overrides, file.as_ref());
-        let required = |key: Key| {
-            one(key)?.ok_or(InstallPathsError::Empty {
-                key: key.name(),
-                origin: PathSource::Default,
-            })
+        let mut file: Option<Option<InstallFile>> = None;
+        let mut one = |key: Key| -> Result<Option<ResolvedPath>, InstallPathsError> {
+            if let Some(hit) = resolve_early(key, &env, home, overrides)? {
+                return Ok(Some(hit));
+            }
+            if file.is_none() {
+                file = Some(read_install_file(home)?);
+            }
+            resolve_late(key, file.as_ref().and_then(Option::as_ref), home)
         };
+        let projects_root = required(Key::ProjectsRoot, one(Key::ProjectsRoot)?)?;
+        let config_dir = required(Key::ConfigDir, one(Key::ConfigDir)?)?;
         Ok(Self {
-            projects_root: required(Key::ProjectsRoot)?,
-            config_dir: required(Key::ConfigDir)?,
+            projects_root,
+            config_dir,
             claude_config_dir: one(Key::ClaudeConfigDir)?,
             codex_home: one(Key::CodexHome)?,
         })
@@ -296,13 +302,20 @@ impl InstallPaths {
     }
 }
 
-/// Resolve one key through the chain; `None` only for a key with no default.
-fn resolve_key(
+/// A key that always has a default must have resolved.
+fn required(key: Key, hit: Option<ResolvedPath>) -> Result<ResolvedPath, InstallPathsError> {
+    hit.ok_or(InstallPathsError::Empty {
+        key: key.name(),
+        origin: PathSource::Default,
+    })
+}
+
+/// The override and env rungs; `None` means neither decides the key.
+fn resolve_early(
     key: Key,
     env: &impl Fn(&str) -> Option<String>,
     home: &Path,
     overrides: &PathOverrides,
-    file: Option<&InstallFile>,
 ) -> Result<Option<ResolvedPath>, InstallPathsError> {
     if let Some(raw) = key.pick(overrides) {
         let expanded = expand_raw(raw, home);
@@ -312,6 +325,15 @@ fn resolve_key(
         let expanded = expand_tilde(raw.trim(), home);
         return absolute(key, PathSource::Env, expanded).map(Some);
     }
+    Ok(None)
+}
+
+/// The file and default rungs; `None` only for a key with no default.
+fn resolve_late(
+    key: Key,
+    file: Option<&InstallFile>,
+    home: &Path,
+) -> Result<Option<ResolvedPath>, InstallPathsError> {
     if let Some(path) = file.and_then(|f| key.pick_file(f)) {
         // install.toml values are taken literally: no `~`, no trimming.
         return absolute(key, PathSource::InstallFile, path.clone()).map(Some);
@@ -360,33 +382,48 @@ fn validate(key: &'static str, origin: PathSource, path: &Path) -> Result<(), In
 
 /// Resolve ONE key from the process env and `$HOME`, so a bad value under
 /// another key cannot change what a legacy wrapper returns.
+/// Env is checked before the file is read (#11821).
 fn resolve_process_key(key: Key) -> Result<Option<ResolvedPath>, InstallPathsError> {
     let home = dirs::home_dir().ok_or(InstallPathsError::NoHome)?;
-    let file = read_install_file(&home)?;
     let env = |name: &str| std::env::var(name).ok();
-    resolve_key(key, &env, &home, &PathOverrides::default(), file.as_ref())
+    if let Some(hit) = resolve_early(key, &env, &home, &PathOverrides::default())? {
+        return Ok(Some(hit));
+    }
+    let file = read_install_file(&home)?;
+    resolve_late(key, file.as_ref(), &home)
 }
 
-/// The process-env config dir for the legacy `crate_config_dir` wrapper.
+/// The process-env config dir for `crate_config`'s writers and `load`.
 ///
-/// Why: `crate_config_dir` returns `Option` and cannot surface an error, so
-/// its call sites see no behaviour change (#11821 P1).
-/// What: `Ok` yields the resolved config dir; `NoHome` yields `None`, as
-/// before; any other error is logged at `warn` and yields `$HOME`, the
-/// pre-#11821 value. `resolve()` still returns the typed error for P2's
-/// `tm paths show` and doctor row.
-/// Test: `process_env_wrappers_match_today`.
+/// Why: a broken install file must fail a write closed, never redirect it
+/// under `$HOME` (#11821).
+/// What: `Ok(Some(dir))` when resolved; `Ok(None)` when home is unknown (the
+/// pre-#11821 "no home" case); `Err` for a broken or invalid source that no
+/// higher rung overrides.
+/// Test: `save_fails_closed_on_broken_install_file`.
+#[cfg(feature = "crate-config")]
+pub(crate) fn config_dir_checked() -> Result<Option<PathBuf>, InstallPathsError> {
+    match resolve_process_key(Key::ConfigDir) {
+        Ok(resolved) => Ok(resolved.map(|r| r.path)),
+        Err(InstallPathsError::NoHome) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// The process-env config dir for the `Option`-returning `crate_config_dir`.
+///
+/// Why: `crate_config_dir` cannot surface an error without breaking callers
+/// in other crates, and some of them write under the path it returns.
+/// What: [`config_dir_checked`], with an error logged at `warn` and mapped
+/// to `None`, the "no config dir" answer every caller already handles. It
+/// never falls back to `$HOME` (#11821).
+/// Test: `process_env_wrappers_match_today`, `save_fails_closed_on_broken_install_file`.
 #[cfg(feature = "crate-config")]
 pub(crate) fn config_dir_for_legacy_wrapper() -> Option<PathBuf> {
-    match resolve_process_key(Key::ConfigDir) {
-        Ok(Some(resolved)) => Some(resolved.path),
-        Ok(None) => dirs::home_dir(),
-        Err(InstallPathsError::NoHome) => None,
-        Err(err) => {
-            tracing::warn!(error = %err, "install paths unresolved; using $HOME as the config dir");
-            dirs::home_dir()
-        }
-    }
+    config_dir_checked().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "install paths unresolved; no config dir (fail closed)");
+        None
+    })
 }
 
 /// The process-env projects root for the legacy `resolve_workspace_root`

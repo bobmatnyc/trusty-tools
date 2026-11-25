@@ -66,12 +66,17 @@ pub fn read_install_file(home: &Path) -> Result<Option<InstallFile>, InstallPath
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(InstallPathsError::Read { path, source }),
     };
-    toml::from_str(&raw)
-        .map(Some)
-        .map_err(|e| InstallPathsError::Parse {
+    toml::from_str(&raw).map(Some).map_err(|e| {
+        // #11821: keep the line and column the bare message drops.
+        let at = e.span().and_then(|s| raw.get(..s.start)).map(|b| {
+            let col = b.len() - b.rfind('\n').map_or(0, |i| i + 1) + 1;
+            format!(" (line {}, column {col})", b.matches('\n').count() + 1)
+        });
+        InstallPathsError::Parse {
             path,
-            message: e.message().to_string(),
-        })
+            message: format!("{}{}", e.message(), at.unwrap_or_default()),
+        }
+    })
 }
 
 /// Write `<home>/.trusty-tools/install.toml`, replacing any existing file.

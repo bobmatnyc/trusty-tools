@@ -342,7 +342,9 @@ fn writer_refuses_relative_paths() {
 /// env or file set; this pins each wrapper to its pre-#11821 formula.
 /// What: with `$HOME` at a tempdir and the two env vars cleared, the wrappers
 /// return exactly the old values; an `install.toml` then moves them (below
-/// the YAML template), and a broken one falls back to the old values.
+/// the YAML template). With a broken one, `crate_config_dir` fails closed
+/// (`None`, #11821); `resolve_workspace_root` keeps its logged default
+/// because its `PathBuf` signature cannot carry an error (P2).
 // Sets HOME and the env vars under the crate-wide `ENV_LOCK` (#5937).
 #[test]
 fn process_env_wrappers_match_today() {
@@ -415,7 +417,117 @@ fn process_env_wrappers_match_today() {
             file_cfg,
             Some(PathBuf::from("/file/cfg/.trusty-tools/trusty-mpm"))
         );
-        assert_eq!(broken_cfg, Some(crate_config_dir_at(&h, "trusty-mpm")));
+        assert_eq!(
+            broken_cfg, None,
+            "a broken install.toml must not yield $HOME"
+        );
+    }
+}
+
+/// Run `f` with `$HOME` at `home` and the config-dir env var set to
+/// `config_dir_env` (or cleared), under `ENV_LOCK`, restoring both after.
+#[cfg(feature = "crate-config")]
+fn with_process_env<R>(home: &Path, config_dir_env: Option<&Path>, f: impl FnOnce() -> R) -> R {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("HOME");
+    let saved_cfg = std::env::var_os(CONFIG_DIR_ENV);
+    // SAFETY: guarded by `ENV_LOCK`; restored below before returning.
+    unsafe {
+        std::env::set_var("HOME", home);
+        match config_dir_env {
+            Some(v) => std::env::set_var(CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(CONFIG_DIR_ENV),
+        }
+    }
+    let out = f();
+    // SAFETY: as above.
+    unsafe {
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_cfg {
+            Some(v) => std::env::set_var(CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(CONFIG_DIR_ENV),
+        }
+    }
+    out
+}
+
+/// Why: a valid env value outranks the file, so a broken file must not block it.
+/// What: every key set by env + a malformed install.toml -> all env, no error;
+/// the process-env wrapper agrees for `TRUSTY_MPM_CONFIG_DIR`.
+#[test]
+fn env_wins_over_broken_file() {
+    let home = tempfile::tempdir().expect("tempdir");
+    write_raw(home.path(), "bogus = 1\n");
+    let got = InstallPaths::resolve_with(env_of(&FULL_ENV), home.path(), &PathOverrides::default())
+        .expect("env must win without parsing the broken file");
+    assert_eq!(got.projects_root, rp("/env/projects", PathSource::Env));
+    assert_eq!(got.config_dir, rp("/env/config", PathSource::Env));
+    assert_eq!(got.codex_home, Some(rp("/env/codex", PathSource::Env)));
+
+    #[cfg(feature = "crate-config")]
+    {
+        let cfg = tempfile::tempdir().expect("tempdir");
+        let dir = with_process_env(home.path(), Some(cfg.path()), || {
+            crate::crate_config::crate_config_dir("tc-11821")
+        });
+        assert_eq!(dir, Some(cfg.path().join(".trusty-tools").join("tc-11821")));
+    }
+}
+
+/// Why: the #11821 critic HIGH — on 8ae77e5fb5 a broken install.toml made
+/// `crate_config::save` write under `$HOME/.trusty-tools/<crate>` instead of
+/// failing.
+/// What: with a malformed install.toml and no env override, `save` returns a
+/// typed `InvalidData` I/O error naming the install file, `load` errors too,
+/// and nothing is written under `$HOME/.trusty-tools/<crate>`.
+#[cfg(feature = "crate-config")]
+#[test]
+fn save_fails_closed_on_broken_install_file() {
+    use std::collections::BTreeMap;
+
+    let home = tempfile::tempdir().expect("tempdir");
+    write_raw(home.path(), "bogus = 1\n");
+    let value: BTreeMap<String, String> = [("k".to_string(), "v".to_string())].into();
+    let (saved, loaded, dir) = with_process_env(home.path(), None, || {
+        (
+            crate::crate_config::save("tc-11821", &value),
+            crate::crate_config::load::<BTreeMap<String, String>>("tc-11821"),
+            crate::crate_config::crate_config_dir("tc-11821"),
+        )
+    });
+    match saved {
+        Err(crate::crate_config::ConfigError::Io { path, source }) => {
+            assert_eq!(path, install_file_path(home.path()));
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+        }
+        other => panic!("save must fail closed, got {other:?}"),
+    }
+    assert!(
+        loaded.is_err(),
+        "load must surface the broken file: {loaded:?}"
+    );
+    assert_eq!(dir, None);
+    assert!(
+        !home.path().join(".trusty-tools").join("tc-11821").exists(),
+        "nothing may be written under $HOME"
+    );
+}
+
+/// What: a parse error names the line and column.
+#[test]
+fn parse_error_names_line_and_column() {
+    let home = tempfile::tempdir().expect("tempdir");
+    write_raw(home.path(), "projects_root = \"/a\"\nbogus = 1\n");
+    match read_install_file(home.path()) {
+        Err(InstallPathsError::Parse { message, .. }) => {
+            assert!(message.contains("line 2, column 1"), "message: {message}");
+        }
+        other => panic!("expected Parse, got {other:?}"),
     }
 }
 

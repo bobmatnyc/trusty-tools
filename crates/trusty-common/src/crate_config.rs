@@ -330,7 +330,8 @@ pub fn load_at<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, ConfigErro
 /// (both mean "no config", which the caller treats as defaults).
 /// Test: covered via `load_at` tests + `save_then_load_round_trips`.
 pub fn load<T: DeserializeOwned>(crate_name: &str) -> Result<Option<T>, ConfigError> {
-    match crate_config_path(crate_name) {
+    // See #11821: a broken install.toml is an error here, not "no config".
+    match checked_config_path(crate_name)? {
         Some(path) => load_at(path.as_path()),
         None => Ok(None),
     }
@@ -438,14 +439,31 @@ pub fn save_raw_at(path: &Path, contents: &str) -> Result<PathBuf, ConfigError> 
 /// Why: the convention's primary write entry point (console toggle, `config set`).
 /// What: resolves the path via [`crate_config_path`] then delegates to
 /// [`save_at`]. Errors with [`ConfigError::Io`] (synthesising a path-less error)
-/// when the home directory cannot be resolved.
-/// Test: covered via `save_at` + `save_then_load_round_trips`.
+/// when the home directory cannot be resolved, and with an `InvalidData`
+/// [`ConfigError::Io`] at the install file when `install.toml` is broken
+/// (#11821): it never writes under `$HOME` instead.
+/// Test: `save_then_load_round_trips`, `save_fails_closed_on_broken_install_file`.
 pub fn save<T: Serialize>(crate_name: &str, value: &T) -> Result<PathBuf, ConfigError> {
-    match crate_config_path(crate_name) {
+    // See #11821: fail closed on a broken install.toml.
+    match checked_config_path(crate_name)? {
         Some(path) => save_at(path.as_path(), value),
         None => Err(ConfigError::Io {
             path: PathBuf::from(format!("~/{TRUSTY_TOOLS_DIR}/{crate_name}/{CONFIG_FILE}")),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "home directory unavailable"),
+        }),
+    }
+}
+
+/// The config file path, or the install-paths error as a typed
+/// `ConfigError::Io` (`InvalidData`, path = the install file). See #11821.
+fn checked_config_path(crate_name: &str) -> Result<Option<PathBuf>, ConfigError> {
+    match crate::install_paths::config_dir_checked() {
+        Ok(dir) => Ok(dir.map(|base| crate_config_path_at(&base, crate_name))),
+        Err(err) => Err(ConfigError::Io {
+            path: dirs::home_dir()
+                .map(|h| crate::install_paths::install_file_path(&h))
+                .unwrap_or_default(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
         }),
     }
 }
