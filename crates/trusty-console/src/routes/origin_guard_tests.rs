@@ -2,8 +2,9 @@
 //!
 //! The listener cases serve the real router through `serve_listeners` on
 //! `127.0.0.1:0`, the path `run_serve` uses, and send raw HTTP/1.1, so the
-//! `Host` and `Origin` are exactly what the server reads. The MagicDNS name is
-//! injected through [`OwnMagicDns`]; no case needs a tailnet.
+//! `Host` and `Origin` are exactly what the server reads. Names and IPs are
+//! placeholders (`example.net`, TEST-NET-1); only their shape matters. The
+//! MagicDNS name is injected through [`OwnMagicDns`]; no case needs a tailnet.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use super::origin_guard::WriteOrigins;
 use crate::server::{AppState, build_router, build_router_with_self_origins};
 use crate::tailnet_peer::{OwnMagicDns, PeerIdentity, PeerResolver, WhoisError, serve_listeners};
 
-const NAME: &str = "studio.tail-net.ts.net";
+const NAME: &str = "studio.tailnet.example.net";
 const TAILNET_PORT: u16 = 7788;
 const ASK: &str = "/api/console/assistants/izzie/ask";
 const GUARD_MESSAGE: &str = "cross-origin write requests are not allowed";
@@ -44,7 +45,7 @@ fn known_name() -> OwnMagicDns {
 fn tailscale_origins(name: &OwnMagicDns) -> WriteOrigins {
     let addrs: [SocketAddr; 2] = [
         format!("127.0.0.1:{TAILNET_PORT}").parse().expect("addr"),
-        format!("100.64.0.9:{TAILNET_PORT}").parse().expect("addr"),
+        format!("192.0.2.9:{TAILNET_PORT}").parse().expect("addr"),
     ];
     WriteOrigins::from_bind_addrs(&addrs, Some(name.clone()))
 }
@@ -103,12 +104,12 @@ fn write_origins_trust_only_the_exact_magic_dns_origins_11749() {
         format!("HTTPS://{}", NAME.to_ascii_uppercase()),
         format!("http://{NAME}:{TAILNET_PORT}"),
         "http://127.0.0.1:7788".to_owned(),
-        format!("http://100.64.0.9:{TAILNET_PORT}"),
+        format!("http://192.0.2.9:{TAILNET_PORT}"),
     ] {
         assert!(origins.trusts(&ok), "{ok} must be trusted");
     }
     for bad in [
-        "https://evil-studio.tail-net.ts.net".to_owned(),
+        "https://evil-studio.tailnet.example.net".to_owned(),
         format!("https://{NAME}.evil.com"),
         format!("https://x.{NAME}"),
         format!("https://{NAME}/"),
@@ -117,7 +118,7 @@ fn write_origins_trust_only_the_exact_magic_dns_origins_11749() {
         format!("https://{NAME}:{TAILNET_PORT}"),
         format!("http://{NAME}:9999"),
         format!("https://user@{NAME}"),
-        "https://tail-net.ts.net".to_owned(),
+        "https://tailnet.example.net".to_owned(),
         "http://evil.example".to_owned(),
     ] {
         assert!(!origins.trusts(&bad), "{bad} must be refused");
@@ -191,7 +192,7 @@ async fn lookalike_origin_writes_are_refused_11749() {
         }
     };
     for bad in [
-        "https://evil-studio.tail-net.ts.net".to_owned(),
+        "https://evil-studio.tailnet.example.net".to_owned(),
         format!("https://{NAME}.evil.com"),
         format!("http://{NAME}"),
         format!("https://{NAME}:8443"),
