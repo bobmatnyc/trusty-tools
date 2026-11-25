@@ -243,27 +243,17 @@ impl NewSessionFlow {
         }
     }
 
-    /// Highlight the project the list cursor was already on (#7406).
-    ///
-    /// Why: the operator opened this overlay from a row, and the project of
-    /// that row is overwhelmingly the project they want another session in.
-    /// Starting on row 0 instead made them scroll past it every time.
-    /// What: moves the highlight to [`preselect_index`]'s answer for `session`,
-    /// which falls back to the first row when nothing matches.
-    /// Test: `new_session_preselects_the_cursor_sessions_project`.
-    pub(crate) fn preselected_for(self, session: Option<&ManagedSessionSummary>) -> Self {
-        self.preselected(None, session)
-    }
-
     /// Open on the cwd repo, else on the cursor session's project (#11822).
     ///
     /// Why: the repo the operator ran `tm` in is the one they want a session
-    /// in; the cursor rule (#7406) stays as the fallback for a cwd that is no
-    /// repo.
+    /// in. The #7406 cursor rule — the project of the row the overlay was
+    /// opened from — stays as the fallback for a cwd that is no repo.
     /// What: [`super::new_session_cwd::with_cwd`] adds or finds the cwd row;
-    /// with none, [`preselect_index`] answers as before.
+    /// with none, [`preselect_index`] answers for `session`, falling back to
+    /// the first row when nothing matches.
     /// Test: `new_session_cwd_preselects_an_unregistered_cwd_repo`,
-    /// `new_session_cwd_falls_back_to_the_cursor_without_a_cwd_repo`.
+    /// `new_session_cwd_falls_back_to_the_cursor_without_a_cwd_repo`,
+    /// `new_session_preselects_the_cursor_sessions_project`.
     pub(crate) fn preselected(
         mut self,
         cwd: Option<ProjectIdentity>,

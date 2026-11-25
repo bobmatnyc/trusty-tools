@@ -1656,7 +1656,7 @@ fn new_session_preselects_the_cursor_sessions_project() {
     assert_eq!(new_session::preselect_index(&targets, Some(&cursor)), 2);
 
     let flow = NewSessionFlow::with_resolver(targets.clone(), stub_identity)
-        .preselected_for(Some(&cursor));
+        .preselected(None, Some(&cursor));
     let rows = flow.rows();
     assert_eq!(rows[2], "▸ contoso/ledger · registered", "{rows:?}");
     assert!(!rows[0].starts_with('▸'), "{rows:?}");
