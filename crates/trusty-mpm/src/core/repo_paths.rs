@@ -126,8 +126,17 @@ fn expand_tilde_repos(template: &str, home: &Path) -> PathBuf {
 /// Test: `base_clone_path_is_canonical_for_a_mixed_case_identity_10604`;
 /// `base_clone_path_resolves_to_canonical_root`; wiring via integration tests.
 pub fn base_clone_path(owner: &str, repo: &str) -> PathBuf {
+    base_clone_path_in(&repos_root(), owner, repo)
+}
+
+/// [`base_clone_path`] under an explicit `repos_root` (#11828).
+///
+/// Why: a test or a caller that already holds the root must not read the env
+/// or the config again.
+/// Test: `base_clone_path_is_canonical_for_a_mixed_case_identity_10604`.
+pub fn base_clone_path_in(repos_root: &Path, owner: &str, repo: &str) -> PathBuf {
     // #10604: canonical here, not by caller convention.
-    repos_root()
+    repos_root
         .join(canonical_segment(owner))
         .join(canonical_segment(repo))
 }
@@ -143,9 +152,7 @@ pub fn try_base_clone_path(
     owner: &str,
     repo: &str,
 ) -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
-    Ok(try_repos_root()?
-        .join(canonical_segment(owner))
-        .join(canonical_segment(repo)))
+    Ok(base_clone_path_in(&try_repos_root()?, owner, repo))
 }
 
 /// One `owner` or `repo` path segment in the slug form tm names clones with.
@@ -176,6 +183,11 @@ mod tests {
         ] {
             let path = base_clone_path(owner, repo);
             assert!(path.ends_with("bobmatnyc/trusty-tools"), "{path:?}");
+            let root = Path::new("/r");
+            assert_eq!(
+                base_clone_path_in(root, owner, repo),
+                root.join("bobmatnyc/trusty-tools")
+            );
         }
     }
 }
