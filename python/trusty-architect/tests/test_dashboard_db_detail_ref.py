@@ -3,7 +3,9 @@
 Covers: `create items` with a `detail_ref` an open item already carries updates that item (no duplicate);
 `list --detail-ref` finds it; a closed item with the key does not stop a new one; an `items` write with a
 field items.schema.json does not name (`priority`) is refused on create, set, update and batch; a dir store
-that already holds such a field still reads and its item still takes a schema-valid update.
+that already holds such a field still reads and its item still takes a schema-valid update; only a TOP-LEVEL extra
+field is refused (a nested one is not); the task-pulse fields (`il`, `refs`, `last_signal_at`, `last_msg_at`,
+`reported`) are writable; a `D` create never updates a `DA01` item carrying the same key.
 """
 import json
 import os
@@ -78,3 +80,39 @@ def test_a_stored_legacy_field_still_reads_and_takes_a_valid_update(cli):
     assert [d["id"] for d in json.loads(cli("list", "items")[1])] == ["D01"]
     rc, _, err = cli("update", "items", "D01", "--json", '{"status": "done"}')
     assert rc == 0, err
+
+
+def test_the_documented_il_update_and_task_pulse_fields_are_writable(cli):
+    # #10766: task_pulse.py documents `update items T93 --json '{"il":"ar-T0b"}'` and writes the signal fields.
+    import dashboard_schema as dsch
+    import task_pulse as tp
+    task = item("pulse", kind="task", steps=[{"title": "one"}])
+    assert cli("set", "items", "T93", "--json", json.dumps(task))[0] == 0
+    rc, _, err = cli("update", "items", "T93", "--json", '{"il":"ar-T0b"}')
+    assert rc == 0, err
+    rc, _, err = cli("update", "items", "T93", "--json", json.dumps({"refs": ["owner/repo#1"], "last_signal_at": T}))
+    assert rc == 0, err
+    tag = {"pct": 85, "done": "a", "est": "1h", "remaining": "b"}
+    rep = tp.build_reported({"reported": {"pct": 80, "at": T, "band_since": T}}, tag, "S14", 1764032400)
+    rc, _, err = cli("update", "items", "T93", "--json", json.dumps({"reported": rep, "last_msg_at": tp.iso_s(1764032400)}))
+    assert rc == 0, err
+    data = ds.Store(cli.root).get("items", "T93")["data"]
+    assert data["il"] == "ar-T0b" and data["reported"]["flags"] and dsch.validate("items", "T93", data) == []
+
+
+def test_only_a_top_level_extra_field_is_refused(cli):
+    rc, _, err = cli("set", "items", "D01", "--json", json.dumps(item("x", priority="high")))
+    assert rc == 2 and "/priority: property is not allowed" in err
+    nested = item("y", kind="task", steps=[{"title": "one", "note": "extra"}], log=[{"at": T, "text": "t", "who": "me"}])
+    rc, _, err = cli("set", "items", "D02", "--json", json.dumps(nested))
+    assert rc == 0, err
+    rc, _, err = cli("update", "items", "D02", "--json", json.dumps({"parked": {"choice": "owner", "at": T, "by": "o", "x": 1}}))
+    assert rc == 0, err
+
+
+def test_a_create_with_prefix_d_never_updates_a_da01_item_with_the_same_key(cli):
+    ds.Store(cli.root).set("items", "DA01", item("other", detail_ref="gh:9"), if_version=0)
+    rc, out, err = cli("create", "items", "D", "--json", json.dumps(item("mine", detail_ref="gh:9")))
+    assert rc == 0, err
+    assert json.loads(out)["id"] != "DA01"
+    assert ds.Store(cli.root).get("items", "DA01")["data"]["title"] == "other"

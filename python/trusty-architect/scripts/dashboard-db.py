@@ -32,7 +32,7 @@ Qualified ids (ar-T44): get/update/delete accept "<S id>:<local id>" (e.g. S0c:D
 get/list on `items` add a derived `qualified` key (the store's S id, not the item's `session` field); stored ids stay bare. `set` on an existing doc without --if-version is refused (exit 3). `next PREFIX` prints the next free id;
 `create COLLECTION PREFIX --json X` picks that id and writes it with if_version 0 in one command (use it for every new item).
 #10766: `create items` with a `detail_ref` (caller key) an open item of that prefix carries updates it (version-pinned); `list --detail-ref KEY` finds it.
-Writes to `items` (set, update, create, batch) refuse a field items.schema.json does not name (e.g. `priority`); stored legacy fields still read.
+Writes to `items` (set, update, create, batch) refuse a top-level field items.schema.json does not name (e.g. `priority`); stored legacy fields still read.
 log items <T id> "<text>" appends {at: now UTC, text} to that task's `log` (short accomplishment lines; the owner 2026-10-28) with a version-pinned update (retried once on a conflict); exit 2 on empty text or a non-items collection.
 validate checks every document against schemas/dashboard/ (exit 1 on errors); fsck (jsonl store) checks canonical bytes and the change-log hashes.
 Every delete (single or in a batch) first appends the full pre-delete document to
@@ -171,12 +171,13 @@ def check_steps(item_id, data):
 
 
 def check_item_fields(item_id, data):
-    """Refuse an `items` write naming a field items.schema.json does not (e.g. `priority`); only the fields this write supplies are checked."""
+    """Refuse an `items` write naming a top-level field items.schema.json does not (e.g. `priority`); nested keys are not checked."""
     # #10766: the dir store runs schema_mode off, so `create` stored fields `validate` later rejected.
-    errs = [e for e in dsch.validate("items", item_id, {k: v for k, v in data.items() if k != "version"})
-            if e.endswith("property is not allowed")] if isinstance(data, dict) else []
-    if errs:
-        raise ds.StoreError("items write refused by schema: " + "; ".join(errs))
+    # #10766: top level only; an extra key inside steps[], parked or log behaves as before the refusal.
+    allowed = dsch.schema_for("items")["properties"]
+    extra = sorted(k for k in data if k not in allowed and k != "version") if isinstance(data, dict) else []
+    if extra:
+        raise ds.StoreError("items write refused by schema: " + "; ".join(f"items/{item_id}: /{k}: property is not allowed" for k in extra))
 
 
 def by_ref(docs, ref, open_only=False):
@@ -486,7 +487,7 @@ def run(args):
         data = load_json(args.json)
         # #10766: an open item already carrying the caller's key (detail_ref, same prefix) is updated, never duplicated.
         hits = [d for d in by_ref(store.list_docs("items"), isinstance(data, dict) and data.get("detail_ref"), True)
-                if d["id"].startswith(args.prefix)] if args.collection == "items" else []
+                if (m := derive.ID_RE.match(d["id"])) and m.group(1) == args.prefix] if args.collection == "items" else []   # #10766: D01, never DA01
         n = hits[0]["id"] if hits else derive.next_id(derive.snapshot(store, derive.ID_COLLECTIONS), args.prefix)
         if n is None:
             raise ds.StoreError(f"no free {args.prefix} ids")
