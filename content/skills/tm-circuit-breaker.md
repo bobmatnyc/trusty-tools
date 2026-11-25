@@ -3,7 +3,7 @@ name: tm-circuit-breaker
 description: Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
 category: pm-framework
 tags: [circuit-breaker, enforcement, pm-required, validation]
 effort: high
@@ -102,7 +102,7 @@ investigation intent (>2 patterns); investigation keywords ("check",
 
 **Action**: BLOCK — delegate to the Research agent. Before Read/Grep, the PM
 must attempt `trusty-search search "<q>" --json` (or the MCP `search_semantic`
-/ `search_lexical`) first (see CB#10 below and `tm-tool-usage-guide`).
+/ `search_lexical`, see #11771) first (see CB#10 below and `tm-tool-usage-guide`).
 
 **Allowed exception**: up to 3 small config/doc files (`Cargo.toml`,
 `package.json`, `.mcp.json`) read for delegation context only — never source
@@ -208,15 +208,13 @@ ps`, `make`, `pytest`, `npm test` directly via Bash.
 
 **Action**: delegate to **Local Ops** (process/port checks, `make`/`mise`
 targets) or **QA** (test suites, endpoint checks). Service liveness for
-trusty-* daemons specifically routes through MCP health tools, never Bash —
-see `tm-tool-usage-guide` (`mcp__trusty-search__search_health`). `search_health` returns `Ok` whether or
-not the daemon is up — branch on the response's `healthy` field, not on the
-call succeeding.
+trusty-* daemons specifically routes through its native health verb, never `curl`/`lsof`/`ps` —
+see `tm-tool-usage-guide` (`trusty-search health`).
 
 **Violation:** `PM: Bash(nc -U "$TRUSTY_SEARCH_SOCKET")`
 
-**Correct:** `PM: mcp__trusty-search__search_health()` — or delegate to
-local-ops for anything not covered by a trusty-* MCP health tool.
+**Correct:** `PM: trusty-search health` — or delegate to
+local-ops for anything not covered by a trusty-* health verb.
 
 ## CB#8: QA Verification Gate
 

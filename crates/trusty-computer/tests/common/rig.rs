@@ -25,6 +25,7 @@ use trusty_computer::broker_server::BrokerServer;
 use trusty_computer::clipboard::Pasteboard;
 use trusty_computer::grants::Grant;
 use trusty_computer::supervisor::Supervisor;
+use trusty_computer::window_order::{WindowLister, WindowRecord};
 
 use super::dialog::{FakeDialog, FakeResolver};
 use super::{FakeDaemon, FakeLauncher, FixtureState, short_tmp};
@@ -83,7 +84,39 @@ pub struct Rig {
     pub pasteboard: Arc<FakePasteboard>,
     /// #11696 Phase D: records the quit requests `quit_app` sends.
     pub quitter: Arc<FakeQuitter>,
+    /// #11756: the window order a drag is checked against.
+    pub windows: Arc<FakeWindowLister>,
     codes: Mutex<HashMap<String, String>>,
+}
+
+/// A window order the test sets; empty (nothing on screen) until set (#11756).
+pub struct FakeWindowLister {
+    pub list: Mutex<Result<Vec<WindowRecord>, String>>,
+    /// Reads answered so far.
+    pub reads: AtomicU64,
+}
+
+impl Default for FakeWindowLister {
+    fn default() -> FakeWindowLister {
+        FakeWindowLister {
+            list: Mutex::new(Ok(Vec::new())),
+            reads: AtomicU64::new(0),
+        }
+    }
+}
+
+impl FakeWindowLister {
+    /// Answer every later read with `list`.
+    pub fn set(&self, list: Result<Vec<WindowRecord>, String>) {
+        *self.list.lock().expect("windows") = list;
+    }
+}
+
+impl WindowLister for FakeWindowLister {
+    fn on_screen(&self) -> Result<Vec<WindowRecord>, String> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.list.lock().expect("windows").clone()
+    }
 }
 
 /// An in-memory clipboard that counts its accesses (#11696 Phase C).
@@ -199,12 +232,14 @@ impl Rig {
         let resolver = Arc::new(FakeResolver::default());
         let pasteboard = Arc::new(FakePasteboard::default());
         let quitter = Arc::new(FakeQuitter::default());
+        let windows = Arc::new(FakeWindowLister::default());
         let broker = Broker::new(sup, &state, clock, dialog.clone()).expect("broker");
         let broker = broker
             .with_dialog_timeout(Duration::from_millis(500))
             .with_app_resolver(resolver.clone())
             .with_pasteboard(pasteboard.clone())
-            .with_quitter(quitter.clone());
+            .with_quitter(quitter.clone())
+            .with_window_lister(windows.clone());
         let broker = Arc::new(broker);
         let mut server = BrokerServer::bind(&state).expect("bind");
         server.spawn(Arc::clone(&broker));
@@ -227,6 +262,7 @@ impl Rig {
             resolver,
             pasteboard,
             quitter,
+            windows,
             codes: Mutex::new(HashMap::new()),
         }
     }

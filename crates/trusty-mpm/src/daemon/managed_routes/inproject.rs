@@ -80,6 +80,7 @@ pub fn account_config_dir_for(login: &str) -> Result<PathBuf, String> {
 // layers compile without `daemon`; re-exported so every path still resolves.
 pub use crate::core::repo_paths::{
     DEFAULT_REPOS_DIR, REPOS_ROOT_ENV, base_clone_path, repos_root, repos_root_from,
+    try_base_clone_path, try_repos_root,
 };
 
 /// Filename-suffix stem used when migrating a pre-#1803 old-layout dir aside.
@@ -805,7 +806,10 @@ pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, Strin
         return Ok(None);
     };
 
-    let base = base_clone_path(&gh.owner, &gh.repo);
+    // #11821: a broken install.toml refuses the clone (df-D1t).
+    let base = try_base_clone_path(&gh.owner, &gh.repo).map_err(|e| {
+        format!("inproject: cannot resolve the repos root: {e} — fix ~/.trusty-tools/install.toml")
+    })?;
     // #7166: an already-on-disk operator checkout has no account SELECTOR to
     // apply. #9091: `None` still clones as the origin's registry pin, else its
     // `[accounts]` login — the account its sessions spawn as.

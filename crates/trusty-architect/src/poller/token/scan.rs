@@ -420,13 +420,7 @@ fn is_poll_turn(msg: &Value) -> bool {
     }
 }
 
-#[cfg(unix)]
 fn inode(m: &fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     m.ino()
-}
-
-#[cfg(not(unix))]
-fn inode(_: &fs::Metadata) -> u64 {
-    0
 }

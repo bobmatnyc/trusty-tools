@@ -15,7 +15,8 @@
 //! `<inbox>/token-watch-state.json` with the Python watcher; a plain dry run
 //! reads it and writes nothing; a shadow run (`--shadow` or
 //! `ARCHITECT_DRY_RUN_STATE`) keeps its own copy beside its poll state,
-//! seeded once from the live file, so it dedupes across cycles without
+//! seeded from the live file when absent and, through [`reseed`], at every
+//! shadow daemon start (#11826), so it dedupes across cycles without
 //! racing the live watcher's offsets (class D).
 //! A writing scan holds `<state>.lock` (BSD `flock`, shared with the Python
 //! watcher) from load to save and saves through a per-process temp file
@@ -209,6 +210,54 @@ pub fn step(
         state::save(&mode.state, &st)?;
     }
     Ok(alerts)
+}
+
+/// How long [`reseed`] waits for the live watcher's lock (the scan's wait).
+pub const RESEED_LOCK_WAIT: std::time::Duration = lock::LOCK_WAIT;
+
+/// Replaces the shadow's own token state `own` with the live state `live`.
+///
+/// Why: the shadow seeded its token state only when the file was absent, so
+/// a restart after 13 h kept a state that lacked every live fire since and
+/// replayed 30 token alerts in one cycle (#11826, parity window 6, class A).
+/// What: holds `<own>.lock`, then `<live>.lock` (the lock the Python watcher
+/// takes around its write, so the read is never of a half-written file),
+/// then reads the live file directly and saves it over `own`. It fails
+/// closed: `state::load` would read garbage as an empty state, and an empty
+/// state replays every alert (#11826 review). A live file absent once the
+/// locks are held keeps `own`, as the poll-state reseed does.
+/// Test: `reseed_copies_the_live_state_under_its_lock`,
+/// `reseed_fails_closed_and_keeps_its_own_state`,
+/// `window6_shadow_restart_reseeds_the_token_state`.
+///
+/// # Errors
+/// [`StateError::Io`] when a lock is not taken within `wait`, the live file
+/// cannot be read (other than absent), or `own` cannot be written;
+/// [`StateError::Shape`] when the live file is not a token state. `own` is
+/// unchanged on every error.
+pub fn reseed(live: &Path, own: &Path, wait: std::time::Duration) -> Result<(), StateError> {
+    // No live state: no lock file in a live inbox. A file that vanishes after
+    // this check reads as NotFound below, never as an empty state.
+    if !live.exists() {
+        return Ok(());
+    }
+    let _own = lock::acquire(own, wait)?;
+    let _live = lock::acquire(live, wait)?;
+    let text = match std::fs::read_to_string(live) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(StateError::Io {
+                what: format!("read {}", live.display()),
+                source,
+            });
+        }
+    };
+    let st: TokenState = serde_json::from_str(&text).map_err(|e| StateError::Shape {
+        what: live.display().to_string(),
+        detail: e.to_string(),
+    })?;
+    state::save(own, &st)
 }
 
 /// The `token` alert for one raised rule (`fleet-poll.py` `token_alerts`).

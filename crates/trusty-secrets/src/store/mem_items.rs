@@ -7,7 +7,8 @@
 //! prompt), and faults: a failing read, write or delete for one item, a
 //! write that stores other text than it was given (a read-back mismatch),
 //! a delete budget after which every delete fails, a delay inside each
-//! write to widen races, and a log of every call.
+//! write to widen races, a one-shot hook run inside a read, and a log of
+//! every call.
 //! Test: used by `vault_blob_tests.rs`, `blob_migrate_tests.rs` and the
 //! server's unlock tests.
 
@@ -34,6 +35,18 @@ pub(crate) struct MemItems {
     pub(crate) write_delay: Mutex<Option<Duration>>,
     /// Every call in order: `("read" | "write" | "delete", item)`.
     pub(crate) calls: Mutex<Vec<(&'static str, ItemId)>>,
+    /// Run once inside the next read of its item, after the text is read.
+    pub(crate) read_hook: Mutex<Option<ReadHook>>,
+}
+
+/// A one-shot hook inside a read of item `.0`: the write window of a
+/// Keychain prompt, made deterministic (#11786).
+pub(crate) struct ReadHook(pub(crate) ItemId, pub(crate) Box<dyn FnOnce() + Send>);
+
+impl std::fmt::Debug for ReadHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ReadHook").field(&self.0).finish()
+    }
 }
 
 impl MemItems {
@@ -92,7 +105,18 @@ impl ItemStore for MemItems {
         if self.fail_read.lock().unwrap().contains(id) {
             return Err(item_error(id, "injected read failure"));
         }
-        Ok(self.raw(id).map(Zeroizing::new))
+        let text = self.raw(id).map(Zeroizing::new);
+        let hook = {
+            let mut armed = self.read_hook.lock().unwrap();
+            match armed.as_ref() {
+                Some(ReadHook(item, _)) if item == id => armed.take(),
+                _ => None,
+            }
+        };
+        if let Some(ReadHook(_, hook)) = hook {
+            hook();
+        }
+        Ok(text)
     }
 
     fn write(&self, id: &ItemId, text: &str) -> Result<(), SecretsError> {

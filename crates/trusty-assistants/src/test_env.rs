@@ -410,13 +410,21 @@ mod tests {
 
     /// Why (#11632): a test that forgets its own `$HOME` override must still
     /// land in a temp dir, never the operator's real home.
-    /// What: with `HOME_LOCK` held, the process-start hook has recorded its
-    /// sandbox under the temp dir, `HOME` is under the temp dir too (tests
-    /// that point it at their own temp dir may leave it there), and the
-    /// variables in `SANDBOX_SCRUB` are unset.
+    /// What: with every lock that guards a `SANDBOX_SCRUB` mutator held, the
+    /// process-start hook has recorded its sandbox under the temp dir, `HOME`
+    /// is under the temp dir too (tests that point it at their own temp dir
+    /// may leave it there), and the variables in `SANDBOX_SCRUB` are unset.
     /// Test: itself.
     #[test]
+    #[serial_test::serial]
     fn test_process_home_is_a_sandbox() {
+        // CI run 45338865592: `HOME_LOCK` alone let a `TA_ASSISTANTS_DIR`
+        // setter run mid-read. Scrubbed vars are set under `#[serial]`,
+        // `agents::tests::loading::ENV_LOCK`, `ENV_LOCK` or `HOME_LOCK`; take
+        // all four, in that order (the order every holder of two uses).
+        // Every `TA_ASSISTANTS_DIR` reader (`assistants_root`, `for_instance`) is `#[serial]`.
+        let _config_env = crate::agents::tests::loading::ENV_LOCK.blocking_lock();
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let marker = std::env::var_os(TEST_HOME_SANDBOX_MARKER).map(PathBuf::from);

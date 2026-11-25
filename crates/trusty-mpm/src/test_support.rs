@@ -96,6 +96,19 @@ pub(crate) use crate::core::spawn_disclaim::disclaimed_output as tmux_spawn;
 /// Test: `tmux_session::tests::the_spawn_seam_takes_the_path_lock`.
 pub(crate) use crate::core::trusty_tools_config::env_test_lock as lock_path_env;
 
+/// A real `install.toml` parse error, read from a scratch home (#11821).
+///
+/// Why: the fail-closed arms take the resolver's error as a parameter, so a
+/// test hands them one without rewriting `$HOME`.
+pub(crate) fn broken_install_error() -> trusty_common::install_paths::InstallPathsError {
+    let home = tempfile::tempdir().expect("scratch home");
+    let tools = home.path().join(".trusty-tools");
+    std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
+    std::fs::write(tools.join("install.toml"), "bogus = 1\n").expect("write install.toml");
+    trusty_common::install_paths::read_install_file(home.path())
+        .expect_err("an unknown key is refused")
+}
+
 /// Arm `core::home_write_fence` for the lib test binary, before `main` (#8545).
 ///
 /// Why: the lib target wrote `~/.claude/settings.json`, `~/.claude.json` and

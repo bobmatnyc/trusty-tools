@@ -16,8 +16,9 @@
 //! detail), [`AttachHandle`] (the tm-vs-tcode attach asymmetry),
 //! [`AgentSpec`]/[`DelegateHandle`] (the `delegate` operation's request and
 //! response).
-//! Test: `types::tests` covers construction, the `BackendParams`/
-//! `AttachHandle` variant matching, and serde round-trips for the wire types.
+//! Test: `types::tests` covers construction and the `BackendParams`/
+//! `AttachHandle` variant matching; `test_kit::tests` drives the session types
+//! through the connector trait.
 
 use serde::{Deserialize, Serialize};
 
@@ -91,7 +92,7 @@ pub struct CreateSessionReq {
 /// `"deadline_exceeded"`) do not have a 1:1 mapping; collapsing them into one
 /// enum would either lose information or invent states neither backend has.
 /// `task` is optional because a legacy tm record may omit it.
-/// Test: `types::tests::session_info_serde_round_trip`.
+/// Test: `test_kit::tests::assert_basic_lifecycle_passes_against_mock`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
     /// Backend-native session id.
@@ -112,7 +113,7 @@ pub struct SessionInfo {
 /// backend-native record.
 /// What: `state` uses the same backend-native vocabulary as
 /// [`SessionInfo::state`] — see that field's docs.
-/// Test: `types::tests::session_status_serde_round_trip`.
+/// Test: `test_kit::tests::assert_basic_lifecycle_passes_against_mock`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatus {
     /// Backend-native session id.
@@ -161,7 +162,7 @@ pub enum AttachHandle {
 /// What: `agent_name` names the sub-agent persona/role; `task` is its
 /// instruction; `tier` is an optional model-tier hint (tm: `"haiku"` |
 /// `"sonnet"` | `"opus"`, mirroring `agent_delegate`'s MCP tool signature).
-/// Test: `types::tests::agent_spec_construction`.
+/// Test: `test_kit::tests::assert_delegate_not_supported_passes_against_mock`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpec {
     /// Name of the agent/persona to delegate to.
@@ -225,31 +226,6 @@ mod tests {
     }
 
     #[test]
-    fn session_info_serde_round_trip() {
-        let info = SessionInfo {
-            id: "abc".into(),
-            name: "tmpm-abc".into(),
-            state: "active".into(),
-            task: Some("do the thing".into()),
-        };
-        let json = serde_json::to_string(&info).unwrap();
-        let back: SessionInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(info, back);
-    }
-
-    #[test]
-    fn session_status_serde_round_trip() {
-        let status = SessionStatus {
-            id: "abc".into(),
-            state: "running".into(),
-            pending_decision: None,
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        let back: SessionStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(status, back);
-    }
-
-    #[test]
     fn attach_handle_variants_are_distinct() {
         let shell = AttachHandle::ShellCommand("tmux attach -t '=x'".into());
         let stream = AttachHandle::EventStream {
@@ -259,17 +235,6 @@ mod tests {
         };
         assert!(matches!(shell, AttachHandle::ShellCommand(_)));
         assert!(matches!(stream, AttachHandle::EventStream { .. }));
-    }
-
-    #[test]
-    fn agent_spec_construction() {
-        let spec = AgentSpec {
-            agent_name: "research".into(),
-            task: "find the bug".into(),
-            tier: Some("opus".into()),
-        };
-        assert_eq!(spec.agent_name, "research");
-        assert_eq!(spec.tier.as_deref(), Some("opus"));
     }
 
     #[test]

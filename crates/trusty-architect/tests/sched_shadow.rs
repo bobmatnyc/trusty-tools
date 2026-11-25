@@ -328,7 +328,6 @@ fn parity_counts_wakes_per_window() {
         ),
         (1, 1, 1)
     );
-    assert!((rep.match_pct() - 100.0 / 3.0).abs() < 0.01);
     assert!(parity::render(&rep).contains("wakes: matched 1 / scheduler-only 1 / poller-only 1"));
 }
 

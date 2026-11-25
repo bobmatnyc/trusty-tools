@@ -149,7 +149,8 @@ pub(crate) fn clean(text: &str) -> String {
 }
 
 /// `(year, month, day)` of `days` since 1970-01-01 (H. Hinnant's algorithm).
-// #9801: shared with the usage step's UTC and New York times.
+// #9801, #10571: the crate's one copy; every civil-date caller imports it.
+/// Test: `civil_helpers_match_the_removed_copies`.
 pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

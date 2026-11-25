@@ -302,6 +302,7 @@ fn config_to_json(config: &TrustyToolsConfig) -> Value {
         // keeps, so the Config tab must be able to read it back.
         "disk": config.disk,
         "projects": config.projects,
+        // #11821: defaulting resolver kept — display only.
         "workspace_root": trusty_tools_config::workspace_root(config).to_string_lossy(),
     })
 }

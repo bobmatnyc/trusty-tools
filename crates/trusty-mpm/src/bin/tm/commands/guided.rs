@@ -434,6 +434,7 @@ pub(crate) fn derive_project(
         .filter(|u| is_github_remote(u))?;
     let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
+    // #11821: defaulting resolver kept — picker identity only; the daemon spawn clones via `try_base_clone_path`.
     let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
     Some((source_id, workspace, git_root))
 }
@@ -1227,7 +1228,7 @@ pub(crate) async fn fallback_protected(
         url,
         cwd,
         &trusty_mpm::core::disk_usage_guard::DiskGate::MeasureTarget,
-        dirs::home_dir().as_deref(),
+        super::launch_home::launch_home()?.as_deref(), // #11077
     )
     .await
 }

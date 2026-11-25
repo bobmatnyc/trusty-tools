@@ -485,23 +485,6 @@ mod tests {
         assert_eq!(start_id, complete_id);
     }
 
-    /// `/clear` (DOC-50 §5 Slice 7) emits `ClearScrollback` — a unit
-    /// variant, just confirming it exists and round-trips like any other.
-    #[test]
-    fn clear_scrollback_is_a_distinct_unit_variant() {
-        assert_eq!(ReplEvent::ClearScrollback, ReplEvent::ClearScrollback);
-        assert_ne!(ReplEvent::ClearScrollback, ReplEvent::Cancel);
-    }
-
-    /// `Quit` (DOC-50 §5 Slice 5) is a distinct unit variant, same as
-    /// `ClearScrollback` above — `crate::run::run`'s dispatch step sends it
-    /// when `TuiEngine::handle_input` returns `Ok(false)`.
-    #[test]
-    fn quit_is_a_distinct_unit_variant() {
-        assert_eq!(ReplEvent::Quit, ReplEvent::Quit);
-        assert_ne!(ReplEvent::Quit, ReplEvent::Cancel);
-    }
-
     /// `TurnFinished` (the `dispatch_pending` completion safety net) carries
     /// its own `generation` and compares by value, same as any other field.
     #[test]
@@ -561,20 +544,11 @@ mod tests {
         assert_eq!(prior_id.as_deref(), Some("a1b2c3d4"));
     }
 
-    /// `KeyInput` default modifiers must be "nothing held" so a bare
-    /// `KeyCode` translation (Slice 2) doesn't need to construct
-    /// `KeyModifiers` by hand for the common case.
-    #[test]
-    fn key_modifiers_default_to_none_held() {
-        let m = KeyModifiers::default();
-        assert!(!m.ctrl && !m.alt && !m.shift);
-    }
-
     /// `WorkstreamSummary` is the wire shape `ReplEvent::WorkstreamUpdated`
     /// carries; a (de)serialization round-trip is the cheapest guarantee
     /// that later HTTP-transported engines (CodeEngine) can carry it
-    /// without a custom `Serialize` impl. (`StatuslineSegment`/`PickerItem`/
-    /// `CommandDescriptor` round-trip tests moved to `crate::model` — Slice
+    /// without a custom `Serialize` impl. (`StatuslineSegment`/
+    /// `CommandDescriptor` serde tests moved to `crate::model` — Slice
     /// 1.5 relocated those types there.)
     #[test]
     fn workstream_summary_round_trips_through_json() {

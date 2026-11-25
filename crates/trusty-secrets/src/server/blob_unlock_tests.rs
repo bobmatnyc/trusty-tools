@@ -13,8 +13,9 @@ use crate::server::audit::MigrationAudit;
 use crate::server::migrate;
 use crate::server::unlock;
 use crate::store::BlobKeychain;
+use crate::store::ControlItem;
 use crate::store::grant_cache::{DropReason, Status};
-use crate::store::mem_items::MemItems;
+use crate::store::mem_items::{MemItems, ReadHook};
 use crate::store::vault_blob::{BlobStore, ItemId, ItemStore};
 
 use super::*;
@@ -348,4 +349,194 @@ fn resolve_with_a_corrupt_blob_fails_closed_despite_the_backup() {
     let log = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
     assert!(!log.contains(SENTINEL_VALUE));
     assert_eq!(items.raw(&ItemId::blob()).as_deref(), Some("{\"format\":"));
+}
+
+/// Why: #11786 M2 — an `AgentDeny` written while unlock reads the blob (a
+/// Keychain prompt can hold that read for 20 s) must be honoured under the
+/// grant. Before the fix the grant held the pre-deny snapshot and answered
+/// "no deny" from memory.
+/// What: a read hook writes the deny inside the unlock's blob read; after
+/// unlock the grant holds the blob and reports the deny.
+/// Test: itself.
+#[test]
+fn deny_written_during_the_unlock_read_is_honoured_under_the_grant() {
+    let fx = fixture();
+    let (items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let keychain = state.open(&BackendId::keychain()).unwrap();
+    let writer = Arc::clone(&keychain);
+    *items.read_hook.lock().unwrap() = Some(ReadHook(
+        ItemId::blob(),
+        Box::new(move || {
+            writer
+                .set_control_item(
+                    ControlItem::AgentDeny,
+                    &vault(PROJECT_VAULT),
+                    Some(&key(KEYS[0])),
+                    true,
+                )
+                .unwrap();
+        }),
+    ));
+    let answer = unlock::unlock(&state, caller(), json!({"project": "ignored"})).unwrap();
+    assert!(
+        items.read_hook.lock().unwrap().is_none(),
+        "the deny was not written inside the read"
+    );
+    assert_eq!(answer["blob_held"], true);
+    let denied = keychain
+        .control_item(
+            ControlItem::AgentDeny,
+            &vault(PROJECT_VAULT),
+            Some(&key(KEYS[0])),
+        )
+        .unwrap();
+    assert!(
+        denied,
+        "the grant answered no deny over a deny just written"
+    );
+}
+
+/// A read hook on the blob that toggles the deny on [`KEYS`]`[0]`, then
+/// arms itself again `rearm` more times.
+fn toggling_deny(items: &Arc<MemItems>, writer: Arc<dyn SecretBackend>, rearm: usize) -> ReadHook {
+    let again = Arc::clone(items);
+    ReadHook(
+        ItemId::blob(),
+        Box::new(move || {
+            let deny = (ControlItem::AgentDeny, vault(PROJECT_VAULT), key(KEYS[0]));
+            let on = !writer.control_item(deny.0, &deny.1, Some(&deny.2)).unwrap();
+            writer
+                .set_control_item(deny.0, &deny.1, Some(&deny.2), on)
+                .unwrap();
+            if rearm > 0 {
+                let next = toggling_deny(&again, Arc::clone(&writer), rearm - 1);
+                *again.read_hook.lock().unwrap() = Some(next);
+            }
+        }),
+    )
+}
+
+/// Why: #11786 fix round — when a write lands during both unlock reads,
+/// unlock fails closed: an error, no held blob and no live grant. A variant
+/// that held the second stale snapshot fails every assertion.
+/// Test: itself.
+#[test]
+fn writes_during_both_unlock_reads_open_no_grant() {
+    let fx = fixture();
+    let (items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let keychain = state.open(&BackendId::keychain()).unwrap();
+    *items.read_hook.lock().unwrap() = Some(toggling_deny(&items, keychain, 1));
+    let refused = unlock::unlock(&state, caller(), json!({"project": "ignored"}));
+    assert!(
+        items.read_hook.lock().unwrap().is_none(),
+        "a read ran without its write"
+    );
+    assert_eq!(refused, Err(ErrorKind::Internal));
+    assert!(!state.cache.grant().holds_blob(), "a stale blob is held");
+    assert_eq!(state.cache.grant().check(), Status::Off);
+}
+
+/// Why: #11786 fix round — a Keychain write in flight when unlock starts
+/// (a prompt can hold it 20 s) is waited for; it never costs a read
+/// attempt or fails the unlock at once.
+/// What: a write stays open while unlock starts; another thread ends it a
+/// little later, and unlock then holds the blob. The delay only makes the
+/// wait likely; the result is the same if the write ends first.
+/// Test: itself.
+#[test]
+fn unlock_waits_for_a_write_in_flight_then_holds() {
+    let fx = fixture();
+    let (_items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let cache = Arc::clone(&state.cache);
+    assert_eq!(cache.grant().held_begin(&ItemId::blob()), None);
+    let finisher = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cache.grant().held_done();
+    });
+    let answer = unlock::unlock(&state, caller(), json!({"project": "ignored"}));
+    finisher.join().unwrap();
+    assert_eq!(answer.unwrap()["blob_held"], true);
+    assert!(state.cache.grant().holds_blob());
+}
+
+/// Why: #11786 fix round — a write that panics must still end its
+/// in-flight count, or every later unlock waits out the deadline and
+/// fails until the server restarts.
+/// What: a read hook panics inside a `set` (the blob write rereads the
+/// blob); afterwards no write is in flight.
+/// Test: itself.
+#[test]
+fn held_write_that_panics_ends_its_in_flight_count() {
+    let fx = fixture();
+    let (items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let keychain = state.open(&BackendId::keychain()).unwrap();
+    *items.read_hook.lock().unwrap() = Some(ReadHook(
+        ItemId::blob(),
+        Box::new(|| panic!("injected panic inside a Keychain write")),
+    ));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        keychain.set(
+            &vault(PROJECT_VAULT),
+            &key(KEYS[0]),
+            &SecretValue::new("v2"),
+        )
+    }));
+    assert!(panicked.is_err(), "the write did not panic");
+    assert!(
+        state
+            .cache
+            .grant()
+            .drained_mark(std::time::Duration::ZERO)
+            .is_some(),
+        "a panicked write left the in-flight count raised"
+    );
+}
+
+/// Why: #11786 fix round — unlock waited the full Keychain timeout for a
+/// write in flight, past the request deadline. The router then answered
+/// `deadline_exceeded`, and a write landing later let the body hold the
+/// blob: a live grant behind a failed reply.
+/// What: unlock runs through the router's `run_blocking` with a short
+/// deadline while a write stays open past it. The reply is
+/// `keychain_access_prompt`; the write then ends, the body's permit comes
+/// back, and the grant is `Off`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unlock_past_its_deadline_answers_the_prompt_and_opens_no_grant() {
+    let fx = fixture();
+    let (_items, state, _) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    let state = Arc::new(state);
+    let grant = || state.cache.grant();
+    assert_eq!(grant().held_begin(&ItemId::blob()), None);
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    let answer = crate::server::router::run_blocking(
+        Arc::clone(&state),
+        Arc::clone(&admission),
+        deadline,
+        unlock::unlock,
+        caller(),
+        json!({"project": "ignored"}),
+    )
+    .await;
+    assert_eq!(answer, Err(ErrorKind::KeychainAccessPrompt));
+    grant().held_done();
+    // The body holds the one permit until it returns.
+    let permit = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        admission.acquire_owned(),
+    )
+    .await;
+    assert!(permit.is_ok(), "the unlock body never returned");
+    assert_eq!(
+        grant().check(),
+        Status::Off,
+        "a grant opened after the reply"
+    );
+    assert!(!grant().holds_blob());
 }

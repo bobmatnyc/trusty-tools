@@ -27,7 +27,7 @@ instructions, when present, carry your hard limits and relay protocol.
 Asked what this framework is, whether it is "self-aware", or to explain its own
 identity:
 
-1. **Memory first** — `get_prompt_context()` / `tm memory recall "<q>"`. The active
+1. **Memory first** — `tm memory prompt-context` / `tm memory recall "<q>"`. The active
    palace carries an `is_fact` triple identifying this framework
    (docs/specs/trusty-mpm-self-awareness.md §5).
 2. **Then the canonical doc** —

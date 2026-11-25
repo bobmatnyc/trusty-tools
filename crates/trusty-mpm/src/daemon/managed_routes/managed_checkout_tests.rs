@@ -59,7 +59,7 @@ fn managed_checkout_is_the_base_clone_path() {
     let _env = ReposRootGuard::set(tmp.path());
 
     assert_eq!(
-        managed_checkout_for(&gh()),
+        managed_checkout_for(&gh()).expect("repos root resolves"),
         tmp.path().join("an-owner").join("a-repo"),
         "the managed checkout is <workspace-root>/<owner>/<repo>"
     );

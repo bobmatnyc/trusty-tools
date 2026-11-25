@@ -43,6 +43,8 @@ mod register;
 mod relaunch;
 pub(crate) mod restart; // #11365
 mod seed;
+// #10161 D3c: the Architect agents, under the skills' deploy rule.
+mod seed_agents;
 mod session_name;
 pub(crate) mod up; // #11364
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
@@ -477,6 +479,8 @@ pub(crate) fn init_full(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir, &seed)?);
+    // #10161 D3c: the Architect agents, under the skills' deploy rule.
+    report.steps.extend(seed_agents::steps(dir, home, &seed));
     // #11012: the watch list, seeded once from live sessions; never replaced.
     if let Some(watch) = watch {
         // #11012 review: the dashboard collector is the Architect's too.

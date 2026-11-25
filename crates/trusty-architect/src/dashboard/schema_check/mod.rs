@@ -27,7 +27,6 @@ use std::str::FromStr;
 use serde_json::{Map, Value};
 
 use super::error::DashError;
-pub use pattern::Pattern;
 use walk::Patterns;
 
 /// Collections with a schema of the same name.

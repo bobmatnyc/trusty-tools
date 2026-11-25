@@ -1,0 +1,5 @@
+crate   trusty-mpm
+version 1.14.14
+reason  The #10161 D3c Architect agents add the pub field agents to the non-#[non_exhaustive] ArchitectSeed struct (break vs 1.14.13); under the 2026-09-26 versioning ruling a public-API break never forces a major version, and the Architect declared this break. Refs #10161.
+# #10161 D3c: ArchitectSeed now carries the five shipped Architect agents; tm fleet init reads seed.agents to deploy them.
+accept  constructible_struct_adds_field field ArchitectSeed.agents

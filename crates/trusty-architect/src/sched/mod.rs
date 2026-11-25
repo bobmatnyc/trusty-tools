@@ -34,6 +34,8 @@ pub mod fresh;
 pub mod logger;
 pub mod parity;
 pub mod parity_join;
+pub mod parity_kind;
+pub mod parity_pair;
 pub mod plist;
 pub mod runlog;
 pub mod shadow;

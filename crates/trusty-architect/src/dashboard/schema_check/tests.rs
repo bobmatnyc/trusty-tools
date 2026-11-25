@@ -3,6 +3,7 @@
 
 use serde_json::json;
 
+use super::pattern::Pattern;
 use super::walk::{Patterns, check, check_keywords};
 use super::*;
 

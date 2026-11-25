@@ -5,7 +5,8 @@
 //! `status`, `run` (needs `--once`), `daemon`, `cutover`, `rollback`,
 //! `parity`, `plist`. Flags: `--root DIR`, `--config PATH`, `--once`,
 //! `--json`, `--since <N>[smhd]`, `--force`, `--min-cycles N`,
-//! `--min-match-pct P` (`parity` and `cutover`; defaults 120 and 95), `--exe PATH`. An unknown verb or flag, a flag
+//! `--min-match-pct P` (`parity` and `cutover`; defaults 120 and 95), `--exe PATH`,
+//! `--by-kind` and `--examples N` (`parity`, #11826). An unknown verb or flag, a flag
 //! without its value or a value that does not parse is a usage error.
 //! Test: `args_parse_every_verb_and_flag`, `args_reject_unknown_and_malformed`.
 
@@ -42,6 +43,10 @@ pub struct Args {
     pub min_match_pct: Option<f64>,
     /// `--exe`.
     pub exe: Option<PathBuf>,
+    /// `--by-kind` (`parity`, #11826).
+    pub by_kind: bool,
+    /// `--examples N` (`parity`, #11826); implies `--by-kind`.
+    pub examples: Option<usize>,
 }
 
 /// Parses `argv` (without the program name).
@@ -74,6 +79,14 @@ pub fn parse(argv: &[String]) -> Result<Args, SchedError> {
             "--once" => a.once = true,
             "--json" => a.json = true,
             "--force" => a.force = true,
+            "--by-kind" => a.by_kind = true,
+            "--examples" => {
+                let v = value("--examples")?;
+                a.examples = Some(
+                    v.parse()
+                        .map_err(|_| usage(format!("--examples {v:?}: not a number")))?,
+                );
+            }
             "--root" => a.root = Some(value("--root")?.into()),
             "--config" => a.config = Some(value("--config")?.into()),
             "--exe" => a.exe = Some(value("--exe")?.into()),

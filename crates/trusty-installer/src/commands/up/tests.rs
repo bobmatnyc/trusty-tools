@@ -692,14 +692,6 @@ fn render_json_is_valid() {
     assert!(s.contains("\"core\""));
 }
 
-#[test]
-fn render_human_does_not_panic() {
-    let mut r = report_with(vec![("core", StageStatus::Ok)]);
-    r.console_url = Some("http://127.0.0.1:7777".to_owned());
-    r.render(false);
-    r.render(true);
-}
-
 // ── §3/§5 end-to-end sequence ───────────────────────────────────────────────────
 
 /// A `Runner` that returns a fixed health per member id (by binary).

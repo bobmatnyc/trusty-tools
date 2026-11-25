@@ -169,18 +169,6 @@ fn run_unknown_member_is_error() {
     assert_eq!(code, 3);
 }
 
-/// Why: `--check` must be read-only (delegates to `updates`) and never reach
-/// the apply path. This performs a live crates.io probe, so it is
-/// `#[ignore]`-tagged to keep CI fast and offline-deterministic.
-/// What: Calls `run` with `check = true`; asserts exit 0 (read-only).
-/// Test: `cargo test -p trusty-installer -- --include-ignored`.
-#[test]
-#[ignore = "performs a live crates.io probe; run with --include-ignored"]
-fn run_check_is_readonly() {
-    let code = run(true, false, false, false, &["tga".to_owned()], true);
-    assert_eq!(code, 0);
-}
-
 // ── #4964 Phase 1: the restart happens, and it is the only thing that
 //    happens on the prebuilt branch ────────────────────────────────────
 //

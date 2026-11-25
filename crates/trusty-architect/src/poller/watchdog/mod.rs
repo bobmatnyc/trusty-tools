@@ -8,7 +8,8 @@
 //! What: [`classify`] and [`step`] are pure: panes, clock, transcript mtime
 //! and the relauncher come in as arguments. The book is the prototype's
 //! `state["watchdog"]` JSON object (`last_relaunch`, `failures`, `pending`,
-//! `spinner`), so Python and Rust read each other's state. [`relaunch`]
+//! `spinner`, `wait_since`), so Python and Rust read each other's state. A
+//! background-agent wait is not frozen until [`WAIT_MAX_MIN`] (#11826). [`relaunch`]
 //! holds the one real relaunch path (the Python `session-relaunch.sh`, run as
 //! a subprocess); [`wiring`] runs one cycle's step against the poll state.
 //! Test: `tests/watchdog_ported.rs` (the prototype's tests, by name).
@@ -71,11 +72,52 @@ fn minutes(secs: f64) -> i64 {
     (secs / 60.0).floor() as i64
 }
 
+/// Minutes a background-agent wait may sit unchanged before it is frozen
+/// (`WAIT_MAX_MIN`, architect-watchdog.py:39).
+pub const WAIT_MAX_MIN: f64 = 60.0;
+
+/// `WAIT_RE.search(spinner)`: `Waiting for \d+ background agents? to finish`
+/// (architect-watchdog.py:40), matched by hand (the crate takes no `regex`).
+pub fn is_agent_wait(spinner: &str) -> bool {
+    spinner.match_indices("Waiting for ").any(|(i, m)| {
+        let rest = &spinner[i + m.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let rest = &rest[digits..];
+        let Some(rest) = rest.strip_prefix(" background agent") else {
+            return false;
+        };
+        let rest = rest.strip_prefix('s').unwrap_or(rest);
+        digits > 0 && rest.starts_with(" to finish")
+    })
+}
+
 /// `(class, detail)` for the Architect; `prev_spinner` is last poll's text.
 ///
 /// Silent needs a wake (with none outstanding a quiet Architect is idle);
-/// frozen needs `busy`.
+/// frozen needs `busy`. A background-agent wait is [`classify_waiting`]
+/// with no clock: never frozen.
 pub fn classify(o: &Observed<'_>, prev_spinner: Option<&str>) -> (Class, String) {
+    classify_waiting(o, prev_spinner, None)
+}
+
+/// [`classify`] with the background-agent wait rule.
+///
+/// Why: an Architect that dispatched an agent sits idle on "Waiting for N
+/// background agent(s) to finish", so its transcript goes stale and its
+/// spinner repeats; the Rust port called that frozen where Python did not
+/// (#11826, parity window 6, class C; architect-watchdog.py:85-88).
+/// What: a busy pane whose spinner matches [`is_agent_wait`] skips both
+/// frozen tests; it is frozen only when `wait_since` (the book's clock,
+/// started by [`step`]) is over [`WAIT_MAX_MIN`] minutes old. Silent still
+/// applies.
+/// Test: `test_step_background_wait_is_not_frozen`,
+/// `test_step_background_wait_alerts_after_60_min`,
+/// `test_step_other_unchanged_spinner_still_frozen`.
+pub fn classify_waiting(
+    o: &Observed<'_>,
+    prev_spinner: Option<&str>,
+    wait_since: Option<f64>,
+) -> (Class, String) {
     let mine: Vec<&Pane> = o.panes.iter().filter(|p| p.session == o.session).collect();
     let Some(first) = mine.first() else {
         return (
@@ -86,7 +128,19 @@ pub fn classify(o: &Observed<'_>, prev_spinner: Option<&str>) -> (Class, String)
     if mine.iter().all(|p| is_shell(&p.cmd)) {
         return (Class::Dead, format!("pane runs {}, not claude", first.cmd));
     }
-    if o.busy
+    if o.busy && is_agent_wait(o.spinner) {
+        // #11826: an expected wait, frozen only past WAIT_MAX_MIN.
+        if let Some(w) = wait_since
+            && o.now - w > WAIT_MAX_MIN * 60.0
+        {
+            let head: String = o.spinner.chars().take(80).collect();
+            let detail = format!(
+                "waiting on background agent for {} min: {head}",
+                minutes(o.now - w)
+            );
+            return (Class::Frozen, detail);
+        }
+    } else if o.busy
         && let Some(t) = o.transcript_mtime
         && o.now - t > o.frozen_min * 60.0
     {
@@ -96,8 +150,7 @@ pub fn classify(o: &Observed<'_>, prev_spinner: Option<&str>) -> (Class, String)
             py_g(o.frozen_min)
         );
         return (Class::Frozen, detail);
-    }
-    if o.busy && !o.spinner.is_empty() && Some(o.spinner) == prev_spinner {
+    } else if o.busy && !o.spinner.is_empty() && Some(o.spinner) == prev_spinner {
         let head: String = o.spinner.chars().take(80).collect();
         let detail = format!("running turn, spinner text unchanged across polls: {head}");
         return (Class::Frozen, detail);
@@ -195,7 +248,22 @@ pub fn step(
         .get("spinner")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let (class, detail) = classify(o, prev.as_deref());
+    // #11826: the wait clock (architect-watchdog.py:117-121) starts on a new
+    // or changed wait text and clears when the pane is not waiting.
+    let wait_since = if o.busy && is_agent_wait(o.spinner) {
+        let held = book.get("wait_since").and_then(Value::as_f64);
+        match held {
+            Some(w) if prev.as_deref() == Some(o.spinner) => Some(w),
+            _ => Some(o.now),
+        }
+    } else {
+        None
+    };
+    book.insert(
+        "wait_since".to_owned(),
+        wait_since.map_or(Value::Null, Value::from),
+    );
+    let (class, detail) = classify_waiting(o, prev.as_deref(), wait_since);
     let spinner = if o.busy && class != Class::Dead {
         Value::String(o.spinner.to_owned())
     } else {

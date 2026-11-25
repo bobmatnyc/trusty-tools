@@ -194,8 +194,10 @@ async fn manager_send_input_skips_modal_probe_for_tcode() {
 /// a hardcoded literal, so no post-send pane read happens and this assertion
 /// cannot hold. Asserting the send ALSO fired proves the verdict describes a
 /// real dispatch rather than a refusal.
+/// #11798: an idle prompt keeps the paste past the re-read window, so the
+/// verdict stays `UnsubmittedPaste`; paused time skips the window.
 /// Test: this function IS the test.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn send_input_observed_reports_unsubmitted_paste() {
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager_with_pane(&dir).await;
@@ -487,4 +489,57 @@ async fn send_input_observed_presses_enter_on_a_paste_placeholder() {
 
     let keys = fake.pane_key_calls.lock().unwrap().clone();
     assert_eq!(keys, vec![("%1".to_string(), "Enter".to_string())]);
+}
+
+/// #11798: a receiver mid-turn, showing its queued paste.
+const BUSY_PASTE: &str =
+    "✻ Waiting for 1 background agent (esc to interrupt)\n❯ [Pasted text #1 +2 lines]\n";
+
+/// #11798: a busy receiver commits the paste after the first post-Enter
+/// read. The send reports `Submitted`. Pre-fix the one read saw the paste and
+/// answered `UnsubmittedPaste`, so the sender resent and delivered twice.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_waits_for_a_busy_receiver_to_commit_the_paste() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    // Every read after the scripted ones shows the committed turn.
+    let (mgr, fake, id) = active_session_showing(&dir, "✻ Working (esc to interrupt)\n❯ \n").await;
+    // Read 1: the modal probe. Read 2: the echo check sees the paste. Read 3:
+    // the first post-Enter read still sees it; the receiver commits it
+    // before read 4.
+    fake.capture_script
+        .lock()
+        .unwrap()
+        .extend([BUSY_PASTE, BUSY_PASTE, BUSY_PASTE].map(String::from));
+
+    let state = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    assert_eq!(state, crate::session_manager::SubmitState::Submitted);
+    assert!(state.delivered());
+    let keys = fake.pane_key_calls.lock().unwrap().clone();
+    assert_eq!(keys, vec![("%1".to_string(), "Enter".to_string())]);
+}
+
+/// #11798: a busy receiver still shows the paste when the window closes. The
+/// state is undetermined: `Unverified`, never `sent: false`, with a reason
+/// telling the sender not to resend. Pre-fix this read `UnsubmittedPaste`.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_is_unverified_when_a_busy_receiver_keeps_the_paste() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake, id) = active_session_showing(&dir, BUSY_PASTE).await;
+
+    let state = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    assert_eq!(state, crate::session_manager::SubmitState::Unverified);
+    assert!(state.delivered(), "undetermined must never be sent:false");
+    assert!(
+        state.reason().is_some_and(|r| r.contains("do not resend")),
+        "{:?}",
+        state.reason()
+    );
+    assert!(
+        fake.pane_capture_calls.lock().unwrap().len() > 2,
+        "the pane was re-read after Enter"
+    );
 }

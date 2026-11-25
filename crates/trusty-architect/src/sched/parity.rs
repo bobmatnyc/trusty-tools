@@ -18,13 +18,15 @@
 //! Haiku-path wakes count only in `haiku_excluded`; `il_cron` alerts and
 //! wakes only in `il_cron_excluded` (unmeasurable in a dry run); `ctxwatch`
 //! alerts and wakes only in `ctxwatch_excluded` (the two pollers share one
-//! debounce file, so whichever runs first raises it). `idle` pairs on the
+//! debounce file, so whichever runs first raises it); the [`UNRAISED`] kinds
+//! only in `unraised_excluded` (#11826). `idle` pairs on the
 //! screen hash, since-epochs within 300 s; `idle_relaxed` counts those. The report
 //! keeps both numbers, identity-only and identity plus fallback, and the
 //! pairs each method made; [`Report::passes`] uses identity plus fallback
 //! against [`Thresholds`] (default 120 cycles and 95% for alerts and wakes).
 //! [`load`] reads the files from a [`Layout`] since a time; [`render`]
-//! prints it. Rows with no readable timestamp are counted in `unread`.
+//! prints it, [`render_by_kind`] adds the per-kind section. Rows with no
+//! readable timestamp are counted in `unread`.
 //! Test: `parity_joins_matched_scheduler_only_and_poller_only`,
 //! `parity_counts_wakes_per_window`, `parity_ignores_failed_shadow_records`,
 //! `parity_counts_only_cycles_whose_triage_woke`,
@@ -32,14 +34,19 @@
 //! `parity_load_reads_the_three_files`, `parity_reports_identity_and_fallback_numbers`,
 //! `parity_excludes_il_cron_with_its_reason`,
 //! `parity_pairs_idle_alerts_whose_epochs_differ`,
-//! `parity_excludes_ctxwatch_with_its_reason`.
+//! `parity_excludes_ctxwatch_with_its_reason`,
+//! `window6_excludes_kinds_a_dry_run_poll_never_raises`,
+//! `window6_fixture_moves_toward_the_projection`.
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use super::cutover::Thresholds;
-use super::parity_join::{CTXWATCH, Event, IDLE_EPOCH_TOLERANCE_S, IL_CRON, Joined, join};
+use super::parity_join::{
+    CTXWATCH, Event, FALLBACK_CYCLES, IDLE_EPOCH_TOLERANCE_S, IL_CRON, Joined, join,
+};
+use super::parity_kind::{self, ByKind};
 use super::shadow::{EventKey, ShadowAlert, ShadowRecord};
 use super::slot::parse_iso;
 use super::{Layout, SchedError};
@@ -86,7 +93,23 @@ pub struct Report {
     pub ctxwatch_excluded: u64,
     /// Alert and wake `idle` pairs made on (session, kind, screen hash).
     pub idle_relaxed: (u64, u64),
+    /// [`UNRAISED`] alerts and wakes on either side, per kind, left out
+    /// (#11826).
+    pub unraised_excluded: [u64; 3],
+    /// `idle` events folded into their episode's previous event (a transient
+    /// screen within two polls), alerts plus wakes: (shadow, live) (#11826).
+    pub idle_folded: (u64, u64),
+    /// Alerts per kind, identity plus fallback (#11826).
+    pub alerts_by_kind: ByKind,
+    /// Wakes per kind, identity plus fallback (#11826).
+    pub wakes_by_kind: ByKind,
 }
+
+/// Kinds a dry-run poll never raises, left out of parity (#11826):
+/// `meta_due` and `meta_miss` are appended by `scripts/meta_due.py:41,55,222`,
+/// not a poll step; `factory_send_maxed` comes only from a live auto-send
+/// (`fleet-poll.py:967-981`), which a dry run skips.
+pub const UNRAISED: [&str; 3] = ["meta_due", "meta_miss", "factory_send_maxed"];
 
 /// One live `alerts.jsonl` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,14 +248,17 @@ pub fn compute_full(
         .collect();
     // MB1595 fix round: il_cron is unmeasurable in a dry run (il-cron.py:249).
     // MB1595 window 4: ctxwatch shares live debounce state (C4), likewise out.
-    let mut excluded = [0u64; 2];
+    // #11826: and the kinds a dry-run poll never raises (UNRAISED).
+    let mut excluded = [0u64; 5];
     let mut drop_il = |v: Vec<Event>, live_side: bool| -> Vec<Event> {
         let mut rest = Vec::with_capacity(v.len());
         for e in v {
             let kind = e.sk.as_ref().map(|(_, k)| k.as_str());
-            let slot = match kind {
-                Some(IL_CRON) => 0,
-                Some(CTXWATCH) => 1,
+            let unraised = kind.and_then(|k| UNRAISED.iter().position(|u| *u == k));
+            let slot = match (kind, unraised) {
+                (Some(IL_CRON), _) => 0,
+                (Some(CTXWATCH), _) => 1,
+                (_, Some(i)) => 2 + i,
                 _ => {
                     rest.push(e);
                     continue;
@@ -244,12 +270,16 @@ pub fn compute_full(
     };
     let (sa, la) = (drop_il(sa, false), drop_il(la, true));
     let (sw, lw) = (drop_il(sw, false), drop_il(lw, true));
-    [rep.il_cron_excluded, rep.ctxwatch_excluded] = excluded;
+    [rep.il_cron_excluded, rep.ctxwatch_excluded] = [excluded[0], excluded[1]];
+    rep.unraised_excluded = [excluded[2], excluded[3], excluded[4]];
     let both = |s: &[Event], l: &[Event]| -> (Joined, Joined) {
         (join(s, l, &in_scope, false), join(s, l, &in_scope, true))
     };
     let (ai, af) = both(&sa, &la);
     let (wi, wf) = both(&sw, &lw);
+    rep.idle_folded = (af.folded.0 + wf.folded.0, af.folded.1 + wf.folded.1);
+    rep.alerts_by_kind = parity_kind::tally(&sa, &la, &af, &in_scope);
+    rep.wakes_by_kind = parity_kind::tally(&sw, &lw, &wf, &in_scope);
     (rep.alerts_identity, rep.alerts) = (ai.counts, af.counts);
     (rep.wakes_identity, rep.wakes) = (wi.counts, wf.counts);
     rep.alert_pairs = (af.by_identity, af.by_fallback);
@@ -420,6 +450,10 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
         "idle pairs on (session, kind, screen hash), epochs within {} s: alerts {}, wakes {}\n",
         IDLE_EPOCH_TOLERANCE_S, r.idle_relaxed.0, r.idle_relaxed.1
     );
+    s += &format!(
+        "idle re-alerts folded into the previous one (a transient screen, within {} polls): shadow {}, live {}\n",
+        FALLBACK_CYCLES, r.idle_folded.0, r.idle_folded.1
+    );
     s += &format!("live rows unread: {}\n", r.unread);
     s += &format!("haiku-path wakes excluded: {}\n", r.haiku_excluded);
     s += &format!(
@@ -429,6 +463,14 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
     s += &format!(
         "ctxwatch excluded: {} (shared debounce state: the first poller to run raises it)\n",
         r.ctxwatch_excluded
+    );
+    let [due, miss, maxed] = r.unraised_excluded;
+    s += &format!(
+        "never raised by a dry-run poll, excluded: {} ({} {due}, {} {miss}, {} {maxed}: meta_due.py writes them; a dry run skips auto-send)\n",
+        due + miss + maxed,
+        UNRAISED[0],
+        UNRAISED[1],
+        UNRAISED[2],
     );
     s += &format!(
         "alert match: {:.1}% (identity only {:.1}%)\nwake match: {:.1}% (identity only {:.1}%)\n",
@@ -441,6 +483,23 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
         "verdict: {verdict} (identity plus fallback; needs at least {} cycles and {:.1}% for alerts and for wakes)\n",
         th.min_cycles, th.min_match_pct,
     );
+    s
+}
+
+/// [`render_with`], then, when `by_kind` is set, the per-kind section for
+/// alerts and wakes with up to that many unmatched rows per kind.
+///
+/// Why: `parity --by-kind` / `--examples N` (#11826); without the flags the
+/// output is exactly [`render_with`]'s.
+/// What: `None` adds nothing; `Some(n)` appends [`parity_kind::render`] for
+/// alerts then wakes, listing up to `n` unmatched rows per kind.
+/// Test: `parity_by_kind_flag_prints_per_kind_rows_and_examples`.
+pub fn render_by_kind(r: &Report, th: &Thresholds, by_kind: Option<usize>) -> String {
+    let mut s = render_with(r, th);
+    if let Some(n) = by_kind {
+        s += &parity_kind::render("alerts", &r.alerts_by_kind, n);
+        s += &parity_kind::render("wakes", &r.wakes_by_kind, n);
+    }
     s
 }
 
@@ -471,20 +530,5 @@ impl Report {
         self.cycles >= th.min_cycles
             && self.alert_pct() >= th.min_match_pct
             && self.wake_pct() >= th.min_match_pct
-    }
-
-    /// Alerts and wakes matched, as a percentage of every compared item
-    /// (matched plus either side's extras); 100 when nothing was compared.
-    pub fn match_pct(&self) -> f64 {
-        let total: u64 = [self.alerts, self.wakes]
-            .iter()
-            .map(|c| c.matched + c.scheduler_only + c.poller_only)
-            .sum();
-        let matched = self.alerts.matched + self.wakes.matched;
-        if total == 0 {
-            100.0
-        } else {
-            matched as f64 * 100.0 / total as f64
-        }
     }
 }

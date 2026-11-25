@@ -508,10 +508,17 @@ async fn create_session_full_lifecycle() {
 
     match persisted_state {
         "active" => {
-            connector
+            // #11796: `FakeNoopTmuxDriver` has no readable input box, so the
+            // send gate cannot prove the box empty and refuses (fail closed);
+            // pre-#11796 this "succeeded" against a pane that never existed.
+            let err = connector
                 .send_input(&info.id, "echo hello")
                 .await
-                .expect("send_input must succeed for an Active session");
+                .expect_err("an unreadable input box must refuse the send");
+            assert!(
+                matches!(&err, ConnectorError::Backend(m) if m.contains("input_not_empty")),
+                "expected an input_not_empty refusal, got {err:?}"
+            );
         }
         other => {
             let err = connector

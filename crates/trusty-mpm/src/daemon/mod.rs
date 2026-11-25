@@ -899,13 +899,15 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // work. See `SessionManager::reap_orphaned_worktrees` for the
                 // authoritative list. Inherits the orphan-GC env gate
                 // (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
-                let repos_root = managed_routes::inproject::repos_root();
+                // #11821: a broken install.toml skips this pass, logged below
+                // as a failed sweep; it never reaps under the default root.
+                let repos_root = managed_routes::inproject::try_repos_root();
                 // #7357: this loop is the entry point for the unattended sweep,
                 // so it resolves the adopted anchors under the DAEMON's own
                 // framework root — the same root `project_register` writes them
                 // to.
                 let adopted = crate::project::adopted_anchors_under(state.framework_root());
-                match mgr.reap_orphaned_worktrees(&repos_root, &adopted).await {
+                match reap_orphans_under(&mgr, repos_root, &adopted).await {
                     Ok(outcome) => {
                         if !outcome.removed.is_empty() {
                             info!(
@@ -1308,6 +1310,49 @@ mod shutdown_reaper_tests {
         handle
             .await
             .expect("reap_loop task must not panic after cancellation");
+    }
+}
+
+/// One orphan-GC worktree pass under `repos_root`.
+///
+/// Why: df-D1t (#11821) — a broken `install.toml` must fail the pass, never
+/// reap under the default root. A parameter, so a test can hand it the error.
+/// What: the resolver's error as `Err`, with nothing reaped; otherwise
+/// [`crate::session_manager::SessionManager::reap_orphaned_worktrees`].
+/// Test: `orphan_gc_refuses_an_unresolved_repos_root`.
+async fn reap_orphans_under(
+    mgr: &crate::session_manager::SessionManager,
+    repos_root: Result<std::path::PathBuf, trusty_common::install_paths::InstallPathsError>,
+    adopted: &[std::path::PathBuf],
+) -> anyhow::Result<crate::session_manager::prune::OrphanSweepOutcome> {
+    // #11821: refuse before the reap, never under a guessed root.
+    let root = repos_root.map_err(|e| anyhow::anyhow!("repos root unresolved: {e}"))?;
+    mgr.reap_orphaned_worktrees(&root, adopted).await
+}
+
+#[cfg(test)]
+mod orphan_gc_root_tests {
+    use super::{DaemonState, reap_orphans_under};
+
+    /// #11821 df-D1t: a broken `install.toml` fails the pass and names the
+    /// file; a resolved root reaps as before.
+    #[tokio::test]
+    async fn orphan_gc_refuses_an_unresolved_repos_root() {
+        let dir = tempfile::tempdir().expect("scratch framework root");
+        let state = DaemonState::with_root(dir.path().to_path_buf());
+        let mgr = state.session_manager().await;
+        let broken = crate::test_support::broken_install_error();
+
+        let err = reap_orphans_under(&mgr, Err(broken), &[])
+            .await
+            .expect_err("an unresolved repos root must fail the pass");
+        assert!(err.to_string().contains("install.toml"), "got: {err}");
+
+        let empty_root = tempfile::tempdir().expect("empty repos root");
+        let outcome = reap_orphans_under(&mgr, Ok(empty_root.path().to_path_buf()), &[])
+            .await
+            .expect("a resolved root runs the pass");
+        assert!(outcome.removed.is_empty(), "outcome: {outcome:?}");
     }
 }
 

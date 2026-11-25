@@ -88,6 +88,11 @@
 # #7812: re-exec under bash when started from zsh (the harness shell).
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
+# #11821 P6a: --projects-root / --config-dir, shared by every sandbox launcher.
+# Builtins only: a selftest runs this launcher on a PATH with no dirname.
+case "${BASH_SOURCE[0]}" in */*) SIP_DIR="${BASH_SOURCE[0]%/*}" ;; *) SIP_DIR=. ;; esac
+# shellcheck source=scripts/lib/sandbox_install_paths.sh
+. "$SIP_DIR/lib/sandbox_install_paths.sh"
 
 SANDBOX_PATH="/usr/bin:/bin"
 SOCKET_SUBPATH=".trusty-tools/trusty-secrets/secrets.sock"
@@ -104,6 +109,7 @@ die() {
 }
 
 usage() {
+  echo "  install paths (#11821): [--projects-root PATH] [--config-dir PATH], inside --dir" >&2
   echo "usage: scripts/sandbox_secrets_console.sh --secrets-bin PATH --console-bin PATH" >&2
   echo "           [--dir DIR] [--tm-bin PATH] [--events-bin PATH] [--bind HOST:PORT] [--projects N] [--idle-secs N] [--dry-run]" >&2
   echo "  --tm-bin PATH  directory holding an executable tm (and trusty-mpm), or the tm file;" >&2
@@ -231,6 +237,8 @@ while [ "$#" -gt 0 ]; do
     --projects) [ "$#" -ge 2 ] || usage; PROJECTS="$2"; shift 2 ;;
     --idle-secs) [ "$#" -ge 2 ] || usage; IDLE="$2"; shift 2 ;;
     --stop) [ "$#" -ge 2 ] || usage; STOP_DIR="$2"; shift 2 ;;
+    --projects-root) [ "$#" -ge 2 ] || usage; SIP_PROJECTS="$2"; shift 2 ;;
+    --config-dir) [ "$#" -ge 2 ] || usage; SIP_CONFIG="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage ;;
     *) echo "$ME: unknown argument: $1" >&2; usage ;;
@@ -358,10 +366,13 @@ echo "$ME: console env -i (names): HOME PATH TRUSTY_SANDBOX TRUSTY_DATA_DIR_OVER
 echo "$ME: secrets argv: ${SECRETS_ARGV[*]}"
 echo "$ME: console argv: ${CONSOLE_ARGV[*]}"
 
+# #11821 P6a: admit only install paths inside the sandbox dir.
+sip_check sandbox_secrets_console "$SANDBOX" || exit 1
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "$ME: dry run; nothing created or started"
   exit 0
 fi
+sip_write sandbox_secrets_console "$SANDBOX" || exit 1
 
 for role in secrets console events; do
   if [ -f "$SANDBOX/$role.pid" ]; then

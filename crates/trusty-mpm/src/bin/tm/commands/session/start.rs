@@ -91,17 +91,25 @@ pub(crate) async fn start_session(
 
     // Not a recognized GitHub-backed remote: no live source tree to protect —
     // preserve the original in-place deploy-and-start behavior.
-    let fw = trusty_mpm::core::paths::FrameworkPaths::default();
+    // #11077: the sandbox home under `TRUSTY_SANDBOX=1`, as launch/connect use.
+    let home = crate::commands::launch_home::launch_home()?;
+    let fw = start_framework_paths(home.as_deref());
     // #9999: the user tier `CLAUDE_CONFIG_DIR` names, as `tm validate --repair` uses.
     let config_dir = trusty_mpm::core::session_record::claude_config_dir_override();
-    start_session_in_place(
-        daemon,
-        &path,
-        &fw,
-        dirs::home_dir().as_deref(),
-        config_dir.as_deref(),
-    )
-    .await
+    start_session_in_place(daemon, &path, &fw, home.as_deref(), config_dir.as_deref()).await
+}
+
+/// The framework layout `tm session start` writes under, for a resolved home.
+///
+/// Why (#11077): `FrameworkPaths::default()` reads the process home, so a
+/// sandboxed start wrote `crate_config_root()` outside the sandbox.
+/// What: `FrameworkPaths::under(home)`; no home keeps `default()`.
+/// Test: `sandboxed_session_start_paths_stay_under_the_sandbox_home`.
+pub(crate) fn start_framework_paths(
+    home: Option<&std::path::Path>,
+) -> trusty_mpm::core::paths::FrameworkPaths {
+    use trusty_mpm::core::paths::FrameworkPaths;
+    home.map_or_else(FrameworkPaths::default, FrameworkPaths::under)
 }
 
 /// The launch spec `tm session start` starts its in-place pane with (#8405,
@@ -339,7 +347,8 @@ async fn start_session_in_place(
     // #8992: the stamp's profile decides whether the skill and tool parts apply.
     let profile =
         trusty_mpm::core::pm_tool_trim::stamped_profile(std::slice::from_ref(&prompt.stamp));
-    let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile);
+    // #11821: a broken install.toml refuses before `POST /sessions` (df-D1w).
+    let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile)?;
     // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
     let spec = inplace_session_spec(path, &root, &prompt, settings.file.as_deref())?;
     // #11270: refused before `POST /sessions`, so a refusal adds no record.

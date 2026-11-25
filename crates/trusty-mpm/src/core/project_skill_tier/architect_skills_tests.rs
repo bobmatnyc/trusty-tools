@@ -257,7 +257,7 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 17] = [
+    const PINNED: [(&str, &str); 19] = [
         (
             "tm-fleet-check",
             "8e41b332fcb147ddf9d81d95936315986e5768c4efcd9d91a4149f2e3e7b55fd",
@@ -280,7 +280,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-search-memory",
-            "c2947716d1e2e238e41de5db982bfdda187adf0fb93d7274dda3631c8c40e733",
+            "3705f84cf316939df211ec5dded2cba48e5f28cc8636898286c21450962ff1d7",
         ),
         (
             "architect-github",
@@ -316,24 +316,35 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-improvements",
-            "5a0f6be29f925e8df9d3b40263f6ace8f0d72e269cee04b823b89a5dd7e7bf93",
+            "349ed4105e92fae097bb5b335b96a83070b8ccf0a379a5b7d054e0be2b5ed3ee",
         ),
         (
             "architect-host-admin",
-            "cf0becdbacdcdc405f9c0f7b93bd8643973aecfa29bc04fdecd638003a0107fb",
+            "7362004b8be5aa0384c1b5c55853e5b427fc4bb29a168a51759f354af977f296",
         ),
         (
             "architect-dashboard",
-            "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
+            // #9457: `fleet init` names when it starts the dashboard on macOS.
+            "908deda6a43c699d7c2d355c3cb0fbfbb64d33d12b6117915aa49e14abc4b0c7",
+        ),
+        (
+            "architect-drift-guard",
+            "228a8d37f9b0a73de888918c4e2fb5bf9b4b3f055f69d5861d1d9b5713c42deb",
+        ),
+        (
+            "architect-improver",
+            "f55bd138d925ae6866d42c8c5dc8cfaf759aef8049012ba6914c48c1a59bf631",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 4] = [
+    const FIRST_RELEASE: [&str; 6] = [
         "architect-github",
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
+        "architect-drift-guard",
+        "architect-improver",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

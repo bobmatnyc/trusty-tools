@@ -12,11 +12,15 @@ What: two subcommands, each with --check (exit 1 and name what is stale; write n
       --list-pairs, provenance.json itself excluded) to its sha256. --commit names the
       prototype commit the content was exported from; without it the recorded one stays.
       `fixtures` records the sha256 of each test fixture in FIXTURES (#10579).
-  history [--from-git]       writes crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv:
+  history [--from-git] [--from-repo PATH [--paths DEST ...]]
+                             writes crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv:
       one "DEST<TAB>SHA256" line per byte-version tm fleet init has shipped for each
-      embedded seed row of seed_table.rs. Without --from-git the existing lines are kept
-      and the current shipped bytes are added; --from-git also adds every version of each
-      asset in git history. --check fails when a current version is missing.
+      embedded seed row of the table files in TABLES. Without --from-git the existing lines
+      are kept and the current shipped bytes are added; --from-git also adds every version of
+      each asset in git history. --from-repo adds, for every seeded scripts/ DEST, one line
+      per distinct blob that DEST has had in any commit of the git repo at PATH (the live
+      Architect checkout, read with git log/show only); --paths limits it to the listed
+      seeded script DESTs. --check fails when a current version is missing.
 Exit: 0 written or current; 1 stale (--check); 2 bad input.
 Test: scripts/tests/test_architect_bundle_meta.py
 """
@@ -35,11 +39,12 @@ PROVENANCE = SUB / "provenance.json"
 MANIFEST = "scripts/architect_export_manifest.txt"
 ASSETS = "crates/trusty-mpm/src/assets/architect"
 FLEET = ROOT / "crates" / "trusty-mpm" / "src" / "bin" / "tm" / "commands" / "fleet"
-TABLE = FLEET / "seed_table.rs"
+# #10571: the seed table spans these files; seed_rows() reads every one, in write order.
+TABLES = (FLEET / "seed_table.rs", FLEET / "seed_table_scripts.rs")
 HISTORY = FLEET / "seed_history.tsv"
 # Test fixtures the bundle's behaviour is checked against (#10579): recorded, not shipped.
 FIXTURES = ("crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md",)
-ROW = re.compile(r'(embedded|template|schema|page)!\(\s*"([^"]+)"(?:\s*,\s*"([^"]+)")?')
+ROW = re.compile(r'(embedded|template|schema|page|script)!\(\s*"([^"]+)"(?:\s*,\s*"([^"]+)")?')
 
 
 class Bad(Exception):
@@ -99,10 +104,12 @@ def provenance(args, root=ROOT):
 
 def seed_rows(root):
     """(dest, asset path under the repo) for every embedded seed row, in table order."""
-    text = (root / TABLE.relative_to(ROOT)).read_text(encoding="utf-8")
+    text = "".join((root / t.relative_to(ROOT)).read_text(encoding="utf-8") for t in TABLES)
     rows = []
     for kind, a, b in ROW.findall(text):
-        if kind == "embedded":
+        if kind == "script":   # #10571: script!("name", exec) seeds scripts/<name>
+            rows.append((f"scripts/{a}", f"{ASSETS}/scripts/{a}"))
+        elif kind == "embedded":
             rows.append((a, f"{ASSETS}/{b}"))
         elif kind == "template":
             rows.append((a, f"{ASSETS}/templates/{a}"))
@@ -111,7 +118,7 @@ def seed_rows(root):
         else:
             rows.append((f"templates/dashboard/{a}", f"{ASSETS}/dashboard/{a}"))
     if not rows:
-        raise Bad(f"no seed rows found in {TABLE.name}")
+        raise Bad(f"no seed rows found in {', '.join(t.name for t in TABLES)}")
     return rows
 
 
@@ -124,6 +131,45 @@ def git_versions(root, rel):
         if blob.returncode == 0:
             out.add(sha(blob.stdout))
     return out
+
+
+def repo_versions(repo, dest):
+    """sha256 of every distinct blob `dest` has had in any commit of the git repo `repo`.
+
+    Why: the live Architect checkout is where the prototype scripts evolve; each version it
+      has held is a shipped copy `tm fleet init` may meet and must refresh (#10571).
+    What: one `git log --all -m --raw` per DEST for the blob ids, then `git show <blob>`
+      per distinct blob. Read-only: no checkout and nothing run from `repo`.
+    Test: test_history_from_repo_adds_every_live_script_version
+    """
+    log = subprocess.run(["git", "-C", str(repo), "log", "--all", "-m", "--raw", "--no-abbrev", "--format=",
+                          "--", dest], capture_output=True, text=True)
+    if log.returncode != 0:
+        raise Bad(f"git log in {repo} failed: {log.stderr.strip()}")
+    blobs = set()
+    for line in log.stdout.splitlines():
+        if line.startswith(":"):
+            blob = line.split("\t", 1)[0].split()[3]
+            if blob.strip("0"):   # all zeros: the path was deleted in that commit
+                blobs.add(blob)
+    out = set()
+    for blob in sorted(blobs):
+        show = subprocess.run(["git", "-C", str(repo), "show", "--no-textconv", blob], capture_output=True)
+        if show.returncode != 0:
+            raise Bad(f"git show {blob} in {repo} failed")
+        out.add(sha(show.stdout))
+    return out
+
+
+def repo_dests(args, rows):
+    """The seeded scripts/ DESTs `--from-repo` reads: all of them, or the `--paths` subset."""
+    scripts = [d for d, _ in rows if d.startswith("scripts/")]
+    if not args.paths:
+        return scripts
+    unknown = sorted(set(args.paths) - set(scripts))
+    if unknown:
+        raise Bad(f"--paths names no seeded script: {', '.join(unknown)}")
+    return [d for d in scripts if d in args.paths]
 
 
 def history(args, root=ROOT):
@@ -139,7 +185,18 @@ def history(args, root=ROOT):
             have.add((parts[0], parts[1]))
     want = set(have)
     missing = []
-    for dest, asset in seed_rows(root):
+    rows = seed_rows(root)
+    # #10571: every version the live Architect repo has held becomes a row.
+    if args.paths and not args.from_repo:
+        raise Bad("--paths needs --from-repo")
+    if args.from_repo:
+        repo = Path(args.from_repo)
+        if subprocess.run(["git", "-C", str(repo), "rev-list", "-n", "1", "--all"],
+                          capture_output=True).returncode != 0:
+            raise Bad(f"--from-repo: not a git repository: {repo}")
+        for dest in repo_dests(args, rows):
+            want |= {(dest, h) for h in repo_versions(repo, dest)}
+    for dest, asset in rows:
         cur = (dest, sha((root / asset).read_bytes()))
         if cur not in have:
             missing.append(dest)
@@ -168,6 +225,8 @@ def main(argv=None):
     p.add_argument("--check", action="store_true")
     h = sub.add_parser("history")
     h.add_argument("--from-git", action="store_true")
+    h.add_argument("--from-repo", default="", metavar="PATH")
+    h.add_argument("--paths", nargs="+", default=[], metavar="DEST")
     h.add_argument("--check", action="store_true")
     args = ap.parse_args(argv)
     try:

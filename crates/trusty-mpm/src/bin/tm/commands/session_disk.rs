@@ -221,6 +221,7 @@ fn session_names(directory: &[DirectoryRow]) -> SessionNames {
 /// Test: `a_worktree_cwd_still_names_its_project`,
 /// `a_cwd_outside_the_workspace_root_has_no_filter`.
 fn current_project_filter(cwd: &Path) -> Option<String> {
+    // #11821: defaulting resolver kept — a read-only survey filter; a wrong root drops the filter, writes nothing.
     let root = trusty_mpm::core::trusty_tools_config::workspace_root(
         &trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load(),
     );

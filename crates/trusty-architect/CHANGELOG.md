@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.3] — 2026-11-25
+
+### Added
+
+- `trusty-architect-sched parity --by-kind` prints matched / scheduler-only / poller-only per kind for alerts and wakes; `--examples N` lists up to N unmatched rows per kind (timestamp, session, fingerprint) (#11826).
+
+### Fixed
+
+- The scheduler's shadow reseeds its token-watch state from the live one at every shadow daemon start, under the live watcher's lock, and fails closed (keeping its own state) when the live file cannot be read or parsed, so a restart after downtime no longer replays old token alerts (#11826).
+- The Rust watchdog applies the background-agent wait rule: an Architect waiting on background agents is not `architect_frozen` until the wait has sat unchanged for 60 minutes (#11826).
+- `parity` leaves out `meta_due`, `meta_miss` and `factory_send_maxed`, which a dry-run poll never raises, and prints their counts on their own line (#11826).
+- `parity` folds an idle alert into the same episode's previous one when it follows within two polls (a transient screen), and prints the folded counts overall and per kind; it pairs `session_exited` without its per-poller first-seen time, and pairs a `token` event the Python watcher labelled `<project>:<sid>` with the same event under its session name (#11826).
+
+### Removed
+
+- Unused public items with no caller in the workspace: `sched::parity::Report::match_pct` (the verdict uses `alert_pct` and `wake_pct` since #11622), `il::ops::is_live`, `dashboard::pending::Pending::into_events`, the `dashboard::schema_check::Pattern` re-export, and `il::store::LockGuard::raw_fd`. Each is a public API break against 0.4.2, declared in `scripts/semver-accepted-breaks/trusty-architect-0.4.3.txt` (Refs [#10571](https://github.com/bobmatnyc/trusty-tools/issues/10571))
+- The four copies of the civil-date helpers are now one `days_from_civil` and one `civil_from_days` in `classify::alerts`; results are unchanged, and a table test checks them against the removed copies
+
 ## [0.4.2] — 2026-11-24
 
 ### Fixed

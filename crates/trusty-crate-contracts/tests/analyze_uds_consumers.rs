@@ -81,13 +81,9 @@ impl EnvGuard {
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).expect("create stub bin dir");
         let stub = bin.join("trusty-analyze");
-        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("write stub");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod stub");
-        }
+        // #10248: no write fd to the stub in this process.
+        trusty_common::exec_stub::write_executable(&stub, "#!/bin/sh\nexit 0\n")
+            .expect("write stub");
 
         let original_path = std::env::var_os("PATH").unwrap_or_default();
         // SAFETY: process-global, and every caller is `#[serial]`.

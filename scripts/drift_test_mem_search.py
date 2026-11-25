@@ -34,11 +34,17 @@ from drift_mem_core import (DREAM_TOOLS, RULINGS_DEGRADED, SEARCH_LANES, TH_COLD
 from drift_mem_dream import *  # noqa: E402,F401,F403
 from drift_mem_dream import dream_findings, dream_pass, print_dream  # noqa: E402
 
-HOME = os.path.expanduser("~")
+sys.path.insert(0, os.path.join(HERE, "lib"))
+from install_paths import InstallPathsError, tools_dir  # noqa: E402
+
 DEF_PUBLIC = os.path.join(HERE, "..", "testdata", "drift", "mem-search", "golden.public.json")
-DEF_PRIVATE = os.path.join(HOME, ".trusty-tools", "drift", "mem-search", "golden.private.json")
 DEF_BASELINE = os.path.join(HERE, "..", "testdata", "drift", "mem-search", "baseline.json")
-DEF_RESULTS = os.path.join(HOME, ".trusty-tools", "drift", "mem-search", "runs.jsonl")
+PRIVATE_NAME, RESULTS_NAME = "golden.private.json", "runs.jsonl"
+
+
+def drift_dir():
+    """`<config_dir>/.trusty-tools/drift/mem-search`; raises InstallPathsError on a broken install.toml (#11821)."""
+    return os.path.join(tools_dir(), "drift", "mem-search")
 REMEMBER_TYPES = {"Ruling", "Decision", "Status", "Turn", "Reference"}
 
 
@@ -298,9 +304,9 @@ def print_table(mt):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--golden-public", default=DEF_PUBLIC)
-    ap.add_argument("--golden-private", default=DEF_PRIVATE)
+    ap.add_argument("--golden-private", default=None, help="default: <drift dir>/golden.private.json")
     ap.add_argument("--baseline", default=DEF_BASELINE)
-    ap.add_argument("--results", default=DEF_RESULTS)
+    ap.add_argument("--results", default=None, help="default: <drift dir>/runs.jsonl")
     ap.add_argument("--write-baseline", action="store_true", help="store this run as the baseline")
     ap.add_argument("--no-record", action="store_true", help="do not append to the results file")
     ap.add_argument("--selftest", action="store_true")
@@ -310,6 +316,15 @@ def main():
     if a.selftest:
         runpy.run_path(os.path.join(HERE, "test_drift_test_mem_search.py"), run_name="__main__")
         return 0
+    if a.golden_private is None or a.results is None:
+        # #11821 P6a: the results file is appended to, so a broken install.toml refuses the run.
+        try:
+            ddir = drift_dir()
+        except InstallPathsError as e:
+            print(f"drift_test_mem_search: refused: {e}", file=sys.stderr)
+            return 2
+        a.golden_private = a.golden_private or os.path.join(ddir, PRIVATE_NAME)
+        a.results = a.results or os.path.join(ddir, RESULTS_NAME)
     golden, digests = load_golden([a.golden_public, a.golden_private])
     rows, info, dream, lane_errors = [], {"versions": {}, "indexes": {}, "palaces": {}, "warmup_ms": {}}, None, []
     try:

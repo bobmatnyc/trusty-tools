@@ -170,6 +170,9 @@ pub struct FakeTmuxDriver {
     pub watched_store: Mutex<Option<Arc<tokio::sync::RwLock<super::store::SessionStore>>>>,
     /// #9101: whether an ownership probe ran with `watched_store` locked.
     pub probed_under_guard: Mutex<bool>,
+    /// #11798: captures `capture_pane` answers in order before it falls back
+    /// to `capture_responses`, so a test can change the pane between reads.
+    pub capture_script: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl FakeTmuxDriver {
@@ -204,6 +207,7 @@ impl FakeTmuxDriver {
             scrollback_option_calls: Mutex::new(0),
             watched_store: Mutex::new(None),
             probed_under_guard: Mutex::new(false),
+            capture_script: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 }
@@ -509,6 +513,9 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .lock()
             .unwrap()
             .push((name.to_owned(), pane_id.to_owned()));
+        if let Some(next) = self.capture_script.lock().unwrap().pop_front() {
+            return Ok(next);
+        }
         Ok(self
             .capture_responses
             .lock()

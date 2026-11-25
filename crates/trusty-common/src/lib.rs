@@ -1208,6 +1208,16 @@ pub mod url_userinfo;
 /// workspace_layout::tests`.
 pub mod workspace_layout;
 
+/// The install-level host paths resolver and `install.toml` (#11821).
+///
+/// Why: the projects root and the config dir had no install-level setting;
+/// every crate derived them from `$HOME`.
+/// What: [`install_paths::InstallPaths::resolve`] (flag > env > install file >
+/// default, with the winning source per key) and
+/// [`install_paths::write_install_file`]. Feature-free.
+/// Test: `cargo test -p trusty-common -- install_paths::tests`.
+pub mod install_paths;
+
 /// Canonical repository identity (DOC-37) — the path-independent join key that
 /// relates the live checkout, `.base` clone, and session worktrees of one repo.
 ///

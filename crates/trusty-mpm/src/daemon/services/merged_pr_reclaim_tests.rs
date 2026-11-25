@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    DEFAULT_INTERVAL_SECS, ManualPermitRefusal, SweepReport, parse_enabled, parse_interval_secs,
-    reclaim, reclaim_loop, try_manual_permit,
+    DEFAULT_INTERVAL_SECS, ManualPermitRefusal, SweepReport, merged_pr_pass, parse_enabled,
+    parse_interval_secs, reclaim, reclaim_loop, try_manual_permit,
 };
 use crate::daemon::state::DaemonState;
 use crate::session_manager::worktree_reclaim::{ReclaimMode, ReclaimOutcome, ReclaimSurvey};
@@ -247,5 +247,22 @@ fn manual_permit_fails_closed_on_a_closed_lane() {
         try_manual_permit(&lane).err(),
         Some(ManualPermitRefusal::Closed),
         "a closed lane must refuse the manual pass, not grant or misreport it"
+    );
+}
+
+/// #11821 df-D1t: a broken `install.toml` skips the pass; a resolved root runs it.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_sweep_skips_an_unresolved_workspace_root() {
+    let (state, _dir) = scratch_root_state();
+    let broken = crate::test_support::broken_install_error();
+    assert!(
+        !merged_pr_pass(&state, Err(broken)).await,
+        "an unresolved workspace root must not run the pass"
+    );
+    let empty_root = tempfile::tempdir().expect("empty workspace root");
+    assert!(
+        merged_pr_pass(&state, Ok(empty_root.path().to_path_buf())).await,
+        "a resolved root runs the pass"
     );
 }
