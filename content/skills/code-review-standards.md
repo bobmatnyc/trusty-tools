@@ -3,7 +3,7 @@ name: code-review-standards
 description: Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference.
 user-invocable: false
 metadata:
-  version: "1.2.1"
+  version: "1.2.2"
 category: agent-reference
 tags: [code-review, severity, verdict, quality-gate, code-critic]
 effort: low

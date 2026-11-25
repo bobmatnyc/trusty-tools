@@ -3,7 +3,7 @@ name: architect-host-admin
 description: Architect skill, macOS host commands. Load for a resource or plan-usage report, a builder-band measurement, a host load or disk check, a subsystem-health check, a tmux priority question, a build-cache or disk question, or any step that touches a secret or backup. Holds the measurement commands the Architect cites. Architect only.
 user-invocable: true
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 category: monitoring
 tags: [architect, host, resources, subsystem-health, secrets]
 effort: medium
@@ -91,7 +91,7 @@ Read-only checks, one call each (MCP tools unless noted):
 | --- | --- | --- |
 | trusty-mpm fleet | `mcp__trusty-mpm__console_metrics`, `supervisor_status` | errored > 0, pending decisions, stale supervisor metrics, daemon version behind the installed `tm` |
 | Recent errors (all daemons) | `mcp__trusty-mpm__list_recent_errors` | new fingerprints or rising counts; vector-lane loss (`usearch ... EMPTY in memory`), corpus open failures |
-| trusty-search | `mcp__trusty-search__search_health`, `console_metrics` | `healthy: false`, `warm_boot_degraded`, watcher inactive, `vectors_unavailable_reason`, search `latency_ms` > 2000 |
+| trusty-search | `trusty-search health`, `mcp__trusty-search__console_metrics` | `healthy: false`, `warm_boot_degraded`, watcher inactive, `vectors_unavailable_reason`, search `latency_ms` > 2000 |
 | trusty-memory | `mcp__trusty-memory__console_metrics` | `ram_bytes` growth, drawers without vectors (drawer_count > vector_count), many empty palaces holding disk |
 | Daemon memory | `ps -o rss= -p $(pgrep -f trusty-search)` (Bash) | RSS far above the index size on disk, or growth between checks |
 | Disk | `mcp__trusty-mpm__disk_survey` | growth of palace store or index dirs |

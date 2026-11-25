@@ -43,7 +43,7 @@ control surface, track goals, summarize, and compact its own context.
 When asked what this framework/system/tool is, whether it is "self-aware," or to explain its own
 identity:
 
-1. **Consult memory first.** Call `get_prompt_context()` (trusty-memory MCP) and/or
+1. **Consult memory first.** Run `tm memory prompt-context` and/or
    `tm memory recall "<q>"` before answering. The active palace carries an `is_fact` triple identifying
    this framework (see docs/specs/trusty-mpm-self-awareness.md ss5).
 2. **Then consult the canonical doc.** Read `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md`
