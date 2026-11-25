@@ -291,7 +291,9 @@ pub(super) fn session_tools() -> Vec<Value> {
              cleared); `unsubmitted_paste` (the harness collapsed a long \
              message into a bracketed paste and the Enter did not commit it — \
              resend in smaller parts); or `unverified` (the pane could not be \
-             read). `sent` is false for `input_not_empty`, `not_echoed` and \
+             read, or a busy receiver still showed the paste after a few \
+             seconds of re-reads — do not resend; read the pane first). `sent` \
+             is false for `input_not_empty`, `not_echoed` and \
              `unsubmitted_paste`.",
             json!({
                 "type": "object",

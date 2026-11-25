@@ -368,7 +368,8 @@ pub async fn session_send(
         "id": record.id.to_string(),
         "sent": submit.delivered(),
         "submit_state": submit.as_str(),
-        "reason": submit.reason(), // #10747: why `sent` is false
+        // #10747: why `sent` is false; #11798: or why not to resend.
+        "reason": submit.reason(),
         "tmux_name": record.tmux_name,
     }))
 }
