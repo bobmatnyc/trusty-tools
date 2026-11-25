@@ -26,7 +26,8 @@ pub async fn try_dispatch(name: &str, args: &Value) -> Option<Result<Value, Stri
         .as_object_mut()
         .and_then(|m| m.remove("op"))
         .and_then(|v| v.as_str().map(str::to_owned));
-    // #10153: MCP writes not session-bound; check belongs in the serve --stdio bridge
+    // #10153: write ownership (LDG-3.6) is checked by the `tm serve --stdio`
+    // bridge, the only process that knows the calling PM; never here.
     Some(match op.as_deref() {
         Some("init") => run(params, |r| dbatg::init(&r)).await,
         Some("batch") => run(params, |r| dbatg::batch(&r)).await,
