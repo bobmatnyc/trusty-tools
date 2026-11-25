@@ -8,7 +8,7 @@ import pytest
 from test_audit.assertions import asserting_helpers
 from test_audit.dupes import duplicate_rules
 from test_audit.extract import extract_tests
-from test_audit.rules import per_test_rules
+from test_audit.rules import ALL_RULES, per_test_rules
 
 PRELUDE = '''
 const GUIDE: &str = include_str!("assets/guide.md");
@@ -19,10 +19,11 @@ fn check_via(x: u8) { check_ok(x) }
 '''
 
 
-def rules_for(test_src, prelude=PRELUDE):
+def rules_for(test_src, prelude=PRELUDE, enabled=ALL_RULES):
+    """Every rule, dropped ones included, so their definitions stay pinned."""
     scan = extract_tests("demo", "crates/demo/src/lib.rs", prelude + test_src)
     helpers = asserting_helpers(scan.helper_bodies)
-    return per_test_rules(scan.tests[-1], scan.asset_names, helpers)
+    return per_test_rules(scan.tests[-1], scan.asset_names, helpers, enabled)
 
 
 def fired(test_src):
@@ -97,6 +98,15 @@ CASES = [
 @pytest.mark.parametrize("name,src,want", CASES, ids=[c[0] for c in CASES])
 def test_rule_fires_only_where_it_should(name, src, want):
     assert fired(src) == want, rules_for(src)
+
+
+DROPPED_HITS = [c for c in CASES if c[2] and c[2][0] in ("R2", "R4")]
+
+
+@pytest.mark.parametrize("name,src,want", DROPPED_HITS, ids=[c[0] for c in DROPPED_HITS])
+def test_dropped_rules_r2_r4_never_fire_by_default(name, src, want):
+    scan = extract_tests("demo", "crates/demo/src/lib.rs", PRELUDE + src)
+    assert per_test_rules(scan.tests[-1], scan.asset_names) == {}
 
 
 def dup_rules(src):
