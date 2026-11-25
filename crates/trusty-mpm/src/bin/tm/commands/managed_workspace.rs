@@ -378,7 +378,8 @@ pub(crate) async fn provision_for_fallback(
     // opted-out project never sees a clone directory appear.
     let isolate =
         trusty_mpm::project::worktree_enabled_for_origin_at(registry_dir, origin_url).await;
-    let base = inproject::base_clone_path(&gh.owner, &gh.repo);
+    // #11821: a broken install.toml refuses the clone (df-D1t).
+    let base = inproject::try_base_clone_path(&gh.owner, &gh.repo)?;
     if isolate {
         eprintln!(
             "tm: daemon unreachable — redirecting to protected managed clone\n\

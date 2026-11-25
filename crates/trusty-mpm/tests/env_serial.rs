@@ -27,7 +27,9 @@ mod architect_floor_host;
 mod architect_version_refusal_10459;
 mod daemon_env_isolation;
 mod inproject_cold_start;
+// #11821 P2: a broken install.toml fails clone and delete paths closed.
 mod inproject_git_failure;
+mod install_paths_fail_closed_11821;
 mod mcp_spawn_gate;
 // #8988: the owner_config doctor row, under a scratch $HOME.
 mod owner_config_8988;

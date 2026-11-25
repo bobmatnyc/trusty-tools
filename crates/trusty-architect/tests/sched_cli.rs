@@ -258,6 +258,38 @@ fn parity_and_plist_verbs_print_and_write_nothing_else() {
     assert!(!dir.path().join("Library").exists(), "plist is render-only");
 }
 
+/// #11826: `parity --by-kind` prints matched / scheduler-only / poller-only
+/// per kind for alerts and wakes, `--examples N` lists unmatched rows, and
+/// without the flags the output carries no per-kind section.
+#[test]
+fn parity_by_kind_flag_prints_per_kind_rows_and_examples() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity6");
+    let root = fixture.display();
+    let dir = tempfile::tempdir().unwrap();
+    // 2026-11-25T02:00:00Z, so --since 135m covers the whole window.
+    let (clock, runner) = (FakeClock::new(1_795_572_000.0), FakeRunner::new());
+    let line = |extra: &str| format!("parity --root {root} --since 135m {extra}");
+    assert!(parse(&argv("parity --by-kind --examples 3")).is_ok());
+    assert!(parse(&argv("parity --examples three")).is_err());
+    let (plain, code) = run(dir.path(), &line(""), &clock, &runner, None).unwrap();
+    assert_eq!(code, 1, "window 6 fails the verdict");
+    assert!(!plain.contains("by kind"), "{plain}");
+    let (by, _) = run(dir.path(), &line("--by-kind"), &clock, &runner, None).unwrap();
+    assert!(by.starts_with(&plain), "the flag only appends");
+    assert!(
+        by.contains("alerts by kind: matched / scheduler-only / poller-only\n"),
+        "{by}"
+    );
+    assert!(by.contains("\n  pm_message: 42 / 0 / 0\n"), "{by}");
+    assert!(by.contains("wakes by kind: "), "{by}");
+    assert!(!by.contains("    scheduler-only "), "{by}");
+    let (ex, _) = run(dir.path(), &line("--examples 2"), &clock, &runner, None).unwrap();
+    assert!(
+        ex.contains("    scheduler-only 2026-11-24T23:46:17Z tm-proj-07 hit_low:main:2026112420\n"),
+        "{ex}"
+    );
+}
+
 #[test]
 fn logger_installs_once() {
     assert!(logger::init().is_ok());

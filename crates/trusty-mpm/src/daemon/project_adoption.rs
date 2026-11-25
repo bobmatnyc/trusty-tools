@@ -118,7 +118,14 @@ pub(crate) fn spawn_startup_marker_migration(state: &Arc<DaemonState>) {
         tracing::info!("startup marker migration: skipped — {reason}");
         return;
     }
-    let repos_root = crate::daemon::managed_routes::inproject::repos_root();
+    // #11821: a broken install.toml skips the marker writes (df-D1t).
+    let repos_root = match crate::daemon::managed_routes::inproject::try_repos_root() {
+        Ok(root) => root,
+        Err(e) => {
+            tracing::warn!("startup marker migration: skipped — repos root unresolved: {e}");
+            return;
+        }
+    };
     let adopted = crate::project::adopted_anchors_under(state.framework_root());
     let pass = tokio::task::spawn_blocking(move || {
         crate::session_manager::worktree_marker_migration::migrate_registered_projects(

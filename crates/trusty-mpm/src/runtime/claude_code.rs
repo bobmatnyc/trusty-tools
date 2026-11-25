@@ -321,7 +321,8 @@ fn prepare_managed_config(
 
 /// #8988: the owner `--settings` file for a managed launch under `fw`, whose
 /// `claude` reads `config_dir/.claude.json`. #8992: `profile` decides whether
-/// the skill and tool parts apply.
+/// the skill and tool parts apply. #11821: a broken `install.toml` is a
+/// spawn error (df-D1w).
 /// Test: `a_managed_spawn_under_an_owner_file_denies_the_unallowed_user_scope_servers`,
 /// `an_inplace_relaunch_under_an_owner_file_carries_the_settings`,
 /// `an_architect_spawn_gets_the_mcp_part_but_no_tools_or_skills`.
@@ -330,9 +331,11 @@ fn owner_settings(
     cwd: &Path,
     config_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
-) -> crate::core::launch_policy::LaunchSettings {
+) -> Result<crate::core::launch_policy::LaunchSettings, RuntimeError> {
     let root = fw.crate_config_root();
+    // #11821: df-D1w — refuse the spawn rather than launch without the policy.
     crate::core::launch_policy::provision_settings(&root, cwd, Some(config_dir), profile)
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))
 }
 
 /// [`prepare_managed_config`] with the hook binary pinned by the caller.
@@ -626,7 +629,7 @@ fn build_inplace_resume_command_with(
         Some(prompt_file.as_path()),
     );
     // #8988: the owner MCP policy provisioned for this relaunch under `fw`.
-    let owner = owner_settings(fw, cwd, &config_dir, profile);
+    let owner = owner_settings(fw, cwd, &config_dir, profile)?;
     args.extend(inplace_tail_args(profile, owner.file.as_deref())?);
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     // #4181: same per-project MCP pins the tmux-pane paths export.
@@ -890,7 +893,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             None,
         );
         // #8988: the owner MCP policy, under the same named state home.
-        let settings = owner_settings(&self.fw, cwd, &config_dir, profile);
+        let settings = owner_settings(&self.fw, cwd, &config_dir, profile)?;
         // #2997: `claude_bin` is passed UNWRAPPED — the shim is now the process
         // that reads the spec, so it `posix_spawn`s `claude` itself, disclaimed,
         // with one hop less than the old `env`-as-program shape.
@@ -1069,7 +1072,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // `posix_spawn`s `claude` disclaimed itself, so every resumed /
         // guided-resume / crash-recovery pane keeps the same TCC contract.
         // #8988: a resume carries the owner MCP policy exactly as `spawn` does.
-        let settings = owner_settings(&self.fw, cwd, &config_dir, profile);
+        let settings = owner_settings(&self.fw, cwd, &config_dir, profile)?;
         let launch = ManagedLaunch {
             cwd,
             claude_bin: &claude_bin,

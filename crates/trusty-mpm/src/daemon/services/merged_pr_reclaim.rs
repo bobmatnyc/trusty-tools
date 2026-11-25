@@ -186,11 +186,15 @@ pub(crate) fn interval_secs() -> u64 {
 /// Why a named function: the `prune-worktrees` route already resolves this for its
 /// orphan pass, and the automatic sweep must resolve the SAME root or the two
 /// reclaim paths would walk different workspaces.
+/// A broken `install.toml` is an error, so the sweep skips rather than
+/// reclaiming under the default root (#11821).
 /// Test: covered through the callers; the resolution itself is
-/// `core::trusty_tools_config`'s.
-pub(crate) fn configured_workspace_root() -> PathBuf {
+/// `core::trusty_tools_config`'s (`broken_install_file_fails_the_workspace_root_closed`).
+pub(crate) fn configured_workspace_root()
+-> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    crate::core::trusty_tools_config::workspace_root(&config)
+    // #11821: fail closed on a broken install.toml (df-D1t).
+    crate::core::trusty_tools_config::try_workspace_root(&config)
 }
 
 /// Run the merged-PR reclaim with every production probe bound (#7504).
@@ -381,12 +385,41 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         warn!("worktree-reclaim sweep: maintenance lane closed; pass not run");
         return;
     };
+    // #11821: an unresolved root skips the whole tick, ledger pass included.
+    if !merged_pr_pass(state, configured_workspace_root()).await {
+        return;
+    }
+    // #8994 S3a: the ledger-driven pass, under the same permit; report-only
+    // unless `disk.ledger_reclaim_remove` is set.
+    super::ledger_reclaim::run_and_log(state).await;
+}
+
+/// The merged-PR pass of one [`run_one_tick`] under `root`.
+///
+/// Why: df-D1t (#11821) — a broken `install.toml` must skip the pass, never
+/// reclaim under the default root. A parameter, so a test can hand it the
+/// error without rewriting `$HOME`.
+/// What: `false`, logged, with nothing recorded or reclaimed when `root` is an
+/// error; otherwise runs and logs the pass and answers `true`.
+/// Test: `the_sweep_skips_an_unresolved_workspace_root`.
+pub(crate) async fn merged_pr_pass(
+    state: &Arc<DaemonState>,
+    root: Result<PathBuf, trusty_common::install_paths::InstallPathsError>,
+) -> bool {
+    // #11821: no reclaim under a guessed root.
+    let root = match root {
+        Ok(root) => root,
+        Err(e) => {
+            warn!("worktree-reclaim sweep: workspace root unresolved ({e}); pass not run");
+            return false;
+        }
+    };
     // #8059: the pass is recorded under the daemon's own framework root, so
     // `tm doctor` — which runs in its own process — can see it in flight.
     let _timing = super::sweep_status::RECLAIM.begin(Some(state.framework_root()));
     match reclaim(
         state,
-        &configured_workspace_root(),
+        &root,
         ReclaimMode::Remove,
         None,
         // The automatic sweep stays daemon-global: it has no caller project.
@@ -425,9 +458,7 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         }
         Err(e) => warn!("worktree-reclaim sweep: the pass did not complete: {e}"),
     }
-    // #8994 S3a: the ledger-driven pass, under the same permit; report-only
-    // unless `disk.ledger_reclaim_remove` is set.
-    super::ledger_reclaim::run_and_log(state).await;
+    true
 }
 
 /// Why a manual reclaim pass did not get the maintenance permit (#8994).

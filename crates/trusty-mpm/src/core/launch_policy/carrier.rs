@@ -27,7 +27,9 @@
 //! `.claude.json` keeps the explicit denies and every skill and tool part
 //! (none reads the user scope); an unwritable settings file
 //! launches with NO `--settings` and a notice that says the policy was not
-//! applied. Every arm prints its notice; none refuses the launch.
+//! applied. Every arm prints its notice; none refuses the launch — except an
+//! unresolved repos root: a broken `install.toml` refuses it ([`ProvisionError`],
+//! #11821 df-D1w).
 //! Test: `carrier_tests.rs`, `tests/owner_launch_config_8988.rs`.
 
 use std::collections::BTreeSet;
@@ -371,31 +373,48 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
+/// Why a launch refuses to provision its owner policy (#11821 df-D1w).
+///
+/// Why: with the repos root unresolved, the owner lookup reads the default
+/// root, finds no owner file, and retires the owner's last-good record — the
+/// launch then runs with no policy and no notice.
+/// Test: `owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "owner launch policy refused: the managed repos root is unresolved because \
+     install.toml is broken ({0}); fix ~/.trusty-tools/install.toml or set TRUSTY_MPM_REPOS_ROOT"
+)]
+pub struct ProvisionError(#[from] pub trusty_common::install_paths::InstallPathsError);
+
 /// [`provision_settings_at`] for a production launch under `state_root`.
 ///
 /// Why: every launch path makes the same call; only the state root and the
 /// relocated config dir differ.
-/// What: the repos root from [`crate::core::repo_paths::repos_root`]; the
-/// `.claude.json` directory is `config_dir` for a relocated launch, else the
-/// one an unrelocated `claude` reads: `$CLAUDE_CONFIG_DIR` when set, else the
-/// home directory (`~/.claude.json`). `profile` is the launch's resolved
-/// profile (#8992).
-/// Test: `an_unrelocated_launch_reads_the_operators_claude_json`.
+/// What: the repos root from [`crate::core::repo_paths::try_repos_root`]; a
+/// broken `install.toml` is a [`ProvisionError`] that refuses the launch and
+/// touches no last-good record (#11821 df-D1w). The `.claude.json` directory is
+/// `config_dir` for a relocated launch, else the one an unrelocated `claude`
+/// reads: `$CLAUDE_CONFIG_DIR` when set, else the home directory
+/// (`~/.claude.json`). `profile` is the launch's resolved profile (#8992).
+/// Test: `an_unrelocated_launch_reads_the_operators_claude_json`,
+/// `owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file`.
 pub fn provision_settings(
     state_root: &Path,
     cwd: &Path,
     config_dir: Option<&Path>,
     profile: SessionProfile,
-) -> LaunchSettings {
-    let repos_root = crate::core::repo_paths::repos_root();
+) -> Result<LaunchSettings, ProvisionError> {
+    // #11821: df-D1w — an unresolved root refuses before the owner lookup, so
+    // the defaulted root can never retire the owner's last-good record.
+    let repos_root = crate::core::repo_paths::try_repos_root()?;
     let claude_json_dir = claude_json_dir(config_dir);
-    provision_settings_at(&CarrierInputs {
+    Ok(provision_settings_at(&CarrierInputs {
         cwd,
         repos_root: &repos_root,
         state_root,
         claude_json_dir: claude_json_dir.as_deref(),
         profile,
-    })
+    }))
 }
 
 /// [`provision_settings`] under the process home's state root; nothing when
@@ -404,10 +423,12 @@ pub fn provision_settings_default(
     cwd: &Path,
     config_dir: Option<&Path>,
     profile: SessionProfile,
-) -> LaunchSettings {
-    super::state_root()
-        .map(|root| provision_settings(&root, cwd, config_dir, profile))
-        .unwrap_or_default()
+) -> Result<LaunchSettings, ProvisionError> {
+    // #11821: the refusal propagates; only a missing home still adds nothing.
+    match super::state_root() {
+        Some(root) => provision_settings(&root, cwd, config_dir, profile),
+        None => Ok(LaunchSettings::default()),
+    }
 }
 
 /// The directory whose `.claude.json` a launch reads.

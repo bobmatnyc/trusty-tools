@@ -882,6 +882,7 @@ pub async fn run_doctor_for_manager(
     project_dir: Option<&Path>,
 ) -> DoctorReport {
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    // #11821: defaulting resolver kept — doctor reports and never reclaims.
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
     // `None` caller: doctor reports, it never reclaims, so it has no session
     // identity to exempt — every claim it holds is foreign, as before (#6806).

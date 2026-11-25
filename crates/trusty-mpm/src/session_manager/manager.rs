@@ -257,6 +257,18 @@ pub enum ManagedError {
     ForeignActiveWorkspaceClaim(ManagedSessionId, ManagedSessionId),
 }
 
+/// A broken `install.toml` as an `InvalidData` [`ManagedError::Io`] (#11821).
+///
+/// Why: decommission resolves its removal guard's root with
+/// `try_workspace_root` and must refuse, not guess, when that fails (df-D1t).
+/// The `Io` shape matches `crate_config`'s mapping of the same error.
+/// Test: `decommission_refuses_on_a_broken_install_file` (env_serial).
+impl From<trusty_common::install_paths::InstallPathsError> for ManagedError {
+    fn from(err: trusty_common::install_paths::InstallPathsError) -> Self {
+        Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    }
+}
+
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the
 // trait's default-impl doc comments alone were ~130 lines, which pushed this
 // file over the 500-SLOC production cap once the serial-numbered naming

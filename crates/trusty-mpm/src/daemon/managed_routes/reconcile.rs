@@ -82,6 +82,7 @@ pub async fn reconcile_worktrees_route(State(state): State<Arc<DaemonState>>) ->
 pub(crate) async fn reconcile_worktrees_core(state: &Arc<DaemonState>) -> RouteOutcome {
     let mgr = state.session_manager().await;
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    // #11821: defaulting resolver kept — this route reports and never mutates.
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
     // #7357: resolved here, at the entry point, under the daemon's own
     // framework root.

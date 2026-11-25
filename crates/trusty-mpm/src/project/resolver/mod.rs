@@ -576,6 +576,7 @@ pub fn local_checkout_for_url_in(
         return None;
     }
     // #9776: `core::repo_paths` — `daemon` is optional.
+    // #11821: defaulting resolver kept — a lookup; the caller decides what a missing directory means.
     Some(crate::core::repo_paths::base_clone_path(
         &gh.owner, &gh.repo,
     ))

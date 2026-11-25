@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 use compose::{OwnerPolicy, ResolvedChain, owner_file_path, resolve_chain};
 use last_good::{LastGood, read_last_good, record_last_good, retire_last_good};
 
-pub use carrier::{LaunchFiles, LaunchSettings, provision_settings, provision_settings_default};
+pub use carrier::{
+    LaunchFiles, LaunchSettings, ProvisionError, provision_settings, provision_settings_default,
+};
 use schema::OwnerPolicyError;
 
 /// What [`resolve`] reads from.

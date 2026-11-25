@@ -347,7 +347,8 @@ async fn start_session_in_place(
     // #8992: the stamp's profile decides whether the skill and tool parts apply.
     let profile =
         trusty_mpm::core::pm_tool_trim::stamped_profile(std::slice::from_ref(&prompt.stamp));
-    let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile);
+    // #11821: a broken install.toml refuses before `POST /sessions` (df-D1w).
+    let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile)?;
     // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
     let spec = inplace_session_spec(path, &root, &prompt, settings.file.as_deref())?;
     // #11270: refused before `POST /sessions`, so a refusal adds no record.

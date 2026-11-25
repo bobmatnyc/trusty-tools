@@ -158,8 +158,8 @@ impl UpReport {
     /// What: With `json`, serialises `{stages, console_url, verdict, exit_code}`.
     /// Otherwise prints an aligned stage table, the console URL, and the verdict.
     ///
-    /// Test: `super::tests::render_json_is_valid`,
-    /// `super::tests::render_human_does_not_panic`.
+    /// Test: `super::tests::render_json_is_valid`; the human table writes to
+    /// stdout with no injectable writer and is untested.
     pub fn render(&self, json: bool) {
         if json {
             let env = serde_json::json!({

@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use crate::core::trusty_tools_config::{TrustyToolsConfig, try_workspace_root};
 
 use super::decommission::is_session_worktree;
 use super::decommission_force::{DecommissionReport, ProvisioningDirt};
@@ -520,7 +520,8 @@ impl SessionManager {
                 .workspace_path
                 .as_deref()
                 .is_some_and(is_session_worktree);
-        let managed_root = workspace_root(&TrustyToolsConfig::load());
+        // #11821: fail closed on a broken install.toml (df-D1t).
+        let managed_root = try_workspace_root(&TrustyToolsConfig::load())?;
         self.decommission_with_root_checked(
             id,
             &managed_root,
