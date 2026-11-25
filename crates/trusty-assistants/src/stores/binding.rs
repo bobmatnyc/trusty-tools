@@ -411,8 +411,11 @@ mod tests {
     /// "refusing to feed an index that describes a different tree" for a
     /// reason the resolution never had. Taking `HOME_LOCK` for the whole body
     /// is the same fix #7994 applied to `trusty_client`'s socket-path test.
+    /// #11779: both reads also follow `TA_ASSISTANTS_DIR`, whose setters
+    /// serialize on `#[serial]`, not `HOME_LOCK`; take both, serial first.
     /// Test: this test IS the coverage.
     #[test]
+    #[serial_test::serial]
     fn explicit_private_store_root_resolves_to_its_bound_index() {
         // #8062: held across BOTH `$HOME` reads, not just the first.
         let _home = crate::test_env::HOME_LOCK

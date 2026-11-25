@@ -261,6 +261,7 @@ fn assistants_root_at(dir: &Path) -> AssistantsRoot {
 /// Requirement 5: the primary index is the instance's own; an attached
 /// foreign index stays queryable under enforcement.
 #[test]
+#[serial] // sets `TA_ASSISTANTS_DIR`; shares the key of its other mutators
 fn each_instance_searches_its_own_index_by_default() {
     let f = fixture();
     provision_pair(&f);
