@@ -4,7 +4,7 @@ Internal record for the unit-test audit, issue #11268. It is not published
 (it is not in `docs/public-manifest.tsv`).
 
 `verdicts.jsonl` holds one line per Rust test. A reviewer's verdict on a test
-stays in the log until the test's normalised body changes, so the audit never
+stays in the log until the test's normalised source changes, so the audit never
 judges the same test twice. Phase 0 rows come from a script and carry no
 verdict yet. Phase 1 reviewers fill in `verdict` and `reason`.
 
@@ -28,7 +28,7 @@ Fields appear in this order, compact JSON, rows sorted by key:
 | Field | Meaning |
 |---|---|
 | `key` | The test path above. |
-| `body_sha` | sha256 of the normalised body: the body's tokens joined by one space. Comments and layout are dropped; string-literal content is kept. |
+| `body_sha` | sha256 of the normalised test source: its attributes (each re-wrapped in `#[ … ]`), signature and body, as tokens joined by one space. Comments and layout are dropped; string-literal content is kept. Adding `#[ignore]` or `#[cfg]`, or changing the signature, changes it. Rows written before #11268 PR0 hashed the body alone; the script moves such a row to the new hash when the body is unchanged, keeping its verdict. |
 | `rules` | Candidate rules that fired, e.g. `["R1","R3"]`. |
 | `verdict` | `null` (not reviewed), `keep`, `excessive`, `wrong-target`, `weak`, `flaky`, or `rereview`. |
 | `reason` | One line. Script rows: the rule details. |
@@ -49,7 +49,7 @@ The rules flag candidates for review. A flag is not a verdict.
 
 | Rule | Fires when |
 |---|---|
-| R1 duplicate | Another test in the scanned set has the same `body_sha`, or a Jaccard similarity of 0.85 or more over token 3-shingles (bodies of 40+ tokens; `--near-threshold`, `--min-tokens`). |
+| R1 duplicate | Another test in the scanned set has the same body (body tokens only, not `body_sha`), or a Jaccard similarity of 0.85 or more over token 3-shingles (bodies of 40+ tokens; `--near-threshold`, `--min-tokens`). |
 | R2 text pin | A compared assertion argument uses an `include_str!` of a `.md`/`.txt`/`.prompt`-style file (directly, through a const, static or loader fn, or through a local bound from one), or a string literal of 8+ words or with markdown markup that the assertion compares against. Message arguments and inputs passed to the code are skipped. |
 | R3 no behavioural assertion | No assertion at all, or only `assert!(x.is_ok())` / `assert!(true)`. `unwrap()`, `?` and "does not panic" are not assertions. Counted as assertions: `assert*!`, `ensure!`, `panic!`/`unreachable!` branches, `#[should_panic]`, `unwrap_err`/`expect_err`, calls to `assert*` fns, and calls to a fn in the same file that itself asserts. |
 | R4 mock-only | The test binds a mock, stub, fake or spy (by constructor name, or a variable named mock/stub/spy), and every assertion starts at that binding (`fake.calls()`), not at code under test that takes it. |

@@ -31,7 +31,8 @@ from test_audit.assertions import asserting_helpers  # noqa: E402
 from test_audit.dupes import MIN_TOKENS, THRESHOLD, duplicate_rules  # noqa: E402
 from test_audit.extract import FileScan, TestFn, extract_tests  # noqa: E402
 from test_audit.rules import per_test_rules  # noqa: E402
-from test_audit.verdict_log import dumps, merge, read_log, row, write_log  # noqa: E402
+from test_audit.verdict_log import (  # noqa: E402
+    dumps, merge, migrate_legacy_sha, read_log, row, write_log)
 
 RULE_IDS = ("R1", "R2", "R3", "R4", "R5", "R6")
 GREP_RE = re.compile(r"#\[(tokio::)?test")
@@ -144,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
         stats_by[d] = stats
     fresh = build_rows(found, rev, date, args.near_threshold, args.min_tokens)
     log_path = root / args.log
-    merged = merge(read_log(log_path), fresh, [f"crates/{d}/" for d in dirs], rev, date)
+    shas = {t.key: (t.body_only_sha, t.body_sha) for t, _ in found}
+    old = migrate_legacy_sha(read_log(log_path), shas)
+    merged = merge(old, fresh, [f"crates/{d}/" for d in dirs], rev, date)
 
     per_crate: dict[str, tuple[int, Counter, Counter]] = {}
     for d in dirs:
