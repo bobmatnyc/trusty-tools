@@ -476,9 +476,11 @@ fn resolve_by_checkout_path<'a>(
 /// project never claims a child). A path-form row's checkout is its
 /// `repo_url`; a URL-form row's is its managed clone under `repos_root`
 /// (#11828), which is read at most once and only for a row whose clone path
-/// ends in the session directory's last two components. Ties break by
-/// [`name_order`].
-/// Test: `resolver_session_without_repo_url_binds_a_canonical_clone_to_its_url_row_11828`.
+/// ends in the session directory's last two components (ASCII case ignored),
+/// and which must be the same directory by `identifies_same_path`, as at
+/// registration. Ties break by [`name_order`].
+/// Test: `resolver_session_without_repo_url_binds_a_canonical_clone_to_its_url_row_11828`,
+/// `resolver_binds_a_canonical_clone_spelled_in_another_case_11828`.
 fn resolve_by_checkout_path_in<'a>(
     session: &SessionRecord,
     projects: &'a [Project],
@@ -503,13 +505,22 @@ fn resolve_by_checkout_path_in<'a>(
                 return false;
             }
             local_checkout_under(&p.repo_url, home, || root.get_or_init(&repos_root).clone())
-                .is_some_and(|checkout| canon(&checkout) == dir)
+                .is_some_and(|checkout| {
+                    // #11828: the identity registration's `canonical_clone_url` uses (inode;
+                    // case-insensitive on APFS), so a `Acme/Widget` clone binds its row.
+                    if path_form {
+                        canon(&checkout) == dir
+                    } else {
+                        trusty_common::identifies_same_path(&checkout, &dir)
+                    }
+                })
         })
         .min_by(|a, b| name_order(a).cmp(&name_order(b)))
 }
 
 /// `true` when `dir` ends in `<owner>/<repo>` as a URL `repo_url` names its
 /// managed clone (#11828); a cheap test run before the repos root is read.
+/// ASCII case is ignored, as `identifies_same_path` ignores it on APFS.
 fn ends_in_clone_name(dir: &std::path::Path, repo_url: &str) -> bool {
     trusty_common::github_path::parse_github_path(repo_url.trim()).is_some_and(|gh| {
         let tail = crate::core::repo_paths::base_clone_path_in(
@@ -517,7 +528,14 @@ fn ends_in_clone_name(dir: &std::path::Path, repo_url: &str) -> bool {
             &gh.owner,
             &gh.repo,
         );
-        dir.ends_with(tail)
+        let tail: Vec<_> = tail.components().collect();
+        let end: Vec<_> = dir.components().rev().take(tail.len()).collect();
+        end.len() == tail.len()
+            && end.iter().rev().zip(&tail).all(|(a, b)| {
+                a.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+            })
     })
 }
 

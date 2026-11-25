@@ -396,7 +396,7 @@ async fn daemon_registers_a_canonical_clone_by_its_github_url_11828() {
         let repos_root = tmp.path().join("repos");
         let root = checkout(&repos_root.join("acme").join("widget"), origin);
 
-        let outcome = register_session_checkout_in(&registry, &root, None, &repos_root)
+        let outcome = register_session_checkout_in(&registry, &root, None, Some(&repos_root))
             .await
             .expect("register");
 
@@ -435,7 +435,7 @@ async fn daemon_keeps_the_path_form_off_the_canonical_clone_11828() {
             }
         };
 
-        register_session_checkout_in(&registry, &root, None, &repos_root)
+        register_session_checkout_in(&registry, &root, None, Some(&repos_root))
             .await
             .expect("register");
 

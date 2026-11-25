@@ -117,16 +117,18 @@ pub async fn register_session_checkout(
 /// is `github.com`, and the root is the same directory as
 /// `<repos_root>/<owner>/<repo>` ([`base_clone_path_in`](crate::core::repo_paths::base_clone_path_in)).
 /// Owner and repo keep the origin's spelling. Any other checkout keeps the
-/// path form.
+/// path form, and so does every checkout when `repos_root` is `None` (the
+/// daemon could not resolve it).
 /// Test: `daemon_registers_a_canonical_clone_by_its_github_url_11828`,
-/// `daemon_keeps_the_path_form_off_the_canonical_clone_11828`.
+/// `daemon_keeps_the_path_form_off_the_canonical_clone_11828`,
+/// `daemon_registers_by_path_on_a_broken_install_file_11828` (env_serial).
 pub async fn register_session_checkout_in(
     registry_dir: &Path,
     cwd: &Path,
     home: Option<&Path>,
-    repos_root: &Path,
+    repos_root: Option<&Path>,
 ) -> Result<SessionRegistration, SessionRegistrationError> {
-    register_checkout(registry_dir, cwd, home, Some(repos_root)).await
+    register_checkout(registry_dir, cwd, home, repos_root).await
 }
 
 /// Both entry points' work; `repos_root` enables the #11828 URL form.

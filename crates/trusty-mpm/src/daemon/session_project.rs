@@ -25,13 +25,15 @@ use crate::project::{SessionRegistration, SessionRegistrationError, register_ses
 /// paths the client-side `tm connect` hook does not.
 /// What: [`register_session_checkout_in`] against
 /// `<framework_root>/project-registry` with the process home as the D50 guard
-/// and the daemon's repos root, so a canonical clone stores its GitHub URL.
+/// and the daemon's repos root, so a canonical clone stores its GitHub URL; an
+/// unresolved root (a broken install.toml) is a warn line and the path form.
 /// A new row is logged at info; a row kept for another clone at warn (the issue's
 /// "reported, not silently kept"); a directory outside any checkout or in a
 /// linked worktree at debug; every error at warn with its cause. The result is
 /// returned for tests and is never turned into a session failure.
 /// Test: `a_registered_session_registers_its_checkout_as_a_project`,
-/// `a_failed_registry_write_leaves_the_session_registered_and_warns`.
+/// `a_failed_registry_write_leaves_the_session_registered_and_warns`,
+/// `daemon_registers_by_path_on_a_broken_install_file_11828` (env_serial).
 pub async fn register_seen_session_project(
     framework_root: &Path,
     dir: &Path,
@@ -39,10 +41,16 @@ pub async fn register_seen_session_project(
     let registry_dir = crate::project::registry_data_dir_under(framework_root);
     let home = dirs::home_dir();
     // #11828: the daemon's repos root decides whether a checkout is canonical.
-    // #11821: defaulting resolver kept — a lookup that writes nothing under the root.
-    let repos_root = crate::core::repo_paths::repos_root();
+    // #11821: fail-closed resolver — a defaulted root would persist a wrong URL
+    // row; with no root the checkout keeps the path form, which is always right.
+    let repos_root = crate::core::repo_paths::try_repos_root()
+        .inspect_err(|e| {
+            tracing::warn!(dir = %dir.display(), "#11828: repos root unresolved, registering the checkout by path: {e}");
+        })
+        .ok();
     let result =
-        register_session_checkout_in(&registry_dir, dir, home.as_deref(), &repos_root).await;
+        register_session_checkout_in(&registry_dir, dir, home.as_deref(), repos_root.as_deref())
+            .await;
     match &result {
         Ok(SessionRegistration::Registered { name }) => {
             tracing::info!(project = %name, dir = %dir.display(), "#10368: registered the session's checkout as a project");
