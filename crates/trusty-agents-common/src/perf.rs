@@ -15,9 +15,7 @@
 //!
 //! `PerfCollector` (stateful, tokio-dependent) is NOT here — it stays in
 //! `trusty-agents::perf`.
-//! Test: `token_usage_default_is_zeros`, `token_usage_accumulates` in
-//! `trusty-agents::perf::tests`; compile-tested via `trusty-agents-common`
-//! unit tests.
+//! Test: `token_usage_accumulates` and the other `perf::tests` in this crate.
 
 use serde::{Deserialize, Serialize};
 
@@ -29,8 +27,7 @@ use serde::{Deserialize, Serialize};
 /// cache effectiveness over time. For non-Anthropic models these stay 0.
 /// What: Plain struct; additive (`+`-style) accumulation is done inline in
 /// `PerfCollector::totals`.
-/// Test: `token_usage_default_is_zeros`, `token_usage_accumulates` in
-/// `trusty-agents::perf::tests`.
+/// Test: `token_usage_accumulates`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
@@ -180,15 +177,6 @@ fn default_status() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn token_usage_default_is_zeros() {
-        let u = TokenUsage::default();
-        assert_eq!(u.prompt_tokens, 0);
-        assert_eq!(u.completion_tokens, 0);
-        assert_eq!(u.cache_read_tokens, 0);
-        assert_eq!(u.cache_creation_tokens, 0);
-    }
 
     #[test]
     fn token_usage_accumulates() {
