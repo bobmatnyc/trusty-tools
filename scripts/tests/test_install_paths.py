@@ -112,7 +112,7 @@ class Refusals(Base):
         """The Python < 3.11 reader: what `toml::to_string` writes parses; anything richer refuses."""
         self.assertEqual(ip._flat_toml("# c\nprojects_root = \"/p\" # t\n\nconfig_dir = '/c'\n"),
                          {"projects_root": "/p", "config_dir": "/c"})
-        for bad in ("[table]\n", 'a = "/x"\na = "/y"\n', 'a = "/x\\U0001F600"\n', "a = 3\n"):
+        for bad in ("[table]\n", 'a = "/x"\na = "/y"\n', 'a = "/x\\U' '0001F600"\n', "a = 3\n"):
             with self.assertRaises(ValueError, msg=bad):
                 ip._flat_toml(bad)
 
