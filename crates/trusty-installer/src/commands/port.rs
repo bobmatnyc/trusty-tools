@@ -102,7 +102,7 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// Why: `tctl port` with no member should answer the most common question —
 /// "what port is search on?" — matching the muscle memory of `trusty-search port`.
 /// What: the binary name `trusty-search`.
-/// Test: `tests::default_member_is_search`.
+/// Test: none; a literal default read only by `run`.
 const DEFAULT_MEMBER: &str = "trusty-search";
 
 /// The refusal `tctl port` prints for a member that binds no TCP port.
@@ -209,14 +209,6 @@ mod tests {
         assert_eq!(select_format(false, true), PortFormat::Json);
         // json_port wins over addr.
         assert_eq!(select_format(true, true), PortFormat::Json);
-    }
-
-    /// Why: the default member must be search so bare `tctl port` is useful.
-    /// What: pins the constant.
-    /// Test: This is the test.
-    #[test]
-    fn default_member_is_search() {
-        assert_eq!(DEFAULT_MEMBER, "trusty-search");
     }
 
     // ── format_output (copied behaviour from trusty-search port) ──────────────

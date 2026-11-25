@@ -531,19 +531,4 @@ impl Report {
             && self.alert_pct() >= th.min_match_pct
             && self.wake_pct() >= th.min_match_pct
     }
-
-    /// Alerts and wakes matched, as a percentage of every compared item
-    /// (matched plus either side's extras); 100 when nothing was compared.
-    pub fn match_pct(&self) -> f64 {
-        let total: u64 = [self.alerts, self.wakes]
-            .iter()
-            .map(|c| c.matched + c.scheduler_only + c.poller_only)
-            .sum();
-        let matched = self.alerts.matched + self.wakes.matched;
-        if total == 0 {
-            100.0
-        } else {
-            matched as f64 * 100.0 / total as f64
-        }
-    }
 }

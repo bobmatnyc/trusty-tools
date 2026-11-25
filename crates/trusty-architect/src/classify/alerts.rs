@@ -6,7 +6,7 @@
 //! What: pure functions over [`PaneInfo`]; `now` (seconds since the epoch) is
 //! always passed in, never read from the clock.
 //! Test: `test_no_agents_still_idle`, `test_idle_prompt_alerts_after_ten_minutes_only`,
-//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_thresholds_follow_ruling_b7`,
+//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_alert_at_the_new_bar`,
 //! `test_alert_display_and_redaction`, `evaluate_matches_python_goldens`.
 
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,8 @@ pub(crate) fn clean(text: &str) -> String {
 }
 
 /// `(year, month, day)` of `days` since 1970-01-01 (H. Hinnant's algorithm).
-// #9801: shared with the usage step's UTC and New York times.
+// #9801, #10571: the crate's one copy; every civil-date caller imports it.
+/// Test: `civil_helpers_match_the_removed_copies`.
 pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

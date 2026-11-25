@@ -392,7 +392,8 @@ pub(crate) const CLI_NAME: &str = "trusty-mpm";
 /// Why: this is the whole point of #4990 — a bare string ends in a real
 /// `SessionRecord` with a tmux pane, visible in `tm ls` and `tm sessions`, not
 /// a blocking foreground `claude`.
-/// What: (1) ensures the managed base clone at
+/// What: through [`run_managed_at`], which first refuses an unreachable
+/// daemon (#11828): (1) ensures the managed base clone at
 /// `<repos_root>/<owner>/<repo>` via
 /// [`trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout`],
 /// which clones when absent and fails loud on a mismatched remote — a dirty
@@ -418,11 +419,35 @@ async fn run_managed(
     account: Option<&str>,
     account_token: Option<&str>,
 ) -> anyhow::Result<()> {
+    // #11821: a broken install.toml refuses the clone (df-D1t), as
+    // `ensure_managed_checkout` does.
+    let base_path = trusty_mpm::core::repo_paths::try_base_clone_path(owner, repo)
+        .map_err(|e| anyhow::anyhow!("cannot resolve the repos root: {e}"))?;
+    run_managed_at(client, url, &base_path, clone_url, account, account_token).await
+}
+
+/// [`run_managed`] for an explicit managed clone path.
+///
+/// What: refuses a broken `[accounts]` table, then an unreachable daemon
+/// (#11828), and only then ensures the clone at `base_path` and hands off.
+/// Test: `run_refuses_an_unreachable_daemon_before_cloning_11828`.
+async fn run_managed_at(
+    client: &reqwest::Client,
+    url: &str,
+    base_path: &std::path::Path,
+    clone_url: &str,
+    account: Option<&str>,
+    account_token: Option<&str>,
+) -> anyhow::Result<()> {
     // #9091: a broken `[accounts]` table refuses here, before anything is touched.
     accounts_preflight(account, clone_url)?;
+    // #11828: a clone the daemon cannot register is never made (#10101 D3c).
+    trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .require_reachable()
+        .await?;
     let checkout =
-        trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout(
-            owner, repo, clone_url, account,
+        trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout_at(
+            base_path, clone_url, account,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 

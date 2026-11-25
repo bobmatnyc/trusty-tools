@@ -44,10 +44,10 @@
 #   Fails closed: a failed fetch, an unresolvable head or base, a shallow
 #   repository, no merge base, a failed git command or a failed temp file
 #   exits 2, never 0.
-#   Not guaranteed: it judges main as fetched when it runs, and re-runs only
-#   when the PR changes or a run is re-requested. A bundle PR that passed can
-#   be overtaken by another bundle PR merging first; until a merge queue or a
-#   re-run on every main move exists, merge order (the supervisor) covers that.
+#   It judges main as fetched when it runs, and runs when the PR changes or a
+#   run is re-requested. A bundle PR that passed can be overtaken by another
+#   bundle PR merging first; scripts/rerun_bundle_pr_current.sh re-requests
+#   the run on every open PR when a bundle change lands on main (#11342).
 # Test: scripts/check_bundle_pr_current_selftest.sh
 #
 # Usage: check_bundle_pr_current.sh [--repo DIR] [--fetch <remote>]
@@ -61,7 +61,7 @@ set -euo pipefail
 trap 'echo "ERROR: unexpected failure at line $LINENO" >&2; exit 2' ERR
 
 # The Architect bundle: every file scripts/architect_bundle_meta.py hashes,
-# reads or writes (its ROOT..FIXTURES constants, lines 32-41), the content
+# reads or writes (its ROOT..FIXTURES constants, lines 36-46), the content
 # copies the pair list in scripts/check_architect_subproject.sh ships, that
 # script itself (its pair table drives the provenance), and the pinned skill
 # hashes. A trailing `/` is a directory prefix; anything else
@@ -75,6 +75,7 @@ BUNDLE_PATHS=(
   "scripts/architect_export_manifest.txt"
   "scripts/check_architect_subproject.sh"
   "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table.rs"
+  "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table_scripts.rs"
   "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv"
   "crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md"
   "crates/trusty-mpm/src/core/project_skill_tier/architect_skills.rs"

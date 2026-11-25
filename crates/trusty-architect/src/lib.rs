@@ -19,11 +19,11 @@
 //! cycle and loop ([`poller::Runner`]) on the same seams. Phase A4 adds
 //! [`verbs`], the `tm architect` commands that replace the scripts (#9822).
 //! #9756 P0 adds [`ledger`], the PM Intent Ledger contract (types, ids,
-//! limits, store layout, `mpm.dbatg.*` request types), not yet wired into `tm`.
+//! limits, store layout, `mpm.dbatg.*` request types).
 //! MB1595 adds [`sched`], the Architect's one job scheduler, and its
 //! `trusty-architect-sched` binary (shadow mode, parity, cutover, rollback).
 //! #10063 adds [`dashboard`], the Architect dashboard store (formats, locking,
-//! versions, batches, tally), not yet wired into `tm`.
+//! versions, batches, tally).
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).

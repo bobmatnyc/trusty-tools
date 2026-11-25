@@ -4,21 +4,21 @@
 //! the daemon (owner ruling D34). #11064: a technical level outside the six
 //! is refused on every write path, whatever the schema mode.
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+use common::no_secret;
 use serde_json::{Map, Value, json};
+use trusty_architect::dashboard::rpc::METHODS;
 use trusty_architect::dashboard::store::{Versioned, dir, jsonl};
 use trusty_architect::dashboard::{DashError, DeleteArchive, Format, Op, PruneLog, Removed, Store};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
 const FORMATS: [Format; 2] = [Format::Dir, Format::Jsonl];
-
-fn no_secret(_: &str) -> Option<String> {
-    None
-}
 
 fn obj(v: Value) -> Map<String, Value> {
     match v {
@@ -316,14 +316,25 @@ fn fsck_reports_references_not_checked_when_the_snapshot_fails() -> R {
 }
 
 /// DOC-82 names the daemon methods with the router's `mpm.` prefix (owner
-/// ruling D34), as the code serves them.
+/// ruling D34), as the code serves them. The row is built from
+/// `dashboard::rpc::METHODS`, the list the tm daemon registers, so a method
+/// added, renamed or reordered in code without the spec fails here. This is
+/// the only check that keeps the spec's method row in step with the code.
 #[test]
 fn doc82_names_the_dashboard_methods_with_the_mpm_prefix() -> R {
     let spec = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md");
     let text = fs::read_to_string(spec)?;
-    let row = "`mpm.architect.dashboard.get/list/set/update/delete/batch/pruned/validate/fsck/tally/footer/ids`";
-    assert!(text.contains(row), "DOC-82 section 3.3 does not name {row}");
+    let prefix = "mpm.architect.dashboard.";
+    let verbs = METHODS
+        .iter()
+        .map(|m| m.strip_prefix(prefix).ok_or(*m))
+        .collect::<Result<Vec<_>, _>>()?;
+    let row = format!("`{prefix}{}`", verbs.join("/"));
+    assert!(
+        text.contains(&row),
+        "DOC-82 section 3.3 does not name {row}"
+    );
     assert!(
         !text.contains("| `architect.dashboard."),
         "DOC-82 still names the unprefixed methods"

@@ -1,22 +1,16 @@
 //! The engine's rules: due slots, jitter, catch-up, overlap, cap, backoff,
 //! freshness, env allowlist (MB1595). The runner is a fake throughout.
 
+mod common;
 mod sched_support;
 
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
+use common::stamp_file;
 use sched_support::*;
 use trusty_architect::FakeClock;
 use trusty_architect::sched::engine_run::allowed_env;
 use trusty_architect::sched::slot::jitter;
-
-fn stamp_file(path: &std::path::Path, mtime: i64) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, "x").unwrap();
-    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    f.set_modified(UNIX_EPOCH + Duration::from_secs(mtime as u64))
-        .unwrap();
-}
 
 #[test]
 fn first_sight_anchors_the_next_slot_and_runs_nothing() {

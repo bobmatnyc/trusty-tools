@@ -255,6 +255,8 @@ async fn dispatch(core: &Arc<Core>, session: &mut Session, request: &Json) -> Re
                 ("op", Some(name.into())),
                 ("outcome", Some(exc.code.as_str().into())),
                 ("tab", seen),
+                // #11808: the child a refused frame action had resolved.
+                ("frames", crate::pages_frames::refusal_hosts(&exc.details)),
             ];
             core.audit.best_effort("operation", &line(&after, extra));
             if !after.active && exc.code != "OutcomeUnknown" {

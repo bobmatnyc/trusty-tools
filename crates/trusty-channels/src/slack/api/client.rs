@@ -422,12 +422,16 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
     fn new_succeeds_without_token() {
         // Constructing must not require Slack credentials so the MCP handshake
-        // and tools/list work in CI without secrets.
+        // and tools/list work in CI without secrets. The sandbox (#9123) hides
+        // env, the dotenv file, the file store and the keychain, so "no token" is
+        // forced rather than assumed.
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
         let client = BaseClient::new().expect("construct base client");
-        let _ = client.has_token();
-        let _ = client.has_user_token();
+        assert!(!client.has_token(), "no bot token is configured");
+        assert!(!client.has_user_token(), "no user token is configured");
     }
 
     #[test]

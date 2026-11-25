@@ -99,11 +99,6 @@ impl Pending {
     pub fn skipped(&self) -> &[SkippedField] {
         &self.skipped
     }
-
-    /// The events, by value.
-    pub fn into_events(self) -> Vec<PendingEvent> {
-        self.events
-    }
 }
 
 /// Why: the Architect wakes on these events; Python's `pending(snap, now)` is

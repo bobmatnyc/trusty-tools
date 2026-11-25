@@ -64,7 +64,8 @@ pub fn own_session() -> Option<String> {
 ///
 /// Why: LDG-3.6 — a PM session writes only its own store. `tm dbatg` refuses
 /// before anything is sent or written, so the answer is the same whether the
-/// daemon is up or down (#9758). The MCP path is not yet bound (#10153).
+/// daemon is up or down (#9758); the `tm serve --stdio` bridge refuses an
+/// MCP write the same way (#10153).
 /// What: [`LedgerError::Invalid`] (exit 2: refused input, nothing written)
 /// naming the store and the caller's own session, or that it is unknown.
 /// Test: `a_pm_writing_another_sessions_store_is_refused_cli_daemon_up`.

@@ -5,63 +5,22 @@
 //! Fixes 3 (watchdog wait rule) and 7 (`--by-kind`) are tested beside their
 //! code: `tests/watchdog_ported.rs` and `tests/sched_cli.rs`.
 
+mod common;
 mod sched_support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use common::{key, record};
 use sched_support::{T0, layout};
 use trusty_architect::sched::config::PollJob;
 use trusty_architect::sched::parity::{self, alert_id};
-use trusty_architect::sched::shadow::{self, EventKey, ShadowAlert, ShadowRecord, WokenKey};
+use trusty_architect::sched::shadow::{self, EventKey};
 use trusty_architect::sched::slot::parse_iso;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const START: &str = "2026-11-24T23:46:17Z";
-
-fn key(s: &str, k: &str, f: &str) -> EventKey {
-    EventKey {
-        session: s.to_owned(),
-        kind: k.to_owned(),
-        fingerprint: f.to_owned(),
-    }
-}
-
-fn record(slot: i64, alerts: Vec<EventKey>, woken: Vec<EventKey>) -> ShadowRecord {
-    ShadowRecord {
-        ts: "x".into(),
-        job: "poll".into(),
-        slot,
-        mode: "shadow".into(),
-        interval_s: 60,
-        ok: true,
-        panes: Some(1),
-        new: Some(alerts.len() as u64),
-        woken: Some(woken.len() as u64),
-        logged: Some(0),
-        suppressed: Some(0),
-        wake_phrase: None,
-        wake_target: None,
-        alerts: alerts
-            .iter()
-            .map(|k| ShadowAlert {
-                session: k.session.clone(),
-                kind: k.kind.clone(),
-            })
-            .collect(),
-        digest_sha: "d".into(),
-        error: None,
-        haiku_woken: Some(0),
-        alert_keys: Some(alerts),
-        woken_keys: Some(
-            woken
-                .into_iter()
-                .map(|key| WokenKey { key, haiku: false })
-                .collect(),
-        ),
-    }
-}
 
 fn alert_row(ts: &str, k: &EventKey) -> String {
     format!(

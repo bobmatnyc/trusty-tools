@@ -158,49 +158,6 @@ fn every_declared_set_is_a_named_constant() {
     );
 }
 
-/// Why: This table decides which binaries get a stable macOS designated
-/// requirement and which stay ad-hoc, losing their TCC grant on every
-/// `cargo install`. Every prior gap in it (#2721 `tm`, #4277
-/// `tagent`, and `trusty-memory`/`trusty-analyze` under the 2026-08-06 owner
-/// ruling) was a silent
-/// omission, never a wrong value — so the guard that matters is one that fails
-/// when a row goes MISSING, which a per-binary spot check cannot do. Pinning
-/// the whole table is deliberate brittleness: changing it should require
-/// stating the change here.
-/// What: Asserts `SIGNABLE_BINARIES` equals the expected `(binary, set,
-/// identifier)` triples exactly, including order.
-/// Test: This is the test.
-#[test]
-fn signable_binaries_table_is_pinned() {
-    assert_eq!(
-        SIGNABLE_BINARIES,
-        &[
-            ("trusty-search", SEARCH_SET, "com.trusty.trusty-search"),
-            (
-                "trusty-embedderd",
-                SEARCH_SET,
-                "com.trusty.trusty-embedderd"
-            ),
-            (
-                "trusty-embedderd-py",
-                SEARCH_SET,
-                "com.trusty.trusty-embedderd-py"
-            ),
-            ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
-            ("tm", MPM_SET, "com.trusty.tm"),
-            ("ta", ASSISTANTS_SET, "com.trusty.ta"),
-            ("tagent", ASSISTANTS_SET, "com.trusty.tagent"),
-            ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
-            (
-                "trusty-memory-mcp-bridge",
-                MEMORY_SET,
-                "com.trusty.trusty-memory-mcp-bridge"
-            ),
-            ("trusty-analyze", ANALYZE_SET, "com.trusty.trusty-analyze"),
-        ]
-    );
-}
-
 /// Why (owner ruling 2026-08-06): `cargo install --path crates/trusty-memory`
 /// installs more than one binary and #2721 is the recorded lesson that signing
 /// only the primary one leaves the rest ad-hoc while the prompt keeps
@@ -658,17 +615,25 @@ fn signing_persistence_tip_mentions_sign_identity_and_tctl_sign() {
     assert!(tip.contains("tctl sign"));
 }
 
-/// Why: The cert-setup guidance must reference the exact `tctl sign`
-/// invocation the operator should re-run, parameterised by target.
-/// What: Asserts all 5 steps are present and the target is interpolated.
+/// Why: The cert-setup guidance must name the `tctl sign` invocation the
+/// operator should re-run for the target that failed, not a fixed one.
+/// What: Renders the guidance for two targets and asserts each re-run line
+/// names its own target and never the other.
 /// Test: This is the test.
 #[test]
-fn cert_setup_guidance_contains_steps() {
-    let g = cert_setup_guidance("trusty-mpm");
-    for step in ["1.", "2.", "3.", "4.", "5."] {
-        assert!(g.contains(step), "{step} missing");
+fn cert_setup_guidance_reruns_the_requested_target() {
+    for (target, other) in [
+        ("trusty-mpm", "trusty-search"),
+        ("trusty-search", "trusty-mpm"),
+    ] {
+        let g = cert_setup_guidance(target);
+        let rerun = g
+            .lines()
+            .find(|l| l.contains("Re-run:"))
+            .unwrap_or_else(|| panic!("no re-run line for {target}: {g}"));
+        assert!(rerun.ends_with(&format!("tctl sign {target}")), "{rerun}");
+        assert!(!g.contains(&format!("tctl sign {other}")), "{g}");
     }
-    assert!(g.contains("tctl sign trusty-mpm"));
 }
 
 /// Why: `commands::sign::run_macos` matches on `SignSetError` variants

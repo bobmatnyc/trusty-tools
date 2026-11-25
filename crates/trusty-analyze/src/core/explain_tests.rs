@@ -280,6 +280,8 @@ fn strip_bullet_marker_rejects_non_numeric_prefix() {
     assert_eq!(strip_bullet_marker("12. nice"), Some("nice"));
 }
 
+/// The daemon sends this report over the socket and the CLI decodes it, so
+/// the JSON field names and the `ReviewSource` tag are pinned to a literal.
 #[test]
 fn deep_report_round_trips_json() {
     let r = DeepAnalysisReport {
@@ -288,11 +290,48 @@ fn deep_report_round_trips_json() {
         frameworks: vec!["React".into()],
         recommendations: vec!["r1".into()],
         model_used: "m".into(),
-        based_on: sample_report(),
+        based_on: ReviewReport {
+            files: vec![FileReview {
+                path: "src/a.rs".into(),
+                grade: ComplexityGrade::C,
+                complexity: ReviewComplexity {
+                    cyclomatic: 12,
+                    cognitive: 9,
+                },
+                smells: vec![],
+                recommendations: vec![],
+                source: ReviewSource::Indexed { modified_chunks: 2 },
+            }],
+            overall_grade: ComplexityGrade::C,
+            changed_lines: 4,
+            smell_count: 0,
+            summary: "1 file analyzed".into(),
+        },
     };
-    let json = serde_json::to_string(&r).unwrap();
-    let back: DeepAnalysisReport = serde_json::from_str(&json).unwrap();
-    assert_eq!(r, back);
+    let wire = serde_json::json!({
+        "index_id": "idx",
+        "narrative": "n",
+        "frameworks": ["React"],
+        "recommendations": ["r1"],
+        "model_used": "m",
+        "based_on": {
+            "files": [{
+                "path": "src/a.rs",
+                "grade": "C",
+                "complexity": {"cyclomatic": 12, "cognitive": 9},
+                "smells": [],
+                "recommendations": [],
+                "source": {"kind": "indexed", "modified_chunks": 2}
+            }],
+            "overall_grade": "C",
+            "changed_lines": 4,
+            "smell_count": 0,
+            "summary": "1 file analyzed"
+        }
+    });
+    assert_eq!(serde_json::to_value(&r).unwrap(), wire);
+    let back: DeepAnalysisReport = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, r);
 }
 
 #[test]

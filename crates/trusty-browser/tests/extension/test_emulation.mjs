@@ -8,8 +8,8 @@ import test from "node:test";
 import vm from "node:vm";
 
 const dir = new URL("../../extension/", import.meta.url);
-const names = ["pages_read.js", "emulation.js", "pages.js", "worker.js", "codes.js"];
-const [readJs, emulationJs, pagesJs, workerJs, codesJs] =
+const names = ["pages_read.js", "emulation.js", "pages.js", "worker.js", "codes.js", "pages_frames.js"];
+const [readJs, emulationJs, pagesJs, workerJs, codesJs, framesJs] =
   await Promise.all(names.map(f => readFile(new URL(f, dir), "utf8")));
 const email = "qa@example.org";
 const DARK = {javascript:false, color_scheme:"dark", width:1440, height:900};
@@ -48,7 +48,7 @@ function pages() {
       throw new Error("unexpected " + func.name);
     }}};
   const ctx = vm.createContext({chrome, TextEncoder, URL, setTimeout, clearTimeout});
-  for (const source of [readJs, emulationJs, pagesJs]) vm.runInContext(source, ctx);
+  for (const source of [readJs, emulationJs, framesJs, pagesJs]) vm.runInContext(source, ctx);
   const cmds = ctx.TrustyPages.commands({identity:async () => email, grant:async () => ({scope:"profile"}),
     ended:async () => {}, remember:async () => {}, originOf:async () => null});
   const ask = (op, fields, grant = "g") => cmds.command({id:1, op, email, grant, ...fields});
@@ -148,6 +148,7 @@ async function worker({attached = [], slow = false} = {}) {
     scripting:{getRegisteredContentScripts:async () => [], unregisterContentScripts:async () => {}},
     alarms:{onAlarm:event(), create(){}}, tabs:{get:async id => ({id})}};
   const scripts = {"pages.js":pagesJs, "pages_read.js":readJs, "codes.js":codesJs, "emulation.js":emulationJs,
+    "pages_frames.js":framesJs,
     "indicator.js":""};
   const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
     TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async () => {}}, setTimeout:() => 0, clearTimeout(){}});

@@ -13,11 +13,14 @@
 //! `cycle()` they exercise (parse, transcript fallback, evaluate); `cycle()`
 //! itself is A3b. Every file lives in a tempdir.
 
+mod common;
+
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::kinds;
 use trusty_architect::classify::{
     Alert, DedupState, PaneState, REEMIT, dedup, evaluate, parse_pane,
 };
@@ -27,12 +30,6 @@ use trusty_architect::poller::{
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-fn kinds(alerts: &[Alert]) -> Vec<&str> {
-    let mut k: Vec<&str> = alerts.iter().map(|a| a.kind.as_str()).collect();
-    k.sort_unstable();
-    k
-}
 
 /// A `Config` with every path under `dir` and the env `vars` on top.
 fn config(dir: &Path, vars: &[(&str, &str)]) -> Result<Config, trusty_architect::ConfigError> {

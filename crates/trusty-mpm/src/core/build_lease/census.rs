@@ -24,6 +24,7 @@ use super::config::BuildLeaseConfig;
 use super::slots::HolderRecord;
 use crate::core::build_probe::{
     BuildGroup, ProcessSampler, ProcessSnapshot, SysinfoSampler, build_groups, is_compiler_process,
+    thread_leader,
 };
 
 /// Bound on one ancestry walk, as in `build_probe`.
@@ -256,24 +257,6 @@ fn lease_processes() -> Result<LeaseProcesses, String> {
     Ok(select_lease_processes(me, my_start, rows))
 }
 
-/// The process a table row is a thread of, or `None` for a process row.
-///
-/// Why: on Linux sysinfo lists each non-leader thread as a row of its own,
-/// marked `ThreadKind::Userland` with its leader as parent (#10260). On every
-/// other OS `Process::thread_kind` is always `None`, and macOS fills the table
-/// from `proc_listallpids`, which returns process ids only, so no thread row
-/// exists there to over-count.
-/// What: a `Userland` row with a parent maps to that parent; anything else is a
-/// process. A `Userland` row with no parent stays a process, so no real process
-/// is ever dropped.
-/// Test: `only_userland_rows_with_a_parent_are_threads`.
-fn thread_leader(kind: Option<sysinfo::ThreadKind>, parent: Option<u32>) -> Option<u32> {
-    match kind {
-        Some(sysinfo::ThreadKind::Userland) => parent,
-        _ => None,
-    }
-}
-
 /// One process-table row, as [`select_lease_processes`] reads it.
 struct LeaseCandidate<'a> {
     pid: u32,
@@ -464,18 +447,41 @@ mod tests {
             "the spawned `rustc` must read as a compiler: {:?}",
             rows.iter().find(|r| r.pid == child.id())
         );
+        // #11863: census only the child and its real ancestors. Linux sysinfo
+        // lists each thread as a row, and the child's libtest thread reads
+        // `rustc` until it names itself, so a whole-table count can see two.
+        let by_pid: HashMap<u32, &ProcessSnapshot> = rows.iter().map(|r| (r.pid, r)).collect();
+        let mut lineage: Vec<ProcessSnapshot> = Vec::new();
+        let mut cursor = Some(child.id());
+        while let Some(row) = cursor.and_then(|pid| by_pid.get(&pid)) {
+            if lineage.len() >= MAX_HOPS || lineage.iter().any(|r| r.pid == row.pid) {
+                break;
+            }
+            lineage.push((*row).clone());
+            cursor = row.parent;
+        }
+        assert!(
+            lineage.iter().any(|r| r.pid == std::process::id()),
+            "the fake compiler must descend from this test process: {lineage:?}"
+        );
         let count = |groups: Vec<BuildGroup>| -> usize {
             groups
                 .iter()
                 .map(|g| g.compilers.iter().filter(|n| n.as_str() == "rustc").count())
                 .sum()
         };
-        let unleased = count(foreign_groups(&rows, &[]));
-        let leased = count(foreign_groups(&rows, &[holder(std::process::id(), None)]));
         assert_eq!(
-            unleased,
-            leased + 1,
-            "exactly this test's rustc is excluded by the lease"
+            count(foreign_groups(&lineage, &[])),
+            1,
+            "with no lease, this test's rustc is counted"
+        );
+        assert_eq!(
+            count(foreign_groups(
+                &lineage,
+                &[holder(std::process::id(), None)]
+            )),
+            0,
+            "a lease naming this test process excludes its rustc"
         );
     }
 

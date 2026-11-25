@@ -113,9 +113,11 @@ impl Peer {
     /// What: a lost reply, or the worker's own `OutcomeUnknown` /
     /// `BrowserDisconnected`, is `OutcomeUnknown` for a mutating op else
     /// `BrowserDisconnected`; an unknown error name is `BrowserRefused`; a
-    /// known one keeps only `REFUSAL_FIELDS`; a wrong email is
-    /// `IdentityMismatch`, a wrong tab `TabMismatch`.
-    /// Test: `captured_exchanges_replay_byte_identically`.
+    /// known one keeps only `REFUSAL_FIELDS`, plus (#11808) a well-formed
+    /// `frame` on any worker refusal; a wrong email is `IdentityMismatch`, a
+    /// wrong tab `TabMismatch`.
+    /// Test: `captured_exchanges_replay_byte_identically`,
+    /// `a_refused_frame_action_is_audited_with_the_frame_origin`.
     pub async fn page(
         &self,
         entropy: &dyn Entropy,
@@ -167,14 +169,25 @@ impl Peer {
             let Some(code) = code.filter(|c| PAGE_ERRORS.contains(c)) else {
                 return Err(Refusal::new("BrowserRefused"));
             };
-            if UNFINISHED.contains(&code) {
-                return Err(lost(op));
-            }
-            let mut refusal = Refusal::new(code);
-            for k in REFUSAL_FIELDS {
-                if let Some(v) = observed.get(k) {
-                    refusal = refusal.with(*k, v.clone());
+            // #11808: a well-formed `frame` (the child a frame action had resolved) is kept on any
+            // refusal, an unfinished one included, so the audit names it; a malformed one is dropped.
+            let frame = observed
+                .get("frame")
+                .filter(|f| crate::pages_frames::frame_ok(f))
+                .cloned();
+            let mut refusal = if UNFINISHED.contains(&code) {
+                lost(op)
+            } else {
+                let mut refusal = Refusal::new(code);
+                for k in REFUSAL_FIELDS {
+                    if let Some(v) = observed.get(k) {
+                        refusal = refusal.with(*k, v.clone());
+                    }
                 }
+                refusal
+            };
+            if let Some(frame) = frame {
+                refusal = refusal.with("frame", frame);
             }
             return Err(refusal);
         }

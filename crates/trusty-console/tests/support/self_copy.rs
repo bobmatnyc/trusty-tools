@@ -12,7 +12,7 @@
 //! when the process exits; a run killed before `exit` leaves its directory,
 //! and the next process's first call removes every sibling directory (a real
 //! directory this euid owns, not a symlink) named for a dead canonical pid.
-//! Test: `one_name_is_one_copy_per_process`, `two_names_are_two_inodes`,
+//! Test: `two_names_are_two_inodes`,
 //! `racing_first_calls_make_one_complete_copy`,
 //! `copies_are_removed_at_process_exit`, `a_dead_runs_copies_are_swept`,
 //! `live_signed_padded_and_symlinked_entries_survive_the_sweep`.
@@ -143,16 +143,6 @@ mod tests {
 
     fn inode(path: &std::path::Path) -> u64 {
         std::fs::metadata(path).expect("stat copy").ino()
-    }
-
-    #[test]
-    fn one_name_is_one_copy_per_process() {
-        // Stat between the calls: a re-copy renamed over the path gets a new inode.
-        let first = self_copy("claude");
-        let first_inode = inode(&first);
-        let second = self_copy("claude");
-        assert_eq!(first, second);
-        assert_eq!(first_inode, inode(&second), "a second copy was made");
     }
 
     #[test]

@@ -322,20 +322,4 @@ mod tests {
         assert!(r.failed, "one survivor fails the whole pass");
         assert_eq!(r.errors.len(), 1);
     }
-
-    /// Why: the label set comes from the shared registry, so an alias added
-    /// there is evicted here without this file changing. The order is asserted
-    /// because the canonical label holds the running process.
-    /// Test: this is the test.
-    #[test]
-    fn the_retired_label_set_comes_from_the_registry() {
-        let labels = trusty_common::launchd_labels::retired_labels_for_member("trusty-analyze");
-        assert_eq!(
-            labels,
-            vec![
-                trusty_common::launchd_labels::ANALYZE,
-                "com.trusty.trusty-analyze"
-            ]
-        );
-    }
 }

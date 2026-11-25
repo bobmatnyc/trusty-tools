@@ -2,59 +2,18 @@
 //! two-cycle tolerance, prints both numbers, and leaves `il_cron` out. New
 //! tests: the base report had no identity numbers and no exclusion line.
 
+mod common;
 mod sched_support;
 
 use std::fs;
 
+use common::{key, record};
 use sched_support::layout;
 use trusty_architect::sched::parity::{self, alert_id};
-use trusty_architect::sched::shadow::{EventKey, ShadowAlert, ShadowRecord, WokenKey};
+use trusty_architect::sched::shadow::EventKey;
 use trusty_architect::sched::slot::parse_iso;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-fn key(s: &str, k: &str, f: &str) -> EventKey {
-    EventKey {
-        session: s.to_owned(),
-        kind: k.to_owned(),
-        fingerprint: f.to_owned(),
-    }
-}
-
-fn record(slot: i64, alerts: Vec<EventKey>, woken: Vec<EventKey>) -> ShadowRecord {
-    ShadowRecord {
-        ts: "x".into(),
-        job: "poll".into(),
-        slot,
-        mode: "shadow".into(),
-        interval_s: 60,
-        ok: true,
-        panes: Some(1),
-        new: Some(alerts.len() as u64),
-        woken: Some(woken.len() as u64),
-        logged: Some(0),
-        suppressed: Some(0),
-        wake_phrase: None,
-        wake_target: None,
-        alerts: alerts
-            .iter()
-            .map(|k| ShadowAlert {
-                session: k.session.clone(),
-                kind: k.kind.clone(),
-            })
-            .collect(),
-        digest_sha: "d".into(),
-        error: None,
-        haiku_woken: Some(0),
-        alert_keys: Some(alerts),
-        woken_keys: Some(
-            woken
-                .into_iter()
-                .map(|key| WokenKey { key, haiku: false })
-                .collect(),
-        ),
-    }
-}
 
 fn alert_row(ts: &str, k: &EventKey) -> String {
     format!(

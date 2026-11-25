@@ -12,7 +12,7 @@ http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`ho
 /config.json `warnings` lists why this interpreter degrades the page ([] when tmux is on PATH, #10606).
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
-owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
+owner_name (re-read per request; a stored "" or "the owner" counts as unset, #10760), else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
 {"share": false}. The Secrets and project-lifecycle routes are optional too (#10571): while dashboard_secrets or
 dashboard_lifecycle is not shipped, /api/secrets/* and /api/projects/<verb>/<id> fall through to the store API, which
 refuses them (404 or 405), and nothing runs. A Content-Length that is not
@@ -32,6 +32,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import architect_config
 import dashboard_docs as docs
 import dashboard_harness
 import dashboard_il
@@ -60,6 +61,7 @@ MAX_BODY = 1 << 20
 REQUEST_TIMEOUT_S = 30   # #10161: a stalled client releases its handler thread after this
 _DIGITS = re.compile(r"[0-9]+")
 LOCAL_NAMES = ("127.0.0.1", "localhost")
+UNSET_OWNER = ("", "the owner")   # #10760: values seed_meta writes when no owner is configured; never an explicit name
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -365,7 +367,9 @@ class Handler(BaseHTTPRequestHandler):
             except ds.NotFound:
                 name = ""
             # #10161: no owner name ships; meta/state, else local/architect.json, else a neutral default.
-            name = name or self.server.owner_name or "the owner"
+            # #10760: a seeded placeholder is unset, and architect.json is read per request, so a later owner_name wins.
+            name = name if name not in UNSET_OWNER else ""
+            name = name or configured_owner(self.server.owner_name) or "the owner"
             return self._send(200, {"id": "local", "name": name, "can_write": True})
         if len(parts) == 2 and parts[0] == "media-archive" and m == "POST":   # archive a media item (architect dash only)
             if self.server.config.get("mode") != "architect":
@@ -401,6 +405,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._err(405, "method_not_allowed", f"{m} {'/'.join(parts)} not supported")
 
     do_GET = do_HEAD = do_PUT = do_PATCH = do_POST = do_DELETE = _dispatch
+
+
+def configured_owner(started_with):
+    """local/architect.json `owner_name` as it is now (#10760); the start-up value when the file cannot be read."""
+    try:
+        return architect_config.load().owner_name or started_with
+    except architect_config.ConfigError:
+        return started_with
 
 
 def features():
