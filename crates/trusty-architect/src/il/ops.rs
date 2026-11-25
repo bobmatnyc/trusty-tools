@@ -12,7 +12,7 @@
 //! `batch_input_must_be_a_list`.
 
 use super::error::{IlResult, invalid};
-use super::ids::{live_ids, next_id, parse_id};
+use super::ids::{next_id, parse_id};
 use super::json::{Json, obj};
 use super::limits::{lim, py_or, title};
 use super::ops_update::{apply_pulse, apply_update};
