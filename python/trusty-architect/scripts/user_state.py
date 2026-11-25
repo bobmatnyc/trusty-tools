@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """user_state.py: the owner's presence state, set from the dashboard settings pane.
 
-Why: the owner (2026-10-09) wants engagement and token use tuned to whether the owner is at the computer, on a
+Why: the owner (see #10571) wants engagement and token use tuned to whether the owner is at the computer, on a
 device, away or asleep. The dashboard writes meta/settings; the poller and the pending-answers hook read it.
 What: read(root) returns {state, at, by} from meta/settings through dashboard_store. State is one of STATES;
 unset or unknown values give DEFAULT ("active") with at "".
@@ -29,7 +29,7 @@ def read(root=None):
     return {"state": data["user_state"], "at": str(data.get("user_state_at", "")), "by": str(data.get("user_state_by", ""))}
 
 
-# ---- effective state (owner, 2026-10-29: "If I respond to questions within 15 minutes, I'm not sleeping.") ----
+# ---- effective state (the owner: "If I respond to questions within 15 minutes, I'm not sleeping.") ----
 import time  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
@@ -38,7 +38,7 @@ SIGNAL_THROTTLE_SECS = 60
 SIGNAL_WRITERS_IGNORED = "architect"  # an Architect-written stamp is never an owner signal
 AUTO_PREFIX = "auto:"  # actor of an automatic sleeping/away -> active switch; not itself an owner signal
 AUTO_FROM = ("sleeping", "away")  # only these flip; active and remote stay, and nothing auto-switches to sleeping or away
-# owner 2026-10-30 ~03:40Z: "Don't count that as me being awake, I'm setting it to walk away." A manual set to sleeping or
+# The owner: "Don't count that as me being awake, I'm setting it to walk away." A manual set to sleeping or
 # away is not a signal, and signals up to GRACE_SECS after it (the turn that sets it) are ignored.
 GRACE_SECS = 300
 
@@ -55,7 +55,7 @@ def _hold_until(data):
 
 def _signal_patch(data, kind, sig_epoch, now):
     """Fields for meta/settings: the signal stamp, plus user_state=active when the stored state is sleeping or away and the
-    signal is under WINDOW_SECS old (owner, 2026-10-29: the dropdown must not say Sleeping while the owner is chatting)."""
+    signal is under WINDOW_SECS old (the owner: the dropdown must not say Sleeping while the owner is chatting)."""
     patch = {"owner_signal_at": _iso(sig_epoch), "owner_signal_kind": kind}
     if data.get("user_state") in AUTO_FROM and 0 <= now - sig_epoch < WINDOW_SECS and sig_epoch > _hold_until(data):
         patch.update({"user_state": "active", "user_state_at": _iso(now), "user_state_by": f"{AUTO_PREFIX} owner activity ({kind})"})
@@ -134,7 +134,7 @@ def effective(root=None, now=None):
     sig_at, sig_kind = last_signal(root)
     age = now - sig_at
     if manual["state"] == "mobile":
-        # owner 2026-11-02: mobile is sticky; an owner turn while on a device keeps mobile (decisions go in chat).
+        # The owner (see #10571): mobile is sticky; an owner turn while on a device keeps mobile (decisions go in chat).
         state, reason = "mobile", "mobile: manual setting (owner activity does not change it)"
     elif sig_at and 0 <= age < WINDOW_SECS:
         reason = f"active: {sig_kind} {max(int(age // 60), 0)} min ago"

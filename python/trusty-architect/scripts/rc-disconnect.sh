@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # rc-disconnect.sh <session> — turn Remote Control off for one live Claude pane, without killing it.
-# Why: RC on tm-architect-questions follows the open interactive questions (questions_rc.py, owner 2026-11-17).
+# Why: RC on tm-architect-questions follows the open interactive questions (questions_rc.py; see #10571).
 # What: skips unless RC is connected and the input box is empty/suggestion and no turn runs (input-state.py gate);
 #   types /remote-control (echo-verified, rc-lib.sh), which opens the "already active" dialog, moves the
 #   selection to "Disconnect this session" and presses Enter. Esc closes the dialog if it cannot be found.

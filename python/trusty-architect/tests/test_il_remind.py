@@ -1,4 +1,4 @@
-"""Reminders attached to Intent Ledger tasks (ar-T6w): il_remind's pure functions and the chat ack parse (ar-T8d).
+"""Reminders attached to Intent Ledger tasks (#10571): il_remind's pure functions and the chat ack parse.
 
 #10571 S2: the datg verbs, the ilio `remind:` field, the poller's `reminder` alert, the dashboard row and the migration
 cases of the pin's test_il_remind.py and test_il_remind_ack.py ship with the datg and poller re-merge (S3, S4).
@@ -35,7 +35,7 @@ def test_parse_every_rejects(bad):
 
 
 def test_one_shot_fires_once_then_waits_for_done():
-    t = {"id": "ar-T01", "status": "open"}
+    t = {"id": "ex-T01", "status": "open"}
     r, created = il_remind.add(t, "2026-11-24", "note")
     assert created and r["state"] == "pending" and r["n"] == 1
     st = {"tasks": [t]}
@@ -50,17 +50,17 @@ def test_one_shot_fires_once_then_waits_for_done():
 
 
 def test_repeat_reschedules_past_now_in_whole_steps():
-    t = {"id": "ar-T01", "status": "open"}
+    t = {"id": "ex-T01", "status": "open"}
     r, _ = il_remind.add(t, "2026-11-24", "again", every="14d")
     il_remind.fire(r, T0 + timedelta(days=30))   # the poller was down for a month
-    assert r["state"] == "fired" and r["at"] == "2026-11-24T12:00Z" and r["fires"] == 1   # a fired one waits for its ack (ar-T8d)
+    assert r["state"] == "fired" and r["at"] == "2026-11-24T12:00Z" and r["fires"] == 1   # a fired one waits for its ack
     assert il_remind.due({"tasks": [t]}, T0 + timedelta(days=30)) == []
     il_remind.mark_done(t, 1, now=T0 + timedelta(days=30))   # the ack: 12-08 and 12-22 are behind now (12-24)
     assert r["state"] == "pending" and r["at"] == "2027-01-05T12:00Z"
 
 
 def test_add_is_idempotent_and_capped():
-    t = {"id": "ar-T01", "status": "open"}
+    t = {"id": "ex-T01", "status": "open"}
     r1, c1 = il_remind.add(t, "2026-11-24", "same")
     r2, c2 = il_remind.add(t, "2026-11-24", "same")
     assert (c1, c2, r1 is r2) == (True, False, True)
@@ -69,13 +69,13 @@ def test_add_is_idempotent_and_capped():
     with pytest.raises(il_remind.RemindError):
         il_remind.add(t, "2026-11-26", "one too many")
     with pytest.raises(il_remind.RemindError):
-        il_remind.add({"id": "ar-T09", "status": "done"}, "2026-11-24", "x")
+        il_remind.add({"id": "ex-T09", "status": "done"}, "2026-11-24", "x")
     with pytest.raises(il_remind.RemindError):
-        il_remind.add({"id": "ar-T09", "status": "open"}, "2026-11-24", "x" * 161)
+        il_remind.add({"id": "ex-T09", "status": "open"}, "2026-11-24", "x" * 161)
 
 
 def test_next_reminder_prefers_fired_then_earliest():
-    t = {"id": "ar-T01", "status": "open"}
+    t = {"id": "ex-T01", "status": "open"}
     a, _ = il_remind.add(t, "2026-12-01", "later")
     b, _ = il_remind.add(t, "2026-11-30", "sooner")
     assert il_remind.next_reminder(t) is b
@@ -86,11 +86,11 @@ def test_next_reminder_prefers_fired_then_earliest():
 # ---- chat ack --------------------------------------------------------------
 
 @pytest.mark.parametrize("text,want", [
-    ("ack ar-T84#2", [("ar-T84", 2)]),
-    ("Ack ar-T84#2, ar-T6e#1  ar-T01#10", [("ar-T84", 2), ("ar-T6e", 1), ("ar-T01", 10)]),
+    ("ack ex-T84#2", [("ex-T84", 2)]),
+    ("Ack ex-T84#2, ex-T6e#1  ex-T01#10", [("ex-T84", 2), ("ex-T6e", 1), ("ex-T01", 10)]),
     ("ack all", "all"),
     ("thanks for the update", None),
-    ("acknowledge ar-T84#2", None),
+    ("acknowledge ex-T84#2", None),
 ])
 def test_parse_ack(text, want):
     assert il_remind.parse_ack(text) == want

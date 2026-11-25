@@ -1,4 +1,4 @@
-"""Base-34 id digits (owner ruling 2026-11-12 17:17Z "0-1a-z", 17:19Z "agreed, drop" o and l): the alphabet, the
+"""Base-34 id digits (the owner: "0-1a-z", then "agreed, drop" for o and l; see #10571): the alphabet, the
 f->g, k->m, n->p and z->10 boundaries, the validator and the sort order of mixed old and new ids.
 
 #10571 S2: the pin's cases for dashboard_derive, dashboard_ids, datg and task_tag ship when those modules move to

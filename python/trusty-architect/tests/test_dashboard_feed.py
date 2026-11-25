@@ -38,7 +38,7 @@ def test_accounts_latest_line_per_account_written_once(tmp_path):
 
 
 def test_non_email_ledger_line_skipped_and_stale_accounts_doc_removed(tmp_path, capsys):
-    """ar-T8b: "acct6" must not reach the store, and a doc no longer in the ledger is dropped via the prune log."""
+    """#10571: "acct6" must not reach the store, and a doc no longer in the ledger is dropped via the prune log."""
     ledger = tmp_path / "ledger.jsonl"
     base = {"pct5h": 1, "reset5h": None, "pctwk": 2, "resetwk": "w", "source": "s"}
     ledger.write_text("\n".join(json.dumps(r) for r in [

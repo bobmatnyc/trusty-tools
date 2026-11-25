@@ -110,7 +110,7 @@ def test_architect_write_never_flips_and_stale_signal_does_not(tmp_path):
     assert stored(tmp_path)["user_state"] == "active"
 
 
-# owner 2026-10-30 ~03:40Z: "Don't count that as me being awake, I'm setting it to walk away."
+# The owner: "Don't count that as me being awake, I'm setting it to walk away."
 def test_manual_sleeping_set_is_not_a_signal_and_grace_ignores_turn(tmp_path):
     sleeping(tmp_path, by="owner")  # set 19:00
     t = user_state._epoch("2026-10-29T19:00:00Z")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dashboard_feed.py: per-session agent and token usage feed for the dashboard (stdlib only).
 
-Why: the owner (2026-10-08): show active/parked subagents and token usage per session
+Why: the owner (see #10571): show active/parked subagents and token usage per session
 (the 2026-10-08 dashboard agents brief, Part B).
 What: reads the token watcher's outputs (hourly rollup, open-hour state, per-file
 context state, via the watcher's report and load_state) plus the mtimes and last
@@ -218,7 +218,7 @@ def slug(account):
 
 def latest_accounts(ledger=LEDGER):
     """{slug: doc} from the newest (by ts) ledger line per account. Unreadable or account-less
-    lines and labels without "@" (ar-T8b: "acct6" became a fake account) are skipped; an absent ledger gives {}."""
+    lines and labels without "@" (#10571: "acct6" became a fake account) are skipped; an absent ledger gives {}."""
     best = {}
     try:
         with open(ledger, encoding="utf-8") as f:

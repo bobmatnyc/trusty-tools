@@ -1,4 +1,4 @@
-"""The one relaunch-resume brief: old vs new text, edit-in-place sync, chunked send (owner, 2026-11-13, briefs-dedupe).
+"""The one relaunch-resume brief: old vs new text, edit-in-place sync, chunked send (the owner, briefs-dedupe; see #10571).
 
 #10571 S2: the pin's old-vs-new byte comparison reads the prototype's git history and its check of the checked-in
 local/briefs/relaunch-resume.md reads instance state; neither exists in the bundle, so both stay in the prototype.

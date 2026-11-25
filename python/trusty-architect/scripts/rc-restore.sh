@@ -4,11 +4,11 @@
 # Why: a Claude account change (/login in any session) drops Remote Control, and
 # every PM pane's status line then shows `/rc failed`. The fix is per pane:
 # /rename <session>, then /remote-control <session> (names the RC session). Not automatic for PMs
-# (owner, 2026-11-12 18:41Z: "Only when the user asks to work directly with a session"): run it by hand
+# (the owner: "Only when the user asks to work directly with a session"): run it by hand
 # for one session on request. fleet-poll.py runs it only for tm-architect (PM_RC_RESTORE is False).
 # What: per session, skips (and logs why) a pane that is at a shell, busy, or
 # holds typed input; else types /rename <session>, then rc_connect (rc-lib.sh): /remote-control <session>,
-# nothing more if RC is already active (ar-T75: never toggled), accept a `❯ Continue` prompt,
+# nothing more if RC is already active (see #10571: never toggled), accept a `❯ Continue` prompt,
 # confirm a https://claude.ai/code/session_... URL that differs from the earlier one.
 # Each command is typed, echo-verified by input-state.py, then submitted with a
 # separate Enter (same pattern as session-relaunch.sh).

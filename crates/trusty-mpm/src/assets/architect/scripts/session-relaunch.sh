@@ -7,7 +7,7 @@
 # fleet-restart.sh, which kills the whole tmux server.
 # What: /exit → wait for the pane's shell → `tm` (relaunches that session in
 # place) → /rename <session> → [/remote-control <session>, only with --rc] → /tm-session-resume. Logs one line per step.
-# --rc: also connect Remote Control. Off by default (owner, 2026-11-12 18:41Z: not automatic for PMs).
+# --rc: also connect Remote Control. Off by default (the owner: not automatic for PMs; see #10571).
 # Precondition: the PM was checkpointed with /tm-session-pause and the
 # snapshot verified; with --il the checkpoint is a fresh Intent Ledger digest
 # verified by the Architect, and the script refuses (IL-MISSING, exit 1, before
@@ -70,7 +70,7 @@ if [ -n "$IL" ]; then
     [ "$n" -le 1 ] || { log "IL-AMBIGUOUS $IL ($n dbatg ledgers)"; exit 1; }
     [ "$n" = 1 ] || { log "IL-MISSING $IL"; exit 1; }
   fi
-  # One brief for every session (owner, 2026-11-13: "similar briefs should be edited, not duplicated"):
+  # One brief for every session (the owner: "similar briefs should be edited, not duplicated"):
   # rewritten only when its text changes; the per-session ledger is filled in at send time.
   BRIEF="${RELAUNCH_BRIEF_DIR:-$SUPERVISOR_DIR/local/briefs}/relaunch-resume.md"
   RB="$SUPERVISOR_DIR/scripts/relaunch_brief.py"
@@ -125,7 +125,7 @@ RC_ECHO_TRIES=40; RC_ECHO_SLEEP=2
 send_cmd() { rc_send_cmd "$@"; }
 send_cmd "/rename $s" || exit 1; log "sent /rename $s"; sleep 3
 tmux rename-window -t "=$s:" "$s" 2>/dev/null
-# Remote Control is opt-in (owner, 2026-11-12 18:41Z): only with --rc; fleet-poll passes it for tm-architect.
+# Remote Control is opt-in (see #10571): only with --rc; fleet-poll passes it for tm-architect.
 if [ "$RC" = 1 ]; then rc_connect && log "rc: $RC_URL" || log "rc: NOT-CONFIRMED ($RC_FAIL)"; else log "rc: skipped (no --rc)"; fi
 # Like rc_send_cmd, for a line longer than input-state.py reports (100 characters):
 # the box must show a prefix of 40+ characters of the line before Enter.

@@ -14,7 +14,7 @@
 # kill-server takes down EVERY session on the socket, so the script refuses to
 # run while a session outside its list is live (2026-09-23: an unlisted PM was
 # lost uncheckpointed). Pass --force first to override after checkpointing it.
-# --rc (off by default; never passed implicitly, owner 2026-11-12 18:41Z) sends /rename <session> then /remote-control <session> (rc-lib.sh) before /tm-session-resume, for a restart after a
+# --rc (off by default; never passed implicitly, see #10571) sends /rename <session> then /remote-control <session> (rc-lib.sh) before /tm-session-resume, for a restart after a
 # Claude account change (Remote Control disconnects on the account switch).
 # --wait-server SECONDS: after kill-server, do NOT let the daemon start the new
 # tmux server (a launchd context is not exempt from the macOS Gatekeeper

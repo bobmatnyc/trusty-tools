@@ -1,4 +1,4 @@
-"""il_timeline.py: which task a project was working on at a given time, from its Intent Ledger log (ar-T5h).
+"""il_timeline.py: which task a project was working on at a given time, from its Intent Ledger log (#10571).
 
 Why: the Tasks view (dashboard_tasks.py) attributed a message only through a literal "Task: <id>" line, so most messages were
 unattributed. Each project's ledger log records when a task was opened, updated and done; that is enough to say what it was on.

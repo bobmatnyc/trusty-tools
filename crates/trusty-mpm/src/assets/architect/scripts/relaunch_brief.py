@@ -2,7 +2,7 @@
 """relaunch_brief.py: the one relaunch-resume brief and the per-session text rendered from it.
 
 Why: session-relaunch.sh --il wrote local/briefs/relaunch-resume-<session>.md per PM (30 near-identical files on the
-dashboard briefs page). Owner ruling (2026-11-13): "similar briefs should be edited, not duplicated, use local git to
+dashboard briefs page). Owner ruling (see #10571): "similar briefs should be edited, not duplicated, use local git to
 track changes." The text now lives once, in local/briefs/relaunch-resume.md, with the per-session ledger as a parameter.
 What: TEMPLATES holds the two resume texts (datg and dbatg ledger layouts). render() fills the placeholders at send time;
 the result is byte-for-byte the body the old per-session brief held. sync(path) rewrites the brief only when its body
@@ -37,7 +37,7 @@ BODY = f"""
 One brief for every PM that `scripts/session-relaunch.sh --il` relaunches onto a new Claude account. The script fills
 the placeholders for that session and types the text into its pane after the relay marker
 (`[<Name> Architect HH:MMZ] Architect answer: `, <Name> from local/architect.json). The text lives in `scripts/relaunch_brief.py`; a rerun rewrites this
-file only when that text changes, and git keeps the history (owner, 2026-11-13: "similar briefs should be edited, not
+file only when that text changes, and git keeps the history (the owner: "similar briefs should be edited, not
 duplicated, use local git to track changes.").
 
 ## Parameters

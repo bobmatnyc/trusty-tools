@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """dashboard_updates.py: deterministic ingester of task update snippets into dashboard items (stdlib only, no model call).
 
-Why: owner 2026-11-12 17:00Z: "capture update snippets directly from tagged tasks in the live chat ... deterministic better".
+Why: the owner (see #10571): "capture update snippets directly from tagged tasks in the live chat ... deterministic better".
 What: reads four sources and appends {at, by, text} entries to the `updates` array of the dashboard item whose `task` field
 names the tagged IL task.
   - inbox/relays.jsonl: {ts, session, kind, text}; a relay belongs to a task when its text carries `Task: <id>[@MMDD]`, or
-    else a bare IL id with the `ar-` prefix (`ar-T24`). A bare `T24` never matches (dashboard and IL ids differ).
+    else a bare IL id with the `ar-` prefix (`ar-T` plus the id digits). A bare `T24` never matches (dashboard and IL ids differ).
   - inbox/task-notes.jsonl: {ts, task, by, text}, the Architect's own work notes; append with
     `python3 scripts/dashboard_updates.py note <task-id> "<text>" [--by <who>]` (appends one line, then ingests).
   - inbox/mcp-messages.jsonl: a PM handback ends with `Task: <id>@MMDD | done: <x> | est: <x> | remaining: <x> | pct: <n>`;

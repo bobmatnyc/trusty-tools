@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ids36.py: base-34 helpers for the 2-digit id suffix of dashboard and Intent Ledger ids.
 
-Why: owner 2026-11-12 17:17Z: "Let's also switch to base 39 prefix letter + 2 digits to avoid duplication risks. 0-1a-z".
-The Architect read that as base 36 (0-9, a-z); owner 2026-11-12 17:19Z ruled "agreed, drop" for the letters o and l (they
+Why: the owner (see #10571): "Let's also switch to base 39 prefix letter + 2 digits to avoid duplication risks. 0-1a-z".
+The Architect read that as base 36 (0-9, a-z); the owner ruled "agreed, drop" for the letters o and l (they
 read as 0 and 1), so the digits are base 34: 0-9, a-k, m, n, p-z, lowercase. Two digits give 34 * 34 = 1,156 values per
 prefix, 1,155 issuable (00 is never issued), instead of 256 hex values. Every old hex id is a valid base-34 id (hex has no
 o or l) and keeps its string; only its numeric value changes, so sort and "next" arithmetic must go through this module,

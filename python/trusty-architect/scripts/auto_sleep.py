@@ -1,6 +1,6 @@
 """auto_sleep.py: set the owner's user state to sleeping at the configured local start time.
 
-Why: the owner (2026-10-11) wants sleep to start by itself at a set time; only the owner leaves it.
+Why: the owner (see #10571) wants sleep to start by itself at a set time; only the owner leaves it.
 What: step(root, now_epoch) reads meta/settings (sleep_start "HH:MM", tz, user_state, sleep_auto_on).
 Once per local date in tz, when local time >= sleep_start, it writes user_state "sleeping",
 user_state_at, user_state_by "Architect (auto-sleep)" and sleep_auto_on = the local date, pinned with

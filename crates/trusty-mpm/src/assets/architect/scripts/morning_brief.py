@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""morning_brief.py: schedule for the owner's morning brief (owner, 2026-10-25: "Let's do a morning brief each weekday morning").
+"""morning_brief.py: schedule for the owner's morning brief (the owner: "Let's do a morning brief each weekday morning").
 
 Why: the brief is a standard Architect behaviour, so a deterministic clock (not the Architect's memory) decides
 when it is due. Each user customises it in the dashboard settings pane (meta/settings.morning_brief).

@@ -1,4 +1,4 @@
-"""session-relaunch.sh --il / --il-session against a fake tmux and a no-op sleep (ar-T13)."""
+"""session-relaunch.sh --il / --il-session against a fake tmux and a no-op sleep (#10571)."""
 import json
 import os
 import re

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """il_remind.py: reminders attached to Intent Ledger tasks (stdlib only).
 
-Why: owner 2026-11-17 ~20:10Z: "a reminder should not be a task, but we should have reminders attached to tasks."
+Why: the owner (see #10571): "a reminder should not be a task, but we should have reminders attached to tasks."
 A dated "Remind ..." task filled the task list and the WIP count; a reminder is an attribute of the task it serves.
 What: a task carries `reminders`, a list of {n, at, every, note, state, fired_at, fires}. `n` is the number within the
 task (never reused), `at` is a UTC `YYYY-MM-DDTHH:MMZ` (a bare date means 12:00Z), `every` is optional (`14d`, `36h`,
@@ -13,7 +13,7 @@ file, no service. Pure functions over the state dict; datg.py applies them as op
   mark_done              the ack. A one-shot becomes `done`. A repeating one that fired (or is past due) moves `at`
                          forward by whole `every` steps past now and goes back to `pending`; `end` stops it for good
   unacked / footer_line  fired reminders not yet acked, and the "Reminders (ack): ..." line the reply footer carries
-  parse_ack / ack        the owner's chat ack: `ack ar-T84#2`, several ids, or `ack all` (owner, 2026-11-19, ar-T8d)
+  parse_ack / ack        the owner's chat ack: `ack ex-T84#2`, several ids, or `ack all` (the owner; see #10571)
   next_reminder          the one a dashboard row shows: a fired one first, else the earliest pending
   lines                  digest lines under a task
 A task with a pending or fired reminder cannot be closed: move it (a new `remind` on another task, then `remind-done`).
@@ -209,7 +209,7 @@ def step(project, now=None, dry_run=False):
     return [dict(_row({"id": e["id"], "title": e["task"]}, e["reminder"]), at=e["reminder"]["fired_for"]) for e in evs if e.get("reminder")]
 
 
-# ---- surfacing and ack (ar-T8d, owner 2026-11-19: "the reminders should be surfaced with your response and me to ack") ----
+# ---- surfacing and ack (see #10571; the owner: "the reminders should be surfaced with your response and me to ack") ----
 
 FOOTER_MAX = 5
 FOOTER_NOTE = 60
@@ -233,7 +233,7 @@ def key(x):
 
 
 def footer_line(rows):
-    """`Reminders (ack): ar-T84#2 note \u00b7 ar-T6e#1 note`, or "" when there are none. At most FOOTER_MAX, then `+N more`."""
+    """`Reminders (ack): ex-T84#2 note \u00b7 ex-T6e#1 note`, or "" when there are none. At most FOOTER_MAX, then `+N more`."""
     if not rows:
         return ""
     parts = [f"{key(x)} {x['note'][:FOOTER_NOTE]}" for x in rows[:FOOTER_MAX]]
@@ -243,7 +243,7 @@ def footer_line(rows):
 
 
 def parse_ack(text):
-    """The owner's chat ack: `ack ar-T84#2`, `ack ar-T84#2 ar-T6e#1` (spaces or commas), `ack all`. Returns "all", a list of
+    """The owner's chat ack: `ack ex-T84#2`, `ack ex-T84#2 ex-T6e#1` (spaces or commas), `ack all`. Returns "all", a list of
     (task id, n) pairs, or None when the text is not an ack. Raises RemindError for an `ack` whose words are not ids."""
     m = ACK_RE.match(str(text or ""))
     if not m:
@@ -255,7 +255,7 @@ def parse_ack(text):
     for w in words:
         k = ID_N.match(w)
         if not k:
-            raise RemindError(f"ack {w!r}: expected <task>#<n> (e.g. ar-T84#2) or `all`")
+            raise RemindError(f"ack {w!r}: expected <task>#<n> (e.g. ex-T84#2) or `all`")
         out.append((k.group(1), int(k.group(2))))
     return out
 
