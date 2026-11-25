@@ -340,7 +340,7 @@ fn owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file() {
 
     let fx = Fixture::new();
     let state = fx.tmp.path().join("state");
-    let default_root = fx.home.join("trusty-mpm-projects");
+    let default_root = fx.home.join("trusty-mpm-projects"); // path-literal: allow (the test must name the unresolved default root by hand)
     let cwd = fx.default_checkout();
     std::fs::create_dir_all(&cwd).expect("mkdir checkout");
     let owner_file = default_root.join("acme").join(".trusty-mpm-owner.toml");
