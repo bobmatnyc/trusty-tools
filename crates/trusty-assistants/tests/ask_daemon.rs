@@ -268,16 +268,41 @@ fn racing_asks_all_answer_through_one_daemon_at_a_time() {
     }
     env.wait_idle();
     assert_eq!(env.turns(), 4, "every ask logged once, none lost");
-    // Serving and exit lines alternate: no two daemons served at once.
+    // See CI run 45522549417: socket unlink precedes the exited log line
+    // (server.rs:285), so a successor's `serving` line may precede it.
+    // Bind exclusion is proven by `racing_binds_end_with_exactly_one_daemon`.
     let log = env.log();
-    let lifecycle: Vec<&str> = log
-        .lines()
-        .filter(|l| l.contains(": serving ") || l.contains(" exited ("))
-        .collect();
-    for (i, line) in lifecycle.iter().enumerate() {
-        let serving = line.contains(": serving ");
-        assert_eq!(serving, i % 2 == 0, "overlapping daemons in:\n{log}");
+    let mut served: Vec<u32> = Vec::new();
+    let mut exited: Vec<u32> = Vec::new();
+    let mut answered = 0;
+    for line in log.lines() {
+        if let Some(rest) = line.split_once(" as pid ").map(|(_, r)| r) {
+            served.push(rest.trim().parse().expect("serving pid"));
+        } else if let Some((pid, summary)) = line
+            .split_once(": pid ")
+            .and_then(|(_, r)| r.split_once(" exited ("))
+        {
+            let pid: u32 = pid.parse().expect("exited pid");
+            assert!(served.contains(&pid), "pid {pid} exited unserved:\n{log}");
+            exited.push(pid);
+            answered += summary_count(summary, "answered");
+        }
     }
+    for pid in &served {
+        let exits = exited.iter().filter(|p| *p == pid).count();
+        assert_eq!(exits, 1, "pid {pid} must exit exactly once:\n{log}");
+    }
+    assert_eq!(answered, 4, "answered counts sum to the asks:\n{log}");
+}
+
+/// The value of `field` in a logged `ServeSummary { .. }`.
+fn summary_count(summary: &str, field: &str) -> usize {
+    let start = summary.find(&format!("{field}: ")).expect("summary field") + field.len() + 2;
+    let digits: String = summary[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().expect("summary count")
 }
 
 #[test]
