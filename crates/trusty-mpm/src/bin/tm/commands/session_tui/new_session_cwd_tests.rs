@@ -118,7 +118,7 @@ fn press(state: &mut TuiState, code: KeyCode) -> Action {
 
 fn open_flow(state: &TuiState) -> &NewSessionFlow {
     match state.mode() {
-        Mode::New(flow) => flow,
+        Mode::New(flow) => &**flow,
         _ => panic!("the new-session flow is not open"),
     }
 }

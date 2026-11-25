@@ -2603,7 +2603,7 @@ fn render_draws_no_state_color_when_color_is_off() {
 /// The open new-session flow, or a panic naming the mode that is open instead.
 fn open_flow(state: &TuiState) -> &NewSessionFlow {
     match state.mode() {
-        Mode::New(flow) => flow,
+        Mode::New(flow) => &**flow,
         other => panic!("the new-session flow is not open: {other:?}"),
     }
 }
