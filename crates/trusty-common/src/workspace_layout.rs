@@ -186,8 +186,8 @@ pub fn resolve_workspace_root(template: Option<&str>) -> PathBuf {
 /// What: the same chain. The env var or `template`, when set, wins and the
 /// install file is never read. Otherwise the install file's `projects_root`
 /// or the default, and an unreadable, unparsable or invalid file is an
-/// [`InstallPathsError`]. An unknown home still yields
-/// `/tmp/trusty-mpm-projects`, as before.
+/// [`InstallPathsError`](crate::install_paths::InstallPathsError). An unknown
+/// home still yields `/tmp/trusty-mpm-projects`, as before.
 /// Test: `try_resolve_workspace_root_fails_closed_on_broken_install_file`.
 pub fn try_resolve_workspace_root(
     template: Option<&str>,
