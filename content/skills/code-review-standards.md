@@ -147,7 +147,7 @@ CRITICAL or HIGH: silent data loss, or a broken contract.
 A bug fix that reaches one path and misses its siblings ships green. For a bug
 fix, check that the brief's `Shared-behaviour paths` lists the other callers and
 data states of the changed code, each with a test or a stated reason. Find
-callers yourself (`trusty-search call-chain` or `grep`); do not trust the list. A path
+callers yourself (`get_call_chain` or `grep`); do not trust the list. A path
 that reaches the same fault, unfixed and untested, is HIGH.
 Skip the check for a Low-risk text edit.
 

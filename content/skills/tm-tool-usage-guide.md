@@ -14,7 +14,8 @@ effort: medium
 Detailed usage patterns for the PM's real tool families: the native `tm
 memory` and `trusty-search` commands, plus `mcp__trusty-mpm__*` and
 `mcp__trusty-review__*`. MCP adapters for memory and search are for non-mpm
-callers only. This is the concrete "how" behind the constraints in
+callers only, except the search verbs the released `trusty-search` CLI lacks
+(see #11771). This is the concrete "how" behind the constraints in
 `tm-circuit-breaker`.
 
 ## Deferred MCP Tool Loading (Mandatory Before Any "Unavailable" Fallback)
@@ -49,8 +50,8 @@ Before delegating to Research or reading any file:
    cross-palace sweep, `tm memory recall-deep` or `recall-all`.
 2. `trusty-search search "<q>" --json` from the repo, or
    `trusty-search query "<q>" -i <index>` from elsewhere (hybrid BM25+vector).
-   The narrower `trusty-search semantic` / `lexical`, `similar` and
-   `list` are native verbs too.
+   The narrower `search_semantic` / `search_lexical`, `search_similar` and
+   `list_indexes` stay MCP tools until a `trusty-search` release ships #11771.
 3. Only if both are insufficient — delegate to Research.
 
 Both tools are mandatory-first, not optional. Skipping straight to Read/Grep
@@ -67,17 +68,18 @@ trusty-search query "skill deploy no-op" -i <index-id>  # from elsewhere
 ```
 
 A `TRUSTY_INDEX` variable in the environment can override the index; pass
-`-i` from outside the repo. The other verbs are native too:
+`-i` from outside the repo. The `mcp__trusty-search__*` rows stay MCP until a
+`trusty-search` release ships #11771/#11774:
 
 | Command | Use |
 |---|---|
-| `trusty-search semantic` / `lexical` | Narrower single-strategy search when hybrid over- or under-matches |
+| `search_semantic` / `search_lexical` (MCP) | Narrower single-strategy search when hybrid over- or under-matches |
 | `trusty-search query "<q>" --indexes "*"` | Cross-project search when the scope is unclear |
-| `trusty-search similar <file> [--function <fn>]` | Find code semantically similar to a known snippet |
-| `trusty-search kg <symbol>` / `call-chain <symbol>` | Structural queries — call graphs, symbol relationships |
-| `trusty-search grep <pattern> [--all]` / `typeahead <prefix>` | Lexical lookup once you already know the token to find |
+| `search_similar` (MCP) | Find code semantically similar to a known snippet |
+| `search_kg` / `get_call_chain` (MCP) | Structural queries — call graphs, symbol relationships |
+| `grep` / `typeahead` (MCP) | Lexical lookup once you already know the token to find |
 | `trusty-search health` | Health check — **use instead of `curl`/`lsof`** (CB#7) |
-| `trusty-search list --details` / `index-status` | Discover what projects are indexed and their freshness |
+| `trusty-search list` / `index-status`; `list_indexes` (MCP) for details | Discover what projects are indexed and their freshness |
 
 **Index Pinning (Automatic, MCP tools):** In managed sessions, your `.mcp.json` pinpoints
 the session's own project index (via `trusty-search serve --index <id>`) so bare
@@ -166,13 +168,14 @@ read this turn? does my task contain investigation keywords ("check",
 ## Bash Tool — Navigation and Git Tracking Only
 
 **Allowed**: `ls`, `pwd`, `cd`; `git status`, `git add`, `git commit`, `git
-log`, `git diff`; `tm memory recall|remember|note` and `trusty-search
-search|query` — the native memory and search verbs.
+log`, `git diff`; `tm memory recall|recall-deep|recall-all|remember|note|list|prompt-context|task|kg`
+and `trusty-search search|query|health|list|index-status` — the native memory
+and search verbs.
 
 **Forbidden (delegate instead)**:
 - Verification commands (`curl`, `lsof`, `ps`, `wget`, `nc`, `make`, `pytest`,
   `npm test`) → Local Ops or QA (CB#7); trusty-* daemon health specifically
-  uses `trusty-search health`, not Bash.
+  uses `trusty-search health`.
 - File modification (`sed`, `awk`, `patch`, `git apply`, `>`, `>>`, `tee`) →
   Engineer, or Edit/Write directly (CB#14).
 - Implementation commands (`npm start`, `docker run`, `cargo build --release`
