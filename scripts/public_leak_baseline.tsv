@@ -1070,8 +1070,6 @@ crates/trusty-review/src/integrations/context/atlassian.rs	EMAIL	9
 crates/trusty-review/src/integrations/context/confluence.rs	EMAIL	1
 crates/trusty-review/src/integrations/context/jira_tests.rs	EMAIL	1
 crates/trusty-review/src/integrations/search_client_tests.rs	OPERATOR_PATH	1
-crates/trusty-review/src/llm/bedrock/arn.rs	RULING_DATED	1
-crates/trusty-review/src/llm/bedrock/arn_tests.rs	RULING_DATED	1
 crates/trusty-review/src/llm/mod.rs	RULING_DATED	2
 crates/trusty-review/src/mcp/context_args_tests.rs	RULING_DATED	1
 crates/trusty-review/src/mcp/tools.rs	RULING_DATED	1

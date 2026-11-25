@@ -115,8 +115,8 @@ const ACCOUNT_MASK: &str = "****";
 /// Replace the 12-digit account id of every ARN inside `text` with `****`.
 ///
 /// Why: an ARN's account id identifies the AWS account behind a review, and it
-/// would otherwise reach the posted PR footer, error strings and logs (#9200,
-/// architect ruling 2026-10-05). AWS's own error messages can quote other ARNs
+/// would otherwise reach the posted PR footer, error strings and logs (#9200).
+/// AWS's own error messages can quote other ARNs
 /// (an `sts` assumed role, say), so every ARN is masked, not only Bedrock's.
 /// What: scans for `arn:<partition>:<service>:<region>:<12 digits>:` anywhere
 /// in `text` and masks the digits. A region may be empty (`iam`, `sts`); an

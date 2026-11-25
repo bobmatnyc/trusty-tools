@@ -65,7 +65,7 @@ fn parse_rejects_plain_ids_and_malformed_arns() {
     }
 }
 
-// ── Account-id masking (#9200, architect ruling 2026-10-05) ──────────────
+// ── Account-id masking (#9200) ──────────────
 
 #[test]
 fn mask_hides_the_account_of_every_arn_form() {
