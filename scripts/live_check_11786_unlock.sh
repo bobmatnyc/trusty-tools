@@ -58,9 +58,9 @@
 #   is about 14 min). Each runs --probe-ancestry first; the live check runs
 #   only when the probe passes. Verbatim.
 #   Deny only (unattended; no restart, so D-c/D-d may be INCONCLUSIVE):
-#   cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a9aa6ad0a0b2a602e && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --project-dir /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools --log /Users/masa/.trusty-tools/trusty-secrets/live_check_11786.log
+#   cd <worktree> && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --project-dir <project-dir> --log <log-file>
 #   Studio run (owner present to answer Touch ID):
-#   cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a9aa6ad0a0b2a602e && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --restart-server --approve --project-dir /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools --log /Users/masa/.trusty-tools/trusty-secrets/live_check_11786.log
+#   cd <worktree> && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --restart-server --approve --project-dir <project-dir> --log <log-file>
 #   Side effects: any live 8 h grant is locked; with --restart-server the
 #   owner's trusty-secrets server is restarted (the next call starts it).
 #
@@ -270,8 +270,16 @@ case $TM_BIN in
   */mise/shims/*) command -v mise >/dev/null 2>&1 && TM_BIN=$(mise which tm 2>/dev/null || echo "$TM_BIN") ;;
 esac
 SOCK="tm11786-$$"
-AUDIT_LOG="$HOME/.trusty-tools/trusty-secrets/audit/audit.jsonl"
-OWNER_SOCKET="$HOME/.trusty-tools/trusty-secrets/secrets.sock"
+# The owner's trusty-secrets paths come from the install resolver (#11821 P6a),
+# not from $HOME: the config dir is configurable per install. No fallback.
+case "${BASH_SOURCE[0]}" in */*) SCRIPT_DIR="${BASH_SOURCE[0]%/*}" ;; *) SCRIPT_DIR=. ;; esac
+CONFIG_DIR=$(python3 -I "$SCRIPT_DIR/lib/install_paths.py" 2>/dev/null | awk -F'\t' '$1 == "config_dir" && $2 ~ /^\// { print $2 }')
+if [ -z "$CONFIG_DIR" ]; then
+  echo "cannot resolve the install config dir via scripts/lib/install_paths.py (needs python3)" >&2; exit 2
+fi
+SECRETS_DIR="$CONFIG_DIR/.trusty-tools/trusty-secrets"
+AUDIT_LOG="$SECRETS_DIR/audit/audit.jsonl"
+OWNER_SOCKET="$SECRETS_DIR/secrets.sock"
 STEPS="baseline_lock unlock list lock read_after_lock"
 
 if [ "$DRY" = 1 ]; then
@@ -445,7 +453,7 @@ env -i $envset tmux -L "$SOCK" -f /dev/null new-session -d -s chk -c "$PROJECT_D
 run_step() {
   name=$1; limit=$2; shift 2
   eval "START_$name='$(now_ms)'"
-  tmux -L "$SOCK" new-window -d -t chk: -c "$PROJECT_DIR" "$TMP/runner.sh" "$TMP" "$name" "$@" \
+  tmux -L "$SOCK" new-window -d -t =chk: -c "$PROJECT_DIR" "$TMP/runner.sh" "$TMP" "$name" "$@" \
     || { STEP_RC=125; STEP_PID=""; return; }
   waited=0
   while [ ! -f "$TMP/$name.rc" ] && [ "$waited" -lt "$limit" ]; do sleep 1; waited=$((waited + 1)); done

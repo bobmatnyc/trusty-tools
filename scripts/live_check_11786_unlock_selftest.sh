@@ -32,11 +32,11 @@ printf '10%s9%s/bin/sh%ssh probe.sh\n9%s1%s/opt/homebrew/bin/tmux%stmux -L x new
   "$tab" "$tab" "$tab" "$tab" "$tab" "$tab" > "$T/clean"
 judge_ancestry "$T/clean" > /dev/null; check ancestry_clean_tmux_chain 0 $?
 
-printf '10%s9%s/bin/zsh%szsh\n9%s1%s/Users/u/.local/bin/claude%sclaude\n' \
+printf '10%s9%s/bin/zsh%szsh\n9%s1%s/Users/alice/.local/bin/claude%sclaude\n' \
   "$tab" "$tab" "$tab" "$tab" "$tab" "$tab" > "$T/native"
 judge_ancestry "$T/native" > /dev/null; check ancestry_native_claude_is_agent 1 $?
 
-printf '10%s1%s/Users/u/.local/share/claude/versions/2.1.9%s2.1.9\n' "$tab" "$tab" "$tab" > "$T/versioned"
+printf '10%s1%s/Users/alice/.local/share/claude/versions/2.1.9%s2.1.9\n' "$tab" "$tab" "$tab" > "$T/versioned"
 judge_ancestry "$T/versioned" > /dev/null; check ancestry_versioned_path_is_agent 1 $?
 
 printf '10%s1%s/usr/local/bin/node%snode /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js\n' \
@@ -52,9 +52,9 @@ cat > "$T/raw" <<'EOF'
 Filtering the log data using "..."
 Timestamp               Ty Process[PID:TID]
 2026-11-24 21:39:33.036 Df coreauthd[55479:aa7855] [com.apple.LocalAuthentication:Server,Interactive] showing UI: <LACRemoteUIParams ID:388-345-0, SU: 0, Siri: 0, uid: 502, pid: 18693, lsai: 0>
-2026-11-24 22:08:27.730 Df securityd[142:c9565a] [com.apple.securityd:kcacl] displaying keychain prompt for /Users/u/.cargo/bin/trusty-secrets(5758); ACL: <...>
+2026-11-24 22:08:27.730 Df securityd[142:c9565a] [com.apple.securityd:kcacl] displaying keychain prompt for /Users/alice/.cargo/bin/trusty-secrets(5758); ACL: <...>
 2026-11-24 22:08:27.965 Df SecurityAgent[5968:c9adfb] [com.apple.Authorization:SecurityAgent] SC confirmation dialog detected
-2026-11-24 22:09:00.000 Df securityd[142:d2f] [com.apple.securityd:kcacl] suppressing keychain prompt /Users/u/.cargo/bin/trusty-secrets(5758); code signing check failed rc=-67065
+2026-11-24 22:09:00.000 Df securityd[142:d2f] [com.apple.securityd:kcacl] suppressing keychain prompt /Users/alice/.cargo/bin/trusty-secrets(5758); code signing check failed rc=-67065
 2026-11-24 22:10:00.000 Df securityd[142:d2f] [com.apple.securityd:kcacl] displaying keychain prompt for /Applications/Other.app/Contents/MacOS/Other(77); ACL: <...>
 EOF
 classify_log "$T/raw" > "$T/ev"
@@ -98,15 +98,15 @@ check prompted_after_restart_is_capped INCONCLUSIVE "$(judge_prompted 1 0 1)"
 check prompted_after_restart_no_prompt_still_fails FAIL "$(judge_prompted 0 0 1)"
 
 # --- owner_server_pids: only the exact owner-socket argv (#11786 M2)
-sock=/Users/u/.trusty-tools/trusty-secrets/secrets.sock
+sock=/Users/alice/.trusty-tools/trusty-secrets/secrets.sock
 cat > "$T/ps" <<EOF
-  101   502 /Users/u/.cargo/bin/trusty-secrets serve --socket $sock
+  101   502 /Users/alice/.cargo/bin/trusty-secrets serve --socket $sock
   102   502 /tmp/sbx/bin/trusty-secrets serve --idle-timeout-secs 600 --socket /tmp/sbx/home/.trusty-tools/trusty-secrets/secrets.sock
-  103   502 /Users/u/target/debug/trusty-secrets serve --socket /var/folders/x/T/.tmpAb12/secrets.sock
-  104   502 /Users/u/.cargo/bin/trusty-secrets serve --socket $sock --index-dir /tmp/idx
-  105   501 /Users/u/.cargo/bin/trusty-secrets serve --socket $sock
+  103   502 /Users/alice/target/debug/trusty-secrets serve --socket /var/folders/x/T/.tmpAb12/secrets.sock
+  104   502 /Users/alice/.cargo/bin/trusty-secrets serve --socket $sock --index-dir /tmp/idx
+  105   501 /Users/alice/.cargo/bin/trusty-secrets serve --socket $sock
   106   502 /usr/bin/grep trusty-secrets serve --socket $sock
-  107   502 /Users/u/.cargo/bin/trusty-secrets-other serve --socket $sock
+  107   502 /Users/alice/.cargo/bin/trusty-secrets-other serve --socket $sock
 EOF
 check owner_pid_matches_only_owner_socket "101" "$(owner_server_pids "$T/ps" 502 "$sock" | tr '\n' ' ' | sed 's/ $//')"
 grep -v '^  101 ' "$T/ps" > "$T/ps-nonowner"
