@@ -1,0 +1,17 @@
+crate   trusty-browser
+version 0.8.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  enum_missing enum trusty_browser::codesign::Signing
+accept  enum_missing enum trusty_browser::launchd::LaunchdError
+accept  function_missing function trusty_browser::install_host::replace_owned
+accept  function_missing function trusty_browser::install_host::same_file
+accept  function_missing function trusty_browser::install_host::write_owned
+accept  function_missing function trusty_browser::peer::peer_uid
+accept  pub_module_level_const_missing KEEP
+accept  pub_module_level_const_missing ROTATE_BYTES
+accept  pub_module_level_const_missing TEAM
+accept  struct_missing struct trusty_browser::codesign::Signer
+accept  struct_missing struct trusty_browser::launchd::Outcome
+accept  struct_missing struct trusty_browser::launchd::SystemLaunchctl
+accept  trait_missing trait trusty_browser::codesign::Codesign
+accept  trait_missing trait trusty_browser::launchd::Launchctl

@@ -223,9 +223,26 @@ fn text_report_contains_summary_and_files() {
 fn report_round_trips_json() {
     let diff = "+++ b/foo.rs\n@@ -0,0 +1,2 @@\n+/// doc\n+fn f() {}\n";
     let report = analyze_diff_with_chunks(diff, &[]).unwrap();
-    let json = serde_json::to_string(&report).unwrap();
-    let back: ReviewReport = serde_json::from_str(&json).unwrap();
-    assert_eq!(report, back);
+    // The computed report and its wire shape are both pinned: a wrong grade,
+    // count or recommendation fails here, and so does a renamed field or a
+    // changed `ReviewSource` tag.
+    let wire = serde_json::json!({
+        "files": [{
+            "path": "foo.rs",
+            "grade": "A",
+            "complexity": {"cyclomatic": 1, "cognitive": 0},
+            "smells": [],
+            "recommendations": [],
+            "source": {"kind": "new_file"}
+        }],
+        "overall_grade": "A",
+        "changed_lines": 2,
+        "smell_count": 0,
+        "summary": "1 file analyzed (0 indexed, 1 new); 0 smells found; overall grade A"
+    });
+    assert_eq!(serde_json::to_value(&report).unwrap(), wire);
+    let back: ReviewReport = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, report);
 }
 
 #[tokio::test]

@@ -311,11 +311,20 @@ mod tests {
 
     /// Why: the launchd agent must start the dashboard HTTP daemon, i.e.
     /// `trusty-console serve`.
-    /// What: asserts the embedded args are exactly `["serve"]`.
+    /// What: parses the embedded args with the console's own CLI and asserts
+    /// they select the `serve` subcommand (#11268: it used to compare them to
+    /// their own literal).
     /// Test: this is the test.
     #[test]
     fn serve_args_are_serve() {
-        assert_eq!(serve_args(), vec!["serve".to_string()]);
+        use clap::Parser as _;
+        let argv = std::iter::once("trusty-console".to_string()).chain(serve_args());
+        let cli = crate::Cli::try_parse_from(argv).expect("the launchd args must parse");
+        assert!(
+            matches!(cli.command, crate::Commands::Serve(_)),
+            "the launchd agent must start `serve`, got {:?}",
+            cli.command
+        );
     }
 
     /// Cross-crate port-uniqueness contract (#2566, extended by #2573).

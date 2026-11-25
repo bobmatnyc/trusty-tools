@@ -276,33 +276,37 @@ mod tests {
         assert_eq!(back.edge_count(), 1);
     }
 
-    /// Every `KgEdgeKind` variant must survive a `serde_json` round-trip.
-    /// This guards the persisted analysis-output format: renaming a variant
-    /// without a `#[serde(rename = "…")]` annotation would break deserialization
-    /// of previously stored graphs.
+    /// Every `KgEdgeKind` variant serializes to the string a stored graph
+    /// holds, and that string reads back. This guards the persisted
+    /// analysis-output format: renaming a variant without a
+    /// `#[serde(rename = "…")]` annotation changes the string and fails here.
     #[test]
     fn kg_edge_kind_serde_round_trip() {
         let variants = [
-            KgEdgeKind::Contains,
-            KgEdgeKind::Imports,
-            KgEdgeKind::Exports,
-            KgEdgeKind::Calls,
-            KgEdgeKind::Implements,
-            KgEdgeKind::Extends,
-            KgEdgeKind::References,
-            KgEdgeKind::Tests,
-            KgEdgeKind::DependsOn,
-            KgEdgeKind::GeneratedFrom,
-            KgEdgeKind::RuntimeObservationFor,
+            (KgEdgeKind::Contains, "\"Contains\""),
+            (KgEdgeKind::Imports, "\"Imports\""),
+            (KgEdgeKind::Exports, "\"Exports\""),
+            (KgEdgeKind::Calls, "\"Calls\""),
+            (KgEdgeKind::Implements, "\"Implements\""),
+            (KgEdgeKind::Extends, "\"Extends\""),
+            (KgEdgeKind::References, "\"References\""),
+            (KgEdgeKind::Tests, "\"Tests\""),
+            (KgEdgeKind::DependsOn, "\"DependsOn\""),
+            (KgEdgeKind::GeneratedFrom, "\"GeneratedFrom\""),
+            (
+                KgEdgeKind::RuntimeObservationFor,
+                "\"RuntimeObservationFor\"",
+            ),
             // Phase D data-flow variants (issue #817)
-            KgEdgeKind::Reads,
-            KgEdgeKind::Writes,
-            KgEdgeKind::AccessesResource,
+            (KgEdgeKind::Reads, "\"Reads\""),
+            (KgEdgeKind::Writes, "\"Writes\""),
+            (KgEdgeKind::AccessesResource, "\"AccessesResource\""),
         ];
-        for v in &variants {
+        for (v, stored) in &variants {
             let json = serde_json::to_string(v).expect("serialize KgEdgeKind");
-            let back: KgEdgeKind = serde_json::from_str(&json).expect("deserialize KgEdgeKind");
-            assert_eq!(v, &back, "round-trip failed for {json}");
+            assert_eq!(&json, stored, "on-disk spelling changed for {v:?}");
+            let back: KgEdgeKind = serde_json::from_str(stored).expect("deserialize KgEdgeKind");
+            assert_eq!(v, &back, "stored {stored} no longer reads back");
         }
     }
 }

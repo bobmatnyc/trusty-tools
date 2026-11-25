@@ -11339,7 +11339,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "libc",
  "serde",
@@ -12001,7 +12001,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-progress"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "indicatif 0.17.11",
  "thiserror 1.0.69",
