@@ -1781,7 +1781,12 @@ fn a_cargo_test_target_that_filters_out_every_test_unasked_fails_11661() {
         "the build's own output is still forwarded"
     );
     let out = run(&empty, &["-p", "widget", "some_name"]);
-    assert_eq!(out.status.code(), Some(0), "a requested filter: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a requested filter: {}",
+        stderr(&out)
+    );
     let ran = home.path().join("ran-bin");
     fake_libtest_cargo(&ran, 18, 0);
     let out = run(&ran, &["-p", "widget"]);
@@ -1812,7 +1817,10 @@ fn a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661() {
         (fingerprint.exists(), stderr(&out))
     };
     let (kept_fp, err) = run(&a);
-    assert!(!kept_fp, "an unrecorded checkout's fingerprints are cleared: {err}");
+    assert!(
+        !kept_fp,
+        "an unrecorded checkout's fingerprints are cleared: {err}"
+    );
     let (kept_fp, err) = run(&a);
     assert!(kept_fp, "the same checkout keeps its fingerprints: {err}");
     let (kept_fp, err) = run(&b);

@@ -225,7 +225,10 @@ mod tests {
             ("cargo t", true),
             ("/usr/bin/cargo +stable test --features cli -p x", true),
             ("env CARGO_BUILD_JOBS=4 cargo test -p x", true),
-            ("cargo test -p x -- --include-ignored --test-threads 2", true),
+            (
+                "cargo test -p x -- --include-ignored --test-threads 2",
+                true,
+            ),
             ("cargo --config a=b test -p x", true),
             ("cargo test -p x some_name", false),
             ("cargo test -p x -- some_name --exact", false),
@@ -250,8 +253,10 @@ mod tests {
         );
         assert_eq!(
             scan.empty_targets(),
-            ["unittests src/lib.rs (/t/debug/deps/x-d3f97a3eacd4af69) — 0 tests ran, 1656 \
-              filtered out"]
+            [
+                "unittests src/lib.rs (/t/debug/deps/x-d3f97a3eacd4af69) — 0 tests ran, 1656 \
+              filtered out"
+            ]
         );
     }
 
@@ -270,6 +275,10 @@ mod tests {
         ] {
             scan.line(line);
         }
-        assert!(scan.empty_targets().is_empty(), "{:?}", scan.empty_targets());
+        assert!(
+            scan.empty_targets().is_empty(),
+            "{:?}",
+            scan.empty_targets()
+        );
     }
 }

@@ -173,7 +173,10 @@ mod tests {
         let fp = fingerprint(&dir);
         let err = lock_for_checkout(&dir, Path::new("/work/b"), Duration::ZERO, pkgs)
             .expect_err("cargo's lock is held");
-        assert!(err.contains("outside the lease") && err.contains("/work/a"), "{err}");
+        assert!(
+            err.contains("outside the lease") && err.contains("/work/a"),
+            "{err}"
+        );
         assert!(fp.exists(), "nothing is cleared under a running build");
     }
 }

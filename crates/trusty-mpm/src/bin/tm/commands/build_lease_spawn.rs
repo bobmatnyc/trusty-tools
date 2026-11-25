@@ -100,10 +100,18 @@ pub(super) async fn spawn_and_wait(
     let mut readers = Vec::new();
     if let Some(scan) = &scan {
         if let Some(out) = child.stdout.take() {
-            readers.push(tokio::spawn(forward(out, tokio::io::stdout(), scan.clone())));
+            readers.push(tokio::spawn(forward(
+                out,
+                tokio::io::stdout(),
+                scan.clone(),
+            )));
         }
         if let Some(err) = child.stderr.take() {
-            readers.push(tokio::spawn(forward(err, tokio::io::stderr(), scan.clone())));
+            readers.push(tokio::spawn(forward(
+                err,
+                tokio::io::stderr(),
+                scan.clone(),
+            )));
         }
     }
     if let (Some(lease), Some(pid)) = (lease.as_mut(), pid) {
