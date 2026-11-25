@@ -6,7 +6,8 @@
 //! What: [`tally`] reads each event's [`Fate`] from a [`Joined`] and counts
 //! matched (shadow side), scheduler-only and poller-only (live side, inside a
 //! joined record's window) per kind, keeping every unmatched row as an
-//! [`Unmatched`]. [`render`] prints one line per kind, the most mismatched
+//! [`Unmatched`], and the folded `idle` events per side. [`render`] prints
+//! one line per kind (with its folded counts, when any), the most mismatched
 //! first, and up to `examples` unmatched rows under each.
 //! Test: `by_kind_counts_each_kind_and_lists_examples`,
 //! `parity_by_kind_flag_prints_per_kind_rows_and_examples`.
@@ -39,6 +40,8 @@ pub struct ByKind {
     pub kinds: BTreeMap<String, Counts>,
     /// Every unmatched row, scheduler-only first, each side in input order.
     pub unmatched: Vec<Unmatched>,
+    /// Folded (absorbed) events by kind: (shadow, live in scope).
+    pub folded: BTreeMap<String, (u64, u64)>,
 }
 
 fn row(e: &Event, poller: bool) -> Unmatched {
@@ -73,15 +76,21 @@ pub fn tally(
                 c.scheduler_only += 1;
                 out.unmatched.push(r);
             }
-            Fate::Absorbed => {}
+            Fate::Absorbed => out.folded.entry(r.kind).or_default().0 += 1,
         }
     }
     for (e, fate) in live.iter().zip(&j.live) {
-        if *fate == Fate::Unmatched && in_scope(e.ts) {
-            let r = row(e, true);
-            out.kinds.entry(r.kind.clone()).or_default().poller_only += 1;
-            out.unmatched.push(r);
+        if *fate == Fate::Matched || !in_scope(e.ts) {
+            continue;
         }
+        let r = row(e, true);
+        if *fate == Fate::Absorbed {
+            out.kinds.entry(r.kind.clone()).or_default();
+            out.folded.entry(r.kind).or_default().1 += 1;
+            continue;
+        }
+        out.kinds.entry(r.kind.clone()).or_default().poller_only += 1;
+        out.unmatched.push(r);
     }
     out
 }
@@ -93,8 +102,12 @@ pub fn render(what: &str, b: &ByKind, examples: usize) -> String {
     kinds.sort_by_key(|(k, c)| (std::cmp::Reverse(c.scheduler_only + c.poller_only), *k));
     let mut s = format!("{what} by kind: matched / scheduler-only / poller-only\n");
     for (kind, c) in kinds {
+        let folded = match b.folded.get(kind) {
+            Some((sh, li)) => format!(" (folded: shadow {sh}, live {li})"),
+            None => String::new(),
+        };
         s += &format!(
-            "  {kind}: {} / {} / {}\n",
+            "  {kind}: {} / {} / {}{folded}\n",
             c.matched, c.scheduler_only, c.poller_only
         );
         let rows = b
@@ -168,5 +181,15 @@ mod tests {
         assert!(text.contains("  ctx: 1 / 0 / 0\n"), "{text}");
         // No examples asked: the counts only.
         assert!(!render("alerts", &b, 0).contains("scheduler-only 1970"));
+        // A transient idle screen folds and is counted per kind, per side.
+        let shadow = [ev(1000, 60, "tm-a", "idle", "since-1-aaaa")];
+        let live = [
+            ev(1010, 0, "tm-a", "idle", "since-1-aaaa"),
+            ev(1070, 0, "tm-a", "idle", "since-1-bbbb"),
+        ];
+        let j = join(&shadow, &live, &all, true);
+        let b = tally(&shadow, &live, &j, &all);
+        assert_eq!((b.kinds["idle"], b.folded["idle"]), (c(1, 0, 0), (0, 1)));
+        assert!(render("alerts", &b, 0).contains("  idle: 1 / 0 / 0 (folded: shadow 0, live 1)\n"));
     }
 }

@@ -173,13 +173,16 @@ fn window6_excludes_kinds_a_dry_run_poll_never_raises() -> TestResult {
     Ok(())
 }
 
-// --- Fix 4: an idle episode counts once ---------------------------------------
+// --- Fix 4: a transient idle screen folds; a later re-alert does not ----------
 
-/// Window 6, class D: tm-jira-linear-01's episode had two screens on the
-/// shadow side and one live; tm-trusty-computer's had three live screens and
-/// one shadow. Red before the fix: 1 scheduler-only and 2 poller-only.
+/// Window 6, class D, tm-trusty-computer: the shadow raised episode
+/// 1795563933 once (5d6a); the live poller raised 5d6a, then cb34 17 minutes
+/// later, then 3d13 73 s after that. The 73 s screen is transient and folds
+/// into cb34; the 17-minute re-alert is its own event and a mismatch.
+/// Red on origin/main (no fold: 2 poller-only) and on 023caa115a (an
+/// unbounded fold: 0 poller-only, nothing reported).
 #[test]
-fn window6_counts_an_idle_episode_once() -> TestResult {
+fn window6_idle_re_alert_after_17_minutes_is_its_own_event() -> TestResult {
     let (dir, l) = root()?;
     let tc = |h: &str| {
         key(
@@ -188,32 +191,25 @@ fn window6_counts_an_idle_episode_once() -> TestResult {
             &format!("since-1795563933-{h}"),
         )
     };
-    let jl = |h: &str| {
-        key(
-            "tm-jira-linear-01",
-            "idle",
-            &format!("since-1795565712-{h}"),
-        )
-    };
-    let events = [
-        (t("2026-11-24T23:55:36Z")?, vec![tc("5d6aa0b232ef")], vec![]),
-        (t("2026-11-25T00:25:36Z")?, vec![jl("5c36747b6f16")], vec![]),
-        (t("2026-11-25T00:36:36Z")?, vec![jl("1310bb590cb3")], vec![]),
-    ];
+    let events = [(t("2026-11-24T23:55:36Z")?, vec![tc("5d6aa0b232ef")], vec![])];
     let from = t("2026-11-24T23:55:36Z")?;
-    shadow_log(&l.shadow_log(), from, t("2026-11-25T00:40:36Z")?, &events)?;
+    shadow_log(&l.shadow_log(), from, t("2026-11-25T00:20:36Z")?, &events)?;
     let rows = alert_row("2026-11-24T23:56:33Z", &tc("5d6aa0b232ef"))
         + &alert_row("2026-11-25T00:13:59Z", &tc("cb3420588b7e"))
-        + &alert_row("2026-11-25T00:15:12Z", &tc("3d13fbe09eaf"))
-        + &alert_row("2026-11-25T00:26:18Z", &jl("1310bb590cb3"));
+        + &alert_row("2026-11-25T00:15:12Z", &tc("3d13fbe09eaf"));
     fs::write(l.alerts(), rows)?;
     fs::write(dir.path().join("inbox/triage.jsonl"), "")?;
     let rep = parity::load(&l, from)?;
     let a = rep.alerts;
     assert_eq!(
         (a.matched, a.scheduler_only, a.poller_only),
-        (2, 0, 0),
+        (1, 0, 1),
         "{rep:?}"
+    );
+    let text = parity::render(&rep);
+    assert!(
+        text.contains("idle re-alerts folded into the previous one (a transient screen, within 2 polls): shadow 0, live 1\n"),
+        "{text}"
     );
     Ok(())
 }
@@ -295,7 +291,10 @@ fn window6_fixture_moves_toward_the_projection() -> TestResult {
     let rep = parity::load(&l, t(START)?)?;
     assert_eq!((rep.cycles, rep.failed_cycles), (122, 1));
     let c = |x: parity::Counts| (x.matched, x.scheduler_only, x.poller_only);
-    assert_eq!(c(rep.alerts), (83, 37, 3), "{}", parity::render(&rep));
+    // #11826 review: idle folds only a transient screen (one live fold), so
+    // the two long idle re-alerts and jira-linear's 11-minute screen stay.
+    assert_eq!(c(rep.alerts), (84, 38, 4), "{}", parity::render(&rep));
+    assert!(parity::render(&rep).contains("within 2 polls): shadow 0, live 1\n"));
     assert_eq!(c(rep.wakes), (49, 4, 0), "{}", parity::render(&rep));
     Ok(())
 }

@@ -922,3 +922,37 @@ fn reseed_copies_the_live_state_under_its_lock() {
     reseed(&gone, &own, Duration::from_secs(1)).expect("absent live");
     assert_eq!(state::load(&own).expect("own"), st);
 }
+
+/// #11826 review: a live file that cannot be read, or is not JSON, is an
+/// error and leaves the shadow's own state as it was; it never reads as an
+/// empty state (which would replay every token alert).
+#[test]
+fn reseed_fails_closed_and_keeps_its_own_state() {
+    let d = tempfile::tempdir().expect("tmp");
+    let own = d.path().join("shadow").join(STATE_FILE);
+    let mut st = TokenState::default();
+    st.fired.insert("tm-a|ctx_main:200k".to_owned(), NOW);
+    save(&own, &st).expect("own");
+    let wait = Duration::from_secs(1);
+    // Unreadable: the live path is a directory.
+    let unreadable = d.path().join("dir").join(STATE_FILE);
+    fs::create_dir_all(&unreadable).expect("mkdir");
+    match reseed(&unreadable, &own, wait) {
+        Err(StateError::Io { what, .. }) => assert!(what.starts_with("read "), "{what}"),
+        other => panic!("unreadable live state gave {other:?}"),
+    }
+    assert_eq!(state::load(&own).expect("own"), st);
+    // Garbage: a half-written file.
+    let garbage = d.path().join("inbox").join(STATE_FILE);
+    fs::create_dir_all(garbage.parent().expect("parent")).expect("mkdir");
+    fs::write(&garbage, "{\"fired\": {\"tm-a|").expect("write");
+    assert!(matches!(
+        reseed(&garbage, &own, wait),
+        Err(StateError::Shape { .. })
+    ));
+    assert_eq!(state::load(&own).expect("own"), st);
+    // Vanished: gone before the read keeps the shadow's own state.
+    fs::remove_file(&garbage).expect("rm");
+    reseed(&garbage, &own, wait).expect("vanished live");
+    assert_eq!(state::load(&own).expect("own"), st);
+}

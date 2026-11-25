@@ -8,16 +8,17 @@
 //! What: [`identity_fp`] drops the `@<time>` suffix of a `session_exited`
 //! fingerprint; [`token_label_pair`] pairs two `token` keys whose
 //! fingerprints are equal when exactly one session is the `<project>:<sid8>`
-//! fallback label; [`idle_episodes`] groups one side's `idle` events by
-//! (session, since-epoch), so an episode counts once, and keeps each
-//! episode's screen hashes for the join's episode pass.
+//! fallback label; [`idle_episodes`] folds one side's `idle` events of one
+//! (session, since-epoch) that follow each other within [`fold_gap`] (a
+//! transient screen), so a fold counts once, and keeps each fold's screen
+//! hashes for the join's episode pass. The join reports the folded counts.
 //! Test: `session_exited_identity_drops_the_first_seen_suffix`,
 //! `token_label_pair_needs_one_fallback_label_and_equal_fingerprints`,
 //! `idle_episodes_group_by_session_and_epoch`.
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::parity_join::{Event, idle_screen};
+use super::parity_join::{Event, FALLBACK_CYCLES, idle_screen};
 use super::shadow::EventKey;
 use super::slot::parse_iso;
 
@@ -96,34 +97,63 @@ impl Episodes {
     }
 }
 
-/// Groups `events` into idle episodes by (session, since-epoch).
+/// The poll interval assumed for a live event, which carries none (the
+/// live poller runs every 60 s, `sched/config.rs` `default_poll_every`).
+pub const LIVE_INTERVAL_S: i64 = 60;
+
+/// Most seconds between an idle event and its episode's previous event for
+/// the two to fold: [`FALLBACK_CYCLES`] intervals of the event.
+pub fn fold_gap(e: &Event) -> i64 {
+    let interval = if e.interval > 0 {
+        e.interval
+    } else {
+        LIVE_INTERVAL_S
+    };
+    FALLBACK_CYCLES * interval
+}
+
+/// Groups `events` into idle episodes by (session, since-epoch), each a
+/// chain of events no more than [`fold_gap`] apart.
 ///
 /// Why: the idle fingerprint is `since-<epoch>-<screen>`, so a screen change
 /// mid-episode is a new alert; the pollers sample ~40 s apart and see
-/// different transient screens (window 6, D).
-/// What: the representative is the earliest event of the episode (ties: the
-/// first in order); every screen hash of the episode is kept.
-/// Test: `idle_episodes_group_by_session_and_epoch`.
+/// different transient screens (window 6, D). Only a transient screen folds:
+/// a re-alert minutes later in the same epoch is its own event, so a dedupe
+/// regression still shows as a mismatch (#11826 review).
+/// What: per (session, epoch), events in time order (ties: input order); an
+/// event within [`fold_gap`] of the previous one joins its chain, else it
+/// starts a new one. The representative is the chain's first event; every
+/// screen hash of the chain is kept.
+/// Test: `idle_episodes_group_by_session_and_epoch`,
+/// `window6_idle_re_alert_after_17_minutes_is_its_own_event`.
 pub fn idle_episodes(events: &[Event]) -> Episodes {
-    let mut first: HashMap<(String, i64), usize> = HashMap::new();
-    for (i, e) in events.iter().enumerate() {
-        let Some(((session, _, _), epoch)) = e.key.as_ref().and_then(idle_screen) else {
-            continue;
-        };
-        let slot = first.entry((session.to_owned(), epoch)).or_insert(i);
-        if e.ts < events[*slot].ts {
-            *slot = i;
-        }
-    }
-    let mut rep = vec![None; events.len()];
-    let mut screens: HashMap<usize, BTreeSet<String>> = HashMap::new();
+    let mut groups: HashMap<(String, i64), Vec<usize>> = HashMap::new();
+    let mut hashes = vec![None; events.len()];
     for (i, e) in events.iter().enumerate() {
         let Some(((session, _, hash), epoch)) = e.key.as_ref().and_then(idle_screen) else {
             continue;
         };
-        if let Some(&r) = first.get(&(session.to_owned(), epoch)) {
-            rep[i] = Some(r);
-            screens.entry(r).or_default().insert(hash.to_owned());
+        hashes[i] = Some(hash.to_owned());
+        groups
+            .entry((session.to_owned(), epoch))
+            .or_default()
+            .push(i);
+    }
+    let mut rep = vec![None; events.len()];
+    let mut screens: HashMap<usize, BTreeSet<String>> = HashMap::new();
+    for mut members in groups.into_values() {
+        members.sort_by_key(|&i| (events[i].ts, i));
+        let mut head = members[0];
+        let mut prev = head;
+        for i in members {
+            if events[i].ts - events[prev].ts > fold_gap(&events[i]) {
+                head = i;
+            }
+            rep[i] = Some(head);
+            if let Some(h) = hashes[i].take() {
+                screens.entry(head).or_default().insert(h);
+            }
+            prev = i;
         }
     }
     Episodes { rep, screens }
@@ -188,11 +218,15 @@ mod tests {
             ev(300, "tm-a", "since-900-aaaa"),
             ev(160, "tm-b", "since-100-aaaa"),
             Event::keyed(170, 60, key("tm-a", "token", "since-100-aaaa")),
+            // Same episode, 17 minutes after the last: its own event.
+            ev(200 + 17 * 60, "tm-a", "since-100-cccc"),
         ];
         let ep = idle_episodes(&events);
-        assert_eq!(ep.rep, [Some(1), Some(1), Some(2), Some(3), None]);
-        assert!(ep.absorbed(0) && ep.is_rep(1) && !ep.absorbed(4));
+        assert_eq!(ep.rep, [Some(1), Some(1), Some(2), Some(3), None, Some(5)]);
+        assert!(ep.absorbed(0) && ep.is_rep(1) && !ep.absorbed(4) && ep.is_rep(5));
         let screens: Vec<&str> = ep.screens[&1].iter().map(String::as_str).collect();
         assert_eq!(screens, ["aaaa", "bbbb"]);
+        // A live event (no interval) folds within two 60 s polls only.
+        assert_eq!(fold_gap(&Event::keyed(0, 0, key("tm-a", "idle", "x"))), 120);
     }
 }

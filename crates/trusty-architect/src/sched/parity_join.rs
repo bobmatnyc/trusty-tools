@@ -9,8 +9,9 @@
 //! and an owner item's id are their fingerprints) within
 //! [`IDENTITY_CYCLES`] cycles of the record (a `session_exited` fingerprint
 //! without its `@<time>` suffix, #11826); pass 1b pairs `idle` per episode:
-//! each side's idle events fold into one per (session, since-epoch)
-//! (`parity_pair::idle_episodes`, #11826; the others are [`Fate::Absorbed`]),
+//! each side's idle events of one (session, since-epoch) that follow each
+//! other within two polls fold into the first (`parity_pair::idle_episodes`,
+//! #11826; the others are [`Fate::Absorbed`], counted in `folded`),
 //! and two episodes pair when they share a screen hash ([`idle_screen`]: the
 //! pollers keep separate idle timers, so the epochs differ) and the epochs
 //! are within [`IDLE_EPOCH_TOLERANCE_S`]; pass 2, when asked, pairs what
@@ -110,6 +111,8 @@ pub struct Joined {
     pub shadow: Vec<Fate>,
     /// Per live event, in input order.
     pub live: Vec<Fate>,
+    /// [`Fate::Absorbed`] events: shadow, and live inside a record's window.
+    pub folded: (u64, u64),
 }
 
 /// An `idle` key's (session, kind, screen hash) and its since-epoch;
@@ -263,6 +266,14 @@ pub fn join(
     out.live = (0..live.len())
         .map(|i| fate(el.absorbed(i), used[i]))
         .collect();
+    // #11826 review: the fold is reported, never silent.
+    out.folded = (
+        out.shadow.iter().filter(|f| **f == Fate::Absorbed).count() as u64,
+        live.iter()
+            .zip(&out.live)
+            .filter(|(l, f)| **f == Fate::Absorbed && in_scope(l.ts))
+            .count() as u64,
+    );
     out.counts = Counts {
         matched: out.by_identity + out.by_fallback,
         scheduler_only: out.shadow.iter().filter(|f| **f == Fate::Unmatched).count() as u64,

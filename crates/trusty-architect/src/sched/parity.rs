@@ -43,7 +43,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::cutover::Thresholds;
-use super::parity_join::{CTXWATCH, Event, IDLE_EPOCH_TOLERANCE_S, IL_CRON, Joined, join};
+use super::parity_join::{
+    CTXWATCH, Event, FALLBACK_CYCLES, IDLE_EPOCH_TOLERANCE_S, IL_CRON, Joined, join,
+};
 use super::parity_kind::{self, ByKind};
 use super::shadow::{EventKey, ShadowAlert, ShadowRecord};
 use super::slot::parse_iso;
@@ -94,6 +96,9 @@ pub struct Report {
     /// [`UNRAISED`] alerts and wakes on either side, per kind, left out
     /// (#11826).
     pub unraised_excluded: [u64; 3],
+    /// `idle` events folded into their episode's previous event (a transient
+    /// screen within two polls), alerts plus wakes: (shadow, live) (#11826).
+    pub idle_folded: (u64, u64),
     /// Alerts per kind, identity plus fallback (#11826).
     pub alerts_by_kind: ByKind,
     /// Wakes per kind, identity plus fallback (#11826).
@@ -272,6 +277,7 @@ pub fn compute_full(
     };
     let (ai, af) = both(&sa, &la);
     let (wi, wf) = both(&sw, &lw);
+    rep.idle_folded = (af.folded.0 + wf.folded.0, af.folded.1 + wf.folded.1);
     rep.alerts_by_kind = parity_kind::tally(&sa, &la, &af, &in_scope);
     rep.wakes_by_kind = parity_kind::tally(&sw, &lw, &wf, &in_scope);
     (rep.alerts_identity, rep.alerts) = (ai.counts, af.counts);
@@ -443,6 +449,10 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
     s += &format!(
         "idle pairs on (session, kind, screen hash), epochs within {} s: alerts {}, wakes {}\n",
         IDLE_EPOCH_TOLERANCE_S, r.idle_relaxed.0, r.idle_relaxed.1
+    );
+    s += &format!(
+        "idle re-alerts folded into the previous one (a transient screen, within {} polls): shadow {}, live {}\n",
+        FALLBACK_CYCLES, r.idle_folded.0, r.idle_folded.1
     );
     s += &format!("live rows unread: {}\n", r.unread);
     s += &format!("haiku-path wakes excluded: {}\n", r.haiku_excluded);
