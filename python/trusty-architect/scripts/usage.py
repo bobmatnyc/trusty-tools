@@ -32,12 +32,14 @@ ROOT = os.path.dirname(HERE)
 LEDGER = os.environ.get("USAGE_LEDGER") or os.path.join(ROOT, "local", "usage", "ledger.jsonl")
 INBOX = os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ROOT, "inbox")
 CACHE = os.environ.get("USAGE_STATUSLINE_CACHE") or os.path.join(INBOX, "statusline-usage.json")
-CLAUDE_JSON = os.environ.get("USAGE_CLAUDE_JSON") or os.path.join(
-    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.trusty-tools/trusty-mpm/claude-config"),
-    ".claude.json")
 PROBE_SCRIPT = os.path.join(HERE, "usage-probe.sh")
 if HERE not in sys.path:     # python3 -I drops the script directory
     sys.path.insert(0, HERE)
+import architect_config  # noqa: E402
+
+# #11821: the config dir comes from the shared resolver (CLAUDE_CONFIG_DIR, else the default).
+CLAUDE_JSON = os.environ.get("USAGE_CLAUDE_JSON") or os.path.join(
+    architect_config.default_claude_config_dir(), ".claude.json")
 from usage_calc import (  # noqa: E402,F401  (#10571 S1: split for the 500-SLOC cap; re-exported)
     BURN_MAX_GAP, BURN_MIN_RISE, BURN_MIN_SPAN, BURN_RELIABLE_SPAN, BURN_SPAN, CACHE_MAX_AGE,
     EMAIL_RE, H5, NY, PROBE_EVERY, STALE_AFTER, UTC, WEEK_WARN, WRITE_EVERY, _clock, _dur,
