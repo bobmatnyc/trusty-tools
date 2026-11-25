@@ -698,7 +698,7 @@ fn an_unparseable_config_yields_an_unreadable_keep_list() {
 fn a_broken_install_file_yields_an_unreadable_keep_list() {
     let home = config_home("disk:\n  keep_list: []\n");
     std::fs::write(
-        home.path().join(".trusty-tools/install.toml"),
+        trusty_common::install_paths::install_file_path(home.path()),
         "bogus = 1\n",
     )
     .expect("broken install.toml");

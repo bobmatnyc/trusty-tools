@@ -76,7 +76,8 @@ impl Fixture {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let root = tmp.path().canonicalize().expect("canonical");
         let home = root.join("home");
-        std::fs::create_dir_all(home.join(".trusty-tools")).expect("mkdir .trusty-tools");
+        std::fs::create_dir_all(home.join(trusty_common::install_paths::TOOLS_DIR_NAME))
+            .expect("mkdir .trusty-tools");
         Self {
             _tmp: tmp,
             home,
@@ -85,7 +86,11 @@ impl Fixture {
     }
 
     fn write_install_file(&self, body: &str) {
-        std::fs::write(self.home.join(".trusty-tools/install.toml"), body).expect("install.toml");
+        std::fs::write(
+            trusty_common::install_paths::install_file_path(&self.home),
+            body,
+        )
+        .expect("install.toml");
     }
 }
 

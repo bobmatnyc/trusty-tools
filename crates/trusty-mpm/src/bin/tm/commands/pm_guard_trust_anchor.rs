@@ -235,9 +235,10 @@ pub(crate) fn evaluate(
 /// What: `true` only when ALL hold, cheapest first: the thread is the main
 /// thread; [`session_profile::hook_profile`] resolves the supervisor (stamp,
 /// `CLAUDE_PROJECT_DIR`, the project's `.trusty-mpm.toml` and the user-level
-/// allowlist agree); and [`architect_launch::is_launched_architect`] matches
-/// the hook's nearest `claude` ancestor to a launch record on PID, start time
-/// and project. Any missing or unreadable input is `false`. #8878 PR-I: a
+/// allowlist agree); and
+/// [`is_launched_architect`](trusty_mpm::core::architect_launch::is_launched_architect)
+/// matches the hook's nearest `claude` ancestor to a launch record on PID,
+/// start time and project. Any missing or unreadable input is `false`. #8878 PR-I: a
 /// wrapper over [`architect_main_thread`], which names the check that failed.
 /// Test: `the_architect_main_thread_may_write_the_anchor`,
 /// `an_architect_stamp_without_a_launch_record_is_denied`,

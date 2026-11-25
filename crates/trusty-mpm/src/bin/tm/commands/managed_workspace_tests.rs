@@ -876,12 +876,9 @@ async fn a_launch_worktree_is_refused_when_install_toml_is_broken() {
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
     let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join(".trusty-tools")).unwrap();
-    std::fs::write(
-        home.path().join(".trusty-tools/install.toml"),
-        "config_dir = \"/elsewhere\"\nbogus = 1\n",
-    )
-    .unwrap();
+    let install = trusty_common::install_paths::install_file_path(home.path());
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+    std::fs::write(install, "config_dir = \"/elsewhere\"\nbogus = 1\n").unwrap();
 
     let err = provision_for_launch_gated(
         origin,
@@ -902,7 +899,10 @@ async fn a_launch_worktree_is_refused_when_install_toml_is_broken() {
         "#11821: nothing may be created when the ledger has no location"
     );
     assert!(
-        !home.path().join(".trusty-mpm").exists(),
+        !home
+            .path()
+            .join(trusty_common::install_paths::MPM_DIR_NAME)
+            .exists(),
         "#11821: no ledger may land under $HOME"
     );
 }

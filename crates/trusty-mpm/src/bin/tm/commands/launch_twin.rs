@@ -160,11 +160,11 @@ mod tests {
     fn twin_precheck_follows_the_config_dir_and_refuses_a_broken_install_file() {
         let root = tempfile::TempDir::new().expect("tempdir");
         let (home, cfg) = (root.path().join("home"), root.path().join("cfg"));
-        std::fs::create_dir_all(home.join(".trusty-tools")).expect("mkdir");
         std::fs::create_dir_all(cfg.join(".trusty-mpm")).expect("mkdir");
         // Only the configured dir's config is malformed: reading it proves the route.
         std::fs::write(cfg.join(".trusty-mpm/config.toml"), "not = [toml").expect("write");
-        let install = home.join(".trusty-tools/install.toml");
+        let install = trusty_common::install_paths::install_file_path(&home);
+        std::fs::create_dir_all(install.parent().expect("tools dir")).expect("mkdir");
         std::fs::write(
             &install,
             format!("config_dir = {:?}\n", cfg.display().to_string()),

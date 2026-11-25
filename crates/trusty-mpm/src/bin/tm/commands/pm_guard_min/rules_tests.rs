@@ -36,13 +36,14 @@ fn r1_flags_the_install_file_and_a_relocated_config_dir() {
     let h = home();
     let env = env_in(h.path(), h.path());
     assert_eq!(
-        bash("echo x > ~/.trusty-tools/install.toml", &env),
+        bash("echo x > ~/.trusty-tools/install.toml", &env), // path-literal: allow (guard input)
         Some("R1")
     );
     let cfg = h.path().join("cfg");
-    std::fs::create_dir_all(h.path().join(".trusty-tools")).unwrap();
+    let install = trusty_common::install_paths::install_file_path(h.path());
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
     std::fs::write(
-        h.path().join(".trusty-tools/install.toml"),
+        install,
         format!("config_dir = {:?}\n", cfg.display().to_string()),
     )
     .unwrap();
@@ -53,7 +54,8 @@ fn r1_flags_the_install_file_and_a_relocated_config_dir() {
         let cmd = format!("echo x > {}", cfg.join(rel).display());
         assert_eq!(bash(&cmd, &env), Some("R1"), "{cmd}");
     }
-    assert_eq!(bash("echo x > ~/.trusty-mpm/config.toml", &env), Some("R1"));
+    let cmd = "echo x > ~/.trusty-mpm/config.toml"; // path-literal: allow (guard input)
+    assert_eq!(bash(cmd, &env), Some("R1"));
 }
 
 #[test]

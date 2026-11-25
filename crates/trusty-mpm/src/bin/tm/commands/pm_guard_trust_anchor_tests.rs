@@ -750,9 +750,10 @@ fn relocate_config_dir(fx: &Fixture) -> PathBuf {
     std::fs::create_dir_all(cfg.join(ANCHOR_ROOT)).expect("mkdir cfg root");
     let config = cfg.join(ANCHOR_ROOT).join(CONFIG_ANCHOR);
     std::fs::write(&config, "[supervisor]\n").expect("write cfg config");
-    std::fs::create_dir_all(fx.home.join(".trusty-tools")).expect("mkdir .trusty-tools");
+    let install = trusty_common::install_paths::install_file_path(&fx.home);
+    std::fs::create_dir_all(install.parent().expect("tools dir")).expect("mkdir .trusty-tools");
     std::fs::write(
-        fx.home.join(".trusty-tools/install.toml"),
+        install,
         format!("config_dir = {:?}\n", cfg.display().to_string()),
     )
     .expect("write install.toml");
@@ -790,7 +791,7 @@ fn a_configured_config_dir_anchor_write_is_denied() {
 fn the_install_file_is_an_anchor() {
     let fx = fixture();
     relocate_config_dir(&fx);
-    let install = fx.home.join(".trusty-tools/install.toml");
+    let install = trusty_common::install_paths::install_file_path(&fx.home);
     let reason = pm_verdict(&fx, "Write", write_input(&install)).expect("denied");
     assert!(reason.contains("trust anchor"), "{reason}");
     let cmd = format!("echo 'config_dir = \"/tmp/x\"' > {}", install.display());
@@ -806,12 +807,15 @@ fn the_install_file_is_an_anchor() {
 fn a_broken_install_file_denies_every_write() {
     let fx = fixture();
     relocate_config_dir(&fx);
-    std::fs::write(fx.home.join(".trusty-tools/install.toml"), "bogus = 1\n")
-        .expect("break install.toml");
+    std::fs::write(
+        trusty_common::install_paths::install_file_path(&fx.home),
+        "bogus = 1\n",
+    )
+    .expect("break install.toml");
     let reason = pm_verdict(&fx, "Write", write_input(&fx.cwd.join("a.txt"))).expect("denied");
     assert!(reason.contains("cannot locate the"), "{reason}");
     // #11821: the deny names the file and how to recover from it.
-    let file = fx.home.join(".trusty-tools/install.toml");
+    let file = trusty_common::install_paths::install_file_path(&fx.home);
     assert!(
         reason.contains(&format!("`{}` is broken or unreadable", file.display())),
         "{reason}"
