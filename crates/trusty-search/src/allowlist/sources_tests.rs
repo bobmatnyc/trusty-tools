@@ -88,7 +88,9 @@ fn default_project_paths_file_ends_at_the_registry() {
 /// `install.toml` reads the home default.
 #[test]
 fn mpm_root_from_follows_the_config_dir() {
-    use trusty_common::install_paths::{install_file_path, InstallPaths, PathOverrides};
+    use trusty_common::install_paths::{
+        install_file_path, InstallPaths, PathOverrides, MPM_DIR_NAME,
+    };
     let home = tempfile::tempdir().expect("tempdir");
     let moved = InstallPaths::resolve_with(
         |name| (name == "TRUSTY_MPM_CONFIG_DIR").then(|| "/srv/cfg".to_string()),
@@ -106,7 +108,7 @@ fn mpm_root_from_follows_the_config_dir() {
     assert!(broken.is_err());
     assert_eq!(
         mpm_root_from(broken, Some(home.path().to_path_buf())),
-        home.path().join(".trusty-mpm")
+        home.path().join(MPM_DIR_NAME)
     );
 }
 

@@ -329,7 +329,9 @@ fn registry_file_follows_the_tm_root() {
 #[test]
 fn mpm_dir_from_follows_the_config_dir() {
     use super::projects::mpm_dir_from;
-    use trusty_common::install_paths::{InstallPaths, PathOverrides, install_file_path};
+    use trusty_common::install_paths::{
+        InstallPaths, MPM_DIR_NAME, PathOverrides, install_file_path,
+    };
     let home = tempfile::tempdir().expect("tempdir");
     let moved = InstallPaths::resolve_with(
         |name| (name == "TRUSTY_MPM_CONFIG_DIR").then(|| "/srv/cfg".to_string()),
@@ -347,7 +349,7 @@ fn mpm_dir_from_follows_the_config_dir() {
     assert!(broken.is_err());
     assert_eq!(
         mpm_dir_from(broken, Some(home.path().to_path_buf())),
-        Some(home.path().join(".trusty-mpm"))
+        Some(home.path().join(MPM_DIR_NAME))
     );
 }
 
