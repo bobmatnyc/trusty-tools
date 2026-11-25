@@ -26,11 +26,11 @@ fn cwd_root() -> String {
     env!("CARGO_MANIFEST_DIR").to_string()
 }
 
-/// The reporter's cwd: `duetto-blast-design-system`, checked out at [`cwd_root`].
+/// The reporter's cwd: `design-system`, checked out at [`cwd_root`].
 fn design_system() -> ProjectIdentity {
     ProjectIdentity {
-        name: "duetto-blast-design-system".to_string(),
-        repo_url: "https://github.com/duettoresearch/duetto-blast-design-system".to_string(),
+        name: "design-system".to_string(),
+        repo_url: "https://github.com/acme/design-system".to_string(),
         root: cwd_root(),
     }
 }
@@ -46,7 +46,7 @@ fn project(name: &str, repo_url: &str) -> Project {
 
 /// Every registry row is checked out at [`cwd_root`] only when it IS the cwd.
 fn checkout_of(project: &Project) -> Option<PathBuf> {
-    if project.name == "duetto-blast-design-system" {
+    if project.name == "design-system" {
         return Some(PathBuf::from(cwd_root()));
     }
     Some(PathBuf::from("/nonexistent/11822").join(&project.name))
@@ -55,14 +55,8 @@ fn checkout_of(project: &Project) -> Option<PathBuf> {
 /// The reporter's registry: two projects, neither the cwd repo.
 fn registry() -> Vec<Project> {
     vec![
-        project(
-            "mcp-services",
-            "https://github.com/duettoresearch/mcp-services",
-        ),
-        project(
-            "duetto-blast-skills",
-            "https://github.com/duettoresearch/duetto-blast-skills",
-        ),
+        project("service-a", "https://github.com/acme/service-a"),
+        project("skills", "https://github.com/acme/skills"),
     ]
 }
 
@@ -128,11 +122,11 @@ fn open_flow(state: &TuiState) -> &NewSessionFlow {
 #[test]
 fn new_session_cwd_preselects_an_unregistered_cwd_repo() {
     let targets = new_session::targets_from_with(&registry(), &[], checkout_of);
-    let cursor = session("duettoresearch/mcp-services");
+    let cursor = session("acme/service-a");
     let flow = NewSessionFlow::new(targets).preselected(Some(design_system()), Some(&cursor));
     assert_eq!(
         highlighted(&flow),
-        "▸ duettoresearch/duetto-blast-design-system · cwd",
+        "▸ acme/design-system · cwd",
         "{:?}",
         flow.rows()
     );
@@ -143,27 +137,24 @@ fn new_session_cwd_preselects_an_unregistered_cwd_repo() {
 fn new_session_cwd_preselects_the_registered_cwd_row() {
     let mut projects = registry();
     projects.push(project(
-        "duetto-blast-design-system",
-        "https://github.com/duettoresearch/duetto-blast-design-system",
+        "design-system",
+        "https://github.com/acme/design-system",
     ));
     let targets = new_session::targets_from_with(&projects, &[], checkout_of);
     let before = targets.len();
-    let cursor = session("duettoresearch/mcp-services");
+    let cursor = session("acme/service-a");
     let flow = NewSessionFlow::new(targets).preselected(Some(design_system()), Some(&cursor));
     assert_eq!(flow.rows().len(), before, "{:?}", flow.rows());
-    assert_eq!(
-        highlighted(&flow),
-        "▸ duettoresearch/duetto-blast-design-system · cwd"
-    );
+    assert_eq!(highlighted(&flow), "▸ acme/design-system · cwd");
 }
 
 /// Fail-open check: with no cwd repo, or a cwd the #7406 filter refuses, the
 /// picker adds no row and opens on the cursor session's project as before.
 #[test]
 fn new_session_cwd_falls_back_to_the_cursor_without_a_cwd_repo() {
-    let cursor = session("duettoresearch/duetto-blast-skills");
+    let cursor = session("acme/skills");
     let in_temp = ProjectIdentity {
-        root: "/tmp/11822/duetto-blast-design-system".to_string(),
+        root: "/tmp/11822/design-system".to_string(),
         ..design_system()
     };
     for cwd in [None, Some(in_temp)] {
@@ -173,7 +164,7 @@ fn new_session_cwd_falls_back_to_the_cursor_without_a_cwd_repo() {
         assert_eq!(flow.rows().len(), before, "cwd {cwd:?}: {:?}", flow.rows());
         assert_eq!(
             highlighted(&flow),
-            "▸ duettoresearch/duetto-blast-skills · registered",
+            "▸ acme/skills · registered",
             "cwd {cwd:?}"
         );
     }
@@ -190,11 +181,11 @@ fn new_session_cwd_arrow_keys_through_the_decoder_move_the_highlight() {
     // Rows: the cwd repo first, then the registry by label, then `other`.
     let steps = [
         (KeyCode::Up, "design-system"),
-        (KeyCode::Down, "duetto-blast-skills"),
-        (KeyCode::Down, "mcp-services"),
+        (KeyCode::Down, "service-a"),
+        (KeyCode::Down, "skills"),
         (KeyCode::Down, "other"),
         (KeyCode::Down, "other"),
-        (KeyCode::Up, "mcp-services"),
+        (KeyCode::Up, "skills"),
     ];
     assert!(start.contains("design-system"), "{start}");
     for (code, expected) in steps {
@@ -225,11 +216,7 @@ fn new_session_cwd_arrow_keys_leave_the_path_entry_for_the_list() {
     press(&mut state, KeyCode::Up);
     let flow = open_flow(&state);
     assert_eq!(flow.typed(), None, "the arrow left the entry");
-    assert!(
-        highlighted(flow).contains("mcp-services"),
-        "{:?}",
-        flow.rows()
-    );
+    assert!(highlighted(flow).contains("skills"), "{:?}", flow.rows());
 }
 
 /// AC (c): every row is the cwd repo or a registry row (after the #7406
@@ -251,9 +238,9 @@ fn new_session_cwd_rows_are_only_the_cwd_and_the_registry() {
     assert_eq!(
         labels,
         vec![
-            "duettoresearch/duetto-blast-design-system · cwd",
-            "duettoresearch/duetto-blast-skills · registered",
-            "duettoresearch/mcp-services · registered",
+            "acme/design-system · cwd",
+            "acme/service-a · registered",
+            "acme/skills · registered",
             "other — type a project path…",
         ]
     );
@@ -284,8 +271,8 @@ fn new_session_cwd_enter_registers_then_creates_in_the_checkout() {
     assert_eq!(
         request.register,
         Some(NewProject {
-            name: "duetto-blast-design-system".to_string(),
-            repo_url: "https://github.com/duettoresearch/duetto-blast-design-system".to_string(),
+            name: "design-system".to_string(),
+            repo_url: "https://github.com/acme/design-system".to_string(),
         })
     );
     assert_eq!(request.repo, cwd_root());
