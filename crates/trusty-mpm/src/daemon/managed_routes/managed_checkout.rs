@@ -34,10 +34,13 @@ use crate::session_manager::ManagedSessionId;
 /// Why: routes through `inproject::base_clone_path` rather than computing the
 /// join here, so the redirect target and the base clone the in-project spawn
 /// path establishes can never drift onto two different directories.
-/// What: `<workspace-root>/<owner>/<repo>`.
+/// What: `<workspace-root>/<owner>/<repo>`, or an error naming the broken
+/// `install.toml` (#11821), since the caller may clone there.
 /// Test: `managed_checkout_is_the_base_clone_path`.
-pub(super) fn managed_checkout_for(gh: &GithubPath) -> PathBuf {
-    super::inproject::base_clone_path(&gh.owner, &gh.repo)
+pub(super) fn managed_checkout_for(gh: &GithubPath) -> Result<PathBuf, String> {
+    // #11821: fail closed on a broken install.toml (df-D1t).
+    super::inproject::try_base_clone_path(&gh.owner, &gh.repo)
+        .map_err(|e| format!("managed checkout path unresolved: {e}"))
 }
 
 /// Resolve where a directory launch runs, provisioning the managed checkout
@@ -68,7 +71,7 @@ pub(super) fn resolve_placement(
     gh: &GithubPath,
     origin_url: &str,
 ) -> Result<PathBuf, String> {
-    resolve_placement_at(launch_dir, &managed_checkout_for(gh), origin_url)
+    resolve_placement_at(launch_dir, &managed_checkout_for(gh)?, origin_url)
 }
 
 /// [`resolve_placement`] against a managed checkout the caller already holds.

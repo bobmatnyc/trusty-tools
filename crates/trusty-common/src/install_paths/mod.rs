@@ -432,28 +432,45 @@ pub(crate) fn config_dir_for_legacy_wrapper() -> Option<PathBuf> {
     })
 }
 
+/// The process-env projects root for the default rung of
+/// `workspace_layout::try_resolve_workspace_root`, consulted only when neither
+/// its env var nor its template is set.
+///
+/// Why: a writer must not clone under the default root when `install.toml`
+/// is broken (df-D1t, #11821).
+/// What: `Ok` with the install-file value or the default; `NoHome` yields
+/// `Ok(/tmp/trusty-mpm-projects)`, the pre-#11821 answer; any other error,
+/// such as a broken install file, is returned.
+/// Test: `try_resolve_workspace_root_fails_closed_on_broken_install_file`.
+pub(crate) fn projects_root_checked() -> Result<PathBuf, InstallPathsError> {
+    match resolve_process_key(Key::ProjectsRoot) {
+        Ok(Some(resolved)) => Ok(resolved.path),
+        // `ProjectsRoot` always has a default; kept total for the type.
+        Ok(None) => Ok(legacy_projects_root()),
+        Err(InstallPathsError::NoHome) => Ok(PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR)),
+        Err(err) => Err(err),
+    }
+}
+
 /// The process-env projects root for the legacy `resolve_workspace_root`
 /// wrapper, consulted only when neither its env var nor its template is set.
 ///
-/// What: `Ok` yields the resolved root (install file or default); `NoHome`
-/// yields `/tmp/trusty-mpm-projects`, as before; any other error is logged at
-/// `warn` and yields the pre-#11821 default.
+/// What: [`projects_root_checked`], with an error logged at `warn` and
+/// mapped to the pre-#11821 default. Writers use the `try_` variant instead
+/// (#11821).
 /// Test: `process_env_wrappers_match_today`.
 pub(crate) fn projects_root_for_legacy_wrapper() -> PathBuf {
-    let legacy_default = || {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(DEFAULT_WORKSPACE_DIR)
-    };
-    match resolve_process_key(Key::ProjectsRoot) {
-        Ok(Some(resolved)) => resolved.path,
-        Ok(None) => legacy_default(),
-        Err(InstallPathsError::NoHome) => PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR),
-        Err(err) => {
-            tracing::warn!(error = %err, "install paths unresolved; using the default projects root");
-            legacy_default()
-        }
-    }
+    projects_root_checked().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "install paths unresolved; using the default projects root");
+        legacy_projects_root()
+    })
+}
+
+/// `$HOME/trusty-mpm-projects`, or under `/tmp` when home is unknown.
+fn legacy_projects_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(DEFAULT_WORKSPACE_DIR)
 }
 
 #[cfg(test)]

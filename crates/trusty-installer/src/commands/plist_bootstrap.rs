@@ -230,7 +230,7 @@ impl<'a> SupervisorTarget<'a> {
     ///
     /// Test: not exercised directly (it IS the live target #3551 exists to
     /// keep tests away from) — covered indirectly by
-    /// `tests::resolve_uid_returns_nonzero_on_real_system`.
+    /// `tests::resolve_uid_matches_the_owner_of_a_file_this_process_creates`.
     pub fn production(launchctl: &'a RealLaunchctl) -> anyhow::Result<Self> {
         let home = dirs::home_dir().ok_or_else(|| {
             anyhow::anyhow!("cannot determine home directory for plist bootstrap")
@@ -812,7 +812,7 @@ pub fn resolve_tm_binary(home: &std::path::Path) -> std::path::PathBuf {
 /// What: Runs `id -u`, parses the trimmed output as u32; falls back to 501 on
 /// parse failure (typical first non-root macOS user) rather than panicking.
 ///
-/// Test: `tests::resolve_uid_returns_nonzero` (CI always has a real UID).
+/// Test: `tests::resolve_uid_matches_the_owner_of_a_file_this_process_creates`.
 pub fn resolve_uid() -> u32 {
     std::process::Command::new("id")
         .arg("-u")

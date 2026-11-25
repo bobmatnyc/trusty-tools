@@ -290,6 +290,75 @@ fn test_step_frozen_by_spinner_needs_two_polls() {
     assert_eq!(r.calls(), 0);
 }
 
+// --- #11826: the background-agent wait rule (architect-watchdog.py:85-88) ----
+
+const WAIT: &str = "✻ Waiting for 1 background agent to finish";
+
+fn run_spin(book: &mut Map<String, Value>, now: f64, spin: &str, mtime: f64) -> StepResult {
+    let p = live();
+    let o = Observed {
+        busy: true,
+        spinner: spin,
+        ..obs(&p, None, Some(mtime), now)
+    };
+    step(book, &o, &Fake::ok(), false)
+}
+
+/// Window 6, class C: tm-architect waited on a background agent with a stale
+/// transcript and an unchanged spinner; Python said `architect=ok`.
+#[test]
+fn test_step_background_wait_is_not_frozen() {
+    let mut book = Map::new();
+    let stale = NOW - 40.0 * 60.0; // a stale transcript too: still a wait
+    for i in 0..2 {
+        let out = run_spin(&mut book, NOW + f64::from(i) * 600.0, WAIT, stale);
+        assert!(out.found.is_empty(), "poll {i}: {:?}", out.found);
+    }
+    assert_eq!(book["wait_since"], json!(NOW));
+}
+
+#[test]
+fn test_step_background_wait_alerts_after_60_min() {
+    let mut book = Map::new();
+    run_spin(&mut book, NOW, WAIT, NOW - 5.0);
+    assert!(
+        run_spin(&mut book, NOW + 59.0 * 60.0, WAIT, NOW)
+            .found
+            .is_empty()
+    );
+    let out = run_spin(&mut book, NOW + 61.0 * 60.0, WAIT, NOW);
+    assert_eq!(kinds(&out), ["architect_frozen"]);
+    assert!(
+        out.phrase
+            .contains("waiting on background agent for 61 min"),
+        "{}",
+        out.phrase
+    );
+    // A changed wait text restarts the clock.
+    let two = WAIT.replace("1 background agent", "2 background agents");
+    assert!(
+        run_spin(&mut book, NOW + 62.0 * 60.0, &two, NOW)
+            .found
+            .is_empty()
+    );
+    // Not waiting any more: the clock clears.
+    run_spin(&mut book, NOW + 63.0 * 60.0, SPIN, NOW + 63.0 * 60.0);
+    assert_eq!(book["wait_since"], Value::Null);
+}
+
+#[test]
+fn test_step_other_unchanged_spinner_still_frozen() {
+    let mut book = Map::new();
+    run_spin(&mut book, NOW, SPIN, NOW - 5.0);
+    let out = run_spin(&mut book, NOW + 600.0, SPIN, NOW + 595.0);
+    assert_eq!(kinds(&out), ["architect_frozen"]);
+    // A near-miss of the wait text is no wait.
+    let near = "✻ Waiting for background agents to finish";
+    run_spin(&mut book, NOW, near, NOW - 5.0);
+    let out = run_spin(&mut book, NOW + 600.0, near, NOW + 595.0);
+    assert_eq!(kinds(&out), ["architect_frozen"]);
+}
+
 #[test]
 fn test_architect_busy_reads_spinner() -> TestResult {
     let top = "─".repeat(40);

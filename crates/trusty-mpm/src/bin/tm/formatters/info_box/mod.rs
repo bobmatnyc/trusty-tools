@@ -263,6 +263,7 @@ pub(crate) fn gather_welcome_data(
         match &github_path {
             Some(gp) => {
                 let cfg = trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load();
+                // #11821: defaulting resolver kept — display only.
                 let managed = trusty_mpm::core::trusty_tools_config::workspace_subpath(&cfg, gp);
                 managed.to_string_lossy().into_owned()
             }
