@@ -177,22 +177,83 @@ impl ProcessSampler for SysinfoSampler {
             .lock()
             .map_err(|e| BuildProbeError::Unusable(e.to_string()))?;
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let rows: Vec<ProcessSnapshot> = sys
-            .processes()
-            .iter()
-            .map(|(pid, proc_)| ProcessSnapshot {
+        // #11867: fold Linux thread rows into their process before anything counts them.
+        let rows = process_rows(sys.processes().iter().map(|(pid, proc_)| {
+            let parent = proc_.parent().map(sysinfo::Pid::as_u32);
+            let snap = ProcessSnapshot {
                 pid: pid.as_u32(),
-                parent: proc_.parent().map(sysinfo::Pid::as_u32),
+                parent,
                 name: proc_.name().to_string_lossy().into_owned(),
                 exe: proc_.exe().map(PathBuf::from),
                 cpu_pct: proc_.cpu_usage(),
-            })
-            .collect();
+            };
+            (snap, thread_leader(proc_.thread_kind(), parent))
+        }));
         if rows.is_empty() {
             return Err(BuildProbeError::EmptyProcessTable);
         }
         Ok(rows)
     }
+}
+
+/// The process a table row is a thread of, or `None` for a process row.
+///
+/// Why: on Linux sysinfo lists each non-leader thread as a row of its own,
+/// marked `ThreadKind::Userland` with its leader as parent (#10260). On every
+/// other OS `Process::thread_kind` is always `None`, and macOS fills the table
+/// from `proc_listallpids`, which returns process ids only, so no thread row
+/// exists there to over-count.
+/// What: a `Userland` row with a parent maps to that parent; anything else is a
+/// process. A `Userland` row with no parent stays a process, so no real process
+/// is ever dropped.
+/// Test: `only_userland_rows_with_a_parent_are_threads`.
+// #11867: moved here from `build_lease::census` so the sampler shares it.
+pub(crate) fn thread_leader(kind: Option<sysinfo::ThreadKind>, parent: Option<u32>) -> Option<u32> {
+    match kind {
+        Some(sysinfo::ThreadKind::Userland) => parent,
+        _ => None,
+    }
+}
+
+/// Fold a raw sysinfo table, thread rows included, into one row per process.
+///
+/// Why: [`ProcessSnapshot`] is one live PROCESS, but sysinfo on Linux also
+/// lists every thread as a row named like its process. [`build_groups`] made a
+/// lone multi-threaded `rustc` one foreign build per thread row (#11867), and
+/// summed each thread's CPU into the group again.
+/// What: each item is a row and its [`thread_leader`]. A thread row whose
+/// leader has a row of its own is dropped. When the leader row is absent
+/// (sysinfo keeps the tasks of a leader whose stat read failed), the leader pid
+/// stands in once, with no parent and the threads' CPU summed: counting the
+/// build once is the fail-closed choice, as in #10260. Process rows pass
+/// through unchanged and in order.
+/// Test: `a_lone_threaded_compiler_is_one_group`,
+/// `threads_of_a_missing_leader_count_it_once`.
+fn process_rows(
+    rows: impl IntoIterator<Item = (ProcessSnapshot, Option<u32>)>,
+) -> Vec<ProcessSnapshot> {
+    let rows: Vec<(ProcessSnapshot, Option<u32>)> = rows.into_iter().collect();
+    let processes: std::collections::HashSet<u32> = rows
+        .iter()
+        .filter(|(_, leader)| leader.is_none())
+        .map(|(snap, _)| snap.pid)
+        .collect();
+    let mut out: Vec<ProcessSnapshot> = Vec::with_capacity(processes.len());
+    for (snap, leader) in rows {
+        match leader {
+            None => out.push(snap),
+            Some(leader) if processes.contains(&leader) => {}
+            Some(leader) => match out.iter_mut().find(|p| p.pid == leader) {
+                Some(stand_in) => stand_in.cpu_pct += snap.cpu_pct,
+                None => out.push(ProcessSnapshot {
+                    pid: leader,
+                    parent: None,
+                    ..snap
+                }),
+            },
+        }
+    }
+    out
 }
 
 /// Executable names that ARE a compilation while they are running.
@@ -412,7 +473,9 @@ impl BuildGroup {
 /// [`BuildGroup`], with CPU summed. Groups come back ordered by CPU descending
 /// then by root pid, so two reads of an unchanged machine render the same way.
 /// The walk is bounded by [`MAX_ANCESTRY_HOPS`] and tolerates a parent cycle.
-/// Test: `a_cargo_build_collapses_to_one_group`,
+/// Input is one row per process; [`SysinfoSampler`] folds Linux thread rows
+/// away first (#11867).
+/// Test: `a_cargo_build_collapses_to_one_group`, `a_lone_threaded_compiler_is_one_group`,
 /// `nested_drivers_collapse_to_the_topmost`,
 /// `two_independent_builds_are_two_groups`, `a_parent_cycle_terminates`.
 #[must_use]
@@ -628,6 +691,40 @@ mod tests {
         let groups = build_groups(&table);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].root_pid, 11);
+    }
+
+    /// #11867: a lone `rustc` with three thread rows, as Linux sysinfo lists
+    /// it, is one foreign build with one compiler, not four.
+    #[test]
+    fn a_lone_threaded_compiler_is_one_group() {
+        let table = vec![
+            (proc_row(10, None, "zsh", 0.0), None),
+            (proc_row(11, Some(10), "rustc", 99.0), None),
+            (proc_row(12, Some(11), "rustc", 50.0), Some(11)),
+            (proc_row(13, Some(11), "rustc", 50.0), Some(11)),
+            (proc_row(14, Some(11), "rustc", 50.0), Some(11)),
+        ];
+        let groups = build_groups(&process_rows(table));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].root_pid, 11);
+        assert_eq!(groups[0].compilers, vec!["rustc".to_string()]);
+        assert!((groups[0].cpu_pct - 99.0).abs() < f32::EPSILON);
+    }
+
+    /// #11867: threads whose leader row is missing stand in for the leader
+    /// once, with their CPU summed, so the build is neither lost nor tripled.
+    #[test]
+    fn threads_of_a_missing_leader_count_it_once() {
+        let table = vec![
+            (proc_row(10, None, "zsh", 0.0), None),
+            (proc_row(12, Some(11), "rustc", 30.0), Some(11)),
+            (proc_row(13, Some(11), "rustc", 20.0), Some(11)),
+        ];
+        let groups = build_groups(&process_rows(table));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].root_pid, 11);
+        assert_eq!(groups[0].ancestry, vec![11]);
+        assert!((groups[0].cpu_pct - 50.0).abs() < f32::EPSILON);
     }
 
     /// The group carries the pid chain the lease census excludes leased builds by.
