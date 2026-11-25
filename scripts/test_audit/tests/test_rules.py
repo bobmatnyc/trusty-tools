@@ -100,7 +100,7 @@ def test_rule_fires_only_where_it_should(name, src, want):
     assert fired(src) == want, rules_for(src)
 
 
-DROPPED_HITS = [c for c in CASES if c[2] and c[2][0] in ("R2", "R4")]
+DROPPED_HITS = [c for c in CASES if c[2] and c[2][0] in ("R2", "R4")]  # R1 lives in dupes.py
 
 
 @pytest.mark.parametrize("name,src,want", DROPPED_HITS, ids=[c[0] for c in DROPPED_HITS])
@@ -136,3 +136,16 @@ def test_r1_does_not_flag_distinct_or_short_bodies():
            "#[test] fn b() { let q = parse(\"z\"); assert!(q.is_none()); assert_eq!(other(7), 8); }\n"
            "#[test] fn c() { assert_eq!(f(1), 1); }\n#[test] fn d() { assert_eq!(f(2), 2); }\n")
     assert dup_rules(src) == {}
+
+
+def test_r1_never_fires_in_the_default_rule_set():
+    from test_audit.inventory import build_rows
+    from test_audit.rules import ACTIVE, DROPPED
+    src = "#[test] fn a() { run(1); assert_eq!(x(), 1); }\n#[test] fn b() { run(1); assert_eq!(x(), 1); }\n"
+    scan = extract_tests("demo", "crates/demo/src/lib.rs", src)
+    found = [(t, scan) for t in scan.tests]
+    assert "R1" in DROPPED and "R1" not in ACTIVE
+    default = build_rows(found, "rev", "2026-11-25", 0.85, 20)
+    assert all("R1" not in r["rules"] for r in default)
+    enabled = build_rows(found, "rev", "2026-11-25", 0.85, 20, enabled=ALL_RULES)
+    assert all("R1" in r["rules"] for r in enabled)
