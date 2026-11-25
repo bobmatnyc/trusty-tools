@@ -28,7 +28,10 @@ TICK=${POLL_SUPERVISE_TICK:-30}
 MATCH=${POLL_MATCH:-fleet-poll.py}
 MAX_TICKS=${POLL_SUPERVISE_MAX_TICKS:-0}   # 0 = run forever (tests bound it)
 log(){ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor $1" >> "$LOG"; }
-mtime(){ stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+# #10571: GNU form first. GNU stat reads `-f %m` as "filesystem status of %m and $1": it prints
+# a multi-line block and exits 1, so a BSD-first chain fed that block into the arithmetic below.
+mtime(){ local t; t=$(stat -c %Y "$1" 2>/dev/null) || t=$(stat -f %m "$1" 2>/dev/null) || t=0
+  case "$t" in ''|*[!0-9]*) t=0 ;; esac; echo "$t"; }
 start(){ if [ -n "${POLL_CMD:-}" ]; then $POLL_CMD & else python3 "$HERE/fleet-poll.py" "$@" & fi
   pid=$!; started=$(date +%s); }
 ours(){ [ -n "${pid:-}" ] && ps -p "$pid" -o command= 2>/dev/null | grep -qF -- "$MATCH"; }

@@ -104,7 +104,7 @@
     "scripts/pm_cursor.py": "fdb416935e4eff5ea329ea9b3d0056757627ad9303160df614ed93c99219621b",
     "scripts/pm_intake.py": "73d9c2977c047dda1c7ad20152dc3a04850ff632ee8a2a60addaab8ca65e71c7",
     "scripts/poll-reset-wake.py": "966b64a284a0a6d26cdbbe9328c889814a7ce6a769d9a7ef6a1a30f3ef9cd413",
-    "scripts/poll-supervise.sh": "aaf3eafbe99884324e1d9776c06068e5ba268e1f47d7d93d19327065fd7cde09",
+    "scripts/poll-supervise.sh": "909bd3acb5cb412a8c85670e3a935e9862cf31ae333c9ee79f5b7dc57d087724",
     "scripts/posted.sh": "9b0d351baf5dc8e049ac6e69bf7131398860590e0fb6fd0c071308cb6f18a721",
     "scripts/quiet-sessions.py": "d7bb4e96dd47cde2c42a3311c9c71c921925448b1a2544ae34af6cfb57ad9094",
     "scripts/rc-disconnect.sh": "d539759250a8565030e49201122529cdd7eacba2e849f51a309816610a1ef43c",
