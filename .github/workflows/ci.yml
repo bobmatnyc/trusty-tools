@@ -336,6 +336,21 @@ jobs:
       - name: PM context probe selftest (#8998)
         run: bash scripts/pm_context_probe_selftest.sh
 
+      # #11821 P6a: the Python install-paths resolver and its callers, the
+      # sandbox launchers' --projects-root/--config-dir, and the hard-coded
+      # path lint. Stdlib unittest and stub binaries; no build. Same job, same
+      # reason as the gates below: no new required context.
+      - name: Install-paths resolver + path-literal lint tests (#11821)
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_install_paths.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_check_path_literals.py'
+
+      - name: Sandbox install-paths selftest (#11821)
+        run: bash scripts/sandbox_install_paths_selftest.sh
+
+      - name: Hard-coded project-home / config-dir path gate (#11821)
+        run: python3 scripts/check_path_literals.py
+
       # #7424: the startup-context size gate. It is a STEP of this existing job
       # rather than a job of its own — promoting a new required context wedges
       # every open PR that predates it (#5962), and this job already runs on
