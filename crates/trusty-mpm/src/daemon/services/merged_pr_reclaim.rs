@@ -385,16 +385,37 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         warn!("worktree-reclaim sweep: maintenance lane closed; pass not run");
         return;
     };
-    // #8059: the pass is recorded under the daemon's own framework root, so
-    // `tm doctor` — which runs in its own process — can see it in flight.
+    // #11821: an unresolved root skips the whole tick, ledger pass included.
+    if !merged_pr_pass(state, configured_workspace_root()).await {
+        return;
+    }
+    // #8994 S3a: the ledger-driven pass, under the same permit; report-only
+    // unless `disk.ledger_reclaim_remove` is set.
+    super::ledger_reclaim::run_and_log(state).await;
+}
+
+/// The merged-PR pass of one [`run_one_tick`] under `root`.
+///
+/// Why: df-D1t (#11821) — a broken `install.toml` must skip the pass, never
+/// reclaim under the default root. A parameter, so a test can hand it the
+/// error without rewriting `$HOME`.
+/// What: `false`, logged, with nothing recorded or reclaimed when `root` is an
+/// error; otherwise runs and logs the pass and answers `true`.
+/// Test: `the_sweep_skips_an_unresolved_workspace_root`.
+pub(crate) async fn merged_pr_pass(
+    state: &Arc<DaemonState>,
+    root: Result<PathBuf, trusty_common::install_paths::InstallPathsError>,
+) -> bool {
     // #11821: no reclaim under a guessed root.
-    let root = match configured_workspace_root() {
+    let root = match root {
         Ok(root) => root,
         Err(e) => {
             warn!("worktree-reclaim sweep: workspace root unresolved ({e}); pass not run");
-            return;
+            return false;
         }
     };
+    // #8059: the pass is recorded under the daemon's own framework root, so
+    // `tm doctor` — which runs in its own process — can see it in flight.
     let _timing = super::sweep_status::RECLAIM.begin(Some(state.framework_root()));
     match reclaim(
         state,
@@ -437,9 +458,7 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         }
         Err(e) => warn!("worktree-reclaim sweep: the pass did not complete: {e}"),
     }
-    // #8994 S3a: the ledger-driven pass, under the same permit; report-only
-    // unless `disk.ledger_reclaim_remove` is set.
-    super::ledger_reclaim::run_and_log(state).await;
+    true
 }
 
 /// Why a manual reclaim pass did not get the maintenance permit (#8994).

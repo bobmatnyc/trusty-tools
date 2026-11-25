@@ -298,3 +298,38 @@ fn owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file() {
         "an unresolved root must never retire the last-good record"
     );
 }
+
+/// #11821 df-D1t: `POST .../managed/prune-worktrees` refuses with a 500 naming
+/// install.toml; before P2 it previewed the default root and answered 200.
+#[tokio::test]
+async fn prune_route_refuses_on_a_broken_install_file() {
+    use std::future::IntoFuture as _;
+    use trusty_mpm::daemon::{api, state::DaemonState};
+
+    let fx = Fixture::new();
+    let _env = EnvGuard::install(&fx.home);
+    let state = Arc::new(DaemonState::with_root_isolated_managed(fx.tmp.path().join("fw")).await);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(axum::serve(listener, api::router(state)).into_future());
+
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/api/v1/sessions/managed/prune-worktrees"
+        ))
+        .json(&serde_json::json!({ "dry_run": true }))
+        .send()
+        .await
+        .expect("prune request");
+    let status = resp.status();
+    let body = resp.text().await.expect("body");
+
+    assert_eq!(
+        status.as_u16(),
+        500,
+        "a broken install.toml must refuse: {body}"
+    );
+    assert!(body.contains("install.toml"), "got: {body}");
+}
