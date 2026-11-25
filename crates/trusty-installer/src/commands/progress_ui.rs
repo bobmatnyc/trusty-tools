@@ -10,8 +10,8 @@
 //! [`prompt_yes_no`] reads a yes/no answer from stdin (stderr prompt, stdout
 //! reserved for data); [`is_tty`] reports whether stdin is interactive.
 //!
-//! Test: `tests` covers `progress_mode`'s json→Plain rule and `is_tty`'s
-//! type; the stdin prompt is side-effect-only.
+//! Test: `tests` covers `progress_mode`'s json→Plain rule; `is_tty` and the
+//! stdin prompt read the process's own fds and are untested.
 
 use trusty_progress::{Mode, Narrator, Output};
 
@@ -61,8 +61,8 @@ pub fn narrator(json: bool) -> Narrator {
 ///
 /// What: Returns `true` when stdin is a TTY.
 ///
-/// Test: `tests::is_tty_returns_bool` (the value depends on the harness's fds,
-/// so we assert only that it is callable and boolean).
+/// Test: none; a one-line `IsTerminal` read whose value depends on the
+/// harness's fds.
 pub fn is_tty() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
@@ -100,13 +100,5 @@ mod tests {
     #[test]
     fn progress_mode_json_is_plain() {
         assert_eq!(progress_mode(true), Mode::Plain);
-    }
-
-    /// Why: `is_tty` must be callable and return a bool regardless of harness fds.
-    /// What: Calls it and binds the result (the value is environment-dependent).
-    /// Test: This is the test.
-    #[test]
-    fn is_tty_returns_bool() {
-        let _v: bool = is_tty();
     }
 }

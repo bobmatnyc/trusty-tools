@@ -174,7 +174,7 @@ impl ShadowReport {
 /// effort).
 ///
 /// Test: `detect_reports_shadow_with_both_paths_and_versions`,
-/// `detect_returns_none_when_path_resolves_to_installed_binary`,
+/// `no_shadow_warning_when_path_resolves_to_the_installed_binary`,
 /// `detect_returns_none_when_not_on_path`,
 /// `detect_does_not_hang_on_an_unresponsive_shadowing_binary`.
 pub async fn detect(
@@ -419,25 +419,6 @@ mod tests {
              against the hanging binary at all, so this test would no longer catch the \
              un-timed-out `installed_version` regression"
         );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn detect_returns_none_when_path_resolves_to_installed_binary() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let install_dir = tmp.path().join("local-bin");
-        std::fs::create_dir_all(&install_dir).expect("mkdir");
-        let install_path = install_dir.join("tm");
-        write_versioned_binary(&install_path, "trusty-mpm 0.19.29");
-
-        let report = detect(
-            "tm",
-            &install_path,
-            Some("0.19.29"),
-            OsStr::new(&install_dir.display().to_string()),
-        )
-        .await;
-        assert!(report.is_none(), "no shadow should be reported: {report:?}");
     }
 
     /// Why (#5805): the shadow check probed `StableMember::binary` only, so

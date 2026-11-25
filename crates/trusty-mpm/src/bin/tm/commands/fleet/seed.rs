@@ -22,7 +22,8 @@
 //! (`seed_history.tsv`, see [`refresh`]). A file with any other bytes is
 //! someone's edit and is reported skipped, never overwritten; since #11245 the
 //! shipped copy is written beside it as `<file>.shipped`. The skills' bytes are the ones every Architect launch also
-//! deploys (#9540).
+//! deploys (#9540). The agents are written by [`super::seed_agents`] under
+//! the skills' deploy rule (#10161 D3c).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
 //! `every_schema_asset_is_seeded`, `every_dashboard_asset_is_seeded`,
@@ -52,8 +53,7 @@ pub(crate) struct Seeded<'a> {
 
 /// The shipped bytes of the compiled-in row seeded at `dest`, if any.
 pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
-    EMBEDDED
-        .iter()
+    table::rows()
         .find(|(d, _, _)| *d == dest)
         .map(|&(_, c, _)| c)
 }
@@ -64,13 +64,12 @@ pub(crate) mod refresh;
 mod table;
 #[path = "seed_wiring.rs"]
 pub(crate) mod wiring;
-use table::EMBEDDED;
 
 /// Every file `tm fleet init` writes, in write order.
 ///
 /// Why: #9132 — the template and the skills are read from content, so the
 /// table is built from `seed` instead of being a compiled-in constant.
-/// What: `CLAUDE.md` from `seed`, then [`EMBEDDED`], then each seed skill at
+/// What: `CLAUDE.md` from `seed`, then [`table::rows`], then each seed skill at
 /// `.claude/skills/<stem>/SKILL.md`.
 /// Test: `a_first_run_seeds_the_architect_project`.
 pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
@@ -79,7 +78,8 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
         contents: &seed.claude_md,
         executable: false,
     };
-    let embedded = EMBEDDED.iter().map(|&(dest, contents, executable)| Seeded {
+    // #10571: the table spans seed_table.rs and seed_table_scripts.rs.
+    let embedded = table::rows().map(|&(dest, contents, executable)| Seeded {
         dest: dest.to_owned(),
         contents,
         executable,
@@ -100,11 +100,15 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
 // #9997: per-project records live in `local/projects/`; the skills write
 // other users' profiles to `local/users/` and briefs to `local/briefs/`.
 // #10161: `architect-improvements` keeps its ledger in `local/improvements/`.
+// #10161 D3c: the curator, improver and drift-guard agents write run files.
 pub(crate) const DIRS: &[&str] = &[
     "local/projects",
     "local/users",
     "local/briefs",
     "local/improvements",
+    "local/improvements/runs",
+    "local/improver/runs",
+    "local/drift-guard/runs",
 ];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`, then the

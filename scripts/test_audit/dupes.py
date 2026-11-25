@@ -4,7 +4,7 @@ Why: a test whose body repeats another's adds run time without coverage, and
   a near copy is a table-test candidate. Both must be found without a model
   and without an all-pairs comparison over ~43k tests.
 What: `duplicate_rules(tests)` returns `{key: detail}`.
-  - Identical: two tests with the same `body_sha`.
+  - Identical: two tests with the same `body_only_sha` (body tokens only).
   - Near-identical: Jaccard similarity of the bodies' token 3-shingle sets
     >= `threshold` (default 0.85), for bodies of at least `min_tokens`
     tokens (default 40) that are not already identical. Candidates come
@@ -76,7 +76,7 @@ def duplicate_rules(tests: list[TestFn], threshold: float = THRESHOLD,
                     min_tokens: int = MIN_TOKENS) -> dict[str, str]:
     by_sha: dict[str, list[str]] = defaultdict(list)
     for t in tests:
-        by_sha[t.body_sha].append(t.key)
+        by_sha[t.body_only_sha].append(t.key)
     out: dict[str, str] = {}
     for keys in by_sha.values():
         if len(keys) > 1:
@@ -86,10 +86,10 @@ def duplicate_rules(tests: list[TestFn], threshold: float = THRESHOLD,
     rep: dict[str, TestFn] = {}
     for t in sorted(tests, key=lambda t: t.key):
         if len(t.body) >= min_tokens:
-            rep.setdefault(t.body_sha, t)
+            rep.setdefault(t.body_only_sha, t)
     sets = {t.key: shingles(t) for t in rep.values()}
     near = near_pairs(sets, threshold)
-    sha_of = {t.key: t.body_sha for t in tests}
+    sha_of = {t.key: t.body_only_sha for t in tests}
     for key, partners in near.items():
         members = [x for x in by_sha[sha_of[key]]]
         others = sorted(k for p in partners for k in by_sha[sha_of[p]])

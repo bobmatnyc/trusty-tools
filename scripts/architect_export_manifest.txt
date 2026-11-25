@@ -174,6 +174,24 @@ scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
 # scratch, diff against the shipped copy, hand-merge the delta.
 .claude/skills/architect-dashboard/SKILL.md	skills/architect-dashboard.md
 
+# Architect agents and their two skills (D3c, #10161): .claude/agents/<name>.md ->
+# agents/<name>.md. All are hand-merged into trusty-tools form (see the note at
+# the top). token-optimizer ships with the usage set (D3d).
+.claude/agents/runner.md	agents/runner.md
+.claude/agents/improver.md	agents/improver.md
+.claude/skills/architect-drift-guard/SKILL.md	skills/architect-drift-guard.md
+.claude/skills/architect-improver/SKILL.md	skills/architect-improver.md
+# Held until the Architect applies .trusty-mpm/plans/d3c-mirror-lines.md at
+# source (each still fails the leak gate there); enable a row once its source
+# exports clean. verify-claim.py is split here into verify-claim.py and
+# verify_claim_input.py (500-SLOC cap) and reads its repo map from
+# local/architect.json.
+# .claude/agents/event-extractor.md	agents/event-extractor.md
+# .claude/agents/improvement-curator.md	agents/improvement-curator.md
+# .claude/agents/drift-guard.md	agents/drift-guard.md
+# scripts/verify-claim.py
+# scripts/test_verify_claim.py	tests/test_verify_claim.py
+
 # P1 dashboard + Intent Ledger (#10571), from prototype 23da8a9. dashboard-serve.py,
 # dashboard_harness.py and datg.py stage whole and are hand-merged into their split
 # modules (dashboard_http/page/docs/routes.py, dashboard_fleet.py and
@@ -234,3 +252,12 @@ scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py
 # fleet_alert_dedupe.py (ar-T8a) has no prototype source either.
 # templates/local/il-schedule.json is written in trusty-tools form: the prototype copy holds
 # instance sessions and names, so only its job and threshold shape is kept.
+
+# Prototype re-sync (#10571): section skeleton. Later slices add their rows under
+# the matching header, each hand-merged per the note at the top, and add a seed
+# row for each shipped script (scripts/architect_bundle_meta.py history
+# --from-repo records the live versions).
+# -- Re-sync, Phase 1: dashboard + Intent Ledger.
+# -- Re-sync, Phase 2: poller + PM relay.
+# -- Re-sync, Phase 3: the rest (generic and mixed scripts only).
+# -- Re-sync: tests for the rows above.

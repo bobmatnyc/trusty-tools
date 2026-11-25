@@ -10,7 +10,8 @@ What: copies only the paths a manifest lists (default
   (scripts/architect_leak_patterns.txt, through check_content.leak_findings)
   plus a REQUIRED out-of-tree deny file over every staged file's content and
   path. Instance paths (local/, owner/, records/, inbox/, docs/briefs/, .env*,
-  .mcp.json, ...), symlinks and `..` are refused even when listed. Nothing is
+  .mcp.json, ...), the instance setup scripts (scripts/init.sh, doctor.sh,
+  test_init.py), symlinks and `..` are refused even when listed. Nothing is
   written unless the gate is clean; --dry-run writes nothing at all.
 
   Manifest line: SRC_REL[<TAB>DEST_REL]; a SRC_REL ending in /** copies every
@@ -43,6 +44,9 @@ DENY_TOP = {"local", "owner", "records", "inbox"}
 DENY_PREFIX = ("docs/briefs/", ".claude/settings", ".claude/worktrees/")
 DENY_PART = {".git", ".trusty-mpm", ".trusty-channels", "__pycache__", ".pytest_cache"}
 DENY_NAME = re.compile(r"\.env.*|\.mcp\.json|.*\.bak|.*\.lock")
+# #10161 D3c (plan s.6): instance-only setup that merges the guard-lifting env
+# into .claude/settings.json; never framework, at any destination.
+DENY_EXACT = {"scripts/init.sh", "scripts/doctor.sh", "scripts/test_init.py"}
 # A repo root holding either file is a trusty-tools checkout or worktree (#10161).
 TT_MARKERS = ("crates/trusty-common/Cargo.toml", "scripts/architect_leak_patterns.txt")
 
@@ -60,6 +64,7 @@ def forbidden(rel):
         or any(low.startswith(p) or low == p.rstrip("/") for p in DENY_PREFIX)
         or bool(DENY_PART & set(parts))
         or any(DENY_NAME.fullmatch(p) for p in parts)
+        or low in DENY_EXACT
     )
 
 

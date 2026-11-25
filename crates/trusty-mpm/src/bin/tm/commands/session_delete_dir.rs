@@ -24,7 +24,7 @@ use anyhow::Context as _;
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::core::architect_store::protected_architect_dirs;
 use trusty_mpm::core::presence_local::LocalAuthenticator;
-use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, try_workspace_root};
 use trusty_mpm::session_manager::project_dir_delete::{
     Confirmation, DirDeleteInput, DirDeleteOptions, DirDeletePlan, DirSession, OsProbes,
     SessionSource, run_dir_delete,
@@ -75,7 +75,8 @@ pub(crate) async fn run(
     if !sessions.iter().any(|s| s.id == target.id) {
         sessions.push(DirSession::from_summary(&target));
     }
-    let root = workspace_root(&TrustyToolsConfig::load());
+    // #11821: a broken install.toml refuses the delete (df-D1t).
+    let root = delete_root(try_workspace_root(&TrustyToolsConfig::load()))?;
     // #10992 critic HIGH: strict config read plus `ARCHITECT_PROJECT_DIR`;
     // a guard that cannot get its input refuses.
     let env = |name: &str| std::env::var(name).ok();
@@ -116,6 +117,15 @@ pub(crate) async fn run(
                 target.id
             )
         })
+}
+
+/// The workspace root the delete guards, or the refusal (#11821 df-D1t).
+///
+/// Test: `a_broken_install_file_refuses_the_delete`.
+fn delete_root(
+    resolved: Result<std::path::PathBuf, trusty_common::install_paths::InstallPathsError>,
+) -> anyhow::Result<std::path::PathBuf> {
+    resolved.map_err(|e| anyhow::anyhow!("refusing to delete a project directory: {e}"))
 }
 
 /// The blocking body: guards, prompt, presence, removal.
@@ -222,6 +232,30 @@ mod tests {
                 "{args:?} must not parse"
             );
         }
+    }
+
+    /// #11821 df-D1t: a broken `install.toml` refuses, naming the file and key.
+    #[test]
+    fn a_broken_install_file_refuses_the_delete() {
+        let home = tempfile::tempdir().expect("scratch home");
+        let tools = home.path().join(".trusty-tools");
+        std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
+        std::fs::write(tools.join("install.toml"), "bogus = 1\n").expect("write install.toml");
+        let broken = trusty_common::install_paths::read_install_file(home.path())
+            .expect_err("an unknown key is refused");
+
+        let err = super::delete_root(Err(broken)).expect_err("the delete must refuse");
+        let text = err.to_string();
+        assert!(
+            text.starts_with("refusing to delete a project directory")
+                && text.contains("install.toml")
+                && text.contains("bogus"),
+            "got: {text}"
+        );
+        assert_eq!(
+            super::delete_root(Ok("/w".into())).expect("a resolved root passes"),
+            std::path::PathBuf::from("/w")
+        );
     }
 
     #[test]

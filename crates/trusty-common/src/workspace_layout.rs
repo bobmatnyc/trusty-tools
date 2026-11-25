@@ -165,27 +165,52 @@ pub fn expand_tilde(template: &str, home: &Path) -> PathBuf {
 /// What: applies **`TRUSTY_MPM_WORKSPACE_ROOT` env > `template` > built-in
 /// `~/trusty-mpm-projects`**, expanding a leading `~`. Falls back to
 /// `/tmp/trusty-mpm-projects` only when the home directory is unresolvable AND
-/// nothing absolute was supplied.
+/// nothing absolute was supplied. With neither env nor template set, the
+/// built-in default rung defers to `install_paths` (#11821), so a
+/// `projects_root` in `~/.trusty-tools/install.toml` sits below the template.
 /// Test: `default_root_is_trusty_mpm_projects`, `env_overrides_config_and_default`,
-/// `config_template_used_when_no_env`.
+/// `config_template_used_when_no_env`, `process_env_wrappers_match_today`.
 pub fn resolve_workspace_root(template: Option<&str>) -> PathBuf {
-    let home = dirs::home_dir();
+    // See #11821: the default slot now reads `install.toml` before the
+    // built-in default; with no file the result is unchanged. A broken file
+    // is logged and defaulted here; writers call the `try_` variant.
+    chosen_workspace_root(template)
+        .unwrap_or_else(crate::install_paths::projects_root_for_legacy_wrapper)
+}
 
+/// [`resolve_workspace_root`] that fails closed on a broken `install.toml`.
+///
+/// Why: a caller that clones, deletes or writes under the root must not act
+/// on the default root while the operator's `install.toml` is broken
+/// (df-D1t, #11821).
+/// What: the same chain. The env var or `template`, when set, wins and the
+/// install file is never read. Otherwise the install file's `projects_root`
+/// or the default, and an unreadable, unparsable or invalid file is an
+/// [`InstallPathsError`](crate::install_paths::InstallPathsError). An unknown
+/// home still yields `/tmp/trusty-mpm-projects`, as before.
+/// Test: `try_resolve_workspace_root_fails_closed_on_broken_install_file`.
+pub fn try_resolve_workspace_root(
+    template: Option<&str>,
+) -> Result<PathBuf, crate::install_paths::InstallPathsError> {
+    // #11821: no default on a broken install file.
+    chosen_workspace_root(template).map_or_else(crate::install_paths::projects_root_checked, Ok)
+}
+
+/// The env > template rungs of the workspace-root chain, `~`-expanded;
+/// `None` when neither is set.
+fn chosen_workspace_root(template: Option<&str>) -> Option<PathBuf> {
     let from_env = std::env::var(WORKSPACE_ROOT_ENV)
         .ok()
         .filter(|raw| !raw.trim().is_empty());
-    let chosen = from_env
+    let raw = from_env
         .as_deref()
         .or(template)
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    match (chosen, &home) {
-        (Some(raw), Some(h)) => expand_tilde(raw, h),
-        (Some(raw), None) => PathBuf::from(raw),
-        (None, Some(h)) => h.join(DEFAULT_WORKSPACE_DIR),
-        (None, None) => PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR),
-    }
+        .filter(|s| !s.is_empty())?;
+    Some(match dirs::home_dir() {
+        Some(h) => expand_tilde(raw, &h),
+        None => PathBuf::from(raw),
+    })
 }
 
 /// Resolve the absolute workspace root, loading trusty-mpm's config first.

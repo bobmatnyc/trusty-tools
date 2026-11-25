@@ -125,8 +125,9 @@ pub(crate) async fn launch(
     //    built-in `~/trusty-mpm-projects`. The pre-#1807 code called
     //    `workspace_subpath`, which skipped `TRUSTY_MPM_REPOS_ROOT` entirely and
     //    re-introduced the root divergence #1803 set out to eliminate.
+    // #11821: a broken install.toml refuses the launch (df-D1t).
     let project_dir =
-        trusty_mpm::daemon::managed_routes::inproject::base_clone_path(&gh.owner, &gh.repo);
+        trusty_mpm::daemon::managed_routes::inproject::try_base_clone_path(&gh.owner, &gh.repo)?;
     let project_dir_str = project_dir.to_string_lossy().to_string();
 
     // 4. Reconnect check — prefix-match any LIVE session whose workdir lives under

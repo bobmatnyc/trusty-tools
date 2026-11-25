@@ -61,7 +61,7 @@ set -euo pipefail
 trap 'echo "ERROR: unexpected failure at line $LINENO" >&2; exit 2' ERR
 
 # The Architect bundle: every file scripts/architect_bundle_meta.py hashes,
-# reads or writes (its ROOT..FIXTURES constants, lines 32-41), the content
+# reads or writes (its ROOT..FIXTURES constants, lines 36-46), the content
 # copies the pair list in scripts/check_architect_subproject.sh ships, that
 # script itself (its pair table drives the provenance), and the pinned skill
 # hashes. A trailing `/` is a directory prefix; anything else
@@ -75,6 +75,7 @@ BUNDLE_PATHS=(
   "scripts/architect_export_manifest.txt"
   "scripts/check_architect_subproject.sh"
   "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table.rs"
+  "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table_scripts.rs"
   "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv"
   "crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md"
   "crates/trusty-mpm/src/core/project_skill_tier/architect_skills.rs"

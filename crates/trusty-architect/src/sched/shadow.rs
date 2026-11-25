@@ -37,6 +37,7 @@ use super::slot::day_key;
 use super::spawn::{RunResult, RunSpec};
 use super::{Layout, SchedError};
 use crate::classify::alerts::iso;
+use crate::poller::token;
 use crate::sha256::sha256_hex;
 
 /// What a finished shadow run needs to write its record.
@@ -345,8 +346,12 @@ pub fn plan(
 /// a temp file and rename; the copy carries no offsets marker, so the live
 /// queue offsets are seeded again at the current end. Without a live state
 /// the dry run keeps its own. A copy that fails is an error, never a stale
-/// fallback: the engine retries the reseed on the next run.
+/// fallback: the engine retries the reseed on the next run. `fresh` also
+/// reseeds the shadow's `token-watch-state.json` from the live one under the
+/// live watcher's lock (`token::reseed`, #11826: window 6 replayed 30 token
+/// alerts after a 13 h gap).
 /// Test: `shadow_restart_reseeds_from_the_live_state`,
+/// `window6_shadow_restart_reseeds_the_token_state`,
 /// `shadow_restart_reseed_failure_is_an_error`.
 ///
 /// # Errors
@@ -377,6 +382,17 @@ pub fn plan_with_seed(
                 return Err(SchedError::io(format!("seed {}", state.display()), e));
             }
         }
+    }
+    if fresh {
+        // #11826: the token-watch state too, copied under the live lock.
+        let live = layout.root.join("inbox").join(token::STATE_FILE);
+        let own = dir.join(token::STATE_FILE);
+        token::reseed(&live, &own, token::RESEED_LOCK_WAIT).map_err(|e| match e {
+            token::StateError::Io { what, source } => {
+                SchedError::io(format!("seed {what}"), source)
+            }
+            token::StateError::Shape { what, detail } => SchedError::Parse { what, detail },
+        })?;
     }
     seed_live_offsets(&state, &layout.root.join("inbox"))?;
     let stdout = dir.join("last-stdout.txt");

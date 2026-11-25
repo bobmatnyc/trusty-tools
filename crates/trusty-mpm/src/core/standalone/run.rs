@@ -369,6 +369,7 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
 
     // #8988: the owner MCP policy for the `.claude.json` this launch reads;
     // #8992: `cli.profile` decides whether the skill and tool parts apply.
+    // #11821: a broken install.toml refuses `tm run` (df-D1w).
     let config_dir = Some(claude_config_dir);
     let files = crate::core::launch_policy::LaunchFiles {
         mcp_config: Some(mcp_config),
@@ -376,7 +377,7 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
             &repo_path,
             config_dir,
             cli.profile,
-        )
+        )?
         .file,
     };
     let mut cmd = run_launch_command(

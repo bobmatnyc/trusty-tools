@@ -27,6 +27,7 @@ pub(crate) fn needs_first_run_clone(repo_url: &str) -> Option<(String, std::path
     // unreadable remote declines the hint exactly as an absent one does.
     let origin = ip::get_origin_url(p).ok().flatten()?;
     let gh = trusty_common::github_path::parse_github_path(&origin)?;
+    // #11821: defaulting resolver kept — decides a "cloning…" hint only; the clone itself fails closed.
     let b = ip::base_clone_path(&gh.owner, &gh.repo);
     (!b.join(".git").exists()).then_some((format!("{}/{}", gh.owner, gh.repo), b))
 }

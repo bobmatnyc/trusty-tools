@@ -221,6 +221,7 @@ async fn survey_pass(
     group_by: GroupBy,
 ) -> Result<Value, String> {
     let config = TrustyToolsConfig::load();
+    // #11821: defaulting resolver kept — this survey only displays; the delete path re-resolves.
     let repos_root = trusty_tools_config::workspace_root(&config);
     // #6927: read FALLIBLY, separately from the lenient `load` above. A config
     // that will not parse yields a keep-list that keeps everything and says so

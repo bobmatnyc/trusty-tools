@@ -143,12 +143,17 @@ mod tests {
         assert_eq!(v["phase"], "0");
     }
 
-    /// `render_json` does not panic on a simple value.
+    /// Why: callers turn a failed `render_json` into exit 1 so automation
+    /// never reads success from JSON that was not written; that needs the
+    /// serialisation error to reach them.
+    /// What: a map with non-string keys cannot become JSON; asserts
+    /// `render_json` returns that error, and `Ok` for a plain object.
+    /// Test: This is the test.
     #[test]
-    fn render_json_does_not_panic() {
-        let obj = serde_json::json!({"key": "value"});
-        // We can't capture stdout in a unit test without external machinery,
-        // but we can verify it returns `Ok`.
-        assert!(render_json(&obj).is_ok());
+    fn render_json_propagates_a_serialisation_error() {
+        let unserialisable = std::collections::BTreeMap::from([((1u8, 2u8), "v")]);
+        let err = render_json(&unserialisable).expect_err("tuple keys are not JSON");
+        assert!(err.to_string().contains("key must be a string"), "{err}");
+        assert!(render_json(&serde_json::json!({"key": "value"})).is_ok());
     }
 }

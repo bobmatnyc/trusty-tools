@@ -1,15 +1,19 @@
 """extract.py — find every Rust test fn in a source file (#11268).
 
 Why: the verdict log is keyed by test path and re-judges a test only when its
-  normalised body changes, so the inventory needs a stable key and a body hash
-  that a comment-only or whitespace-only edit cannot move.
+  normalised source changes, so the inventory needs a stable key and a hash
+  that a comment-only or whitespace-only edit cannot move but an attribute
+  (`#[ignore]`, `#[cfg]`) or signature edit does.
 What: `extract_tests(crate, path, src)` walks the token stream, tracks inline
   `mod NAME { … }` nesting, and returns one `TestFn` per fn carrying a test
   attribute: an attribute whose path ends in `test` (`#[test]`,
   `#[tokio::test(…)]`, `#[sqlx::test]`), `#[rstest]` or `#[test_case(…)]`.
   Fns inside `macro_rules!` bodies are templates, not tests; they are counted
-  in `FileScan.macro_templates` only. `body_sha` is sha256 over the body's
-  tokens joined by one space, so comments and layout never reach it.
+  in `FileScan.macro_templates` only. `body_sha` is sha256 over the test's
+  attributes, signature and body tokens joined by one space, so comments and
+  layout never reach it. `body_only_sha` hashes the body alone: R1 compares
+  bodies with it, and it is the value `body_sha` had before #11268 PR0, which
+  `verdict_log.migrate_legacy_sha` recognises.
 Test: scripts/test_audit/tests/test_lexer_extract.py
 """
 from __future__ import annotations
@@ -37,6 +41,12 @@ class TestFn:
 
     @property
     def body_sha(self) -> str:
+        """Hash of attributes + signature + body: the verdict log's re-review trigger."""
+        return source_sha(self.attrs, self.sig, self.body)
+
+    @property
+    def body_only_sha(self) -> str:
+        """Hash of the body alone: R1's identity test and the pre-PR0 log value."""
         return body_sha(self.body)
 
 
@@ -54,6 +64,16 @@ def body_sha(body: list[Tok]) -> str:
     """sha256 of the normalised body: tokens joined by one space."""
     norm = " ".join(t.text for t in body)
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+
+def source_sha(attrs: list[list[Tok]], sig: list[Tok], body: list[Tok]) -> str:
+    """sha256 of `#[attr] … sig { body }`, tokens joined by one space.
+
+    Each attribute is re-wrapped in `#[ … ]` so `#[a] #[b]` and `#[a b]` differ.
+    """
+    texts = [x for a in attrs for x in ("#", "[", *(t.text for t in a), "]")]
+    texts += [t.text for t in sig] + ["{", *(t.text for t in body), "}"]
+    return hashlib.sha256(" ".join(texts).encode("utf-8")).hexdigest()
 
 
 def attr_path(attr: list[Tok]) -> list[str]:

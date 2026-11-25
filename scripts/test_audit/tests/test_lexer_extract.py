@@ -95,6 +95,25 @@ def test_code_and_string_edits_change_body_sha():
     assert sha('{ assert_eq!(f("a b"), 2); }') != base
 
 
+def test_attribute_and_signature_edits_change_body_sha_but_not_body_only_sha():
+    def one(src):
+        return extract_tests("demo", "f.rs", src).tests[0]
+    base = one("#[test]\nfn t() { assert_eq!(f(), 1); }")
+    variants = [
+        "#[test]\n#[ignore]\nfn t() { assert_eq!(f(), 1); }",
+        "#[test]\n#[cfg(unix)]\nfn t() { assert_eq!(f(), 1); }",
+        "#[tokio::test]\nasync fn t() { assert_eq!(f(), 1); }",
+        "#[test]\nfn t() -> anyhow::Result<()> { assert_eq!(f(), 1); }",
+    ]
+    for src in variants:
+        t = one(src)
+        assert t.body_sha != base.body_sha, src
+        assert t.body_only_sha == base.body_only_sha, src
+    # Attribute boundaries count: two attributes are not one attribute.
+    assert one("#[test]\n#[a]\n#[b]\nfn t() {}").body_sha != one("#[test]\n#[a b]\nfn t() {}").body_sha
+    assert one("#[test]\n// note\nfn  t( ) { assert_eq!(f(), 1); }").body_sha == base.body_sha
+
+
 def test_lexer_keeps_raw_strings_chars_and_lifetimes():
     toks = tokenize("let s: &'static str = r#\"a \"q\" // x\"#; let c = '}'; // gone")
     kinds = [(t.kind, t.text) for t in toks]

@@ -18,7 +18,7 @@ use chrono::Utc;
 
 use tracing::{info, warn};
 
-use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use crate::core::trusty_tools_config::{TrustyToolsConfig, try_workspace_root};
 
 use super::architect::{ProtectedVerb, refuse_protected};
 use super::decommission_force::{
@@ -758,7 +758,8 @@ impl SessionManager {
         caller: Option<ManagedSessionId>,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
-        let managed_root = workspace_root(&config);
+        // #11821: fail closed on a broken install.toml (df-D1t).
+        let managed_root = try_workspace_root(&config)?;
         self.decommission_with_root(id, &managed_root, caller).await
     }
 
@@ -984,7 +985,8 @@ impl SessionManager {
         caller: Option<ManagedSessionId>,
         dirt_policy: ProvisioningDirt,
     ) -> Result<DecommissionReport, ManagedError> {
-        let managed_root = workspace_root(&TrustyToolsConfig::load());
+        // #11821: fail closed on a broken install.toml (df-D1t).
+        let managed_root = try_workspace_root(&TrustyToolsConfig::load())?;
         self.decommission_with_root_checked(id, &managed_root, caller, true, dirt_policy)
             .await
     }
@@ -1021,7 +1023,8 @@ impl SessionManager {
         id: &ManagedSessionId,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
-        let managed_root = workspace_root(&config);
+        // #11821: fail closed on a broken install.toml (df-D1t).
+        let managed_root = try_workspace_root(&config)?;
         self.decommission_with_root_checked(
             id,
             &managed_root,

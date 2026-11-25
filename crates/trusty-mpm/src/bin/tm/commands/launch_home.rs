@@ -104,7 +104,8 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
 /// What: `provision_for_spawn_at` under `FrameworkPaths::under(home)`; with no
 /// home it keeps `provision_for_spawn`, which reports the unresolvable home.
 /// Then [`trusty_mpm::core::launch_policy::provision_settings`] under the same
-/// root, which never fails the launch; `profile` is the launch's resolved
+/// root, which fails the launch only on a broken `install.toml` (#11821
+/// df-D1w); `profile` is the launch's resolved
 /// profile, which decides whether the #8992 skill and tool parts apply.
 /// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
 /// `launch_files_add_no_settings_without_an_owner`; the `--settings` token
@@ -126,10 +127,11 @@ pub(crate) fn launch_files(
         .map_err(|err| anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}"))?;
     // #8988: the owner MCP policy; a failure is a printed notice, never a refusal.
     // #8992: plus the skill and tool parts for a PM `profile`.
+    // #11821: except a broken install.toml, which refuses the launch (df-D1w).
     let settings = match &root {
         Some(root) => provision_settings(root, workspace, config_dir, profile),
         None => provision_settings_default(workspace, config_dir, profile),
-    };
+    }?;
     Ok(trusty_mpm::core::launch_policy::LaunchFiles {
         mcp_config,
         settings: settings.file,
