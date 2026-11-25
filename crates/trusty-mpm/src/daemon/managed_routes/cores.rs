@@ -233,11 +233,14 @@ pub(crate) async fn send_core(
         Ok(r) => r.tmux_name,
         Err(_) => return not_found(id_str),
     };
-    match mgr.send_input(&id, &req.text).await {
-        Ok(()) => RouteOutcome::ok(&SendInputResponse {
-            sent: true,
-            tmux_name,
-        }),
+    // #11796: the same input-box gate as MCP `session_send`; a send that was
+    // refused or not delivered is a 409, never `sent: true`.
+    match mgr.send_input_observed(&id, &req.text).await {
+        Ok(submit) => {
+            let body = SendInputResponse::from_submit(submit, tmux_name);
+            let status = if submit.delivered() { 200 } else { 409 };
+            RouteOutcome::json(status, &body)
+        }
         Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
