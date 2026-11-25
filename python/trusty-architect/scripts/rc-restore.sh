@@ -35,12 +35,12 @@ restore_one() {
     log "rc-restore FAILED: no such session"; echo "$s failed no such session"; return 1
   fi
   local cmd st cap
-  cmd=$(tmux display -p -t "$t" '#{pane_current_command}')
+  cmd=$(tmux display -p -t "=$s:" '#{pane_current_command}')
   case "$cmd" in
     bash|zsh|sh|fish|dash|ksh|-*) log "rc-restore SKIP: foreground is $cmd"
       echo "$s skipped foreground is $cmd"; return 2 ;;
   esac
-  cap=$(tmux capture-pane -t "$t" -p)
+  cap=$(tmux capture-pane -t "=$s:" -p)
   if printf '%s\n' "$cap" | grep -q 'esc to interrupt'; then
     log "rc-restore SKIP: busy"; echo "$s skipped busy"; return 2
   fi

@@ -21,11 +21,11 @@ sleep 3
 for _ in 1 2 3 4 5; do
   _rc_dialog || { sleep 1; continue; }
   if _rc_cap | grep -q '❯.*Disconnect this session'; then
-    _rc_tmux send-keys -t "$t" Enter; sleep 3
+    _rc_tx send-keys Enter; sleep 3
     if _rc_active; then log "rc-disconnect FAILED: still active"; echo "$s failed still active"; exit 1; fi
     log "rc-disconnect: RC off"; echo "$s disconnected"; exit 0
   fi
-  _rc_tmux send-keys -t "$t" Down; sleep 1
+  _rc_tx send-keys Down; sleep 1
 done
-_rc_tmux send-keys -t "$t" Escape
+_rc_tx send-keys Escape
 log "rc-disconnect FAILED: no Disconnect option"; echo "$s failed no disconnect option"; exit 1

@@ -87,32 +87,32 @@ if [ -n "$IL" ]; then
   OWNER=$(python3 "$SUPERVISOR_DIR/scripts/architect_config.py" owner-name 2>>"$L") || { log "IL-CONFIG local/architect.json"; exit 1; }
 fi
 # After a reboot tm recreates the tmux sessions at a bare shell: skip /exit and launch.
-if [ "$(tmux display -p -t "$t" '#{pane_current_command}')" = zsh ]; then
+if [ "$(tmux display -p -t "=$s:" '#{pane_current_command}')" = zsh ]; then
   log "already at shell"
 else
 st=$(python3 "$SUPERVISOR_DIR/scripts/input-state.py" "$t" | awk '{print $2}')
 case "$st" in empty|suggestion) ;; *) log "SKIP input=$st"; exit 1 ;; esac
-tmux send-keys -t "$t" -l '/exit'; sleep 1; tmux send-keys -t "$t" Enter
+tmux send-keys -t "=$s:" -l '/exit'; sleep 1; tmux send-keys -t "=$s:" Enter
 ok=0
 for i in $(seq 1 20); do
   sleep 2
-  [ "$(tmux display -p -t "$t" '#{pane_current_command}')" = zsh ] && { ok=1; break; }
-  if tmux capture-pane -t "$t" -p | grep -q '❯ 1. Exit and stop tasks'; then
-    if [ $STOP = 1 ]; then tmux send-keys -t "$t" Enter
+  [ "$(tmux display -p -t "=$s:" '#{pane_current_command}')" = zsh ] && { ok=1; break; }
+  if tmux capture-pane -t "=$s:" -p | grep -q '❯ 1. Exit and stop tasks'; then
+    if [ $STOP = 1 ]; then tmux send-keys -t "=$s:" Enter
     else log "STOPPED: background work running; rerun with --stop-tasks or Esc"; exit 1; fi
   fi
 done
-[ $ok = 1 ] || { log "EXIT-FAILED: $(tmux capture-pane -t "$t" -p | grep -v '^\s*$' | tail -3 | tr '\n' '|')"; exit 1; }
+[ $ok = 1 ] || { log "EXIT-FAILED: $(tmux capture-pane -t "=$s:" -p | grep -v '^\s*$' | tail -3 | tr '\n' '|')"; exit 1; }
 log "exited"
 fi
-tmux send-keys -t "$t" -l 'tm'; tmux send-keys -t "$t" Enter
+tmux send-keys -t "=$s:" -l 'tm'; tmux send-keys -t "=$s:" Enter
 ok=0
 for i in $(seq 1 40); do
   sleep 3
-  c=$(tmux capture-pane -t "$t" -p)
+  c=$(tmux capture-pane -t "=$s:" -p)
   # tm may restore the prior conversation, which scrolls the 'Claude Code' banner away:
   # a non-shell foreground process with a prompt line counts as launched.
-  [ "$(tmux display -p -t "$t" '#{pane_current_command}')" != zsh ] && echo "$c" | grep -q '^❯' && { ok=1; break; }
+  [ "$(tmux display -p -t "=$s:" '#{pane_current_command}')" != zsh ] && echo "$c" | grep -q '^❯' && { ok=1; break; }
 done
 [ $ok = 1 ] || { log "LAUNCH-TIMEOUT"; exit 1; }
 sleep 3; log "launched"
@@ -136,17 +136,17 @@ send_long() {
   while [ ${#rest} -gt 300 ]; do
     piece=${rest:0:300}; piece=${piece% *}
     [ -n "$piece" ] && [ "$piece" != "${rest:0:300}" ] || piece=${rest:0:300}
-    _rc_tmux send-keys -t "$t" -l "$piece"; rest=${rest:${#piece}}; sleep 1
+    _rc_tx send-keys -l "$piece"; rest=${rest:${#piece}}; sleep 1
   done
-  _rc_tmux send-keys -t "$t" -l "$rest"
+  _rc_tx send-keys -l "$rest"
   for i in $(seq 1 "$RC_ECHO_TRIES"); do
     sleep "$RC_ECHO_SLEEP"
     box=$(_rc_box); box=${box#"typed | "}
-    if [ ${#box} -ge 40 ] && [ "${line#"$box"}" != "$line" ]; then _rc_tmux send-keys -t "$t" Enter; return 0; fi
+    if [ ${#box} -ge 40 ] && [ "${line#"$box"}" != "$line" ]; then _rc_tx send-keys Enter; return 0; fi
   done
   box=$(_rc_box); box=${box#"typed | "}
   log "NOT-ECHOED: IL resume (input: $box)"
-  [ -n "$box" ] && [ "${line#"$box"}" != "$line" ] && _rc_tmux send-keys -t "$t" C-u
+  [ -n "$box" ] && [ "${line#"$box"}" != "$line" ] && _rc_tx send-keys C-u
   return 1
 }
 if [ -n "$IL" ]; then
