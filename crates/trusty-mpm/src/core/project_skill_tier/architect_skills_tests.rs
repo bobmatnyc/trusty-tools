@@ -324,7 +324,8 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
+            // #9457: `fleet init` names when it starts the dashboard on macOS.
+            "908deda6a43c699d7c2d355c3cb0fbfbb64d33d12b6117915aa49e14abc4b0c7",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first

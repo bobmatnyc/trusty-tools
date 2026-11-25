@@ -3,7 +3,7 @@ name: architect-dashboard
 description: Architect skill. Load at the end of every pass that changed a session, goal or owner item, when the owner says "dashboard" (terminal or Remote Control), when an owner write from the dashboard page waits, or when the dashboard is set up on a new host. Covers the served page, the data model, the per-pass update, the answer flow, the owner controls and the technical level of item text. Architect only.
 user-invocable: true
 metadata:
-  version: "0.3.2"
+  version: "0.3.3"
 category: monitoring
 tags: [architect, dashboard, owner, store]
 effort: medium
@@ -254,10 +254,15 @@ terminal:
 
 ## New installation
 
-`tm fleet init` seeds the server, the page and the store scripts. Start the
-server with `python3 scripts/dashboard-serve.py` (it refuses a busy port), set
-`owner_name` and, for a tailnet link, `tailnet_url` in `local/architect.json`.
-Seed `goals` from `local/goals.md` and `sessions` from the first full poll.
+`tm fleet init` seeds the page and the store scripts and, on macOS, tries to
+start `scripts/dashboard-serve.py` under a LaunchAgent. It reports `skipped` or
+`failed` and starts nothing with `--no-launch`, off macOS, when `$HOME` is not
+your real login home, when another program holds the port, when a running
+dashboard needs `--dashboard-takeover`, or when the port cannot be checked or
+the agent will not load. Then start it by hand with
+`python3 scripts/dashboard-serve.py` (it refuses a busy port). Set `owner_name`
+and, for a tailnet link, `tailnet_url` in `local/architect.json`. Seed `goals`
+from `local/goals.md` and `sessions` from the first full poll.
 
 ## Owner writes from the page
 
