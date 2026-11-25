@@ -61,10 +61,40 @@ const LIBTEST_VALUE_OPTS: &[&str] = &[
 /// What: the program word is `cargo` (any path), optionally after `env` and
 /// `KEY=value` words; a `+toolchain` and global options may precede the `test`
 /// (or `t`) subcommand. `false` for anything else — the check never runs on a
-/// command it cannot read.
+/// command it cannot read; [`hides_a_cargo_test`] says when that is worth a
+/// notice.
 /// Test: `only_an_unfiltered_cargo_test_is_checked`.
 #[must_use]
 pub fn wants_empty_target_check(argv: &[String]) -> bool {
+    direct_cargo_test(argv).is_some_and(|rest| !requests_filter(&rest))
+}
+
+/// Whether `argv` may run a `cargo test` that is not the direct command —
+/// `sh -c '… cargo test …'`, `bash -c`, `env -S` — so the empty-target check
+/// cannot read its filter and does not run (#11661).
+///
+/// What: `false` for a direct `cargo test`, filtered or not. Otherwise
+/// `true` when the argv, split on whitespace and shell punctuation, holds a
+/// `cargo` word followed later by `test`, or directly by `t`.
+/// Test: `a_wrapped_cargo_test_is_named_as_unreadable`.
+#[must_use]
+pub fn hides_a_cargo_test(argv: &[String]) -> bool {
+    if direct_cargo_test(argv).is_some() {
+        return false;
+    }
+    let words: Vec<&str> = argv
+        .iter()
+        .flat_map(|w| w.split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c)))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().enumerate().any(|(i, w)| {
+        std::path::Path::new(w).file_name() == Some("cargo".as_ref())
+            && (words.get(i + 1) == Some(&"t") || words[i + 1..].contains(&"test"))
+    })
+}
+
+/// The words after `test` when `argv` is a direct `cargo test`.
+fn direct_cargo_test(argv: &[String]) -> Option<Vec<&str>> {
     let mut words = argv.iter().map(String::as_str).peekable();
     while let Some(&w) = words.peek() {
         if w == "env" || (w.contains('=') && !w.starts_with('-')) {
@@ -77,26 +107,24 @@ pub fn wants_empty_target_check(argv: &[String]) -> bool {
         .next()
         .is_some_and(|w| std::path::Path::new(w).file_name() == Some("cargo".as_ref()));
     if !is_cargo {
-        return false;
+        return None;
     }
     // A toolchain and cargo's global options come before the subcommand.
-    let mut found_test = false;
     while let Some(w) = words.next() {
         if w.starts_with('+') {
             continue;
         }
         if w == "test" || w == "t" {
-            found_test = true;
-            break;
+            return Some(words.collect());
         }
         if !w.starts_with('-') {
-            return false;
+            return None;
         }
         if CARGO_VALUE_OPTS.contains(&w) {
             words.next();
         }
     }
-    found_test && !requests_filter(&words.collect::<Vec<_>>())
+    None
 }
 
 /// Whether the words after `cargo test` carry a test filter.
@@ -182,8 +210,12 @@ impl EmptyTargetScan {
     }
 
     /// Feed one output line, from stdout or stderr, without its newline.
+    ///
+    /// #11661: ANSI colour codes (`CARGO_TERM_COLOR=always`) are stripped
+    /// first, so a coloured `Running` line still names its target.
     pub fn line(&mut self, line: &str) {
-        let trimmed = line.trim();
+        let clean = strip_ansi(line);
+        let trimmed = clean.trim();
         if let Some(target) = trimmed
             .strip_prefix("Running ")
             .or_else(|| trimmed.strip_prefix("Doc-tests "))
@@ -208,6 +240,29 @@ impl EmptyTargetScan {
     pub fn empty_targets(&self) -> &[String] {
         &self.empty
     }
+}
+
+/// `line` without its ANSI escape sequences.
+///
+/// What: a CSI sequence (`ESC [` … final byte `@`..=`~`) is dropped whole; any
+/// other `ESC` is dropped alone.
+fn strip_ansi(line: &str) -> String {
+    let esc = char::from(0x1b_u8);
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != esc {
+            out.push(c);
+        } else if chars.clone().next() == Some('[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -279,6 +334,39 @@ mod tests {
             scan.empty_targets().is_empty(),
             "{:?}",
             scan.empty_targets()
+        );
+    }
+
+    #[test]
+    fn a_wrapped_cargo_test_is_named_as_unreadable() {
+        let words = |v: &[&str]| v.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        for (cmd, want) in [
+            (words(&["sh", "-c", "cd x && cargo test -p y 2>&1"]), true),
+            (words(&["bash", "-c", "cargo t"]), true),
+            (words(&["env", "-S", "cargo test -p y"]), true),
+            (words(&["cargo", "test", "-p", "y"]), false),
+            (words(&["cargo", "test", "-p", "y", "some_name"]), false),
+            (words(&["sh", "-c", "cargo build -p y"]), false),
+            (words(&["cargo", "clippy"]), false),
+        ] {
+            assert_eq!(hides_a_cargo_test(&cmd), want, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn a_coloured_running_line_still_names_its_target() {
+        let esc = char::from(0x1b_u8);
+        let mut scan = EmptyTargetScan::new();
+        scan.line(&format!(
+            "{esc}[1m{esc}[92m     Running{esc}[0m unittests src/lib.rs (/t/deps/x-0123456789abcdef)"
+        ));
+        scan.line(&format!(
+            "test result: {esc}[32mok{esc}[0m. 0 passed; 0 failed; 0 ignored; 0 measured; \
+             9 filtered out; finished in 0.00s"
+        ));
+        assert_eq!(
+            scan.empty_targets(),
+            ["unittests src/lib.rs (/t/deps/x-0123456789abcdef) — 0 tests ran, 9 filtered out"]
         );
     }
 }

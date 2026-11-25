@@ -1829,3 +1829,56 @@ fn a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661() {
         "another checkout's fingerprints are cleared and the checkout named: {err}"
     );
 }
+
+/// #11661 (critic item 2): a leased command that wraps its `cargo test` in a
+/// shell cannot have its filter read, so the empty-target check does not run
+/// — and the lease says so on stderr instead of skipping it silently.
+#[test]
+fn a_wrapped_cargo_test_says_the_empty_target_check_did_not_run_11661() {
+    let home = home_with_ceiling(2, "");
+    let out = build_lease(home.path())
+        .args([
+            "--wait-secs",
+            "3",
+            "--",
+            "sh",
+            "-c",
+            "true cargo test -p widget",
+        ])
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains("empty-test-target check (#11661) did not run"),
+        "the skipped check is named: {err}"
+    );
+}
+
+/// #11661 (critic item 6): with no lease to take, a build that runs UNLEASED
+/// in a kept `CARGO_TARGET_DIR` still gets the stale-checkout guard.
+#[test]
+#[serial_test::serial(lease_processes)]
+fn an_unleased_build_in_a_kept_target_dir_is_still_guarded_11661() {
+    let home = home_with_ceiling(64, "");
+    std::fs::write(home.path().join(".trusty-mpm/build-slots"), "a file").expect("file");
+    let blocker = home.path().join("tmp-is-a-file");
+    std::fs::write(&blocker, "x").expect("file");
+    let kept = home.path().join("kept-target");
+    let fingerprint = kept.join("debug/.fingerprint/widget-0123456789abcdef");
+    std::fs::create_dir_all(&fingerprint).expect("fingerprint");
+    let out = build_lease(home.path())
+        .env("TMPDIR", blocker.join("sub"))
+        .env("TRUSTY_MPM_TEST_BUILD_SLOT_FALLBACK", blocker.join("store"))
+        .env("CARGO_TARGET_DIR", &kept)
+        .args(["--wait-secs", "3", "--", "true"])
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("UNLEASED"), "the build ran unleased: {err}");
+    assert!(
+        !fingerprint.exists(),
+        "an unrecorded checkout's fingerprints are cleared: {err}"
+    );
+}

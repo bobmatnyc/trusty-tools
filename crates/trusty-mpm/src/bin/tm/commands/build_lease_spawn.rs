@@ -13,7 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use trusty_mpm::core::build_lease::phase::{PHASE_POLL, Phase, PhaseTracker};
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotGuard};
 use trusty_mpm::core::build_lease::stale_guard::cargo_lock_held;
-use trusty_mpm::core::build_lease::test_summary::{EmptyTargetScan, wants_empty_target_check};
+use trusty_mpm::core::build_lease::test_summary::{
+    EmptyTargetScan, hides_a_cargo_test, wants_empty_target_check,
+};
 
 /// The exit code for a `cargo test` that exited 0 although a target ran no
 /// test with every test filtered out and no filter requested (`EX_DATAERR`,
@@ -89,6 +91,15 @@ pub(super) async fn spawn_and_wait(
     if let Some(dir) = target_dir {
         cmd.env("CARGO_TARGET_DIR", dir);
     }
+    // #11661: a wrapped `cargo test` is never skipped silently.
+    if hides_a_cargo_test(command) {
+        eprintln!(
+            "tm build-lease: the empty-test-target check (#11661) did not run — this command \
+             wraps its `cargo test` (a shell or `env -S`), so the lease cannot read its filter. \
+             A target that ran 0 tests will not fail this build; run `cargo test` directly \
+             under the lease to have it checked."
+        );
+    }
     let scan = wants_empty_target_check(command).then(|| {
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -129,11 +140,25 @@ pub(super) async fn spawn_and_wait(
                 let status = status?;
                 for reader in readers.drain(..) {
                     // #11661: bounded; a reader still running past it is dropped.
-                    let _ = tokio::time::timeout(DRAIN_BOUND, reader).await;
+                    if tokio::time::timeout(DRAIN_BOUND, reader).await.is_err() {
+                        eprintln!(
+                            "tm build-lease: the empty-test-target check (#11661) is \
+                             INCOMPLETE — output was still arriving {}s after the build \
+                             exited (a process it started holds the pipe), and the rest \
+                             was not read.",
+                            DRAIN_BOUND.as_secs()
+                        );
+                    }
                 }
+                // #11661: a poisoned scan still reports what it read.
                 let empty_targets = scan
                     .as_ref()
-                    .and_then(|s| s.lock().ok().map(|s| s.empty_targets().to_vec()))
+                    .map(|s| {
+                        s.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .empty_targets()
+                            .to_vec()
+                    })
                     .unwrap_or_default();
                 return Ok(RunOutcome { status, empty_targets });
             }
@@ -176,9 +201,9 @@ async fn forward(
         if writable {
             writable = to.write_all(&line).await.is_ok() && to.flush().await.is_ok();
         }
-        if let Ok(mut scan) = scan.lock() {
-            scan.line(String::from_utf8_lossy(&line).trim_end());
-        }
+        scan.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .line(String::from_utf8_lossy(&line).trim_end());
     }
 }
 
