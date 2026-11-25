@@ -258,6 +258,27 @@ scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py
 # row for each shipped script (scripts/architect_bundle_meta.py history
 # --from-repo records the live versions).
 # -- Re-sync, Phase 1: dashboard + Intent Ledger.
+# P1c (#10571 S1), from prototype a64108f (architect-target-2026-11-24): the usage ledger
+# and token watcher. usage.py and token_watch.py stage whole and are hand-merged into a
+# re-exporting entry point plus usage_calc.py / token_watch_rules.py (500-SLOC cap), which
+# have no prototype source. rc-lib.sh ships here because usage-probe.sh sources it.
+# fleet-poll-ledger.py is not shipped (#11540 keeps it as the Python shim).
+scripts/usage-probe.sh
+scripts/effort-send.sh
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/usage.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/token_watch.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/effort-governor.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/ctx_bar.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/statusline-tee.sh
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/rc-lib.sh
 # -- Re-sync, Phase 2: poller + PM relay.
 # -- Re-sync, Phase 3: the rest (generic and mixed scripts only).
 # -- Re-sync: tests for the rows above.
+# P1c (#10571 S1): each test reads ../scripts and drops its fleet-poll, ctx-watch and
+# alert_triage checks, which port with those scripts in S3.
+scripts/test_token_watch_lock.py	tests/test_token_watch_lock.py
+scripts/test_rc_lib.py	tests/test_rc_lib.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_usage.py	tests/test_usage.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_token_watch.py	tests/test_token_watch.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_effort_governor.py	tests/test_effort_governor.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_ctx_bar.py	tests/test_ctx_bar.py
