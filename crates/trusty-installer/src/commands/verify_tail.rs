@@ -800,7 +800,8 @@ pub fn run_verify_tail(selected: &[StableMember]) -> VerifyTailReport {
 /// Why: a piped/CI invocation (e.g. inside `curl | sh`) must not emit raw
 /// escape codes into a log file.
 /// What: `true` iff stdout is a TTY.
-/// Test: `tests::use_color_returns_bool`.
+/// Test: none; a one-line `IsTerminal` read whose value depends on the
+/// harness's fds.
 fn use_color() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
