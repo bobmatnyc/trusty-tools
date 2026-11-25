@@ -6,7 +6,9 @@
 //! happen only from a tm-registered checkout, so registration must never reach
 //! past the session's own project root.
 //! What: [`register_session_checkout`] writes one path-form row for the git
-//! root holding the session's directory, through the locked
+//! root holding the session's directory (the daemon's
+//! [`register_session_checkout_in`] stores a canonical managed clone by its
+//! GitHub URL, #11828), through the locked
 //! [`ProjectRegistry::register_unless_present`]; [`registered_checkout`] maps an
 //! `owner/repo` key back to that checkout. Both fail closed: every store error
 //! is returned, never read as "registered".
@@ -93,11 +95,46 @@ pub enum SessionRegistrationError {
 /// `session_start_second_start_leaves_the_bytes_alone`,
 /// `session_start_through_a_symlink_to_home_is_refused`,
 /// `session_start_in_an_old_tilde_record_checkout_is_the_same_repo_10604`,
-/// `session_start_name_collision_with_another_repo_is_name_taken_10604`.
+/// `session_start_name_collision_with_another_repo_is_name_taken_10604`,
+/// `client_registration_keeps_the_path_form_at_the_canonical_path_11828`.
 pub async fn register_session_checkout(
     registry_dir: &Path,
     cwd: &Path,
     home: Option<&Path>,
+) -> Result<SessionRegistration, SessionRegistrationError> {
+    // #11828: the client resolves its own repos root, so it never claims a URL.
+    register_checkout(registry_dir, cwd, home, None).await
+}
+
+/// [`register_session_checkout`] for the daemon: a canonical clone registers
+/// by its GitHub URL.
+///
+/// Why: #11828 — a path `repo_url` names no owner (the TUI lists it under
+/// `(local)`) and never matches a managed session's URL, so the row a `tm run`
+/// clone got showed 0 sessions.
+/// What: as [`register_session_checkout`], except the stored `repo_url` is
+/// `https://github.com/<owner>/<repo>` when the root's origin parses, its host
+/// is `github.com`, and the root is the same directory as
+/// `<repos_root>/<owner>/<repo>` ([`base_clone_path_in`](crate::core::repo_paths::base_clone_path_in)).
+/// Owner and repo keep the origin's spelling. Any other checkout keeps the
+/// path form.
+/// Test: `daemon_registers_a_canonical_clone_by_its_github_url_11828`,
+/// `daemon_keeps_the_path_form_off_the_canonical_clone_11828`.
+pub async fn register_session_checkout_in(
+    registry_dir: &Path,
+    cwd: &Path,
+    home: Option<&Path>,
+    repos_root: &Path,
+) -> Result<SessionRegistration, SessionRegistrationError> {
+    register_checkout(registry_dir, cwd, home, Some(repos_root)).await
+}
+
+/// Both entry points' work; `repos_root` enables the #11828 URL form.
+async fn register_checkout(
+    registry_dir: &Path,
+    cwd: &Path,
+    home: Option<&Path>,
+    repos_root: Option<&Path>,
 ) -> Result<SessionRegistration, SessionRegistrationError> {
     use crate::core::project_aliases::{find_git_root, git_dir_differs_from_common};
     // #10368: walk the real path, so a symlink cannot hide home or a parent.
@@ -121,7 +158,10 @@ pub async fn register_session_checkout(
         Some(true) => return Ok(SessionRegistration::LinkedWorktree),
         None => return Err(SessionRegistrationError::UnverifiedRoot(root)),
     }
-    let repo_url = root.to_string_lossy().into_owned();
+    // #11828: a canonical managed clone is stored by its GitHub URL.
+    let repo_url = repos_root
+        .and_then(|repos_root| canonical_clone_url(&root, repos_root))
+        .unwrap_or_else(|| root.to_string_lossy().into_owned());
     let name = crate::core::project::name_from_path(&root);
     let project = session_project(&name, &repo_url);
     let key = super::project_key_from_repo_url(&repo_url);
@@ -155,6 +195,24 @@ pub async fn register_session_checkout(
         name: kept.name,
         root,
     })
+}
+
+/// `https://github.com/<owner>/<repo>` when `root` is the managed clone of its
+/// own GitHub origin under `repos_root`, else `None` (#11828).
+///
+/// What: no origin, an origin that does not parse, a host other than
+/// `github.com`, or a root that is not `<repos_root>/<owner>/<repo>` is `None`:
+/// the path form, which is the right row for such a checkout, not a failure.
+/// The URL is rebuilt from the parsed parts, never the raw origin (#9124).
+fn canonical_clone_url(root: &Path, repos_root: &Path) -> Option<String> {
+    let origin = trusty_common::github_path::derive_remote_repo(root).ok()?;
+    if !origin.host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let clone =
+        crate::core::repo_paths::base_clone_path_in(repos_root, &origin.owner, &origin.repo);
+    trusty_common::identifies_same_path(root, &clone)
+        .then(|| format!("https://github.com/{}/{}", origin.owner, origin.repo))
 }
 
 /// `git -C root rev-parse --show-toplevel`, canonicalized; `None` on any failure.

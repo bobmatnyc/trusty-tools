@@ -515,6 +515,30 @@ fn resolver_session_without_repo_url_ignores_a_sibling_path() {
     assert!(resolve_session_project(&session_in(&sibling.join("sub")), &projects).is_none());
 }
 
+/// #11828: a no-repo session (a boot-adopted `tm-*` pane) in a canonical clone
+/// binds to that clone's URL-form row, from the clone and from a worktree of
+/// it; a clone of another repo does not. Before the fix only path-form rows
+/// were compared, so the row showed 0 sessions once registered by URL.
+#[test]
+fn resolver_session_without_repo_url_binds_a_canonical_clone_to_its_url_row_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repos_root = tmp.path().join("repos");
+    let clone = repos_root.join("acme").join("widget");
+    let tree = clone.join(".worktrees").join("x");
+    let other = repos_root.join("acme").join("other");
+    std::fs::create_dir_all(&tree).expect("mkdir");
+    std::fs::create_dir_all(&other).expect("mkdir");
+    let projects = vec![proj("widget", "https://github.com/Acme/Widget")];
+    let bind = |dir: &std::path::Path| {
+        resolve_by_checkout_path_in(&session_in(dir), &projects, None, || repos_root.clone())
+            .map(|p| p.name.clone())
+    };
+
+    assert_eq!(bind(&clone).as_deref(), Some("widget"));
+    assert_eq!(bind(&tree).as_deref(), Some("widget"));
+    assert_eq!(bind(&other), None);
+}
+
 #[test]
 fn resolver_session_unregistered_url_returns_none() {
     let projects = vec![proj("trusty-tools", "https://github.com/org/trusty-tools")];

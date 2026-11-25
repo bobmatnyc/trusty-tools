@@ -6,7 +6,7 @@
 //! daemon without a `projects.json` row, so `tm secrets assign` answered
 //! "project not registered" for a project with a live session.
 //! What: [`register_seen_session_project`] runs
-//! [`register_session_checkout`] against the daemon's own registry and logs the
+//! [`register_session_checkout_in`] against the daemon's own registry and logs the
 //! outcome; [`register_adopted_sessions`] applies it to the tm-launched tmux
 //! sessions one discovery scan adopted (never a native `claude` cwd, D50). Neither ever fails the session: a failure is a warn
 //! line naming the cause, and the session stays registered.
@@ -16,15 +16,16 @@ use std::path::{Path, PathBuf};
 
 use crate::core::session::SessionHost;
 use crate::daemon::state::DaemonState;
-use crate::project::{SessionRegistration, SessionRegistrationError, register_session_checkout};
+use crate::project::{SessionRegistration, SessionRegistrationError, register_session_checkout_in};
 
 /// Register the git checkout holding `dir` as a project, from the daemon.
 ///
 /// Why: #10368 — the daemon is the one place every session start and every
 /// adopted running session passes through, so registering here covers the
 /// paths the client-side `tm connect` hook does not.
-/// What: [`register_session_checkout`] against
-/// `<framework_root>/project-registry` with the process home as the D50 guard.
+/// What: [`register_session_checkout_in`] against
+/// `<framework_root>/project-registry` with the process home as the D50 guard
+/// and the daemon's repos root, so a canonical clone stores its GitHub URL.
 /// A new row is logged at info; a row kept for another clone at warn (the issue's
 /// "reported, not silently kept"); a directory outside any checkout or in a
 /// linked worktree at debug; every error at warn with its cause. The result is
@@ -37,7 +38,11 @@ pub async fn register_seen_session_project(
 ) -> Result<SessionRegistration, SessionRegistrationError> {
     let registry_dir = crate::project::registry_data_dir_under(framework_root);
     let home = dirs::home_dir();
-    let result = register_session_checkout(&registry_dir, dir, home.as_deref()).await;
+    // #11828: the daemon's repos root decides whether a checkout is canonical.
+    // #11821: defaulting resolver kept — a lookup that writes nothing under the root.
+    let repos_root = crate::core::repo_paths::repos_root();
+    let result =
+        register_session_checkout_in(&registry_dir, dir, home.as_deref(), &repos_root).await;
     match &result {
         Ok(SessionRegistration::Registered { name }) => {
             tracing::info!(project = %name, dir = %dir.display(), "#10368: registered the session's checkout as a project");

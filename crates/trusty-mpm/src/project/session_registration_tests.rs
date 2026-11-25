@@ -365,3 +365,106 @@ async fn session_start_name_collision_with_another_repo_is_name_taken_10604() {
         );
     }
 }
+
+/// The one row `registry` holds.
+fn only_row(registry: &Path) -> Project {
+    let mut rows = crate::project::store::read_projects(registry).expect("read registry");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    rows.remove(0)
+}
+
+/// #11828: the daemon registers a checkout at `<repos_root>/<owner>/<repo>`
+/// whose origin is that GitHub repo by its URL, keeping the origin's spelling.
+/// Before the fix every checkout stored its path, so the TUI listed a `tm run`
+/// clone under `(local)`.
+#[tokio::test]
+async fn daemon_registers_a_canonical_clone_by_its_github_url_11828() {
+    for (origin, url) in [
+        (
+            "git@github.com:acme/widget.git",
+            "https://github.com/acme/widget",
+        ),
+        (
+            "https://github.com/Acme/Widget.git",
+            "https://github.com/Acme/Widget",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry");
+        let repos_root = tmp.path().join("repos");
+        let root = checkout(&repos_root.join("acme").join("widget"), origin);
+
+        let outcome = register_session_checkout_in(&registry, &root, None, &repos_root)
+            .await
+            .expect("register");
+
+        assert_eq!(
+            outcome,
+            SessionRegistration::Registered {
+                name: "widget".into()
+            },
+            "{origin}"
+        );
+        let row = only_row(&registry);
+        assert_eq!(row.repo_url, url, "{origin}");
+        assert_eq!(row.project_key.as_deref(), Some("acme/widget"), "{origin}");
+    }
+}
+
+/// #11828: a checkout off the canonical path, one on another host, and one
+/// with no origin keep the path form, and `tm secrets assign`'s lookup still
+/// finds the first.
+#[tokio::test]
+async fn daemon_keeps_the_path_form_off_the_canonical_clone_11828() {
+    for (dir, origin) in [
+        ("elsewhere/widget", Some("git@github.com:acme/widget.git")),
+        ("acme/widget", Some("git@gitlab.com:acme/widget.git")),
+        ("acme/widget", None),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry");
+        let repos_root = tmp.path().join("repos");
+        let root = match origin {
+            Some(origin) => checkout(&repos_root.join(dir), origin),
+            None => {
+                std::fs::create_dir_all(repos_root.join(dir)).expect("mkdir");
+                git(&repos_root.join(dir), &["init", "-q"]);
+                repos_root.join(dir).canonicalize().expect("canonical")
+            }
+        };
+
+        register_session_checkout_in(&registry, &root, None, &repos_root)
+            .await
+            .expect("register");
+
+        assert_eq!(
+            only_row(&registry).repo_url,
+            root.to_string_lossy(),
+            "{dir} {origin:?}"
+        );
+        if dir.starts_with("elsewhere") {
+            assert_eq!(
+                registered_checkout(&registry, "acme/widget").expect("resolves"),
+                root
+            );
+        }
+    }
+}
+
+/// #11828: the client (`tm connect`) keeps the path form even at the canonical
+/// path; only the daemon, which owns the repos root, stores the URL.
+#[tokio::test]
+async fn client_registration_keeps_the_path_form_at_the_canonical_path_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+    let root = checkout(
+        &tmp.path().join("repos").join("acme").join("widget"),
+        "git@github.com:acme/widget.git",
+    );
+
+    register_session_checkout(&registry, &root, None)
+        .await
+        .expect("register");
+
+    assert_eq!(only_row(&registry).repo_url, root.to_string_lossy());
+}
