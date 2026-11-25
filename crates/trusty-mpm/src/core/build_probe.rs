@@ -225,10 +225,13 @@ pub(crate) fn thread_leader(kind: Option<sysinfo::ThreadKind>, parent: Option<u3
 /// leader has a row of its own is dropped. When the leader row is absent
 /// (sysinfo keeps the tasks of a leader whose stat read failed), the leader pid
 /// stands in once, with no parent and the threads' CPU summed: counting the
-/// build once is the fail-closed choice, as in #10260. Process rows pass
-/// through unchanged and in order.
+/// build once is the fail-closed choice, as in #10260. The stand-in takes the
+/// name and exe of a compiler-named thread when any has one, so a first thread
+/// named `opt cgu.00` cannot hide the build. Process rows pass through
+/// unchanged and in order.
 /// Test: `a_lone_threaded_compiler_is_one_group`,
-/// `threads_of_a_missing_leader_count_it_once`.
+/// `threads_of_a_missing_leader_count_it_once`,
+/// `a_missing_leader_keeps_its_compiler_identity`.
 fn process_rows(
     rows: impl IntoIterator<Item = (ProcessSnapshot, Option<u32>)>,
 ) -> Vec<ProcessSnapshot> {
@@ -244,7 +247,14 @@ fn process_rows(
             None => out.push(snap),
             Some(leader) if processes.contains(&leader) => {}
             Some(leader) => match out.iter_mut().find(|p| p.pid == leader) {
-                Some(stand_in) => stand_in.cpu_pct += snap.cpu_pct,
+                Some(stand_in) => {
+                    stand_in.cpu_pct += snap.cpu_pct;
+                    // #11867: any compiler-named thread gives the stand-in its identity.
+                    if !is_compiler_process(stand_in) && is_compiler_process(&snap) {
+                        stand_in.name = snap.name;
+                        stand_in.exe = snap.exe;
+                    }
+                }
                 None => out.push(ProcessSnapshot {
                     pid: leader,
                     parent: None,
@@ -725,6 +735,25 @@ mod tests {
         assert_eq!(groups[0].root_pid, 11);
         assert_eq!(groups[0].ancestry, vec![11]);
         assert!((groups[0].cpu_pct - 50.0).abs() < f32::EPSILON);
+    }
+
+    /// #11867: a missing leader whose first thread row is not compiler-named
+    /// (an LLVM worker such as `opt cgu`) still stands in as the compiler a
+    /// later thread row names, so the build is counted once, not dropped.
+    #[test]
+    fn a_missing_leader_keeps_its_compiler_identity() {
+        let table = vec![
+            (proc_row(10, None, "zsh", 0.0), None),
+            (proc_row(12, Some(11), "opt cgu.00", 30.0), Some(11)),
+            (proc_row(13, Some(11), "rustc", 20.0), Some(11)),
+            (proc_row(14, Some(11), "opt cgu.01", 10.0), Some(11)),
+        ];
+        let groups = build_groups(&process_rows(table));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].root_pid, 11);
+        assert_eq!(groups[0].compilers, vec!["rustc".to_string()]);
+        assert_eq!(groups[0].ancestry, vec![11]);
+        assert!((groups[0].cpu_pct - 60.0).abs() < 1e-3);
     }
 
     /// The group carries the pid chain the lease census excludes leased builds by.
