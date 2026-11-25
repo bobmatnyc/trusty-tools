@@ -63,7 +63,9 @@ pub struct PalaceCreateResult {
 }
 
 /// Why a create was refused. Nothing was written.
+// #9273: a new refusal kind must not break a downstream exhaustive match.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PalaceCreateError {
     /// The request cannot name this palace: no `cwd`, an untrustworthy pin,
     /// no project directory, or a name that is not the project's palace.
