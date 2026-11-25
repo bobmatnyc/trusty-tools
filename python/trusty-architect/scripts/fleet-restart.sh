@@ -12,8 +12,8 @@
 # Precondition: every session was checkpointed with /tm-session-pause and the
 # snapshot verified. Run it detached (nohup), because it kills its caller.
 # kill-server takes down EVERY session on the socket, so the script refuses to
-# run while a session outside its list is live (2026-09-23: an unlisted PM was
-# lost uncheckpointed). Pass --force first to override after checkpointing it.
+# run while a session outside its list is live (an unlisted PM would be lost
+# uncheckpointed). Pass --force first to override after checkpointing it.
 # --rc (off by default; never passed implicitly, see #10571) sends /rename <session> then /remote-control <session> (rc-lib.sh) before /tm-session-resume, for a restart after a
 # Claude account change (Remote Control disconnects on the account switch).
 # --wait-server SECONDS: after kill-server, do NOT let the daemon start the new

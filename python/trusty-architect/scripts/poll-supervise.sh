@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # poll-supervise.sh [poller args] — run fleet-poll.py as a child and restart it when it hangs.
-# Why: D22 (an owner ruling; see #10571). On 2026-10-21 the poller sat in select/poll 02:58Z-07:01Z with
-# stale state and nothing noticed. A hung process cannot restart itself; this wrapper is the
+# Why: a hung poller sat in select/poll for hours with stale state and went unnoticed (see #10571).
+# A hung process cannot restart itself; this wrapper is the
 # independent watcher. start-fleet-poll.sh runs it as the tm-architect-poll session command.
 # What: starts the poller, then every POLL_SUPERVISE_TICK s checks the newest of the state-file
 # mtime and the child start time. Older than POLL_STALE_S (600) => SIGTERM, then SIGKILL, to the
