@@ -335,14 +335,6 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             "architect-improver",
             "f55bd138d925ae6866d42c8c5dc8cfaf759aef8049012ba6914c48c1a59bf631",
         ),
-        (
-            "architect-drift-guard",
-            "228a8d37f9b0a73de888918c4e2fb5bf9b4b3f055f69d5861d1d9b5713c42deb",
-        ),
-        (
-            "architect-improver",
-            "f55bd138d925ae6866d42c8c5dc8cfaf759aef8049012ba6914c48c1a59bf631",
-        ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
