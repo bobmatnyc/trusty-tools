@@ -1,23 +1,20 @@
 //! #10063 PR 1: store failure paths in both formats. A refused write leaves
 //! every byte as it was (DOC-82 LDG-2.8.1, LDG-2.8.4, LDG-3.2).
 
+mod common;
+
 use std::fs;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use common::{no_secret, snapshot};
 use serde_json::{Value, json};
 use trusty_architect::dashboard::{
     DashError, DeleteArchive, Format, ListQuery, Op, Removed, SchemaDir, SchemaMode, Store,
 };
 
 type R = Result<(), Box<dyn std::error::Error>>;
-
-/// A test scanner: nothing is secret-shaped (#10063 PR 2: a store with no
-/// scan refuses writes).
-fn no_secret(_: &str) -> Option<String> {
-    None
-}
 
 const FORMATS: [Format; 2] = [Format::Dir, Format::Jsonl];
 
@@ -38,24 +35,6 @@ impl DeleteArchive for Refuse {
             removed.len()
         )))
     }
-}
-
-/// Every file under `root` with its bytes, `.lock` excluded.
-fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.file_name().is_some_and(|n| n != ".lock") {
-                out.push((path.clone(), fs::read(&path).unwrap_or_default()));
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 fn seeded(root: &Path, format: Format) -> Result<Store, DashError> {

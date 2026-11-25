@@ -7,6 +7,8 @@
 //! byte for byte. Regenerate the goldens with the command in
 //! `tests/fixtures/parity/README.md`; never edit them by hand.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,18 +33,7 @@ fn corpus() -> Result<Value, Box<dyn std::error::Error>> {
 
 /// Compares `rows` with the golden file line by line, naming the first diff.
 fn assert_golden(name: &str, rows: &[String]) -> TestResult {
-    let golden = fs::read_to_string(fixture_dir().join(name))?;
-    let got: String = rows.iter().map(|r| format!("{r}\n")).collect();
-    for (i, (g, r)) in golden.lines().zip(got.lines()).enumerate() {
-        assert_eq!(
-            r,
-            g,
-            "{name} line {}: Rust (left) differs from Python (right)",
-            i + 1
-        );
-    }
-    assert_eq!(got, golden, "{name}: row count or trailing bytes differ");
-    Ok(())
+    common::assert_golden_in(&fixture_dir(), name, rows)
 }
 
 fn str_of(v: &Value) -> &str {

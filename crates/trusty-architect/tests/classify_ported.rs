@@ -15,8 +15,11 @@
 //! events, host load, band, rc-restore runs) are A3 work and are not here; the
 //! wake tests' classifier halves are, against `input_state_for_send`.
 
+mod common;
+
 use std::path::Path;
 
+use common::kinds;
 use trusty_architect::classify::{
     Alert, BoxReading, CTX_HIGH, CTX_WARN, DedupState, PaneState, alert, dedup, evaluate,
     fleet_plan_alerts, parse_pane,
@@ -121,12 +124,6 @@ fn ask_user() -> String {
     ]
     .join("\n")
         + "\n"
-}
-
-fn kinds(alerts: &[Alert]) -> Vec<&str> {
-    let mut k: Vec<&str> = alerts.iter().map(|a| a.kind.as_str()).collect();
-    k.sort_unstable();
-    k
 }
 
 fn run(
