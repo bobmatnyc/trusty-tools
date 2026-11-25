@@ -1,4 +1,4 @@
-# 0076. Features with semantic options ship a pre-canned default, the CLI is the only writer, and a selection test decides UI surfaces
+# 0077. Features with semantic options ship a pre-canned default, the CLI is the only writer, and a selection test decides UI surfaces
 
 - **Status:** Proposed
 - **Date:** 2026-11-10
