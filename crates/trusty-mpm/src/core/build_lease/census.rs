@@ -464,18 +464,41 @@ mod tests {
             "the spawned `rustc` must read as a compiler: {:?}",
             rows.iter().find(|r| r.pid == child.id())
         );
+        // #11863: census only the child and its real ancestors. Linux sysinfo
+        // lists each thread as a row, and the child's libtest thread reads
+        // `rustc` until it names itself, so a whole-table count can see two.
+        let by_pid: HashMap<u32, &ProcessSnapshot> = rows.iter().map(|r| (r.pid, r)).collect();
+        let mut lineage: Vec<ProcessSnapshot> = Vec::new();
+        let mut cursor = Some(child.id());
+        while let Some(row) = cursor.and_then(|pid| by_pid.get(&pid)) {
+            if lineage.len() >= MAX_HOPS || lineage.iter().any(|r| r.pid == row.pid) {
+                break;
+            }
+            lineage.push((*row).clone());
+            cursor = row.parent;
+        }
+        assert!(
+            lineage.iter().any(|r| r.pid == std::process::id()),
+            "the fake compiler must descend from this test process: {lineage:?}"
+        );
         let count = |groups: Vec<BuildGroup>| -> usize {
             groups
                 .iter()
                 .map(|g| g.compilers.iter().filter(|n| n.as_str() == "rustc").count())
                 .sum()
         };
-        let unleased = count(foreign_groups(&rows, &[]));
-        let leased = count(foreign_groups(&rows, &[holder(std::process::id(), None)]));
         assert_eq!(
-            unleased,
-            leased + 1,
-            "exactly this test's rustc is excluded by the lease"
+            count(foreign_groups(&lineage, &[])),
+            1,
+            "with no lease, this test's rustc is counted"
+        );
+        assert_eq!(
+            count(foreign_groups(
+                &lineage,
+                &[holder(std::process::id(), None)]
+            )),
+            0,
+            "a lease naming this test process excludes its rustc"
         );
     }
 
