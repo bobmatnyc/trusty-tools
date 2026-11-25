@@ -857,6 +857,56 @@ async fn a_launch_worktree_is_refused_when_the_ledger_cannot_record() {
     );
 }
 
+/// #11821: a broken `install.toml` under the ledger home refuses the launch
+/// worktree instead of recording it under `$HOME/.trusty-mpm`.
+///
+/// What: the scratch home's `install.toml` carries an unknown key. A scratch
+/// home is not the process home, so `TRUSTY_MPM_CONFIG_DIR` cannot mask it.
+/// Asserts `Err` naming `install.toml`, no worktree, no `<home>/.trusty-mpm`.
+/// Test: this is the test. RED under the lenient `WorktreeLedger::under_home`.
+#[tokio::test]
+async fn a_launch_worktree_is_refused_when_install_toml_is_broken() {
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".trusty-tools")).unwrap();
+    std::fs::write(
+        home.path().join(".trusty-tools/install.toml"),
+        "config_dir = \"/elsewhere\"\nbogus = 1\n",
+    )
+    .unwrap();
+
+    let err = provision_for_launch_gated(
+        origin,
+        &base,
+        live.path(),
+        true,
+        LaunchDir::OperatorCwd,
+        &session_id,
+        &empty_disk(),
+        Some(home.path()),
+    )
+    .await
+    .expect_err("a broken install.toml must refuse the launch worktree");
+
+    assert!(err.to_string().contains("install.toml"), "{err}");
+    assert!(
+        !expected_worktree(&base, &session_id).exists(),
+        "#11821: nothing may be created when the ledger has no location"
+    );
+    assert!(
+        !home.path().join(".trusty-mpm").exists(),
+        "#11821: no ledger may land under $HOME"
+    );
+}
+
 /// #8994: `tm launch --worktree` records the tree it creates.
 /// Test: this is the test.
 #[tokio::test]

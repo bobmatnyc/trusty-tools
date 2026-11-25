@@ -81,8 +81,19 @@ Resolution precedence for the workspace root is (#11821):
 4. the built-in default `~/trusty-mpm-projects`.
 
 A broken `install.toml` (bad TOML, an unknown key, a relative path) is an
-error: clone, delete and write paths refuse rather than fall back to the
-default.
+error. Clone and delete paths refuse rather than fall back to the default
+workspace root. For the config dir, not every writer refuses yet:
+
+- These writers refuse: the `pm_guard` trust-anchor floor (it denies every
+  write and names the file), the session store, the worktree ledger
+  (including the `tm launch --worktree` ledger in `managed_workspace`), and the
+  OAuth token store.
+- The build-lease store does not use `$HOME`'s store. It falls back to its
+  per-uid store under `/tmp`.
+- Every other writer still falls back to `$HOME` until #11821 row P3-f1.
+
+Fix or remove a broken `install.toml` from your own shell. A hooked session
+cannot write it, because it is a trust anchor.
 
 These settings are editable from the **trusty-console Config tab**
 (`/api/console/config/mpm`, backed by the `config_read` / `config_write` MCP

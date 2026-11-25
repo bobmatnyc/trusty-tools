@@ -810,4 +810,15 @@ fn a_broken_install_file_denies_every_write() {
         .expect("break install.toml");
     let reason = pm_verdict(&fx, "Write", write_input(&fx.cwd.join("a.txt"))).expect("denied");
     assert!(reason.contains("cannot locate the"), "{reason}");
+    // #11821: the deny names the file and how to recover from it.
+    let file = fx.home.join(".trusty-tools/install.toml");
+    assert!(
+        reason.contains(&format!("`{}` is broken or unreadable", file.display())),
+        "{reason}"
+    );
+    assert!(reason.contains("from your own shell"), "{reason}");
+    assert!(
+        reason.contains("a hooked session cannot write it"),
+        "{reason}"
+    );
 }

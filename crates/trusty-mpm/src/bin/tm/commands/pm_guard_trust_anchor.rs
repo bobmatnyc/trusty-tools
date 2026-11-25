@@ -301,7 +301,7 @@ fn decide(
     };
     let anchors = match Anchors::locate(home) {
         Ok(anchors) => anchors,
-        Err(path) => return Some(unlocatable_anchor_reason(&path)),
+        Err(path) => return Some(unlocatable_anchor_reason(&path, home)),
     };
     judge_writes(&anchors, &writes, cwd, home)
 }
@@ -667,7 +667,20 @@ fn unknown_home_reason() -> String {
 }
 
 /// The deny when an anchor's own location does not resolve.
-fn unlocatable_anchor_reason(path: &Path) -> String {
+///
+/// #11821: when that location is `install.toml` itself, the deny says how to
+/// recover, since no hooked session may write the file.
+/// Test: `a_broken_install_file_denies_every_write`.
+fn unlocatable_anchor_reason(path: &Path, home: &Path) -> String {
+    if path == trusty_common::install_paths::install_file_path(home) {
+        return format!(
+            "Trust-anchor write denied (#8878, #11821): `{0}` is broken or unreadable, so the \
+             guard cannot locate the trust anchors and refuses every write. Fix or remove `{0}` \
+             from your own shell, outside any hooked session: a hooked session cannot write it. \
+             {REMEDY}",
+            path.display()
+        );
+    }
     format!(
         "Trust-anchor write denied (#8878): `{}` does not resolve, so the guard cannot locate the \
          trust anchors and refuses every write. {REMEDY}",
