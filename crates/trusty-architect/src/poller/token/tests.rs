@@ -897,3 +897,62 @@ fn python_flock_on_the_lock_file_blocks_the_rust_writer() {
     assert!(blocked.is_err(), "Rust took the lock Python held");
     lock::acquire(&state, Duration::from_secs(1)).expect("free once Python exits");
 }
+
+/// #11826: the shadow reseeds its token state from the live one, and only
+/// under the live watcher's lock; a held lock refuses rather than reads.
+#[test]
+fn reseed_copies_the_live_state_under_its_lock() {
+    let d = tempfile::tempdir().expect("tmp");
+    let live = d.path().join("inbox").join(STATE_FILE);
+    let own = d.path().join("shadow").join(STATE_FILE);
+    let mut st = TokenState::default();
+    st.fired
+        .insert("tm-a|hit_low:main:2026112420".to_owned(), NOW);
+    save(&live, &st).expect("live");
+    save(&own, &TokenState::default()).expect("stale own");
+    let held = lock::acquire(&live, Duration::from_secs(1)).expect("live holder");
+    let err = reseed(&live, &own, Duration::from_millis(100)).expect_err("lock held");
+    assert!(err.to_string().starts_with("lock "), "{err}");
+    assert!(state::load(&own).expect("own").fired.is_empty());
+    drop(held);
+    reseed(&live, &own, Duration::from_secs(1)).expect("reseed");
+    assert_eq!(state::load(&own).expect("own"), st);
+    // No live state: the shadow keeps its own.
+    let gone = d.path().join("none").join(STATE_FILE);
+    reseed(&gone, &own, Duration::from_secs(1)).expect("absent live");
+    assert_eq!(state::load(&own).expect("own"), st);
+}
+
+/// #11826 review: a live file that cannot be read, or is not JSON, is an
+/// error and leaves the shadow's own state as it was; it never reads as an
+/// empty state (which would replay every token alert).
+#[test]
+fn reseed_fails_closed_and_keeps_its_own_state() {
+    let d = tempfile::tempdir().expect("tmp");
+    let own = d.path().join("shadow").join(STATE_FILE);
+    let mut st = TokenState::default();
+    st.fired.insert("tm-a|ctx_main:200k".to_owned(), NOW);
+    save(&own, &st).expect("own");
+    let wait = Duration::from_secs(1);
+    // Unreadable: the live path is a directory.
+    let unreadable = d.path().join("dir").join(STATE_FILE);
+    fs::create_dir_all(&unreadable).expect("mkdir");
+    match reseed(&unreadable, &own, wait) {
+        Err(StateError::Io { what, .. }) => assert!(what.starts_with("read "), "{what}"),
+        other => panic!("unreadable live state gave {other:?}"),
+    }
+    assert_eq!(state::load(&own).expect("own"), st);
+    // Garbage: a half-written file.
+    let garbage = d.path().join("inbox").join(STATE_FILE);
+    fs::create_dir_all(garbage.parent().expect("parent")).expect("mkdir");
+    fs::write(&garbage, "{\"fired\": {\"tm-a|").expect("write");
+    assert!(matches!(
+        reseed(&garbage, &own, wait),
+        Err(StateError::Shape { .. })
+    ));
+    assert_eq!(state::load(&own).expect("own"), st);
+    // Vanished: gone before the read keeps the shadow's own state.
+    fs::remove_file(&garbage).expect("rm");
+    reseed(&garbage, &own, wait).expect("vanished live");
+    assert_eq!(state::load(&own).expect("own"), st);
+}
