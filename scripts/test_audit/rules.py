@@ -4,8 +4,8 @@ Why: Phase 0 flags candidates for review without a model; every rule must be
   reproducible from source text alone so a re-run fires the same set.
 What: `per_test_rules(test, asset_names)` returns `{rule_id: detail}` for one
   test, over the `ACTIVE` rules only. R1 (duplicates) needs every test at
-  once and lives in dupes.py. R2 and R4 are `DROPPED` (100% false flags in
-  the pilot, Architect 2026-11-25): defined below for history, never run by
+  once and lives in dupes.py. R1, R2 and R4 are `DROPPED` (false flags in
+  the pilot and B2, Architect 2026-11-25): defined below for history, never run by
   default.
   R2 text pin: a compared assertion argument references embedded prose — an
      `include_str!` of a .md/.txt/.prompt-style file (directly, through a
@@ -318,11 +318,11 @@ def rule_r6(test: TestFn) -> str | None:
     return None
 
 
-ALL_RULES = frozenset({"R2", "R3", "R4", "R5", "R6"})
-# #11268: R2 and R4 were 100% false flags in the pilot; dropped (Architect
-# 2026-11-25). Their definitions stay for history and are reachable with
-# `enabled=ALL_RULES`.
-DROPPED = frozenset({"R2", "R4"})
+ALL_RULES = frozenset({"R1", "R2", "R3", "R4", "R5", "R6"})
+# #11268: R2 and R4 were 100% false flags in the pilot; R1 flagged 43 of 43
+# kept in B2. All dropped (Architect 2026-11-25). Their definitions stay for
+# history and are reachable with `enabled=ALL_RULES`. R1 lives in dupes.py.
+DROPPED = frozenset({"R1", "R2", "R4"})
 ACTIVE = ALL_RULES - DROPPED
 
 
