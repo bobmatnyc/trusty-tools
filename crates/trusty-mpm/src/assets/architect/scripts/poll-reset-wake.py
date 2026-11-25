@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """poll-reset-wake.py — one-shot reset of the stuck wake backlog in inbox/poll-state.json.
 
-Why: D22 (an owner ruling; see #10571): wake_pending/wake_alerts grew to 2000+ while every wake failed.
+Why (see #10571): wake_pending/wake_alerts grew to 2000+ while every wake failed.
 The running poller rewrites poll-state.json each cycle, so a reset made while it runs is lost;
 this refuses while the poller's tmux session exists (ARCHITECT_POLL_SESSION, else ARCHITECT_SESSION-poll, else
 tm-architect-poll: the name start-fleet-poll.sh gives it).

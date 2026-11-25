@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """dream_catchup.py: daily digest of what the owner said and decided since the last owner/ dreaming pass.
 
-Why: the owner model (owner/) lapsed 10-08..10-29 because nothing prompted the dreaming pass (owner ruling Daa
-2026-10-29: "Daily 06:30 local: a script digests new prompts + answers + rulings, a research agent updates
-owner/, I review and commit"). This script is the deterministic first half; the research agent is the second.
+Why: the owner model (owner/) lapsed because nothing prompted the dreaming pass, so the owner asked for a daily
+digest: a script digests new prompts, answers and rulings, a research agent updates owner/, the owner reviews and
+commits. This script is the deterministic first half; the research agent is the second.
 What: reads (a) Owner-authored turns in the Architect transcripts newer than the last timestamp in
 owner/dream-log.md (human-origin string turns only; no hook output, system reminders, tool results,
 task notifications, sidechains, "[poll " wakes, slash-command echoes or resume boilerplate), and (b) dashboard
