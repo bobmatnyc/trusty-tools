@@ -168,3 +168,68 @@ fn config_base_follows_the_install_paths_chain() {
     assert_eq!(config_base_under(&fx.home), fx.home);
     assert_eq!(FrameworkPaths::default(), FrameworkPaths::under(&fx.home));
 }
+
+/// A scratch home whose install.toml is broken, `$HOME` pointed at it.
+fn broken_install_home() -> (Fixture, EnvGuard) {
+    let fx = Fixture::new();
+    fx.write_install_file("config_dir = \"/elsewhere\"\nbogus = 1\n");
+    let env = EnvGuard::install(&fx.home);
+    (fx, env)
+}
+
+/// The refusal names install.toml, and nothing landed under `$HOME`.
+fn assert_refused_closed(fx: &Fixture, err: String) {
+    assert!(
+        err.contains("install.toml"),
+        "must name install.toml: {err}"
+    );
+    for tree in [".trusty-mpm", ".trusty-tools/trusty-mpm"] {
+        assert!(
+            !fx.home.join(tree).exists(),
+            "no writer may create $HOME/{tree}"
+        );
+    }
+}
+
+/// #11821 P3 (H3): the pause writer refuses a broken install.toml; before the
+/// fix it wrote `$HOME/.trusty-mpm/sessions`, stranded once the file is fixed.
+#[test]
+fn session_store_writers_fail_closed_on_a_broken_install_file() {
+    use trusty_mpm::core::session::{ControlModel, Session, SessionId};
+    let (fx, _env) = broken_install_home();
+    let session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
+    let err = trusty_mpm::core::session_store::save_pause(&session).expect_err("save refuses");
+    assert_refused_closed(&fx, err.to_string());
+    let err = trusty_mpm::core::session_store::clear_pause(&session.id).expect_err("clear refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3 (H3): the worktree ledger's writer constructors refuse.
+#[test]
+fn worktree_ledger_writers_fail_closed_on_a_broken_install_file() {
+    use trusty_mpm::core::worktree_ledger::WorktreeLedger;
+    let (fx, _env) = broken_install_home();
+    let err = WorktreeLedger::host().expect_err("host refuses");
+    assert_refused_closed(&fx, err.to_string());
+    let err = WorktreeLedger::try_under_home(&fx.home).expect_err("try_under_home refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3 (H3): `tm auth set-token`/`clear-token` refuse, naming the file.
+#[test]
+fn oauth_token_writers_fail_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::oauth_token::set_token("tok").expect_err("set refuses");
+    assert_refused_closed(&fx, err.to_string());
+    let err = trusty_mpm::core::oauth_token::clear_token().expect_err("clear refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3 (H3): the build-lease store never resolves to the home's store.
+#[test]
+fn build_lease_store_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::build_lease::store::try_canonical_path(&fx.home)
+        .expect_err("store path refuses");
+    assert_refused_closed(&fx, err.to_string());
+}

@@ -43,8 +43,8 @@ pub fn config_base_dir() -> Option<PathBuf> {
 /// [`try_config_base`] for an infallible reader.
 ///
 /// Why: `FrameworkPaths::default()` and its readers cannot carry an error.
-/// The launch refuses on a broken install file (df-D1w), so a write through
-/// this path never starts a session.
+/// Readers only: on a broken install file this answers `$HOME`, so a writer
+/// must use [`try_config_base`] and refuse instead (#11821).
 /// What: the configured config dir; on an error, logged at `warn`, the
 /// pre-#11821 base (`$HOME`, or `.` with no home).
 /// Test: `config_base_follows_the_install_paths_chain`.
@@ -66,7 +66,8 @@ pub fn try_config_base_under(home: &Path) -> Result<PathBuf, InstallPathsError> 
 }
 
 /// [`try_config_base_under`] for an infallible reader: on an error, logged
-/// at `warn`, `home` itself (the pre-#11821 base).
+/// at `warn`, `home` itself (the pre-#11821 base). Readers only; a writer
+/// uses [`try_config_base_under`] (#11821).
 ///
 /// Test: `framework_and_tools_dirs_nest_under_the_config_base`.
 pub fn config_base_under(home: &Path) -> PathBuf {

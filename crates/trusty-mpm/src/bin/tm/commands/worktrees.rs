@@ -130,7 +130,8 @@ pub(crate) async fn collect(
     measure: bool,
     fetch: bool,
 ) -> anyhow::Result<WorktreesReport> {
-    let ledger = WorktreeLedger::under_home(home);
+    // #11821: the backfill writes the ledger, so it fails closed.
+    let ledger = WorktreeLedger::try_under_home(home)?;
     let registry_dir = trusty_mpm::project::worktree_policy::registry_data_dir_under(
         // #11821 P3: under the configured config dir.
         &trusty_mpm::core::config_base::framework_root_under(home),

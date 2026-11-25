@@ -58,12 +58,22 @@ pub const OAUTH_TOKEN_ENV_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// What: `<base>/.trusty-tools/trusty-mpm/claude-code-oauth.token`.
 /// Test: `token_file_path_layout`.
 pub fn token_file_path_at(base: &Path) -> PathBuf {
-    // #11821 P3: under the configured config dir of `base`.
-    trusty_common::crate_config::crate_config_dir_at(
-        &crate::core::config_base::config_base_under(base),
-        CRATE_NAME,
-    )
-    .join(TOKEN_FILE)
+    // #11821: `base` is the config dir itself; no install.toml lookup, so no
+    // `$HOME` fallback either.
+    trusty_common::crate_config::crate_config_dir_at(base, CRATE_NAME).join(TOKEN_FILE)
+}
+
+/// The canonical token file path for a writer, failing closed (#11821 P3).
+///
+/// Why: a broken `install.toml` must refuse `tm auth set-token`/`clear-token`
+/// and name the file, not write under `$HOME` or blame the home directory.
+/// What: [`token_file_path_at`] of
+/// [`crate::core::config_base::try_config_base`].
+/// Test: `oauth_token_writers_fail_closed_on_a_broken_install_file` (env_serial).
+pub fn try_token_file_path() -> anyhow::Result<PathBuf> {
+    let base = crate::core::config_base::try_config_base()
+        .map_err(|e| anyhow::anyhow!("the config dir is unresolved: {e}"))?;
+    Ok(token_file_path_at(&base))
 }
 
 /// Resolve the canonical token file path.
@@ -128,12 +138,12 @@ pub fn set_token_at(path: &Path, token: &str) -> anyhow::Result<()> {
 /// Store `token` at the canonical path.
 ///
 /// Why: the production entry point `tm auth set-token` calls.
-/// What: resolves [`token_file_path`] and delegates to [`set_token_at`].
+/// What: resolves [`try_token_file_path`] and delegates to [`set_token_at`].
 /// Test: covered via `set_token_at`'s hermetic tests; production path
 /// exercised by the `tm auth` CLI handler.
 pub fn set_token(token: &str) -> anyhow::Result<PathBuf> {
-    let path =
-        token_file_path().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    // #11821: fail closed on a broken install.toml, naming it.
+    let path = try_token_file_path()?;
     set_token_at(&path, token)?;
     Ok(path)
 }
@@ -159,11 +169,11 @@ pub fn clear_token_at(path: &Path) -> anyhow::Result<()> {
 /// Remove the stored token at the canonical path.
 ///
 /// Why: the production entry point `tm auth clear-token` calls.
-/// What: resolves [`token_file_path`] and delegates to [`clear_token_at`].
+/// What: resolves [`try_token_file_path`] and delegates to [`clear_token_at`].
 /// Test: covered via `clear_token_at`'s hermetic tests.
 pub fn clear_token() -> anyhow::Result<PathBuf> {
-    let path =
-        token_file_path().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    // #11821: fail closed on a broken install.toml, naming it.
+    let path = try_token_file_path()?;
     clear_token_at(&path)?;
     Ok(path)
 }

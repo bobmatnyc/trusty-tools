@@ -691,3 +691,22 @@ fn an_unparseable_config_yields_an_unreadable_keep_list() {
         "a keep-list that could not be read must keep EVERYTHING"
     );
 }
+
+/// #11821 P3: a broken install.toml must not let the reader fall back to
+/// `$HOME`'s config, whose keep-list may be empty; the list keeps everything.
+#[test]
+fn a_broken_install_file_yields_an_unreadable_keep_list() {
+    let home = config_home("disk:\n  keep_list: []\n");
+    std::fs::write(
+        home.path().join(".trusty-tools/install.toml"),
+        "bogus = 1\n",
+    )
+    .expect("broken install.toml");
+    let list = load_disk_keep_list_at(home.path());
+    let error = list.error().expect("a broken install.toml is unreadable");
+    assert!(error.contains("install.toml"), "{error}");
+    assert!(
+        list.keeps(std::path::Path::new("/anything/at/all"))
+            .is_some()
+    );
+}

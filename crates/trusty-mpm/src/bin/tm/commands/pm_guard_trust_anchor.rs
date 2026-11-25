@@ -24,6 +24,9 @@
 //! APFS does.
 //! #9815: the channel question table's files are anchors too, and bind the
 //! Architect's main thread as well (`pm_guard_trust_anchor_questions.rs`).
+//! #11821 P3: the `.trusty-mpm` anchors are guarded under `$HOME` and under the
+//! configured config dir, `install.toml` is an anchor, and a config dir that
+//! does not resolve denies every write (`pm_guard_trust_anchor_roots.rs`).
 //! #8878 PR2a: the Architect's main thread writes an anchor only with a live
 //! presence grant (`pm_guard_presence::presence_gate`); without one it is
 //! denied with the `tm presence local` remedy, never asked.
@@ -48,10 +51,14 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+// #11821 P3: the root anchors moved to `roots`; the tests still name these.
+#[cfg(test)]
 use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
-use trusty_mpm::core::twin_arming::{self, ARMED_DIR};
+use trusty_mpm::core::twin_arming;
+#[cfg(test)]
+use trusty_mpm::core::twin_arming::ARMED_DIR;
 use trusty_mpm::core::twin_identity::ClaudeProcess;
 
 use crate::commands::env_file_grant::GRANT_DIR;
@@ -75,7 +82,7 @@ pub(crate) const TRUST_ANCHOR_RULE: &str = "trust-anchor-write";
 pub(crate) const ANCHOR_ROOT: &str = ".trusty-mpm";
 
 /// The config anchor, under [`ANCHOR_ROOT`].
-const CONFIG_ANCHOR: &str = "config.toml";
+pub(super) const CONFIG_ANCHOR: &str = "config.toml";
 
 /// The hook's ambient inputs, injectable so every fail-closed arm is testable.
 #[derive(Debug, Clone, Default)]
@@ -338,9 +345,9 @@ struct Anchors {
     guarded: Vec<PathBuf>,
     /// The identities of the config and the #8454 anchors that exist.
     ids: Vec<FileId>,
-    /// The live arming records, when the directory holds a `*.json` (or
-    /// cannot be read).
-    armed: Option<ArmedAnchors>,
+    /// The live arming records of each root, when its directory holds a
+    /// `*.json` (or cannot be read).
+    armed: Vec<ArmedAnchors>,
     /// Trees every path under which is refused: the Architect launch
     /// directory, and the `twin/` tree when the arming directory does not
     /// resolve.
@@ -357,7 +364,7 @@ struct Anchors {
 }
 
 /// The live arming records.
-struct ArmedAnchors {
+pub(super) struct ArmedAnchors {
     /// The resolved `~/.trusty-mpm/twin/armed`.
     dir: PathBuf,
     /// Each record's identity.
@@ -371,7 +378,7 @@ impl Anchors {
         Self {
             guarded: Vec::new(),
             ids: Vec::new(),
-            armed: None,
+            armed: Vec::new(),
             fence: Vec::new(),
             records_live,
             names: Vec::new(),
@@ -386,57 +393,28 @@ impl Anchors {
     /// file, a link loop) no longer refuses every write; it fences the `twin/`
     /// tree, lexical and resolved, and counts records as live. The Architect
     /// launch directory is always fenced.
+    /// #11821 P3: every `.trusty-mpm` root [`roots::anchor_roots`] names.
     /// Test: `an_unlocatable_anchor_denies_every_write`,
     /// `a_blocked_arming_dir_fences_only_the_twin_tree`,
-    /// `the_launch_record_dir_is_an_anchor`.
+    /// `the_launch_record_dir_is_an_anchor`,
+    /// `a_configured_config_dir_anchor_write_is_denied`.
     fn locate(home: &Path) -> Result<Self, PathBuf> {
-        let root = home.join(ANCHOR_ROOT);
-        let lexical = root.join(CONFIG_ANCHOR);
-        let Resolved::Path(config) = resolve(&lexical) else {
-            return Err(lexical);
-        };
+        // #11821 P3: `$HOME`'s root and the configured config dir's root.
+        let mut parts = Vec::new();
+        for root in roots::anchor_roots(home)? {
+            parts.push(roots::RootAnchors::locate(&root)?);
+        }
         // #8454: `config.yaml` and the managed settings, same rules.
         let extra = egress::EgressAnchors::locate(home)?;
-        let armed_lexical = root.join(ARMED_DIR);
-        let mut guarded = vec![config.clone()];
-        guarded.extend(extra.guarded);
-        let mut paths = vec![lexical, config.clone(), armed_lexical.clone()];
-        paths.extend(extra.paths);
-        let (armed, fence) = match resolve(&armed_lexical) {
-            Resolved::Path(dir) => {
-                guarded.push(dir.clone());
-                paths.push(dir.clone());
-                (live_armed(dir), Vec::new())
-            }
-            // #8878 finding 5: fail closed on the twin tree only.
-            Resolved::Unresolvable => {
-                let twin = Path::new(ARMED_DIR).iter().next().unwrap_or_default();
-                let resolved_root = config.parent().map(|p| p.join(twin));
-                (
-                    None,
-                    [Some(root.join(twin)), resolved_root]
-                        .into_iter()
-                        .flatten()
-                        .collect(),
-                )
-            }
-        };
-        let records_live = armed.is_some() || !fence.is_empty();
-        let mut fence = fence;
-        // #8878 ruling A: the Architect launch directory is sealed — itself,
-        // every directory above it, and everything under it.
-        let launch = root.join(architect_launch::ARCHITECT_DIR);
-        paths.push(launch.clone());
-        match resolve(&launch) {
-            Resolved::Path(dir) => {
-                guarded.push(dir.clone());
-                fence.push(dir.clone());
-                paths.push(dir);
-            }
-            Resolved::Unresolvable => {
-                fence.extend(config.parent().map(|p| p.join(ARCHITECT_DIR)));
-                fence.push(launch);
-            }
+        let (mut guarded, mut paths, mut ids) = (extra.guarded, extra.paths, extra.ids);
+        let (mut armed, mut fence, mut records_live) = (Vec::new(), Vec::new(), false);
+        for part in parts {
+            guarded.extend(part.guarded);
+            paths.extend(part.paths);
+            ids.extend(part.ids);
+            armed.extend(part.armed);
+            fence.extend(part.fence);
+            records_live |= part.records_live;
         }
         // #8433: the channel taint directory is sealed the same way, and while
         // a taint is live a `*.json` in an unknown directory could be one.
@@ -451,11 +429,7 @@ impl Anchors {
         names.push(GRANT_DIR.to_owned());
         Ok(Self {
             guarded,
-            ids: file_id(&config)
-                .into_iter()
-                .chain(extra.ids)
-                .chain(questions.ids)
-                .collect(),
+            ids: ids.into_iter().chain(questions.ids).collect(),
             records_live: records_live || taint.live,
             armed,
             fence,
@@ -477,7 +451,7 @@ impl Anchors {
         if id.is_some_and(|id| self.ids.contains(&id)) {
             return true;
         }
-        self.armed.as_ref().is_some_and(|armed| {
+        self.armed.iter().any(|armed| {
             id.is_some_and(|id| armed.ids.contains(&id))
                 || (resolved.parent().is_some_and(|p| same_ci(p, &armed.dir))
                     && resolved.file_name().is_some_and(is_json))
@@ -601,7 +575,7 @@ impl Anchors {
 /// What: a missing directory is not live. A directory that cannot be read, or
 /// an entry that cannot be listed, is live — fail closed.
 /// Test: `a_live_armed_record_is_an_anchor`, `an_unreadable_armed_dir_is_live`.
-fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
+pub(super) fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
     let entries = match std::fs::read_dir(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(_) => {
@@ -631,9 +605,11 @@ const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `~/.trusty-mpm/architect-launch/`, `~/.trusty-tools/trusty-mpm/config.yaml` and the managed \
      `claude-config/settings.json` and `settings.local.json` (#8454), `~/.ssh/authorized_keys` \
      and `~/.trusty-tools/trusty-common/config.yaml` (#11463), and, while any exist, \
-     `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
-     — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
-     do not lift this rule. Ask the operator, or make the change from the Architect session. \
+     `~/.trusty-mpm/twin/armed/*.json`. `~/.trusty-tools/install.toml` is an anchor, and with a \
+     configured config dir (`TRUSTY_MPM_CONFIG_DIR`, `install.toml` `config_dir`) the same \
+     `.trusty-mpm` and `.trusty-tools` files under it are anchors too (#11821). Only the \
+     Architect session's main thread may write them — no PM, agent or subagent — and \
+     `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` do not lift this rule. Ask the operator, or make the change from the Architect session. \
      `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433), \
      as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815), and \
      `channels/inbound_claims.jsonl` and its `.lock`, `.torn` and `.prune` files (#9923).";
@@ -718,6 +694,10 @@ mod taint;
 // #9815 (P2a of #8433): the channel question table as a trust anchor.
 #[path = "pm_guard_trust_anchor_questions.rs"]
 mod questions;
+
+// #11821 P3: the `.trusty-mpm` roots, `$HOME`'s and the configured one.
+#[path = "pm_guard_trust_anchor_roots.rs"]
+mod roots;
 
 // #8878, #9815: the name rules for a target the guard cannot place.
 #[path = "pm_guard_trust_anchor_names.rs"]

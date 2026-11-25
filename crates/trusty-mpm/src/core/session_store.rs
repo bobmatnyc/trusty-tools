@@ -92,9 +92,17 @@ pub fn save_pause_under(framework_root: &Path, session: &Session) -> std::io::Re
 /// "session_id": <uuid> }` to [`pause_path`]; `paused_at` defaults to "now" when
 /// the session carries no explicit pause timestamp.
 /// Test: `save_then_load_round_trips`.
+/// #11821 P3: fails closed (`Err`, nothing written) when the config dir does
+/// not resolve, never under `$HOME`.
+/// Test: `session_store_writers_fail_closed_on_a_broken_install_file` (env_serial).
 pub fn save_pause(session: &Session) -> std::io::Result<()> {
-    // #11821 P3: under the configured config dir.
-    save_pause_in(&crate::core::config_base::config_base(), session)
+    // #11821: a writer never falls back to `$HOME`.
+    save_pause_in(&writer_base()?, session)
+}
+
+/// The configured config dir for a pause writer, as an I/O error on failure.
+fn writer_base() -> std::io::Result<PathBuf> {
+    crate::core::config_base::try_config_base().map_err(std::io::Error::other)
 }
 
 /// Load the pause state for a session from an explicit base directory.
@@ -323,9 +331,10 @@ pub fn reap_empty_session_dirs_at(sessions_dir: &Path) -> std::io::Result<Sessio
 /// What: deletes [`pause_path`]; a missing file is treated as success so the
 /// call is idempotent.
 /// Test: `clear_removes_file`, `clear_missing_is_ok`.
+/// #11821 P3: fails closed like [`save_pause`].
 pub fn clear_pause(id: &SessionId) -> std::io::Result<()> {
-    // #11821 P3: under the configured config dir.
-    clear_pause_in(&crate::core::config_base::config_base(), id)
+    // #11821: a writer never falls back to `$HOME`.
+    clear_pause_in(&writer_base()?, id)
 }
 
 #[cfg(test)]

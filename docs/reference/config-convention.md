@@ -73,11 +73,16 @@ every Rust project on the host, so wiring `build.rustc-wrapper` there stays an
 operator decision, and the row warns when `sccache: true` sits beside an unwired
 config.
 
-Resolution precedence for the workspace root is:
+Resolution precedence for the workspace root is (#11821):
 
 1. `TRUSTY_MPM_WORKSPACE_ROOT` environment variable (back-compat escape hatch);
-2. `workspace_root_template` from this file;
-3. the built-in default `~/trusty-mpm-projects`.
+2. `projects_root` in `~/.trusty-tools/install.toml`;
+3. `workspace_root_template` from this file;
+4. the built-in default `~/trusty-mpm-projects`.
+
+A broken `install.toml` (bad TOML, an unknown key, a relative path) is an
+error: clone, delete and write paths refuse rather than fall back to the
+default.
 
 These settings are editable from the **trusty-console Config tab**
 (`/api/console/config/mpm`, backed by the `config_read` / `config_write` MCP

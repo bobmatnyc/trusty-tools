@@ -886,8 +886,9 @@ pub fn disk_keep_list_patterns(config: &TrustyToolsConfig) -> Vec<String> {
 /// unreadable".
 /// What: the fallible [`trusty_common::crate_config::load`], not
 /// `load_or_default`. An absent file (or an unknown home) is an EMPTY list,
-/// which is the documented default and permits. A read or parse failure builds
-/// [`KeepList::unreadable`], which keeps every path — see that constructor.
+/// which is the documented default and permits. A read or parse failure of
+/// the config or of `install.toml` (#11821) builds [`KeepList::unreadable`],
+/// which keeps every path — see that constructor.
 /// Test: `an_unparseable_config_yields_an_unreadable_keep_list`,
 /// `an_absent_config_yields_an_empty_keep_list`,
 /// `a_valid_config_yields_the_operators_patterns`,
@@ -907,16 +908,20 @@ pub(crate) fn load_disk_keep_list() -> KeepList {
 /// not depend on. Pointing `base` at a `tempfile::TempDir` is what lets the
 /// fail-closed path be proved end to end — write a config there, run a reclaim
 /// against a scratch worktree store, assert nothing was deleted.
-/// What: `<base>/.trusty-tools/trusty-mpm/config.yaml`, with the same
-/// absent/valid/unreadable three-way as [`load_disk_keep_list`].
+/// What: `<config dir of base>/.trusty-tools/trusty-mpm/config.yaml`, with
+/// the same absent/valid/unreadable three-way as [`load_disk_keep_list`]; a
+/// `base` whose `install.toml` does not resolve is unreadable (#11821).
 /// Test: `an_unparseable_config_yields_an_unreadable_keep_list`,
-/// `a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree`.
+/// `a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree`,
+/// `a_broken_install_file_yields_an_unreadable_keep_list`.
 pub(crate) fn load_disk_keep_list_at(base: &Path) -> KeepList {
-    // #11821 P3: under the configured config dir of `base`.
-    let path = trusty_common::crate_config::crate_config_path_at(
-        &crate::core::config_base::config_base_under(base),
-        CRATE_NAME,
-    );
+    // #11821 P3: under the configured config dir of `base`; a broken
+    // install.toml is an unreadable list, never `base`'s config.
+    let config_dir = match crate::core::config_base::try_config_base_under(base) {
+        Ok(dir) => dir,
+        Err(e) => return KeepList::unreadable(e.to_string()),
+    };
+    let path = trusty_common::crate_config::crate_config_path_at(&config_dir, CRATE_NAME);
     match trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path) {
         Ok(Some(config)) => KeepList::from_patterns(&disk_keep_list_patterns(&config)),
         Ok(None) => KeepList::default(),

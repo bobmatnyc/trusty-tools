@@ -742,3 +742,72 @@ fn the_launch_record_dir_is_an_anchor() {
     assert_eq!(pm_bash(&fx, "cd /tmp && echo x > r.session"), None);
     assert_eq!(pm_bash(&fx, "echo x > notes.md"), None);
 }
+
+/// Point `fx.home`'s `install.toml` at a sibling config dir holding its own
+/// `.trusty-mpm/config.toml`; returns that config file (#11821 P3).
+fn relocate_config_dir(fx: &Fixture) -> PathBuf {
+    let cfg = fx.home.with_file_name("cfg");
+    std::fs::create_dir_all(cfg.join(ANCHOR_ROOT)).expect("mkdir cfg root");
+    let config = cfg.join(ANCHOR_ROOT).join(CONFIG_ANCHOR);
+    std::fs::write(&config, "[supervisor]\n").expect("write cfg config");
+    std::fs::create_dir_all(fx.home.join(".trusty-tools")).expect("mkdir .trusty-tools");
+    std::fs::write(
+        fx.home.join(".trusty-tools/install.toml"),
+        format!("config_dir = {:?}\n", cfg.display().to_string()),
+    )
+    .expect("write install.toml");
+    config
+}
+
+/// #11821 P3 (C1): the allowlist, twin and launch readers follow the
+/// configured config dir, so the floor guards that root as well as `$HOME`'s.
+#[test]
+fn a_configured_config_dir_anchor_write_is_denied() {
+    let fx = fixture();
+    let config = relocate_config_dir(&fx);
+    let root = config.parent().expect("cfg root").to_path_buf();
+    for target in [
+        config.clone(),
+        root.join(ARMED_DIR),
+        root.join(architect_launch::ARCHITECT_DIR)
+            .join("60.architect"),
+    ] {
+        let reason = pm_verdict(&fx, "Write", write_input(&target))
+            .unwrap_or_else(|| panic!("{} must be denied", target.display()));
+        assert!(reason.contains("trust anchor"), "{reason}");
+    }
+    // `$HOME`'s root stays guarded; an ordinary file stays writable.
+    assert!(pm_verdict(&fx, "Write", write_input(&fx.anchor)).is_some());
+    assert_eq!(
+        pm_verdict(&fx, "Write", write_input(&fx.cwd.join("a.txt"))),
+        None
+    );
+}
+
+/// #11821 P3 (C2): `install.toml` decides where the anchors live, so the
+/// enforcing floor guards it.
+#[test]
+fn the_install_file_is_an_anchor() {
+    let fx = fixture();
+    relocate_config_dir(&fx);
+    let install = fx.home.join(".trusty-tools/install.toml");
+    let reason = pm_verdict(&fx, "Write", write_input(&install)).expect("denied");
+    assert!(reason.contains("trust anchor"), "{reason}");
+    let cmd = format!("echo 'config_dir = \"/tmp/x\"' > {}", install.display());
+    assert!(
+        pm_bash(&fx, &cmd).is_some(),
+        "a Bash write must be denied too"
+    );
+}
+
+/// #11821 P3: a config dir that does not resolve leaves the anchors
+/// unplaceable, so every write is refused.
+#[test]
+fn a_broken_install_file_denies_every_write() {
+    let fx = fixture();
+    relocate_config_dir(&fx);
+    std::fs::write(fx.home.join(".trusty-tools/install.toml"), "bogus = 1\n")
+        .expect("break install.toml");
+    let reason = pm_verdict(&fx, "Write", write_input(&fx.cwd.join("a.txt"))).expect("denied");
+    assert!(reason.contains("cannot locate the"), "{reason}");
+}
