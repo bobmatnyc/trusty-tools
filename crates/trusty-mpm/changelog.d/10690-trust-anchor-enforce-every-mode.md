@@ -1,0 +1,2 @@
+Changed
+- `tm hook --pm-guard-shadow` now refuses a trust-anchor write (rule 1) instead of only logging it, in every session profile, and records the refusal in `~/.trusty-mpm/guard/shadow.jsonl` with `"enforced": true`. A call it cannot judge for rule 1 (unreadable or oversized stdin, non-JSON, no tool name, no home directory, a project settings file that exists but cannot be read, an internal panic) is refused too. Rules 2, 3 and 5 still only log (#10690, owner ruling D0u).

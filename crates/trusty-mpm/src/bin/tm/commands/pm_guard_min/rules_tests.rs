@@ -29,6 +29,31 @@ fn home() -> TempDir {
     tempfile::tempdir().unwrap()
 }
 
+/// #10690 (ruling D0u): a project settings file that exists but cannot be
+/// read may hold a guard entry, so the write is refused. Before the fix the
+/// read error counted as "no guard entry" and the write was allowed.
+#[test]
+fn an_unreadable_project_settings_file_is_an_r1_hit() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = home();
+    let dir = h.path().join("proj/.claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings = dir.join("settings.json");
+    std::fs::write(&settings, "{\"hooks\":\"tm hook --pm-guard\"}").unwrap();
+    let env = env_in(h.path(), h.path());
+    let write = json!({ "file_path": settings, "content": "{}" });
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = std::fs::read_to_string(&settings).is_err();
+    let got = evaluate("Write", &write, &env).0.map(|h| h.rule);
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o600)).unwrap();
+    if unreadable {
+        assert_eq!(got, Some("R1"), "an unreadable settings file is refused");
+    }
+    // Absent file: no guard entry to protect, so a plain write passes.
+    std::fs::remove_file(&settings).unwrap();
+    assert_eq!(evaluate("Write", &write, &env).0.map(|h| h.rule), None);
+}
+
 #[test]
 fn r1_flags_writes_to_each_anchor() {
     let h = home();

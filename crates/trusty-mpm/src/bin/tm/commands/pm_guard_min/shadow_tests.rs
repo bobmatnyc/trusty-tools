@@ -31,38 +31,53 @@ fn a_would_refuse_logs_one_line_without_the_command_text() {
     assert_eq!(line["fact"]["argv0"], "rm");
     assert_eq!(line["sha256"].as_str().map(str::len), Some(64));
     assert!(!line.to_string().contains("sentinel-prose-xyz"));
+    assert_eq!(line["enforced"], false, "#10690: rule 2 only records");
     append_log(home.path(), &line);
     append_log(home.path(), &line);
     let log = std::fs::read_to_string(home.path().join(LOG_PATH)).unwrap();
     assert_eq!(log.lines().count(), 2);
 }
 
+/// #10690 (ruling D0u): a call rule 1 cannot judge is refused, never allowed.
+/// Before the fix each arm returned `None` (no line, exit 0, no deny).
 #[test]
-fn malformed_and_huge_payloads_yield_no_line() {
+fn every_rule1_error_arm_refuses() {
     let home = tempfile::tempdir().unwrap();
-    assert_eq!(judge(b"{not json", home.path(), &test_env), None);
-    assert_eq!(judge(b"", home.path(), &test_env), None);
     let huge = json!({ "tool_name": "Bash", "tool_input": { "command": format!("rm -rf ~ {}", "a".repeat(2 << 20)) } });
-    assert_eq!(
-        judge(huge.to_string().as_bytes(), home.path(), &test_env),
-        None
-    );
+    let no_tool = json!({ "tool_input": { "file_path": "/tmp/x" } });
+    for (raw, kind) in [
+        (b"{not json".to_vec(), "unparseable"),
+        (Vec::new(), "unparseable"),
+        (huge.to_string().into_bytes(), "oversized"),
+        (no_tool.to_string().into_bytes(), "no_tool_name"),
+    ] {
+        let line = judge(&raw, home.path(), &test_env).expect(kind);
+        assert_eq!(line["rule"], "R1", "{kind}");
+        assert_eq!(line["fact"]["error"], kind);
+        assert_eq!(line["enforced"], true, "{kind}");
+    }
     let deep = format!("{}rm -rf ~{}", "$(".repeat(5000), ")".repeat(5000));
     let raw = json!({ "tool_name": "Bash", "tool_input": { "command": deep } });
     // Bounded recursion: no stack overflow; the answer itself does not matter.
     let _ = judge(raw.to_string().as_bytes(), home.path(), &test_env);
 }
 
+/// #10690: a panic before rule 1 answers is a refusal, not an unwind or an allow.
 #[test]
-fn a_panicking_judge_is_caught() {
+fn a_panic_in_rule1_refuses() {
     let home = tempfile::tempdir().unwrap();
-    let raw = json!({ "tool_name": "Bash", "tool_input": { "command": "rm -rf ~" } }).to_string();
-    let mut reached = false;
-    guarded(|| {
-        let _ = judge(raw.as_bytes(), home.path(), &|_, _| panic!("parser panic"));
-        reached = true;
-    });
-    assert!(!reached, "the panic unwound out of judge and was caught");
+    let raw = json!({ "tool_name": "Write", "tool_input": { "file_path": "/tmp/x" } }).to_string();
+    let line = guarded_judge(raw.as_bytes(), home.path());
+    assert_eq!(
+        line.as_ref().map(|l| l["fact"]["error"].clone()),
+        Some(json!("panic"))
+    );
+}
+
+fn guarded_judge(raw: &[u8], home: &Path) -> Option<Value> {
+    let mut out = None;
+    guarded(|| out = judge(raw, home, &|_, _| panic!("parser panic")));
+    out
 }
 
 #[test]

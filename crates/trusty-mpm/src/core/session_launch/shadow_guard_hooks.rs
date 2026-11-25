@@ -1,7 +1,8 @@
 //! The `tm hook --pm-guard-shadow` registration (#11431).
 //!
-//! Why: the minimal pm-guard runs log-only beside the old guard for the
-//! brief's 7-day shadow window, in every PM, subagent and Architect session.
+//! Why: the minimal pm-guard runs beside the old guard for the brief's 7-day
+//! shadow window, in every PM, subagent and Architect session; rules 2, 3
+//! and 5 log only, rule 1 enforces (#10690, owner ruling D0u).
 //! The hook picks the rules per profile at run time (Architect: rule 1 only).
 //! What: [`push_shadow_guard_group`] appends one `PreToolUse` group, matched
 //! to the tools the rules read, invoking `<exe> hook --pm-guard-shadow`.
@@ -36,7 +37,8 @@ pub(super) fn shadow_guard_group(exe: &Path) -> Value {
 ///
 /// Why: appended right after the egress guard, so every group the toggles add
 /// later still only appends.
-/// What: no `onFailure` — the hook never blocks, and a failed run must not either.
+/// What: no `onFailure` — only rule 1 blocks, by its printed deny (#10690);
+/// a hook that fails to run must not block the observe-only rules.
 /// Test: `every_session_registers_the_shadow_guard_after_the_egress_guard`.
 pub(super) fn push_shadow_guard_group(hooks: &mut Map<String, Value>, exe: &Path) {
     let group = shadow_guard_group(exe);
