@@ -259,3 +259,12 @@ fn gh_session_token_writer_fails_closed_on_a_broken_install_file() {
     .expect_err("the token writer refuses");
     assert_refused_closed(&fx, err);
 }
+
+/// #11821 P3-f1: the console's auto-resume toggle refuses; before the fix it
+/// wrote `$HOME/.trusty-mpm/auto_resume`.
+#[test]
+fn auto_resume_writer_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::auto_resume::write_desired(true).expect_err("write refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
