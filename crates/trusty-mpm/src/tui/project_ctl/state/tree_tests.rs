@@ -224,7 +224,10 @@ fn decommissioned_project_dims_until_a_session_is_live() {
         "alpha".to_string(),
         vec![session("s1", "boss", "stopped", None)],
     );
-    assert!(!dim_of(&[alpha.clone()], &sessions), "active project is lit");
+    assert!(
+        !dim_of(&[alpha.clone()], &sessions),
+        "active project is lit"
+    );
 
     alpha.decommissioned = true;
     assert!(dim_of(&[alpha.clone()], &sessions), "decommissioned is dim");
@@ -234,7 +237,10 @@ fn decommissioned_project_dims_until_a_session_is_live() {
         .get_mut("alpha")
         .expect("alpha sessions")
         .push(session("s2", "fresh", "provisioning", None));
-    assert!(!dim_of(&[alpha.clone()], &sessions), "a live session clears it");
+    assert!(
+        !dim_of(&[alpha.clone()], &sessions),
+        "a live session clears it"
+    );
 
     // The registry cleared the stamp (#10988's spawn path): lit, live or not.
     alpha.decommissioned = false;
