@@ -9,17 +9,14 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
 /// A script answering `--version` with `version`.
 fn plant_binary(path: &Path, version: &str) {
     let body = format!("#!/bin/sh\necho \"member {version}\"\n");
-    std::fs::write(path, body).expect("write script");
-    let mut perms = std::fs::metadata(path).expect("stat").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("chmod");
+    // #10248: no write fd to the stub in this process.
+    trusty_common::exec_stub::write_executable(path, body).expect("write script");
 }
 
 /// Plants a record with one member, whose digest is that of `digest`.
@@ -150,10 +147,9 @@ fn a_hung_member_cannot_stall_stack_health_10607() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     let binary = root.join("tga");
-    std::fs::write(&binary, "#!/bin/sh\nexec /bin/sleep 60\n").expect("write script");
-    let mut perms = std::fs::metadata(&binary).expect("stat").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&binary, perms).expect("chmod");
+    // #10248: no write fd to the stub in this process.
+    trusty_common::exec_stub::write_executable(&binary, "#!/bin/sh\nexec /bin/sleep 60\n")
+        .expect("write script");
     plant_record(root, &binary, "1.0.0", "planted");
 
     let started = std::time::Instant::now();
