@@ -54,6 +54,8 @@ mod hook_group_diff;
 pub use asset_notices::{PrepScope, log_prep_findings};
 pub(crate) use hook_group_diff::{ProjectHookGroupGaps, project_hook_group_gaps};
 mod palace_alias;
+// #11823: the alias then the palace create, shared by both launch paths.
+pub(crate) mod palace_create;
 // #7780: preserve a malformed project settings.json before a writer rewrites it.
 // #7789: `pub(crate)` because the managed-tier writers in `core::standalone`
 // share the rule; the module stays here because `PrepError` does.
@@ -252,22 +254,6 @@ pub(crate) use settings::{AUTO_MEMORY_KEY, merge_settings_key};
 /// Test: `tests_search_index.rs` and `resolve_palace_slug_*` in `tests.rs`.
 pub(crate) use search_index::register_project_index;
 pub(crate) use settings::resolve_palace_slug;
-
-/// Re-export of the #1939 palace-alias healing so it can run per launch from
-/// `core::managed_config::ensure_managed_config_dir_with_root`.
-///
-/// Why (#4181): `maybe_register_palace_alias` had exactly one call site — inside
-/// `settings::inject_trusty_memory_mcp`, immediately before the write. ADR-0042
-/// deletes that injector, and deleting it as written would stop the claude-mpm
-/// split-brain healing with no test failing to say so. The call is rehomed onto
-/// `ensure_managed_config_dir`, which every spawn, resume and in-place relaunch
-/// already reaches.
-/// What: re-exports [`palace_alias::maybe_register_palace_alias`] — a plain
-/// re-export, no logic of its own.
-/// Test: `palace_alias`'s own unit tests, plus
-/// `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`, which fails if
-/// the rehomed call site is deleted.
-pub(crate) use palace_alias::maybe_register_palace_alias;
 
 /// Re-export of the resume-time worktree/upstream sync primitives (issue
 /// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
@@ -584,11 +570,11 @@ impl PrepError {
 /// `native_supported`, and (issue #1605) the cloned-from `repo_url`. Funnelling
 /// them through one private body keeps the long preparation sequence in a single
 /// place so the variants cannot drift. `repo_url` is the only new degree of
-/// freedom: it is threaded to [`maybe_register_palace_alias`] as the
+/// freedom: it is threaded to [`palace_create::launch_palace_steps`] as the
 /// authoritative remote and is `None` for the flag-less / style-only entry
 /// points (which then fall back to the workspace's own git origin remote).
 /// What: identical to the documented [`prepare_session_with_style_and_native`]
-/// behaviour, plus it passes `repo_url` to [`maybe_register_palace_alias`].
+/// behaviour, plus it passes `repo_url` to [`palace_create::launch_palace_steps`].
 /// Issue #2149: an agent-deploy or skill-deploy failure is captured into
 /// [`PrepReport::roster_errors`] rather than short-circuiting the function via
 /// `?` — every step after the roster deploy (CLAUDE.md/instructions, the
@@ -1079,7 +1065,7 @@ pub(super) fn prepare_session_inner(
     // and side-effect-only; never fails the launch.
     if plan.inject_trusty_memory {
         // #8311: an injected registry is the only one written.
-        maybe_register_palace_alias(project_dir, repo_url, host.palace_registry);
+        palace_create::launch_palace_steps(project_dir, repo_url, host.palace_registry, true);
     }
 
     // Pre-seed per-directory trust for this workspace in `~/.claude.json`

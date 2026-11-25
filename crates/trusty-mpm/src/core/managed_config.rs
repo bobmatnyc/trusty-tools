@@ -266,7 +266,16 @@ fn ensure_managed_config_dir_phases(
     // in-place relaunch already reaches, so the healing keeps running. Best-effort
     // and side-effect-only — it never returns an error and never blocks a launch.
     // #8311: `None` is the registry the trusty-memory daemon reads.
-    crate::core::session_launch::maybe_register_palace_alias(project_dir, None, None);
+    // #11823: then the palace create, when the project's manifest enables
+    // trusty-memory (the standalone path's gate).
+    let memory_on =
+        crate::core::mcp_session_env::resolve_conditional_mcp_toggles(fw, project_dir).0;
+    crate::core::session_launch::palace_create::launch_palace_steps(
+        project_dir,
+        None,
+        None,
+        memory_on,
+    );
 
     // Phase 2: guarantee the COMPLETE roster from the resolved (submodule-aware)
     // framework source, matching `session_launch::prepare_session`. Refreshing

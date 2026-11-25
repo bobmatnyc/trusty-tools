@@ -874,7 +874,7 @@ fn make_palace(registry_dir: &Path, id: &str) {
 /// rehome as the change that would silently stop working with no test failing.
 /// The unit cases in `session_launch::palace_alias` prove the function's own
 /// guards; only a test driven through this function proves it is still CALLED.
-/// Delete the `maybe_register_palace_alias` line from
+/// Delete the `launch_palace_steps` line from
 /// `ensure_managed_config_dir_with_root` and this fails.
 ///
 /// What: seeds the bare `trusty-tools` palace with no `bobmatnyc-trusty-tools`
@@ -923,6 +923,35 @@ fn ensure_managed_config_dir_heals_a_bare_repo_palace_alias() {
         "provisioning must register {pinned} -> {BARE_PALACE} so the pinned palace \
          resolves to the claude-mpm-era store instead of failing with missing metadata"
     );
+}
+
+/// #11823: the daemon spawn/resume path sends the palace create after its
+/// alias step; deleting the call from `ensure_managed_config_dir_phases`
+/// fails this test.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn ensure_managed_config_dir_sends_the_palace_create() {
+    use crate::core::session_launch::palace_create::tests::{
+        REMOTE, Reply, StubDaemon, assert_one_create, git_project,
+    };
+    let daemon = StubDaemon::start(Reply::Created);
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+    let workspace = project_dir(tmp.path());
+    git_project(&workspace, REMOTE);
+    let _no_override = EnvGuard::clear("TRUSTY_MEMORY_PALACE");
+    let data = TempDir::new().unwrap();
+    let _data_dir = EnvGuard::set("TRUSTY_DATA_DIR_OVERRIDE", data.path());
+    let _socket = EnvGuard::set(
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        daemon.socket(),
+    );
+
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+
+    assert_one_create(&daemon.creates(), &workspace);
 }
 
 /// #9540: resume and in-place relaunch reach this choke point, so a deleted
