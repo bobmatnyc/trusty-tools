@@ -380,8 +380,10 @@ fn only_row(registry: &Path) -> Project {
 #[tokio::test]
 async fn daemon_registers_a_canonical_clone_by_its_github_url_11828() {
     for (origin, url) in [
+        // #11828: ssh scp syntax with no `user@`, so the public-content leak
+        // guard's EMAIL pattern does not match; the parser drops the user anyway.
         (
-            "git@github.com:acme/widget.git",
+            "github.com:acme/widget.git",
             "https://github.com/acme/widget",
         ),
         (
@@ -417,8 +419,8 @@ async fn daemon_registers_a_canonical_clone_by_its_github_url_11828() {
 #[tokio::test]
 async fn daemon_keeps_the_path_form_off_the_canonical_clone_11828() {
     for (dir, origin) in [
-        ("elsewhere/widget", Some("git@github.com:acme/widget.git")),
-        ("acme/widget", Some("git@gitlab.com:acme/widget.git")),
+        ("elsewhere/widget", Some("github.com:acme/widget.git")),
+        ("acme/widget", Some("gitlab.com:acme/widget.git")),
         ("acme/widget", None),
     ] {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -459,7 +461,7 @@ async fn client_registration_keeps_the_path_form_at_the_canonical_path_11828() {
     let registry = tmp.path().join("registry");
     let root = checkout(
         &tmp.path().join("repos").join("acme").join("widget"),
-        "git@github.com:acme/widget.git",
+        "github.com:acme/widget.git",
     );
 
     register_session_checkout(&registry, &root, None)
