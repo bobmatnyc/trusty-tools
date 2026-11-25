@@ -83,12 +83,12 @@ def test_a_stored_legacy_field_still_reads_and_takes_a_valid_update(cli):
 
 
 def test_the_documented_il_update_and_task_pulse_fields_are_writable(cli):
-    # #10766: task_pulse.py documents `update items T93 --json '{"il":"ar-T0b"}'` and writes the signal fields.
+    # #10766: task_pulse.py documents `update items T93 --json '{"il":"ar-example"}'` and writes the signal fields.
     import dashboard_schema as dsch
     import task_pulse as tp
     task = item("pulse", kind="task", steps=[{"title": "one"}])
     assert cli("set", "items", "T93", "--json", json.dumps(task))[0] == 0
-    rc, _, err = cli("update", "items", "T93", "--json", '{"il":"ar-T0b"}')
+    rc, _, err = cli("update", "items", "T93", "--json", '{"il":"ar-example"}')
     assert rc == 0, err
     rc, _, err = cli("update", "items", "T93", "--json", json.dumps({"refs": ["owner/repo#1"], "last_signal_at": T}))
     assert rc == 0, err
@@ -97,7 +97,7 @@ def test_the_documented_il_update_and_task_pulse_fields_are_writable(cli):
     rc, _, err = cli("update", "items", "T93", "--json", json.dumps({"reported": rep, "last_msg_at": tp.iso_s(1764032400)}))
     assert rc == 0, err
     data = ds.Store(cli.root).get("items", "T93")["data"]
-    assert data["il"] == "ar-T0b" and data["reported"]["flags"] and dsch.validate("items", "T93", data) == []
+    assert data["il"] == "ar-example" and data["reported"]["flags"] and dsch.validate("items", "T93", data) == []
 
 
 def test_only_a_top_level_extra_field_is_refused(cli):
