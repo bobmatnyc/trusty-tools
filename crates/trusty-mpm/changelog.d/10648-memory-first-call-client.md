@@ -1,2 +1,2 @@
 Fixed
-- A memory read (`memory_recall`, `memory_list`, `palace_info`) whose first exchange times out while trusty-memory re-opens an idle palace is retried once, and `tm memory remember`/`note`/`forget` and the session-pause resume-slot write warm the palace with a read first and send the write exactly once, the pause write still inside its 2 s budget (#10648).
+- A memory read (`memory_recall`, `memory_list`, `palace_info`) whose first exchange times out while trusty-memory re-opens an idle palace is retried once, and `tm memory remember`/`note`/`forget` and the session-pause resume-slot write warm the palace with a read first and send the write exactly once, the pause write keeping whatever its 600 ms-capped warm-up leaves of the 2 s budget (#10648).

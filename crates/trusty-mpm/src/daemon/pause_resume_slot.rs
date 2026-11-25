@@ -17,7 +17,8 @@
 //! `pause_survives_an_unreachable_memory_socket`,
 //! `a_verify_record_failure_is_reported_as_stored_without_verify`,
 //! `pr_numbers_come_from_pr_mentions_only`, `an_unsafe_branch_gets_no_command`,
-//! `pause_slot_write_survives_a_stalled_first_exchange`.
+//! `pause_slot_write_survives_a_stalled_first_exchange`,
+//! `pause_slot_write_gets_the_rest_of_the_budget`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -37,8 +38,8 @@ use crate::daemon::verify_allowlist::{AllowedCommand, MAX_PRS, is_safe_branch};
 /// snapshot file, already written, is what it must not lose.
 const SLOT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One exchange's share of [`SLOT_WRITE_TIMEOUT`]: a warm-up, its retry and the
-/// write fit inside it (#10648).
+/// One warm-up exchange's cap; the write gets what is left of
+/// [`SLOT_WRITE_TIMEOUT`] (#10648).
 const SLOT_EXCHANGE_TIMEOUT: Duration = Duration::from_millis(600);
 
 /// The slot's lifetime: ADR-0028's 24-hour Tier C default, stated explicitly.
@@ -141,14 +142,21 @@ pub(crate) async fn record_resume_slot(
 /// Why: the pause write was the issue's worst symptom (#10648): a cold palace
 /// open stalled it into `memory_unreachable`.
 /// What: `memory_first_call::call_verb` warms the palace with `palace_info`
-/// (retried once on a timeout) and sends `memory_remember` exactly once. Each
-/// exchange gets [`SLOT_EXCHANGE_TIMEOUT`]; the whole sequence is cut off at
+/// (retried once on a timeout), each warm-up exchange capped at
+/// [`SLOT_EXCHANGE_TIMEOUT`], and sends `memory_remember` exactly once with the
+/// rest of [`SLOT_WRITE_TIMEOUT`]; the whole sequence is cut off at
 /// [`SLOT_WRITE_TIMEOUT`], so the pause never waits longer than before.
-/// Test: `pause_slot_write_survives_a_stalled_first_exchange`.
+/// Test: `pause_slot_write_survives_a_stalled_first_exchange`,
+/// `pause_slot_write_gets_the_rest_of_the_budget`.
 async fn write_slot(socket: &Path, args: Value) -> anyhow::Result<Value> {
-    // #10648: warm-up then one write, all inside the pause's existing budget.
-    let call =
-        memory_first_call::call_verb(socket, REMEMBER_METHOD, args, true, SLOT_EXCHANGE_TIMEOUT);
+    // #10648: the 600 ms cap is the warm-up's; the write keeps the rest of 2 s.
+    let call = memory_first_call::call_write_within(
+        socket,
+        REMEMBER_METHOD,
+        args,
+        SLOT_EXCHANGE_TIMEOUT,
+        SLOT_WRITE_TIMEOUT,
+    );
     match tokio::time::timeout(SLOT_WRITE_TIMEOUT, call).await {
         Ok(result) => result,
         Err(_) => Err(anyhow::anyhow!(

@@ -21,7 +21,7 @@
 //! Test: `core::memory_first_call_tests`.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -79,15 +79,50 @@ pub async fn call_verb(
     is_write: bool,
     timeout: Duration,
 ) -> Result<Value> {
-    if is_write && let Some(palace) = params.get("palace").and_then(Value::as_str) {
-        let warm = json!({ "palace": palace });
-        if let Err(e) = memory_checked::call_with_timeout(socket, WARM_METHOD, warm, timeout).await
-        {
-            // #10648: still stalled after a retry; the write stays unsent.
-            if is_exchange_timeout(&e) {
-                return Err(e);
-            }
-        }
+    if is_write {
+        warm_palace(socket, &params, timeout).await?;
     }
     memory_checked::call_with_timeout(socket, method, params, timeout).await
+}
+
+/// Send a write within `budget`, warming its palace first.
+///
+/// Why: a caller holding one overall budget (the pause slot) must not cap its
+/// write at the warm-up's per-exchange share (#10648).
+/// What: the warm-up, as in [`call_verb`], gets `warm_timeout` per exchange;
+/// the write is sent once with whatever of `budget` the warm-up left, and is
+/// not sent when nothing is left.
+/// Test: `pause_slot_write_gets_the_rest_of_the_budget`.
+pub async fn call_write_within(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    warm_timeout: Duration,
+    budget: Duration,
+) -> Result<Value> {
+    let started = Instant::now();
+    warm_palace(socket, &params, warm_timeout).await?;
+    // #10648: the write keeps the rest of the budget, not the warm-up's cap.
+    let left = budget.saturating_sub(started.elapsed());
+    if left.is_zero() {
+        anyhow::bail!("{method}: the warm-up used the whole {budget:?} budget; write not sent");
+    }
+    memory_checked::call_with_timeout(socket, method, params, left).await
+}
+
+/// Warm the palace `params` names with [`WARM_METHOD`], retried once.
+///
+/// What: `Err` only when the warm-up timed out twice; any other warm-up error is
+/// dropped, because the write reports its own failure (a new palace, for one,
+/// has no `palace_info` yet). No `palace` in `params` sends nothing.
+async fn warm_palace(socket: &Path, params: &Value, timeout: Duration) -> Result<()> {
+    let Some(palace) = params.get("palace").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let warm = json!({ "palace": palace });
+    match memory_checked::call_with_timeout(socket, WARM_METHOD, warm, timeout).await {
+        // #10648: still stalled after a retry; the write stays unsent.
+        Err(e) if is_exchange_timeout(&e) => Err(e),
+        _ => Ok(()),
+    }
 }
