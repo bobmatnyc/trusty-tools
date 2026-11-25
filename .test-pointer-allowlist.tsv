@@ -69,7 +69,6 @@ crates/trusty-assistants/src/tools/mcp_service_tools.rs	formats_text_content
 crates/trusty-assistants/src/tools/mcp_service_tools.rs	mcp_service_tool_executors_returns_tools_for_enabled_services
 crates/trusty-assistants/src/tools/mcp_service_tools.rs	surfaces_call_errors
 crates/trusty-assistants/src/tools/registry/mod.rs	disabled_endpoint_is_skipped
-crates/trusty-analyze/src/commands/daemon.rs	test_default_facts_path_is_home_anchored
 crates/trusty-analyze/src/commands/setup.rs	claude_mpm_writes_both_files
 crates/trusty-analyze/src/core/tool_registry.rs	discover_records_unavailable_tools
 crates/trusty-analyze/src/core/tools.rs	diagnostics_report_clean_run
@@ -194,8 +193,6 @@ crates/trusty-installer/src/commands/stable_set.rs	select_transitive_idempotent_
 crates/trusty-installer/src/commands/up/claude_code.rs	claude_non_tty_warns
 crates/trusty-installer/src/commands/up/config.rs	config_parses_claude_code
 crates/trusty-installer/src/commands/up/config.rs	config_parses_full
-crates/trusty-installer/src/commands/up/config.rs	config_path_shape
-crates/trusty-installer/src/commands/up/lock.rs	lock_path_shape
 crates/trusty-installer/src/commands/up/report.rs	verdict_matches_exit_code
 crates/trusty-installer/src/commands/up/stages.rs	sequence_console_starts_on_partial_core
 crates/trusty-installer/src/commands/up/stages.rs	sequence_core_down_skips_orchestrator

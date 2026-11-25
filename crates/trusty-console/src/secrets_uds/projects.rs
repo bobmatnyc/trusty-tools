@@ -56,20 +56,49 @@ pub enum RegistryError {
     Malformed,
 }
 
-/// `$TRUSTY_MPM_ROOT/project-paths.json`, else `~/.trusty-mpm/project-paths.json`.
+/// `$TRUSTY_MPM_ROOT/project-paths.json`, else
+/// `<config_dir>/.trusty-mpm/project-paths.json` from the install paths
+/// (#11821), default `~/.trusty-mpm/project-paths.json`.
 ///
 /// What: `None` when neither is known, so the console never falls back to a
 /// path relative to its own working directory.
-/// Test: `registry_file_follows_the_tm_root`.
+/// Test: `registry_file_follows_the_tm_root`, `mpm_dir_from_follows_the_config_dir`.
 pub fn default_registry_file() -> Option<PathBuf> {
-    registry_file_for(std::env::var_os(MPM_ROOT_ENV), dirs::home_dir())
+    let mpm_dir = mpm_dir_from(
+        trusty_common::install_paths::InstallPaths::resolve(),
+        dirs::home_dir(),
+    );
+    registry_file_for(std::env::var_os(MPM_ROOT_ENV), mpm_dir)
 }
 
-/// [`default_registry_file`] for a given tm root and home directory.
-pub(crate) fn registry_file_for(root: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+/// [`default_registry_file`] for a given tm root and default tm dir.
+pub(crate) fn registry_file_for(
+    root: Option<OsString>,
+    mpm_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
     match root {
         Some(root) if !root.is_empty() => Some(PathBuf::from(root).join(REGISTRY_FILE)),
-        _ => home.map(|home| home.join(".trusty-mpm").join(REGISTRY_FILE)),
+        _ => mpm_dir.map(|dir| dir.join(REGISTRY_FILE)),
+    }
+}
+
+/// The tm dir for a resolved install.
+///
+/// #11821: read-only — the picker only lists projects, so a broken
+/// `install.toml` logs a warning and reads `~/.trusty-mpm`; no home is `None`.
+pub(crate) fn mpm_dir_from(
+    paths: Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    >,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match paths {
+        Ok(paths) => Some(paths.mpm_dir()),
+        Err(e) => {
+            tracing::warn!(error = %e, "install paths unresolved; reading the default tm registry");
+            home.map(|home| home.join(".trusty-mpm"))
+        }
     }
 }
 

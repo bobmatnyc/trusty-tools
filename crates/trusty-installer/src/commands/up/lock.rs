@@ -34,22 +34,21 @@ pub struct BootLock {
     path: PathBuf,
 }
 
-/// Resolve the default boot lock path: `~/.trusty-tools/trusty-installer/ensure.lock`.
+/// Resolve the default boot lock path:
+/// `<config_dir>/.trusty-tools/trusty-installer/ensure.lock`.
 ///
 /// Why: Co-locates the lock with the #1220 installer config dir so all
 /// installer state lives under one root.
 ///
-/// What: Joins `dirs::home_dir()` with `.trusty-tools/trusty-installer/ensure.lock`.
-/// Returns `None` if the home dir is unresolvable.
+/// What: [`super::config::tools_dir`] joined with
+/// `trusty-installer/ensure.lock` (#11821). `Ok(None)` if the home dir is
+/// unresolvable; a broken `install.toml` is an `Err`, so no lock is taken on
+/// the default tree.
 ///
-/// Test: `super::tests::lock_path_shape`.
-pub fn lock_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(
-        home.join(".trusty-tools")
-            .join("trusty-installer")
-            .join("ensure.lock"),
-    )
+/// Test: `super::tests::tools_dir_from_fails_closed_on_broken_install_file`.
+pub fn lock_path() -> anyhow::Result<Option<PathBuf>> {
+    // #11821: the lock follows the configured config dir.
+    Ok(super::config::tools_dir()?.map(|dir| dir.join("trusty-installer").join("ensure.lock")))
 }
 
 impl BootLock {
@@ -62,7 +61,7 @@ impl BootLock {
     ///
     /// Test: Path-resolving wrapper; covered via `acquire_at` in `super::tests`.
     pub fn acquire() -> anyhow::Result<Self> {
-        let path = lock_path()
+        let path = lock_path()?
             .ok_or_else(|| anyhow::anyhow!("cannot resolve home dir for the boot lock"))?;
         Self::acquire_at(&path, true)
     }

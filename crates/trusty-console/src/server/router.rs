@@ -52,7 +52,7 @@ pub fn build_router(state: AppState) -> Router {
 /// Test: the `route_*` and `metrics_route_*` cases in `webhook/tests.rs`.
 pub fn build_router_with_webhooks(
     state: AppState,
-    self_origins: crate::routes::origin_guard::SelfOrigins,
+    self_origins: crate::routes::origin_guard::WriteOrigins,
     ingress: crate::webhook::WebhookIngress,
 ) -> Router {
     build_router_inner(state, self_origins, Some(ingress))
@@ -69,15 +69,15 @@ pub fn build_router_with_webhooks(
 /// unchanged.
 /// What: Identical router to `build_router`, except the write-origin guard
 /// (see below) is constructed with `self_origins` instead of the default
-/// empty set.
+/// empty set. #11749: also takes a `WriteOrigins` carrying the MagicDNS name.
 /// Test: `server/tests.rs` tests `proxy_route_allows_self_origin_write` /
 /// `proxy_route_rejects_cross_origin_write`; `bind.rs`/`lib.rs` wire the real
 /// resolved addresses in `run_serve`.
 pub fn build_router_with_self_origins(
     state: AppState,
-    self_origins: crate::routes::origin_guard::SelfOrigins,
+    self_origins: impl Into<crate::routes::origin_guard::WriteOrigins>,
 ) -> Router {
-    build_router_inner(state, self_origins, None)
+    build_router_inner(state, self_origins.into(), None)
 }
 
 /// Wrap `router` in the loopback listener's Host/Origin guard for `listener`,
@@ -131,7 +131,7 @@ fn is_loopback_bind(addr: std::net::SocketAddr) -> bool {
 /// route set cannot drift between them.
 fn build_router_inner(
     state: AppState,
-    self_origins: crate::routes::origin_guard::SelfOrigins,
+    self_origins: crate::routes::origin_guard::WriteOrigins,
     webhook: Option<crate::webhook::WebhookIngress>,
 ) -> Router {
     // #9066: taken before `with_state` consumes the state.
@@ -504,9 +504,10 @@ fn build_router_inner(
         // #9792: reads are guarded per listener instead — the loopback and
         // tailnet listeners each admit only their own Host/Origin, every
         // method (`tailnet_peer::guard_loopback`, `guard_tailnet_peer`).
+        // #11749: the console wrapper also trusts the MagicDNS origin.
         .layer(axum::middleware::from_fn_with_state(
             self_origins,
-            crate::routes::origin_guard::guard_write_origin,
+            crate::routes::origin_guard::guard_console_write_origin,
         ))
         // #9792: no CORS layer — the permissive one let any page read.
         // #9066 A6: merged after the write-origin guard, so it does not apply

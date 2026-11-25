@@ -40,26 +40,39 @@ pub fn data_dir() -> Result<PathBuf> {
 ///
 /// Why: the old default (`trusty-analyze.facts.redb`) is a CWD-relative path
 /// that crashes under launchd (which sets cwd to `/`, a read-only root on
-/// macOS).  The new default anchors to `~/.trusty-tools/analyze/facts.redb`
+/// macOS).  The new default anchors to `<tools dir>/analyze/facts.redb`
+/// (`~/.trusty-tools` unless the install paths move the config dir, #11821)
 /// so the daemon always has a writable location regardless of cwd.  The
 /// `TRUSTY_ANALYZER_FACTS` env var (or `--facts-path` CLI flag) still wins
 /// as an absolute-path override.  (closes #632 os-error-30 crash)
 /// What: if `cli_path` is `Some`, use it directly.  Otherwise resolve
-/// `$HOME/.trusty-tools/analyze/facts.redb` via the `dirs` crate.  Creates
-/// the parent directory (but not the file) when it does not exist.
-/// Test: `test_default_facts_path_is_home_anchored` in daemon tests.
+/// `<config_dir>/.trusty-tools/analyze/facts.redb` through the install
+/// paths; a broken `install.toml` is an error, never the default tree.
+/// Creates the parent directory (but not the file) when it does not exist.
+/// Test: `facts_dir_from_follows_the_config_dir`,
+/// `facts_dir_from_fails_closed_on_broken_install_file`.
 pub fn resolve_facts_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = cli_path {
         return Ok(p);
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for facts store path"))?;
-    let dir = home.join(".trusty-tools").join("analyze");
+    // #11821: the facts store is a write; fail closed on a broken install.toml.
+    let dir = facts_dir_from(trusty_common::install_paths::InstallPaths::resolve())?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create facts store directory {}", dir.display()))?;
     }
     Ok(dir.join("facts.redb"))
+}
+
+/// `<tools dir>/analyze` for a resolved install, or the resolver's error.
+fn facts_dir_from(
+    paths: Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    >,
+) -> Result<PathBuf> {
+    let paths = paths.context("cannot resolve the install paths for the facts store")?;
+    Ok(paths.tools_dir().join("analyze"))
 }
 
 /// Path to the PID file used by `start` / `stop` / `status`.
@@ -483,6 +496,44 @@ fn stale_unit_warning(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Resolve against a scratch home with only `TRUSTY_MPM_CONFIG_DIR` set.
+    fn resolve_in(
+        home: &Path,
+        config_dir: Option<&str>,
+    ) -> std::result::Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    > {
+        trusty_common::install_paths::InstallPaths::resolve_with(
+            |name| {
+                (name == "TRUSTY_MPM_CONFIG_DIR")
+                    .then(|| config_dir.map(str::to_string))
+                    .flatten()
+            },
+            home,
+            &trusty_common::install_paths::PathOverrides::default(),
+        )
+    }
+
+    /// #11821: the facts store follows a configured config dir.
+    #[test]
+    fn facts_dir_from_follows_the_config_dir() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let got = super::facts_dir_from(resolve_in(home.path(), Some("/srv/cfg"))).expect("ok");
+        assert_eq!(got, PathBuf::from("/srv/cfg/.trusty-tools/analyze"));
+    }
+
+    /// #11821: a broken `install.toml` refuses the facts store path.
+    #[test]
+    fn facts_dir_from_fails_closed_on_broken_install_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = trusty_common::install_paths::install_file_path(home.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "bogus = 1\n").unwrap();
+        let err = super::facts_dir_from(resolve_in(home.path(), None)).expect_err("refused");
+        assert!(format!("{err:#}").contains("install.toml"), "{err:#}");
+    }
+
     use super::*;
 
     /// Why (#6621): the issue's host still carried
