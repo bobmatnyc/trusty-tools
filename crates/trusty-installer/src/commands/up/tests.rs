@@ -889,3 +889,49 @@ fn console_url_parses() {
     // missing port → None.
     assert!(super::os_env::parse_console_port(br#"{"addr":"x"}"#).is_none());
 }
+
+/// Resolve install paths against a scratch home with an injected env.
+fn resolve_in(
+    home: &std::path::Path,
+    env: &'static [(&'static str, &'static str)],
+) -> Result<
+    trusty_common::install_paths::InstallPaths,
+    trusty_common::install_paths::InstallPathsError,
+> {
+    trusty_common::install_paths::InstallPaths::resolve_with(
+        |name| {
+            env.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        },
+        home,
+        &trusty_common::install_paths::PathOverrides::default(),
+    )
+}
+
+/// #11821: the installer's tools dir follows a configured config dir.
+#[test]
+fn tools_dir_from_follows_the_config_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let got = super::config::tools_dir_from(resolve_in(
+        home.path(),
+        &[("TRUSTY_MPM_CONFIG_DIR", "/srv/cfg")],
+    ))
+    .expect("resolved");
+    assert_eq!(
+        got,
+        Some(std::path::PathBuf::from("/srv/cfg/.trusty-tools"))
+    );
+}
+
+/// #11821: a broken `install.toml` is an error, never the default tree.
+#[test]
+fn tools_dir_from_fails_closed_on_broken_install_file() {
+    let home = tempfile::tempdir().unwrap();
+    let file = trusty_common::install_paths::install_file_path(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "bogus = 1\n").unwrap();
+    let err = super::config::tools_dir_from(resolve_in(home.path(), &[]))
+        .expect_err("a broken install.toml must not resolve");
+    assert!(format!("{err:#}").contains("install.toml"), "{err:#}");
+}

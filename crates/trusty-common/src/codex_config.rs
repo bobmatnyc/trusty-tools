@@ -43,6 +43,42 @@ pub fn codex_config_path(home: &Path) -> PathBuf {
     home.join(".codex").join("config.toml")
 }
 
+/// The Codex config file for a resolved install.
+///
+/// Why: the Codex home is configurable per install (`CODEX_HOME`, or
+/// `codex_home` in `install.toml`); a caller that joins `~/.codex` itself
+/// writes a file the configured Codex never reads (#11821).
+/// What: `<codex_home>/config.toml` when [`InstallPaths`] names a Codex home,
+/// else [`codex_config_path`] under `home`, Codex's own default.
+/// Test: `codex_config_path_in_honours_codex_home`,
+/// `codex_config_path_in_defaults_under_home`.
+///
+/// [`InstallPaths`]: crate::install_paths::InstallPaths
+pub fn codex_config_path_in(paths: &crate::install_paths::InstallPaths, home: &Path) -> PathBuf {
+    // #11821: the configured Codex home wins over `~/.codex`.
+    match &paths.codex_home {
+        Some(resolved) => resolved.path.join("config.toml"),
+        None => codex_config_path(home),
+    }
+}
+
+/// The Codex config file for this process's install.
+///
+/// Why: writers and doctors in other crates need one call that honours the
+/// configured Codex home and surfaces a broken `install.toml` (#11821).
+/// What: [`InstallPaths::resolve`] then [`codex_config_path_in`]. Errors with
+/// the resolver's error, including `NoHome`; it never falls back to
+/// `~/.codex` on a broken install file.
+/// Test: `codex_config_path_in_honours_codex_home` covers the mapping; the
+/// wrapper adds only the process env and home lookups.
+///
+/// [`InstallPaths::resolve`]: crate::install_paths::InstallPaths::resolve
+pub fn resolve_codex_config_path() -> Result<PathBuf, crate::install_paths::InstallPathsError> {
+    let home = dirs::home_dir().ok_or(crate::install_paths::InstallPathsError::NoHome)?;
+    let paths = crate::install_paths::InstallPaths::resolve()?;
+    Ok(codex_config_path_in(&paths, &home))
+}
+
 /// Idempotently register one stdio MCP server in a Codex config file.
 ///
 /// Why: re-running a setup command must be safe, and must REPAIR a broken
@@ -186,6 +222,44 @@ mod tests {
     fn codex_config_path_is_under_dot_codex() {
         let p = codex_config_path(Path::new("/Users/x"));
         assert_eq!(p, PathBuf::from("/Users/x/.codex/config.toml"));
+    }
+
+    /// Resolve against a scratch home with the given env and no override.
+    fn paths_with(
+        home: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<crate::install_paths::InstallPaths, crate::install_paths::InstallPathsError> {
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        crate::install_paths::InstallPaths::resolve_with(
+            |name| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()),
+            home,
+            &crate::install_paths::PathOverrides::default(),
+        )
+    }
+
+    /// #11821: a configured Codex home moves the config file with it.
+    #[test]
+    fn codex_config_path_in_honours_codex_home() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let paths = paths_with(home.path(), &[("CODEX_HOME", "/srv/codex")]).expect("resolve");
+        assert_eq!(
+            codex_config_path_in(&paths, home.path()),
+            PathBuf::from("/srv/codex/config.toml")
+        );
+    }
+
+    /// #11821: with no Codex home configured, Codex's own `~/.codex` stands.
+    #[test]
+    fn codex_config_path_in_defaults_under_home() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let paths = paths_with(home.path(), &[]).expect("resolve");
+        assert_eq!(
+            codex_config_path_in(&paths, home.path()),
+            codex_config_path(home.path())
+        );
     }
 
     /// Why (#5264): a machine with no Codex config yet must still end up with a
