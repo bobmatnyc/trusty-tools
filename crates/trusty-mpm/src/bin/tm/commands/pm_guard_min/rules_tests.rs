@@ -29,6 +29,33 @@ fn home() -> TempDir {
     tempfile::tempdir().unwrap()
 }
 
+/// #11821 P3: install.toml relocates the config dir, so it is an anchor, and
+/// the relocated dir's config files are anchors alongside the `$HOME` ones.
+#[test]
+fn r1_flags_the_install_file_and_a_relocated_config_dir() {
+    let h = home();
+    let env = env_in(h.path(), h.path());
+    assert_eq!(
+        bash("echo x > ~/.trusty-tools/install.toml", &env),
+        Some("R1")
+    );
+    let cfg = h.path().join("cfg");
+    std::fs::create_dir_all(h.path().join(".trusty-tools")).unwrap();
+    std::fs::write(
+        h.path().join(".trusty-tools/install.toml"),
+        format!("config_dir = {:?}\n", cfg.display().to_string()),
+    )
+    .unwrap();
+    for rel in [
+        ".trusty-mpm/config.toml",
+        ".trusty-tools/trusty-mpm/config.yaml",
+    ] {
+        let cmd = format!("echo x > {}", cfg.join(rel).display());
+        assert_eq!(bash(&cmd, &env), Some("R1"), "{cmd}");
+    }
+    assert_eq!(bash("echo x > ~/.trusty-mpm/config.toml", &env), Some("R1"));
+}
+
 #[test]
 fn r1_flags_writes_to_each_anchor() {
     let h = home();

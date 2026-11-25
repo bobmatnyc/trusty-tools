@@ -61,7 +61,8 @@ impl StoreError {
 /// `<home>/.trusty-mpm/build-slots`.
 #[must_use]
 pub fn canonical_path(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm").join(SLOT_DIR_NAME)
+    // #11821 P3: under the configured config dir.
+    crate::core::config_base::framework_root_under(home).join(SLOT_DIR_NAME)
 }
 
 /// The fallback [`SlotDir::resolve`] uses: [`fixed_fallback_path`], or in a

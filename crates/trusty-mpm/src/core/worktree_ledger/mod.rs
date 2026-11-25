@@ -199,8 +199,8 @@ impl WorktreeLedger {
     /// The ledger under `home`: `<home>/.trusty-mpm/worktrees.jsonl`.
     pub fn under_home(home: &Path) -> Self {
         Self::at(
-            home.join(crate::core::paths::FRAMEWORK_DIR_NAME)
-                .join(LEDGER_FILE),
+            // #11821 P3: under the configured config dir.
+            crate::core::config_base::framework_root_under(home).join(LEDGER_FILE),
         )
     }
 

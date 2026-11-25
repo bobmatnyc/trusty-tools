@@ -236,7 +236,8 @@ fn split(flag: &str) -> impl Iterator<Item = String> + '_ {
 pub fn spec_dir(home: Option<&Path>) -> Option<PathBuf> {
     match home {
         Some(home) => Some(LaunchSpec::root_at(
-            &crate::core::paths::FrameworkPaths::under(home).crate_config_root(),
+            // #11821 P3: the layout of `home`'s install.
+            &crate::core::paths::FrameworkPaths::under_home(home).crate_config_root(),
         )),
         None => LaunchSpec::root(),
     }

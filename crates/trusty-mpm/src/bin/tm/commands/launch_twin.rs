@@ -76,9 +76,10 @@ pub(crate) fn confirm_placement(checked: &Path, placed: &Path) -> anyhow::Result
 /// on the managed checkout before provisioning anything (#8878 review).
 /// Test: the grant rule is `an_architect_without_the_twin_grant_is_not_twin`.
 pub(crate) fn precheck(project_dir: &Path) -> anyhow::Result<PathBuf> {
-    let root = dirs::home_dir()
-        .map(|home| home.join(".trusty-mpm"))
-        .ok_or_else(|| anyhow::anyhow!("`--twin` refused: the home directory is unknown"))?;
+    // #11821 P3: the configured config dir; a broken install.toml refuses too.
+    let root = trusty_mpm::core::config_base::try_config_base()
+        .map(|base| base.join(trusty_mpm::core::paths::FRAMEWORK_DIR_NAME))
+        .map_err(|e| anyhow::anyhow!("`--twin` refused: the config dir is unresolved: {e}"))?;
     let config = twin_arming::load_user_config_strict(&root)
         .map_err(|e| anyhow::anyhow!("`--twin` refused: the user config could not be read: {e}"))?;
     twin_identity::check_grant(project_dir, &config).map_err(|refusal| {

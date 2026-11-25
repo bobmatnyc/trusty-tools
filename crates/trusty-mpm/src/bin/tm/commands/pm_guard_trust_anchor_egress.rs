@@ -81,16 +81,24 @@ impl EgressAnchors {
     /// Test: `egress_anchor_config_yaml_writes_are_denied`,
     /// `egress_anchor_unresolvable_location_denies_every_write`.
     pub(super) fn locate(home: &Path) -> Result<Self, PathBuf> {
-        let managed = managed_claude_config_dir_at(home);
+        // #11821 P3: under the configured config dir of `home`.
+        let managed =
+            managed_claude_config_dir_at(&trusty_mpm::core::config_base::config_base_under(home));
         let lexical = [
-            trusty_common::crate_config::crate_config_path_at(home, CRATE_NAME),
+            trusty_common::crate_config::crate_config_path_at(
+                &trusty_mpm::core::config_base::config_base_under(home),
+                CRATE_NAME,
+            ),
             managed.join(SETTINGS_NAMES[0]),
             managed.join(SETTINGS_NAMES[1]),
             // #11463: a same-user agent must not add its own ssh key or edit
             // the remote-host allowlist to pose as EVO to
             // `trusty-secrets remote-gate`.
             home.join(AUTHORIZED_KEYS),
-            trusty_common::crate_config::crate_config_path_at(home, TRUSTY_COMMON),
+            trusty_common::crate_config::crate_config_path_at(
+                &trusty_mpm::core::config_base::config_base_under(home),
+                TRUSTY_COMMON,
+            ),
         ];
         let mut out = Self {
             guarded: Vec::new(),

@@ -177,8 +177,8 @@ pub(crate) fn deps_budget_check(shared_root: &Path, pool_root: &Path, line: usiz
 /// The live row against this machine's shared root and slot pool.
 pub(crate) fn deps_budget_row() -> DoctorCheck {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let shared_root = home
-        .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+    // #11821 P3: the configured config dir.
+    let shared_root = trusty_mpm::core::config_base::tools_root_under(&home)
         .join(trusty_mpm::core::build_env::CARGO_TARGET_SUBDIR);
     let pool_root = MpmConfig::load_default()
         .builders

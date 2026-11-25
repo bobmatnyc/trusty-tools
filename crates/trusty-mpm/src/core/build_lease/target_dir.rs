@@ -43,7 +43,8 @@ impl SharedDirs {
     pub fn resolve(config: &BuildersConfig, home: &Path) -> Self {
         let mut roots = vec![
             config.effective_slot_pool_root(home),
-            home.join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+            // #11821 P3: under the configured config dir.
+            crate::core::config_base::tools_root_under(home)
                 .join(crate::core::build_env::CARGO_TARGET_SUBDIR),
         ];
         let configured = load_build_config(home)
@@ -246,8 +247,9 @@ pub fn rewrite_target_dir_arg(argv: &[String], new_dir: &str) -> Vec<String> {
 /// The `build:` section of `~/.trusty-tools/trusty-mpm` config, if readable.
 fn load_build_config(home: &Path) -> Option<crate::core::build_env::BuildConfig> {
     trusty_common::crate_config::load_at::<crate::core::trusty_tools_config::TrustyToolsConfig>(
+        // #11821 P3: under the configured config dir of `home`.
         &trusty_common::crate_config::crate_config_path_at(
-            home,
+            &crate::core::config_base::config_base_under(home),
             crate::core::trusty_tools_config::CRATE_NAME,
         ),
     )

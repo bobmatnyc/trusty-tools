@@ -298,8 +298,9 @@ pub(super) fn gather(project_dir: Option<&Path>, home: &Path) -> BuildEnvFacts {
 
     let config = trusty_common::crate_config::load_at::<
         crate::core::trusty_tools_config::TrustyToolsConfig,
+        // #11821 P3: under the configured config dir of `home`.
     >(&trusty_common::crate_config::crate_config_path_at(
-        home,
+        &crate::core::config_base::config_base_under(home),
         crate::core::trusty_tools_config::CRATE_NAME,
     ))
     .ok()

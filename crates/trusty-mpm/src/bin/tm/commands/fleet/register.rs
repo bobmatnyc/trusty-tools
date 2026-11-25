@@ -113,7 +113,8 @@ pub(crate) fn prune_step(home: &Path, probe: Probe) -> Option<Step> {
         start_time: &prune::start_time,
         session_exists: &session_exists,
     };
-    let root = home.join(".trusty-mpm");
+    // #11821 P3: under the configured config dir.
+    let root = trusty_mpm::core::config_base::framework_root_under(home);
     match prune::prune_stale_sidecars(&root, probes) {
         Err(why) => Some(Step::Unchanged(format!(
             "Architect sidecars kept: cannot list them ({why})"

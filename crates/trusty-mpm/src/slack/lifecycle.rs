@@ -32,8 +32,9 @@ const SLACK_PID_FILE: &str = "slack.pid";
 /// the home directory cannot be resolved (mirrors `FrameworkPaths::default`).
 /// Test: `pid_file_path_is_under_framework_root`.
 pub fn pid_file_path() -> std::path::PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(crate::core::paths::FRAMEWORK_DIR_NAME)
+    // #11821 P3: under the configured config dir.
+    crate::core::paths::FrameworkPaths::default()
+        .root
         .join(SLACK_PID_FILE)
 }
 

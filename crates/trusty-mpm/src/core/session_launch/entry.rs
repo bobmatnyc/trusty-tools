@@ -305,7 +305,11 @@ pub fn prepare_isolated_session_under(
     home: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     let fw = match home {
-        Some(home) => FrameworkPaths::for_managed_workspace_under(home, project_dir),
+        // #11821 P3: the framework source under `home`'s configured config dir.
+        Some(home) => FrameworkPaths::for_managed_workspace_under(
+            crate::core::config_base::config_base_under(home),
+            project_dir,
+        ),
         None => isolated_framework_paths(project_dir),
     };
     let native = crate::core::output_style::claude_supports_native_output_style();

@@ -132,7 +132,11 @@ impl BuildLeaseConfig {
     #[must_use]
     pub fn load_default() -> Self {
         dirs::home_dir()
-            .and_then(|h| std::fs::read_to_string(h.join(".trusty-mpm/config.toml")).ok())
+            // #11821 P3: under the configured config dir.
+            .and_then(|h| {
+                let path = crate::core::config_base::framework_root_under(&h).join("config.toml");
+                std::fs::read_to_string(path).ok()
+            })
             .map(|raw| Self::from_toml(&raw))
             .unwrap_or_default()
     }

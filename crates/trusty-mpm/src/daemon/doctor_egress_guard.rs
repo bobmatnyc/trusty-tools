@@ -68,7 +68,8 @@ pub(super) fn check_egress_guard(
     // #8454 fix round: the managed tier is judged whenever `claude-config/`
     // exists, so a deleted or dangling `settings.json` fails rather than
     // hiding the tier; a directory that cannot be stat'ed is Unknown.
-    let managed = managed_claude_config_dir_at(home);
+    // #11821 P3: under the configured config dir of `home`.
+    let managed = managed_claude_config_dir_at(&crate::core::config_base::config_base_under(home));
     match std::fs::symlink_metadata(&managed) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => unknowns.push(format!("{} cannot be read ({e})", managed.display())),

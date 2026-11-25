@@ -72,7 +72,8 @@ impl OsProbe {
     /// The probe for this process and the operator's `~/.trusty-mpm`.
     pub fn current() -> Self {
         Self {
-            root: dirs::home_dir().map(|home| home.join(".trusty-mpm")),
+            // #11821 P3: the configured config dir; `None` on a broken install.toml.
+            root: crate::core::config_base::framework_root_dir(),
             start_pid: std::process::id(),
         }
     }

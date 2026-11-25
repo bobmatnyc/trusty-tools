@@ -58,7 +58,12 @@ pub const OAUTH_TOKEN_ENV_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// What: `<base>/.trusty-tools/trusty-mpm/claude-code-oauth.token`.
 /// Test: `token_file_path_layout`.
 pub fn token_file_path_at(base: &Path) -> PathBuf {
-    trusty_common::crate_config::crate_config_dir_at(base, CRATE_NAME).join(TOKEN_FILE)
+    // #11821 P3: under the configured config dir of `base`.
+    trusty_common::crate_config::crate_config_dir_at(
+        &crate::core::config_base::config_base_under(base),
+        CRATE_NAME,
+    )
+    .join(TOKEN_FILE)
 }
 
 /// Resolve the canonical token file path.

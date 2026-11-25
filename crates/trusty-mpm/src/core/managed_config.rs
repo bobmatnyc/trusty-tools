@@ -469,8 +469,11 @@ pub fn prepare_interactive_config_dir_under(
         }
         return None;
     };
-    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir_at(home);
-    prepare_interactive_config_dir_in(&FrameworkPaths::under(home), &config_dir, workspace);
+    // #11821 P3: under the configured config dir of `home`.
+    let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir_at(
+        &crate::core::config_base::config_base_under(home),
+    );
+    prepare_interactive_config_dir_in(&FrameworkPaths::under_home(home), &config_dir, workspace);
     Some(config_dir)
 }
 

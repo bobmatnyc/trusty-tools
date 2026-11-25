@@ -756,7 +756,11 @@ impl TrustyToolsConfig {
     pub fn load_under(home: Option<&Path>) -> Self {
         match home {
             Some(home) => trusty_common::crate_config::load_or_default_at(
-                &trusty_common::crate_config::crate_config_path_at(home, CRATE_NAME),
+                // #11821 P3: under the configured config dir of `home`.
+                &trusty_common::crate_config::crate_config_path_at(
+                    &crate::core::config_base::config_base_under(home),
+                    CRATE_NAME,
+                ),
                 CRATE_NAME,
             ),
             None => Self::load(),
@@ -908,7 +912,11 @@ pub(crate) fn load_disk_keep_list() -> KeepList {
 /// Test: `an_unparseable_config_yields_an_unreadable_keep_list`,
 /// `a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree`.
 pub(crate) fn load_disk_keep_list_at(base: &Path) -> KeepList {
-    let path = trusty_common::crate_config::crate_config_path_at(base, CRATE_NAME);
+    // #11821 P3: under the configured config dir of `base`.
+    let path = trusty_common::crate_config::crate_config_path_at(
+        &crate::core::config_base::config_base_under(base),
+        CRATE_NAME,
+    );
     match trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path) {
         Ok(Some(config)) => KeepList::from_patterns(&disk_keep_list_patterns(&config)),
         Ok(None) => KeepList::default(),

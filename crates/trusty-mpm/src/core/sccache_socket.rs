@@ -39,7 +39,8 @@ const START_BUDGET: Duration = Duration::from_secs(15);
 /// directory tm already owns.
 /// Test: `the_socket_lives_under_trusty_mpm`.
 pub fn socket_path_at(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm").join(SOCKET_FILE)
+    // #11821 P3: under the configured config dir.
+    crate::core::config_base::framework_root_under(home).join(SOCKET_FILE)
 }
 
 /// What an UNSANDBOXED cargo client sets to use the server. Never handed to a
@@ -280,8 +281,9 @@ pub fn ensure_server(bin: &Path, socket: &Path) -> Result<StartOutcome, SccacheS
 /// Test: `start_if_requested_is_a_no_op_without_the_opt_in`,
 /// `an_unreadable_config_is_an_error_not_a_skip`.
 pub fn sccache_requested(home: &Path) -> Result<bool, String> {
+    // #11821 P3: under the configured config dir of `home`.
     let path = trusty_common::crate_config::crate_config_path_at(
-        home,
+        &crate::core::config_base::config_base_under(home),
         crate::core::trusty_tools_config::CRATE_NAME,
     );
     let config = trusty_common::crate_config::load_at::<

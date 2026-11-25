@@ -46,7 +46,8 @@ pub fn pause_path_under(framework_root: &Path, id: &SessionId) -> PathBuf {
 /// back to a relative base when the home directory cannot be determined.
 /// Test: `pause_path_is_under_home`.
 pub fn pause_path(id: &SessionId) -> PathBuf {
-    pause_path_in(&dirs::home_dir().unwrap_or_default(), id)
+    // #11821 P3: under the configured config dir.
+    pause_path_in(&crate::core::config_base::config_base(), id)
 }
 
 /// Persist the pause state for a session under an explicit base directory.
@@ -92,7 +93,8 @@ pub fn save_pause_under(framework_root: &Path, session: &Session) -> std::io::Re
 /// the session carries no explicit pause timestamp.
 /// Test: `save_then_load_round_trips`.
 pub fn save_pause(session: &Session) -> std::io::Result<()> {
-    save_pause_in(&dirs::home_dir().unwrap_or_default(), session)
+    // #11821 P3: under the configured config dir.
+    save_pause_in(&crate::core::config_base::config_base(), session)
 }
 
 /// Load the pause state for a session from an explicit base directory.
@@ -114,7 +116,8 @@ pub fn load_pause_in(base: &Path, id: &SessionId) -> Option<serde_json::Value> {
 /// yield `None` rather than an error so callers can treat "not paused" uniformly.
 /// Test: `load_missing_returns_none`, `save_then_load_round_trips`.
 pub fn load_pause(id: &SessionId) -> Option<serde_json::Value> {
-    load_pause_in(&dirs::home_dir().unwrap_or_default(), id)
+    // #11821 P3: under the configured config dir.
+    load_pause_in(&crate::core::config_base::config_base(), id)
 }
 
 /// Remove the pause file for a session under an explicit base directory.
@@ -321,7 +324,8 @@ pub fn reap_empty_session_dirs_at(sessions_dir: &Path) -> std::io::Result<Sessio
 /// call is idempotent.
 /// Test: `clear_removes_file`, `clear_missing_is_ok`.
 pub fn clear_pause(id: &SessionId) -> std::io::Result<()> {
-    clear_pause_in(&dirs::home_dir().unwrap_or_default(), id)
+    // #11821 P3: under the configured config dir.
+    clear_pause_in(&crate::core::config_base::config_base(), id)
 }
 
 #[cfg(test)]

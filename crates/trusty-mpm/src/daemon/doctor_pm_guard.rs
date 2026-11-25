@@ -29,7 +29,8 @@ const NAME: &str = "pm_guard";
 /// Test: `a_disabled_guard_warns_naming_the_key`,
 /// `an_absent_config_reports_the_guard_enabled`.
 pub(super) fn check_pm_guard(home: &Path) -> DoctorCheck {
-    let config = MpmConfig::load(&home.join(".trusty-mpm"));
+    // #11821 P3: under the configured config dir.
+    let config = MpmConfig::load(&crate::core::config_base::framework_root_under(home));
     if config.pm_guard.enabled {
         return DoctorCheck::new(
             NAME,

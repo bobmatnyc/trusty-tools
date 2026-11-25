@@ -1,0 +1,5 @@
+Changed
+- `~/.trusty-mpm` and `~/.trusty-tools` now follow the configured config dir (`TRUSTY_MPM_CONFIG_DIR`, or `config_dir` in `~/.trusty-tools/install.toml`). `FrameworkPaths::default()`, the managed `claude-config` dir, session state, logs, the daemon lock, build slots and the cargo target pool, the channel stores, the doctor rows, the fleet commands and the guard anchors resolve through the new `core::config_base`; `~/.claude` stays under `$HOME`. With nothing configured every path is unchanged (#11821).
+- A broken `install.toml` refuses `tm launch --twin`, the default managed root of the standalone commands and `tm fleet init`, and leaves the `Option` paths (`sm` overrides, twin arming, the issue state file) unset; read-only paths log it and keep `$HOME` (#11821).
+- `tm issue next` reads its goals file from the resolved Architect directory instead of a fixed `~/trusty-mpm-projects/architect` (#11821).
+- The pm-guard treats `~/.trusty-tools/install.toml` and the relocated config dir's `config.toml` and `config.yaml` as trust anchors (#11821).
