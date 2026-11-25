@@ -88,6 +88,22 @@ check audit_lock_any_decision 1 "$(audit_count 0 secrets.lock "" "$T/audit")"
 check audit_unlock_drop_not_unlock 0 "$(printf '{"ts":500,"method":"secrets.unlock.drop","decision":"allow"}\n' | audit_count 0 secrets.unlock allow /dev/stdin)"
 check audit_agent_parent 2 "$(audit_unlock_agent_parent 0 "$T/audit")"
 
+# --- prompt verdict: only a seen prompt is evidence (#11786 critic)
+check prompted_fail_no_prompt_is_not_pass INCONCLUSIVE "$(judge_prompted 0 1)"
+check prompted_timeout_no_prompt_is_not_pass INCONCLUSIVE "$(judge_prompted 0 124)"
+check prompted_success_no_prompt_fails FAIL "$(judge_prompted 0 0)"
+check prompted_prompt_and_fail_passes PASS "$(judge_prompted 1 1)"
+check prompted_prompt_and_success_passes PASS "$(judge_prompted 2 0)"
+check prompted_after_restart_is_capped INCONCLUSIVE "$(judge_prompted 1 0 1)"
+check prompted_after_restart_no_prompt_still_fails FAIL "$(judge_prompted 0 0 1)"
+
+# --- bounded: a command past its limit is killed with 124
+start=$(date +%s); bounded 1 sleep 30; brc=$?; took=$(( $(date +%s) - start ))
+check bounded_kills_overrun 124 "$brc"
+check bounded_returns_quickly 1 "$([ "$took" -le 5 ] && echo 1 || echo 0)"
+bounded 5 true; check bounded_passes_success 0 $?
+bounded 5 false; check bounded_passes_failure 1 $?
+
 # --- dry run executes nothing and names the predicate
 out=$(TM_BIN=/nonexistent/tm "$HERE/live_check_11786_unlock.sh" --dry-run 2>&1); rc=$?
 check dry_run_exit 0 "$rc"

@@ -32,16 +32,34 @@
 #   Coverage stays with `blob_store_corrupt_blob_with_backup_fails_closed`.
 #   The log file holds step names, exit codes, prompt counts and fixed tm
 #   text; `list` output is reduced to vault and key counts. No value is
-#   ever written. A trap removes the tmux server, `log stream` and the
-#   temp dir on every exit path. Every step is bounded by a timeout.
+#   ever written. A trap runs a bounded `tm secrets lock` (once tm steps
+#   began) and removes the tmux server, `log stream` and the temp dir on
+#   every exit path. Every step and every wait is bounded by a timeout.
+#   A prompt assertion passes only on positive evidence: the step's own
+#   Keychain prompt count from `log stream` is >= 1. A read that fails with
+#   no prompt is INCONCLUSIVE, never PASS. The server is restarted before
+#   the run, and before the read after lock when `list` failed, so an
+#   abandoned dialog cannot make a later read fail fast with no prompt
+#   (see `restart_server`).
 # Test: `scripts/live_check_11786_unlock_selftest.sh` (ancestry verdict,
-#   log classification, list redaction, audit counting, dry-run);
-#   `--probe-ancestry` checks the tmux route on the host without calling tm.
+#   log classification, list redaction, audit counting, the prompt verdict
+#   `judge_prompted`, `bounded`, dry-run); `--probe-ancestry` checks the
+#   tmux route on the host without calling tm.
+#
+# Run (the Architect, with the Claude Code Bash sandbox disabled:
+#   `dangerouslyDisableSandbox: true`; use run_in_background, the worst case
+#   is about 14 min). It runs --probe-ancestry first; the live check runs
+#   only when the probe passes. Verbatim:
+#   cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a9aa6ad0a0b2a602e && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --project-dir /Users/masa/Projects/trusty-tools --log /Users/masa/.trusty-tools/trusty-secrets/live_check_11786.log
+#   Add `--approve` to the second command only when the owner is at the
+#   Studio to answer Touch ID. Side effects: any live 8 h grant is locked,
+#   and the trusty-secrets server is restarted (the next call starts it).
 #
 # Usage: live_check_11786_unlock.sh [--dry-run | --probe-ancestry]
 #          [--approve] [--log FILE] [--project-dir DIR]
 #          [--unlock-timeout SECS] [--step-timeout SECS]
-# Exit: 0 overall PASS, 1 overall FAIL, 2 usage or pre-flight error.
+# Exit: 0 overall PASS, 1 overall FAIL, 2 usage or pre-flight error,
+#   3 overall INCONCLUSIVE (no FAIL, but an assertion lacked evidence).
 
 set -u
 
@@ -151,6 +169,43 @@ audit_unlock_agent_parent() {
 # and lock replies are fixed text; `list` output never reaches this.
 excerpt() { head -n 2 "$1" 2>/dev/null | cut -c1-240 | tr '\n' ' '; }
 
+# judge_prompted <keychain prompts> <rc> [restarted]: the verdict of a
+# "this read prompts" assertion. Only a prompt seen by `log stream` is
+# evidence. A failed read with no prompt cannot tell "no grant" from an
+# abandoned item (the item refuses at once), so it is INCONCLUSIVE; a read
+# that succeeds with no prompt is FAIL. A third argument of 1 (the server
+# was restarted first, which also ends any grant) caps a PASS at
+# INCONCLUSIVE, for the approve path where lock itself is under test.
+judge_prompted() {
+  if [ "$1" -ge 1 ] && [ "${3:-0}" = 1 ]; then echo INCONCLUSIVE
+  elif [ "$1" -ge 1 ]; then echo PASS
+  elif [ "$2" != 0 ]; then echo INCONCLUSIVE
+  else echo FAIL; fi
+}
+
+# stop_pid <pid> <secs>: TERM, poll up to <secs>, then KILL. `wait` runs
+# only after the KILL, so it never blocks past <secs> + 1.
+stop_pid() {
+  kill -TERM "$1" 2>/dev/null || return 0
+  i=0
+  while kill -0 "$1" 2>/dev/null && [ "$i" -lt "$2" ]; do sleep 1; i=$((i + 1)); done
+  kill -KILL "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+  return 0
+}
+
+# bounded <secs> <cmd...>: run cmd in the background; past <secs> kill it
+# and answer 124, else answer its exit status.
+bounded() {
+  lim=$1; shift
+  "$@" &
+  bp=$!
+  j=0
+  while kill -0 "$bp" 2>/dev/null && [ "$j" -lt "$lim" ]; do sleep 1; j=$((j + 1)); done
+  if kill -0 "$bp" 2>/dev/null; then stop_pid "$bp" 2; return 124; fi
+  wait "$bp"
+}
+
 if [ "${LIVE_CHECK_11786_SOURCE_ONLY:-}" = 1 ]; then
   # shellcheck disable=SC2317 # exit runs only when executed, not sourced
   return 0 2>/dev/null || exit 0
@@ -202,12 +257,15 @@ audit log read:  $AUDIT_LOG (+ .1), read-only
 PLAN: env -i HOME USER LOGNAME PATH TMPDIR LANG SHELL [SSH_*] tmux -L $SOCK -f /dev/null new-session -d -s chk -c $PROJECT_DIR '<idle loop>'
 PLAN: tmux new-window: probe.sh — walk ps ppid chain to pid 1; abort on any Claude ancestor
 PLAN: log stream --style compact --predicate '$PREDICATE'
+PLAN: restart_server:       pkill -TERM -U \$(id -u) -x trusty-secrets; 10 s; then KILL (clears abandoned dialogs)
 PLAN: step baseline_lock:   $TM_BIN secrets lock          (clears any earlier grant; T0 = epoch before it)
 PLAN: step unlock:          $TM_BIN secrets unlock        (timeout ${UNLOCK_TIMEOUT}s)
 PLAN: status:               audit records secrets.unlock decision=allow with ts >= T0 (read-only)
 PLAN: step list:            $TM_BIN secrets list          (output reduced to counts)
 PLAN: step lock:            $TM_BIN secrets lock
+PLAN: restart_server again only if list failed (its unanswered dialog would mask this read)
 PLAN: step read_after_lock: $TM_BIN secrets list          (output reduced to counts)
+PLAN: on exit (trap):       bounded 30 s $TM_BIN secrets lock, logged; stop log stream (5 s bound); kill tmux server
 PLAN: SKIP corrupt-blob: no isolated blob (login Keychain item trusty-secrets.vault-blob)
 EOF
   if [ "$MODE" = deny ]; then cat <<'EOF'
@@ -215,15 +273,15 @@ ASSERT D-a1 unlock exits non-zero, reporting presence declined/unavailable
 ASSERT D-a2 unlock showed a Touch ID prompt (coreauthd showing UI from the unlock pid)
 ASSERT D-b1 no secrets.unlock allow record since T0 (audit observable via the baseline lock record)
 ASSERT D-b2 the lock step reports "no unlock grant was live"
-ASSERT D-c  list prompts (KC_PROMPT >= 1) or fails
-ASSERT D-d  read after lock prompts or fails
+ASSERT D-c  list shows >= 1 Keychain prompt (fails with none: INCONCLUSIVE; succeeds with none: FAIL)
+ASSERT D-d  read after lock shows >= 1 Keychain prompt (same arms)
 EOF
   else cat <<'EOF'
 ASSERT A-a1 unlock exits 0 and reports "unlocked for"
 ASSERT A-a2 a secrets.unlock allow record since T0, none with agent_parent=true
 ASSERT A-b  list exits 0 with 0 Keychain prompts (served from the grant)
 ASSERT A-c  the lock step reports "locked"
-ASSERT A-d  read after lock prompts or fails
+ASSERT A-d  read after lock shows >= 1 Keychain prompt with no restart (else INCONCLUSIVE/FAIL)
 EOF
   fi
   exit 0
@@ -233,9 +291,17 @@ fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/lc11786.XXXXXX") || exit 2
 LOG_PID=""
+LOCK_ON_EXIT=0
 # shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
-  [ -n "$LOG_PID" ] && kill "$LOG_PID" 2>/dev/null
+  # #11786 critic: a run killed after a granted unlock must not leave the
+  # 8 h grant open. Bounded and logged, on every exit path once tm steps
+  # began. `lock` has no ancestry check, so it runs here, outside tmux.
+  if [ "$LOCK_ON_EXIT" = 1 ]; then
+    bounded 30 "$TM_BIN" secrets lock > "$TMP/exit_lock.out" 2>&1 < /dev/null
+    logf "exit lock rc=$?: $(excerpt "$TMP/exit_lock.out")"
+  fi
+  [ -n "$LOG_PID" ] && stop_pid "$LOG_PID" 5
   for f in "$TMP"/*.pid; do
     [ -f "$f" ] && kill -KILL "$(cat "$f")" 2>/dev/null
   done
@@ -249,12 +315,33 @@ trap 'exit 130' INT TERM HUP
 chmod 600 "$LOG_FILE"
 logf() { printf '%s %s\n' "$(now_ms)" "$*" >> "$LOG_FILE"; }
 FAILS=0
-result() { # result PASS|FAIL|SKIP <id> <text>
+result() { # result PASS|FAIL|INCONCLUSIVE|SKIP <id> <text>
   printf '%s %s %s\n' "$1" "$2" "$3"; logf "$1 $2 $3"
   [ "$1" = FAIL ] && FAILS=$((FAILS + 1))
+  [ "$1" = INCONCLUSIVE ] && INCONCLUSIVES=$((INCONCLUSIVES + 1))
   return 0
 }
+INCONCLUSIVES=0
 die() { echo "PRE-FLIGHT: $*" >&2; logf "PRE-FLIGHT $*"; echo "OVERALL FAIL (pre-flight)"; exit 2; }
+
+# #11786 critic: an unanswered Keychain dialog leaves its read abandoned in
+# the server's memory, and every later read of that item then fails at once
+# with no prompt (store/keychain_item.rs `read_within`; audit
+# `abandoned_item: true`). The dialog does not time out on its own, so
+# waiting cannot clear it; the abandoned set lives in the server process,
+# so a restart does (server/errors.rs TIMEOUT_RECOVERY). Bounded: TERM,
+# 10 s, then KILL. The next tm call starts a fresh server.
+restart_server() {
+  uid=$(id -u)
+  if ! pgrep -U "$uid" -x trusty-secrets > /dev/null; then logf "restart: no trusty-secrets running"; return 0; fi
+  pkill -TERM -U "$uid" -x trusty-secrets
+  k=0
+  while pgrep -U "$uid" -x trusty-secrets > /dev/null && [ "$k" -lt 10 ]; do sleep 1; k=$((k + 1)); done
+  pgrep -U "$uid" -x trusty-secrets > /dev/null && pkill -KILL -U "$uid" -x trusty-secrets
+  sleep 1
+  if pgrep -U "$uid" -x trusty-secrets > /dev/null; then logf "restart: trusty-secrets still running after KILL"
+  else logf "restart: trusty-secrets stopped after ${k}s"; fi
+}
 
 [ "$(uname -s)" = Darwin ] || die "macOS only"
 for t in tmux log perl; do command -v "$t" >/dev/null 2>&1 || die "$t not found"; done
@@ -332,6 +419,10 @@ LOG_PID=$!
 w=0; while ! grep -q 'Filtering' "$TMP/stream.raw" 2>/dev/null && [ "$w" -lt 10 ]; do sleep 1; w=$((w + 1)); done
 kill -0 "$LOG_PID" 2>/dev/null || die "log stream did not start"
 
+# A clean server first: an abandoned item from an earlier session would
+# make the first list fail fast with no prompt.
+LOCK_ON_EXIT=1
+restart_server
 T0=$(date +%s)
 run_step baseline_lock "$STEP_TIMEOUT" "$TM_BIN" secrets lock
 logf "baseline_lock: $(excerpt "$TMP/baseline_lock.out")"
@@ -341,11 +432,16 @@ run_step list "$STEP_TIMEOUT" "$TM_BIN" secrets list; RC_list=$STEP_RC
 logf "list: $(redact_list "$TMP/list.out")"; rm -f "$TMP/list.out"
 run_step lock "$STEP_TIMEOUT" "$TM_BIN" secrets lock; RC_lock=$STEP_RC
 logf "lock: $(excerpt "$TMP/lock.out")"
+# The first list's unanswered dialog would make this read fail fast with no
+# prompt; restart only then, and record it (a restart also ends any grant).
+RESTARTED=0
+if [ "$RC_list" != 0 ]; then restart_server; RESTARTED=1; fi
+logf "restart before read_after_lock: $RESTARTED"
 run_step read_after_lock "$STEP_TIMEOUT" "$TM_BIN" secrets list; RC_read=$STEP_RC
 logf "read_after_lock: $(redact_list "$TMP/read_after_lock.out")"; rm -f "$TMP/read_after_lock.out"
 END_ALL=$(now_ms)
 
-sleep 2; kill "$LOG_PID" 2>/dev/null; wait "$LOG_PID" 2>/dev/null; LOG_PID=""
+sleep 2; stop_pid "$LOG_PID" 5; LOG_PID=""
 classify_log "$TMP/stream.raw" > "$TMP/events.tsv"
 cat "$TMP/events.tsv" >> "$LOG_FILE"
 
@@ -389,10 +485,9 @@ if [ "$MODE" = deny ]; then
   else result FAIL D-b1 "$allows secrets.unlock allow record(s) since T0: a grant was opened"; fi
   if [ "$RC_lock" = 0 ] && grep -q 'no unlock grant was live' "$TMP/lock.out"; then result PASS D-b2 "server reports no unlock grant was live"
   else result FAIL D-b2 "lock rc=$RC_lock: $(excerpt "$TMP/lock.out")"; fi
-  if [ "$KC_list" -ge 1 ] || [ "$RC_list" != 0 ]; then result PASS D-c "list prompted ($KC_list) or failed (rc=$RC_list)"
-  else result FAIL D-c "list succeeded with no Keychain prompt and no grant"; fi
-  if [ "$KC_read_after_lock" -ge 1 ] || [ "$RC_read" != 0 ]; then result PASS D-d "read after lock prompted ($KC_read_after_lock) or failed (rc=$RC_read)"
-  else result FAIL D-d "read after lock succeeded with no Keychain prompt"; fi
+  result "$(judge_prompted "$KC_list" "$RC_list")" D-c "list: keychain prompts=$KC_list rc=$RC_list (PASS needs >= 1 prompt)"
+  # In deny mode a restart ends no grant (D-b shows none), so it does not cap D-d.
+  result "$(judge_prompted "$KC_read_after_lock" "$RC_read")" D-d "read after lock: keychain prompts=$KC_read_after_lock rc=$RC_read restarted=$RESTARTED (PASS needs >= 1 prompt)"
 else
   if [ "$RC_unlock" = 0 ] && grep -q 'unlocked for' "$TMP/unlock.out"; then result PASS A-a1 "$(excerpt "$TMP/unlock.out")"
   else result FAIL A-a1 "unlock rc=$RC_unlock: $(excerpt "$TMP/unlock.out")"; fi
@@ -402,10 +497,10 @@ else
   else result FAIL A-b "list rc=$RC_list keychain prompts=$KC_list"; fi
   if [ "$RC_lock" = 0 ] && grep -q '^locked' "$TMP/lock.out"; then result PASS A-c "grant ended by lock"
   else result FAIL A-c "lock rc=$RC_lock: $(excerpt "$TMP/lock.out")"; fi
-  if [ "$KC_read_after_lock" -ge 1 ] || [ "$RC_read" != 0 ]; then result PASS A-d "read after lock prompted ($KC_read_after_lock) or failed (rc=$RC_read)"
-  else result FAIL A-d "read after lock succeeded with no Keychain prompt"; fi
+  result "$(judge_prompted "$KC_read_after_lock" "$RC_read" "$RESTARTED")" A-d "read after lock: keychain prompts=$KC_read_after_lock rc=$RC_read restarted=$RESTARTED (PASS needs >= 1 prompt and no restart)"
 fi
 result SKIP corrupt-blob "no isolated blob: the server reads only the login Keychain item trusty-secrets.vault-blob; covered by blob_store_corrupt_blob_with_backup_fails_closed"
 
-if [ "$FAILS" = 0 ]; then echo "OVERALL PASS ($MODE) log=$LOG_FILE"; logf "OVERALL PASS"; exit 0; fi
-echo "OVERALL FAIL ($FAILS failed, $MODE) log=$LOG_FILE"; logf "OVERALL FAIL $FAILS"; exit 1
+if [ "$FAILS" != 0 ]; then echo "OVERALL FAIL ($FAILS failed, $INCONCLUSIVES inconclusive, $MODE) log=$LOG_FILE"; logf "OVERALL FAIL $FAILS"; exit 1; fi
+if [ "$INCONCLUSIVES" != 0 ]; then echo "OVERALL INCONCLUSIVE ($INCONCLUSIVES, $MODE) log=$LOG_FILE"; logf "OVERALL INCONCLUSIVE $INCONCLUSIVES"; exit 3; fi
+echo "OVERALL PASS ($MODE) log=$LOG_FILE"; logf "OVERALL PASS"; exit 0
