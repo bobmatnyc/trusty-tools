@@ -332,14 +332,49 @@ ruling 2026-11-14.
   check stays unreported there until the conflict is resolved.
 - For bundle PRs this overrides "a `BEHIND` branch merges fine" below, when
   `main` is ahead by a bundle commit.
-- Not guaranteed: it runs when the PR changes or a run is re-requested, not
-  when `main` moves. A bundle PR that passed can be overtaken by another
-  bundle PR merging first. Until a merge queue or a re-run on every `main`
-  move exists, the supervisor covers that by merge order; re-run the check
-  after another bundle PR merges.
+- It runs when the PR changes or a run is re-requested. When a push to `main`
+  changes a bundle path, `Architect bundle PR re-check`
+  (`bundle-pr-rerun.yml`, #11342) re-runs its latest run on every open PR
+  that targets `main`. The re-run fetches `main` fresh, so a bundle PR that
+  another bundle PR overtook turns red. The job's path list is the script's
+  `BUNDLE_PATHS`. A PR with no run is logged and not counted. A run still
+  in progress that started after the push already fetches the new `main`; one
+  that started before is awaited (up to 180 s) and then re-run. A refused
+  re-run, or a run not completed by the bound, logs a `::warning::` and
+  exits 1. GitHub re-runs only runs from the last 30 days. Its logic is
+  `scripts/rerun_bundle_pr_current.sh`, its selftest
+  `scripts/rerun_bundle_pr_current_selftest.sh`.
+- On `merge_group` it reports success with a message: a queue commit already
+  contains `main`. The history check below judges the queue commit.
 - Known limit (#11120): a feature branch can merge `main`, keep its own bytes
   for a bundle file, then land. A PR whose head already holds both sides'
   commits for that file passes. Check such a PR by hand, or merge `main` into it.
+
+## The bundle seed history is checked on the merge result (#11342)
+
+🔴 **`Architect bundle history/provenance check`** (`architect-bundle-meta.yml`)
+runs `scripts/architect_bundle_meta.py history --check` and
+`provenance --check` on the commit the event checks out. On `pull_request`
+that is `refs/pull/N/merge`; on `merge_group` it is the queue commit. #11333
+and #11334 each recorded their own provenance bytes and were green alone;
+squash-merged in sequence, `main` held bytes neither recorded and went red.
+
+- No `paths:` filter and no job-level `if:`, so it reports on every PR in
+  seconds. It moved out of `architect-subproject.yml`, whose `paths:` filter
+  skipped it, and a skipped workflow can never satisfy a required context.
+- `scripts/bundle_merge_result_selftest.sh` runs first. It replays two bundle
+  PRs merged in sequence and asserts that `check_bundle_pr_current.sh` fails
+  the second PR's head and `history --check` fails the merge of both. Both
+  pass once the second PR merges `main` and regenerates the history.
+- Without a merge queue, it judges the merge ref at event time only: a
+  `pull_request` run, and any re-run of it, reuses that merge SHA. After
+  `main` moves, only `Architect bundle PR is current with main` (re-run as
+  above) turns the overtaken PR red; this check stays green.
+- **Pending, for the owner:** neither context is required in branch
+  protection, and no merge queue is enabled. Making
+  `Architect bundle history/provenance check` and
+  `Architect bundle PR is current with main` required is an owner protection
+  change. Until then a red check warns but does not block a merge.
 
 ## Merge states, and what each one means
 

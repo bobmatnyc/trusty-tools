@@ -1,0 +1,59 @@
+# The Architect bundle's seed history and provenance, checked on the merge
+# result (issue #11342; the job itself is #8021).
+#
+# Two PRs that each regenerate provenance.json and add their own
+# seed_history.tsv row are each green at their own head; squash-merged one after
+# the other, main holds provenance bytes neither recorded and goes red. This job
+# runs `architect_bundle_meta.py history --check` and `provenance --check` on the
+# commit the event checks out: refs/pull/N/merge on pull_request, the queue
+# commit on merge_group, so the merge result is what it judges.
+#
+# Moved out of architect-subproject.yml, whose workflow-level `paths:` filter
+# skips it on most PRs: a skipped workflow reports no check, so it could never
+# be a required context. Here there is no `paths:` filter and no job-level `if:`
+# (#5311); it reports on every PR in seconds and passes a PR that touches no
+# bundle file. Making it a required context is an owner protection change,
+# pending (docs/reference/ci-gates.md). pull_request and merge_group only, so
+# no red-main-notify entry (scripts/check-red-main-coverage.sh).
+name: Architect bundle meta
+
+on:
+  pull_request:
+    # Explicit activity types (#4179). `edited` is the event a base-branch
+    # RETARGET fires; `ready_for_review` covers a draft being marked ready.
+    # Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: architect-bundle-meta-${{ github.ref }}
+  cancel-in-progress: ${{ github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
+
+jobs:
+  bundle-meta:
+    name: Architect bundle history/provenance check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # #11342: two bundle PRs merged in sequence must fail the second.
+      - name: Merge-result selftest (two concurrent bundle PRs)
+        run: bash scripts/bundle_merge_result_selftest.sh
+
+      - name: Seed history records every shipped seed version
+        run: python3 scripts/architect_bundle_meta.py history --check
+
+      - name: Provenance matches the shipped files
+        run: python3 scripts/architect_bundle_meta.py provenance --check

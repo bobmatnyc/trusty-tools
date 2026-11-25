@@ -1,0 +1,61 @@
+# Re-run `Architect bundle PR is current with main` on every open PR when a
+# bundle change lands on main (issue #11342).
+#
+# bundle-pr-current.yml runs when a PR changes, not when main moves, so a
+# bundle PR that passed stays green after another bundle PR merges first. This
+# job re-runs that check on every open PR targeting main; the re-run fetches
+# main fresh and fails a bundle PR whose head lacks the new bundle commit. A PR
+# that changes no bundle file passes its re-run at once. Logic and fail-open
+# rule: scripts/rerun_bundle_pr_current.sh.
+#
+# push only, never pull_request_target: no PR code runs with the write token.
+# The `paths:` list is BUNDLE_PATHS in scripts/check_bundle_pr_current.sh; keep
+# the two in step. A push-to-main workflow, so red-main-notify.yml watches it.
+name: Architect bundle PR re-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "python/trusty-architect/**"
+      - "crates/trusty-mpm/src/assets/architect/**"
+      - "content/instructions/architect/**"
+      - "content/skills/tm-architect-setup.md"
+      - "scripts/architect_bundle_meta.py"
+      - "scripts/architect_export_manifest.txt"
+      - "scripts/check_architect_subproject.sh"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table.rs"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_table_scripts.rs"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/seed_history.tsv"
+      - "crates/trusty-mpm/src/bin/tm/commands/fleet/il_init_sample_state.md"
+      - "crates/trusty-mpm/src/core/project_skill_tier/architect_skills.rs"
+
+permissions:
+  actions: write
+  pull-requests: read
+  contents: read
+
+# One pass at a time, none cancelled: each push's pass must finish (#11342).
+concurrency:
+  group: bundle-pr-rerun
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    name: Re-run bundle-pr-current on open PRs
+    runs-on: ubuntu-latest
+    # The script waits up to WAIT_MAX (180s) for runs that predate the push.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Re-run script selftest (fake gh)
+        run: bash scripts/rerun_bundle_pr_current_selftest.sh
+
+      - name: Re-run the check on every open PR targeting main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUSHED_AT: ${{ github.event.head_commit.timestamp }}
+        run: bash scripts/rerun_bundle_pr_current.sh
