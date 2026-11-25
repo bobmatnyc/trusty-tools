@@ -344,7 +344,9 @@ fn writer_refuses_relative_paths() {
 /// return exactly the old values; an `install.toml` then moves them (below
 /// the YAML template). With a broken one, `crate_config_dir` fails closed
 /// (`None`, #11821); `resolve_workspace_root` keeps its logged default
-/// because its `PathBuf` signature cannot carry an error (P2).
+/// because its `PathBuf` signature cannot carry an error. Writers use
+/// `try_resolve_workspace_root`, pinned by
+/// `try_resolve_workspace_root_fails_closed_on_broken_install_file`.
 // Sets HOME and the env vars under the crate-wide `ENV_LOCK` (#5937).
 #[test]
 fn process_env_wrappers_match_today() {
@@ -544,4 +546,69 @@ fn source_labels() {
     .map(ToString::to_string)
     .collect();
     assert_eq!(labels, ["flag", "env", "install-file", "default"]);
+}
+
+/// Why: df-D1t (#11821): a writer must not act on the default projects root
+/// while `install.toml` is broken.
+/// What: with `$HOME` at a tempdir and `TRUSTY_MPM_WORKSPACE_ROOT` cleared,
+/// `try_resolve_workspace_root` returns the default with no file, the file's
+/// value with a valid one, and `Parse` with a broken one, while the legacy
+/// wrapper still answers the default. A template or the env var wins without
+/// reading the broken file.
+// Sets HOME and the env var under the crate-wide `ENV_LOCK` (#5937).
+#[test]
+fn try_resolve_workspace_root_fails_closed_on_broken_install_file() {
+    use crate::workspace_layout::{resolve_workspace_root, try_resolve_workspace_root};
+
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("tempdir");
+    let h = home.path().to_path_buf();
+    let saved_home = std::env::var_os("HOME");
+    let saved_root = std::env::var_os(WORKSPACE_ROOT_ENV);
+    // SAFETY: guarded by `ENV_LOCK`; everything is restored below.
+    unsafe {
+        std::env::set_var("HOME", &h);
+        std::env::remove_var(WORKSPACE_ROOT_ENV);
+    }
+
+    let absent = try_resolve_workspace_root(None);
+    write_raw(&h, "projects_root = \"/file/projects\"\n");
+    let valid = try_resolve_workspace_root(None);
+    write_raw(&h, "projects_root = \"/file/projects\"\nbogus = 1\n");
+    let broken = try_resolve_workspace_root(None);
+    let broken_legacy = resolve_workspace_root(None);
+    let broken_template = try_resolve_workspace_root(Some("/tmp/from-config"));
+    // SAFETY: as above.
+    unsafe { std::env::set_var(WORKSPACE_ROOT_ENV, "/env/projects") };
+    let broken_env = try_resolve_workspace_root(None);
+
+    // SAFETY: as above.
+    unsafe {
+        match &saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match &saved_root {
+            Some(v) => std::env::set_var(WORKSPACE_ROOT_ENV, v),
+            None => std::env::remove_var(WORKSPACE_ROOT_ENV),
+        }
+    }
+
+    assert_eq!(absent.expect("no file"), h.join(DEFAULT_WORKSPACE_DIR));
+    assert_eq!(valid.expect("valid file"), PathBuf::from("/file/projects"));
+    assert!(
+        matches!(broken, Err(InstallPathsError::Parse { .. })),
+        "a broken install.toml must fail closed, got {broken:?}"
+    );
+    assert_eq!(broken_legacy, h.join(DEFAULT_WORKSPACE_DIR));
+    assert_eq!(
+        broken_template.expect("template wins"),
+        PathBuf::from("/tmp/from-config")
+    );
+    assert_eq!(
+        broken_env.expect("env wins"),
+        PathBuf::from("/env/projects")
+    );
 }

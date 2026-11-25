@@ -186,11 +186,15 @@ pub(crate) fn interval_secs() -> u64 {
 /// Why a named function: the `prune-worktrees` route already resolves this for its
 /// orphan pass, and the automatic sweep must resolve the SAME root or the two
 /// reclaim paths would walk different workspaces.
+/// A broken `install.toml` is an error, so the sweep skips rather than
+/// reclaiming under the default root (#11821).
 /// Test: covered through the callers; the resolution itself is
-/// `core::trusty_tools_config`'s.
-pub(crate) fn configured_workspace_root() -> PathBuf {
+/// `core::trusty_tools_config`'s (`broken_install_file_fails_the_workspace_root_closed`).
+pub(crate) fn configured_workspace_root()
+-> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    crate::core::trusty_tools_config::workspace_root(&config)
+    // #11821: fail closed on a broken install.toml (df-D1t).
+    crate::core::trusty_tools_config::try_workspace_root(&config)
 }
 
 /// Run the merged-PR reclaim with every production probe bound (#7504).
@@ -383,10 +387,18 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
     };
     // #8059: the pass is recorded under the daemon's own framework root, so
     // `tm doctor` — which runs in its own process — can see it in flight.
+    // #11821: no reclaim under a guessed root.
+    let root = match configured_workspace_root() {
+        Ok(root) => root,
+        Err(e) => {
+            warn!("worktree-reclaim sweep: workspace root unresolved ({e}); pass not run");
+            return;
+        }
+    };
     let _timing = super::sweep_status::RECLAIM.begin(Some(state.framework_root()));
     match reclaim(
         state,
-        &configured_workspace_root(),
+        &root,
         ReclaimMode::Remove,
         None,
         // The automatic sweep stays daemon-global: it has no caller project.

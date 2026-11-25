@@ -387,6 +387,7 @@ pub fn provision_settings(
     config_dir: Option<&Path>,
     profile: SessionProfile,
 ) -> LaunchSettings {
+    // #11821: defaulting resolver kept — reads the owner policy file only; every failure arm here is a notice (#8988).
     let repos_root = crate::core::repo_paths::repos_root();
     let claude_json_dir = claude_json_dir(config_dir);
     provision_settings_at(&CarrierInputs {

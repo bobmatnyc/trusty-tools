@@ -899,13 +899,19 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // work. See `SessionManager::reap_orphaned_worktrees` for the
                 // authoritative list. Inherits the orphan-GC env gate
                 // (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
-                let repos_root = managed_routes::inproject::repos_root();
+                // #11821: a broken install.toml skips this pass, logged below
+                // as a failed sweep; it never reaps under the default root.
+                let repos_root = managed_routes::inproject::try_repos_root();
                 // #7357: this loop is the entry point for the unattended sweep,
                 // so it resolves the adopted anchors under the DAEMON's own
                 // framework root — the same root `project_register` writes them
                 // to.
                 let adopted = crate::project::adopted_anchors_under(state.framework_root());
-                match mgr.reap_orphaned_worktrees(&repos_root, &adopted).await {
+                let reaped = match &repos_root {
+                    Ok(root) => mgr.reap_orphaned_worktrees(root, &adopted).await,
+                    Err(e) => Err(anyhow::anyhow!("repos root unresolved: {e}")),
+                };
+                match reaped {
                     Ok(outcome) => {
                         if !outcome.removed.is_empty() {
                             info!(

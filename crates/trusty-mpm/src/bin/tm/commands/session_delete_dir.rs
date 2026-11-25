@@ -24,7 +24,7 @@ use anyhow::Context as _;
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::core::architect_store::protected_architect_dirs;
 use trusty_mpm::core::presence_local::LocalAuthenticator;
-use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, try_workspace_root};
 use trusty_mpm::session_manager::project_dir_delete::{
     Confirmation, DirDeleteInput, DirDeleteOptions, DirDeletePlan, DirSession, OsProbes,
     SessionSource, run_dir_delete,
@@ -75,7 +75,9 @@ pub(crate) async fn run(
     if !sessions.iter().any(|s| s.id == target.id) {
         sessions.push(DirSession::from_summary(&target));
     }
-    let root = workspace_root(&TrustyToolsConfig::load());
+    // #11821: a broken install.toml refuses the delete (df-D1t).
+    let root = try_workspace_root(&TrustyToolsConfig::load())
+        .map_err(|e| anyhow::anyhow!("refusing to delete a project directory: {e}"))?;
     // #10992 critic HIGH: strict config read plus `ARCHITECT_PROJECT_DIR`;
     // a guard that cannot get its input refuses.
     let env = |name: &str| std::env::var(name).ok();
