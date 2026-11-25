@@ -1,6 +1,6 @@
 crate   trusty-architect
 version 0.4.3
-reason  PR #11830 (parity window-6 gaps) adds fields to the non-#[non_exhaustive] sched structs Args, Joined and Report, and drops Copy from Joined (break vs 0.4.2); under the 2026-09-26 versioning ruling a public-API break never forces a major version, and the Architect declared this break. Refs #11830.
+reason  PR #11830 (parity window-6 gaps) adds fields to the non-#[non_exhaustive] sched structs Args, Joined and Report, and drops Copy from Joined (break vs 0.4.2); under the 2026-09-26 versioning ruling a public-API break never forces a major version, and the Architect declared this break. Refs #11830. PR #11841 (dead-code cleanup, #10571) removes five unused public items; the Architect declared these breaks.
 accept  constructible_struct_adds_field field Args.by_kind
 accept  constructible_struct_adds_field field Args.examples
 accept  constructible_struct_adds_field field Joined.shadow
@@ -11,3 +11,8 @@ accept  constructible_struct_adds_field field Report.idle_folded
 accept  constructible_struct_adds_field field Report.alerts_by_kind
 accept  constructible_struct_adds_field field Report.wakes_by_kind
 accept  derive_trait_impl_removed type Joined no longer derives Copy
+accept  inherent_method_missing Report::match_pct
+accept  function_missing function trusty_architect::il::ops::is_live
+accept  inherent_method_missing Pending::into_events
+accept  struct_missing struct trusty_architect::dashboard::schema_check::Pattern
+accept  inherent_method_missing LockGuard::raw_fd
