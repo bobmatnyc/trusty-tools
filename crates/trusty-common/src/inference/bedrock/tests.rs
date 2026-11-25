@@ -30,7 +30,7 @@ use super::convert::{
     build_converse_messages, build_tool_config, converse_output_to_chat_response,
     document_to_json_string, json_to_document,
 };
-use super::stream::{ConverseEventSource, drive};
+use super::stream::{ConverseEventSource, drive, mid_stream_error_message};
 use super::{
     BedrockAdapter, DEFAULT_REGION, bedrock_model_id, build_converse_parts, resolve_bedrock_region,
     resolve_region_from,
@@ -1666,4 +1666,18 @@ fn image_attachment_becomes_bedrock_image_block() {
     assert_eq!(image.source().unwrap().as_bytes().unwrap().as_ref(), b"abc");
     user.role = "system".into();
     assert!(build_converse_messages(&minimal_request(vec![user])).is_err());
+}
+
+/// #11865: a mid-stream error must not expose an ARN's account id (#9200).
+#[test]
+fn mid_stream_error_message_masks_arn_account_ids() {
+    let model = "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751";
+    let err = "access denied for arn:aws:bedrock:us-west-2:111122223333:inference-profile/x";
+    let msg = mid_stream_error_message(model, "us-west-2", err);
+    assert!(!msg.contains("111122223333"), "account id leaked: {msg}");
+    assert!(msg.contains("****"), "mask missing: {msg}");
+    assert!(
+        msg.starts_with("ConverseStream failed mid-stream (model="),
+        "{msg}"
+    );
 }

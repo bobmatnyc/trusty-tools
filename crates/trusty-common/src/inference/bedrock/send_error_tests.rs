@@ -138,3 +138,49 @@ async fn chat_without_credentials_returns_missing_credential() {
         Ok(_) => panic!("chat_stream: a missing credential returned a stream"),
     }
 }
+
+/// An application-inference-profile ARN; the account id is AWS's
+/// documentation placeholder, not a real account.
+const ARN_MODEL: &str =
+    "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751";
+/// The account id `ARN_MODEL` carries.
+const ACCOUNT: &str = "111122223333";
+
+/// #11865: an ARN model id, or an ARN quoted by AWS in the source chain, never
+/// leaks its account id into the `BedrockError` Display text (#9200).
+#[test]
+fn send_error_message_masks_arn_account_ids() {
+    let credentials: SdkError<ConverseError, HttpResponse> =
+        SdkError::dispatch_failure(ConnectorError::other(
+            Box::new(CredentialsError::not_loaded("no credentials in the chain")),
+            None,
+        ));
+    let meta = ErrorMetadata::builder()
+        .code("AccessDeniedException")
+        .message(format!(
+            "User: arn:aws:sts::{ACCOUNT}:assumed-role/r/s is not authorized"
+        ))
+        .build();
+    let api = SdkError::service_error(ConverseError::generic(meta), response(403));
+
+    let missing = classify_send_error("Converse", ARN_MODEL, REGION, &credentials);
+    assert!(
+        matches!(missing, BedrockError::MissingCredential(_)),
+        "{missing:?}"
+    );
+    let denied = classify_send_error("Converse", ARN_MODEL, REGION, &api);
+    assert!(
+        matches!(denied, BedrockError::Api { status: 403, .. }),
+        "{denied:?}"
+    );
+    let denied_text = denied.to_string();
+    assert!(
+        denied_text.contains("arn:aws:sts::****:assumed-role"),
+        "source-chain ARN not masked: {denied_text}"
+    );
+    for err in [missing, denied] {
+        let text = err.to_string();
+        assert!(!text.contains(ACCOUNT), "account id leaked: {text}");
+        assert!(text.contains("****"), "mask absent: {text}");
+    }
+}
