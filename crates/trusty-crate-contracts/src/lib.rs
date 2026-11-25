@@ -21,6 +21,8 @@
 //!   trusty-analyze socket, four consumers agreeing about what they see.
 //! - `tests/memory_uds_consumer.rs` — the #6555 arm: tctl's own probe must read
 //!   a live trusty-memory daemon as `Serving`.
+//! - `tests/palace_name_contract_11823.rs` — the #11823 arm: the palace name
+//!   `tctl ensure` sends is the one trusty-memory's create accepts.
 //!
 //! A new test belongs here when, and only when, it needs the real entry points
 //! of two crates that do not already depend on one another. A test that needs

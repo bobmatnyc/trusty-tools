@@ -1,53 +1,24 @@
-//! Pure project-identity derivation for the `tctl ensure` project-setup stages.
+//! Project-identity derivation for the `tctl ensure` project-setup stages.
 //!
 //! Why: the index-register and palace-create stages need two project-scoped
 //! names: the trusty-search index id and the trusty-memory palace name. Both
-//! must be derived deterministically so that re-running `ensure` targets the
-//! same index / palace (idempotency). Critically, the palace name must equal the
-//! slug trusty-memory's `validate_palace_name` derives from the same cwd
-//! (`project_slug_at`: pin-file value, else slugified basename) — otherwise the
-//! daemon rejects `POST /api/v1/palaces` with a 400. Keeping the derivation pure
-//! (the pin-file read is the only I/O, and it is injected as parsed input in
-//! tests) makes every branch unit-testable without a runtime or a real repo.
+//! must be deterministic so re-running `ensure` targets the same index and
+//! palace. The palace name must also be the one every reader of the palace
+//! resolves — `tm` launch, the memory hook, `tm memory` — or `ensure` creates a
+//! palace nobody reads (#11823).
 //!
 //! What: [`index_id_for`] (trusty-search index id = directory basename, matching
-//! `trusty-search`'s own `resolve_index_name` default), [`palace_slug`] (the pure
-//! pin-or-basename slug core), and [`palace_name_for`] (the I/O edge that reads
-//! the optional pin file then delegates to [`palace_slug`]). The slug rule itself
-//! is `trusty_common::slugify_string` — the single source of truth shared with
-//! trusty-memory's `validate_palace_name` (issue #1348), so the slugs agree
-//! byte-for-byte by construction rather than by parallel re-implementation.
+//! `trusty-search`'s own `resolve_index_name` default) and [`palace_name_for`],
+//! a thin wrapper over `trusty_common::resolve_palace`. This module keeps no
+//! palace-naming rule of its own: no pin parsing, no folder-slug fallback.
 //!
-//! Test: `tests` exercise `index_id_for` and `palace_slug` across the
-//! pin-present, basename, and empty cases; the canonical slug behaviour is
-//! pinned in `trusty-common` (`slug::tests`).
+//! Test: `tests` cover the index id and the resolver's pin, `owner-repo`,
+//! parent-dir and fail-closed pin cases as `ensure` sees them; the full rule is
+//! pinned in `trusty-common`'s `palace_resolve_tests.rs`.
 
 use std::path::Path;
 
-use serde::Deserialize;
-use trusty_common::slugify_string;
-
-/// Relative path of the trusty-memory palace pin file within a project root.
-///
-/// Why: when present, the pin file is the authoritative palace slug (it survives
-/// directory renames), so `ensure` must honour it exactly as the daemon does.
-/// What: `".trusty-tools/trusty-memory.yaml"` — identical to
-/// `trusty_memory::project_root::PIN_FILE_REL`.
-/// Test: used by [`palace_name_for`]; the path join is trivial.
-pub const PIN_FILE_REL: &str = ".trusty-tools/trusty-memory.yaml";
-
-/// Minimal view of the trusty-memory palace pin file.
-///
-/// Why: `ensure` only needs the `palace` slug field; deserialising just that
-/// (with `serde`'s ignore-unknown default) keeps `ensure` decoupled from the
-/// full `ProjectPin` schema in trusty-memory while still reading the same file.
-/// What: a single `palace: String` field; all other pin-file keys are ignored.
-/// Test: `tests::palace_name_for_reads_pin` round-trips a written pin file.
-#[derive(Debug, Deserialize)]
-struct PinView {
-    /// The pinned palace slug, stored verbatim (no re-slugification).
-    palace: String,
-}
+use trusty_common::PalaceCreatePlanError;
 
 /// Derive the trusty-search index id for a project directory.
 ///
@@ -64,93 +35,79 @@ pub fn index_id_for(project_root: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Derive the palace slug from an optional pin value and the project root.
+/// Name the project's trusty-memory palace through the shared resolver.
 ///
-/// Why: this is the pure decision core mirroring trusty-memory's
-/// `project_slug_at` slug rule used by `validate_palace_name`: a committed pin
-/// wins authoritatively; otherwise the slugified directory basename is used.
-/// Keeping it pure (the pin value is passed in already-read) makes both branches
-/// testable without filesystem I/O.
-/// What: returns `Some(pin)` when `pin` is `Some` and non-empty after trimming;
-/// else the slugified basename of `project_root`, clamped to
-/// `PALACE_ID_MAX_LEN` so it still matches what the daemon's format gate
-/// accepts (#2443); else `None` (root-less path or a basename that slugifies to
-/// empty).
-/// Test: `tests::palace_slug_prefers_pin`, `tests::palace_slug_falls_back_to_basename`,
-/// `tests::palace_slug_empty_pin_falls_through`,
-/// `tests::palace_slug_from_a_long_basename_is_acceptable`.
-pub fn palace_slug(pin: Option<&str>, project_root: &Path) -> Option<String> {
-    if let Some(p) = pin {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_owned());
-        }
-    }
-    let basename = project_root.file_name()?.to_str()?;
-    let slug = trusty_common::clamp_palace_id(&slugify_string(basename));
-    if slug.is_empty() {
-        None
-    } else {
-        Some(slug)
-    }
-}
-
-/// Read the optional pin file at `project_root` and derive the palace name.
-///
-/// Why: the I/O edge for [`palace_slug`] — keeps the filesystem read here so the
-/// derivation core stays pure. A missing or unreadable pin file is non-fatal
-/// (falls through to the basename slug), matching the daemon's tolerance.
-/// What: reads `project_root/.trusty-tools/trusty-memory.yaml`; on a successful
-/// parse with a non-empty `palace` field, uses it; otherwise (absent, unparsable,
-/// or empty) falls back to [`palace_slug`] with `None`.
-/// Test: `tests::palace_name_for_reads_pin`, `tests::palace_name_for_basename_when_no_pin`.
-pub fn palace_name_for(project_root: &Path) -> Option<String> {
-    let pin_path = project_root.join(PIN_FILE_REL);
-    let pin_value = match std::fs::read_to_string(&pin_path) {
-        Ok(s) => serde_yaml::from_str::<PinView>(&s)
-            .ok()
-            .map(|p| p.palace)
-            .filter(|p| !p.trim().is_empty()),
-        Err(_) => None,
-    };
-    palace_slug(pin_value.as_deref(), project_root)
+/// Why (#11823): `ensure` used to read the pin itself and fall back to the
+/// folder slug, so for `Acme/My_Repo` it created `my-repo` while every reader
+/// looked for `acme-my-repo`; and a malformed pin was skipped silently, naming
+/// a palace nobody chose. One resolver is the only rule.
+/// What: returns `resolve_palace_for_project(project_root)`'s id — the pin,
+/// then git `owner-repo`, then the main worktree's `parent-dir`. It ignores
+/// `TRUSTY_MEMORY_PALACE`, exactly as the daemon does when it validates the
+/// create, so the two agree even when the variable is exported. A pin that
+/// exists but cannot be trusted (unparsable, empty, invalid id, newer schema),
+/// or a root outside any project, is the resolver's error, returned unchanged;
+/// there is no fallback name.
+/// Test: `tests::palace_name_for_reads_pin`,
+/// `tests::palace_name_for_uses_owner_repo_from_the_git_remote`,
+/// `tests::palace_name_for_without_a_remote_uses_the_parent_dir_slug`,
+/// `tests::palace_name_for_rejects_an_untrustworthy_pin`,
+/// `tests::palace_name_for_ignores_the_palace_env`.
+pub fn palace_name_for(project_root: &Path) -> Result<String, PalaceCreatePlanError> {
+    // #11823: the daemon's env-free rule, so tctl sends a name it accepts.
+    trusty_common::resolve_palace_for_project(project_root).map(|r| r.id)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::commands::ensure::ENV_TEST_LOCK as ENV_LOCK;
+    use crate::commands::test_support::clear_env;
     use std::path::PathBuf;
+    use std::process::Command;
+    use trusty_common::{PALACE_OVERRIDE_ENV, PIN_FILE_REL};
 
-    /// Why: `tctl ensure` derives the palace name through the shared
-    /// `trusty_common::slugify_string` (issue #1348); this guards that the
-    /// import wiring resolves to the canonical rule so the controller's slug
-    /// still agrees byte-for-byte with the daemon's `validate_palace_name`.
-    /// What: re-asserts the representative cases against the re-exported fn.
-    /// Test: This is the test.
-    #[test]
-    fn slugify_matches_memory_rules() {
-        assert_eq!(slugify_string("Trusty-Tools"), "trusty-tools");
-        assert_eq!(slugify_string("My_Cool Project"), "my-cool-project");
-        assert_eq!(slugify_string("repo.git"), "repo");
-        assert_eq!(slugify_string("  --weird__name--  "), "weird-name");
-        assert_eq!(slugify_string("!!!"), "");
+    /// Create `<tmp>/<name>` as a git repo, with `origin` set when `remote` is.
+    ///
+    /// Why: the resolver's levels 3 and 4 read git, so the tests need a real repo
+    /// whose remote they control rather than the developer's checkout.
+    pub(crate) fn git_project(name: &str, remote: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path().join(name);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        // The resolver canonicalises (macOS `/var` → `/private/var`), so the
+        // pin path it reports is compared against the canonical form.
+        let root = std::fs::canonicalize(&root).expect("canonicalize");
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .expect("run git");
+            assert!(st.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        if let Some(url) = remote {
+            git(&["remote", "add", "origin", url]);
+        }
+        (tmp, root)
     }
 
-    /// Why (#2443): `ensure` posts this name to the daemon, whose format gate
-    /// caps a slug at 63 bytes. A long directory basename slugified past that
-    /// limit and the create was refused, so the clamp has to apply here too or
-    /// the controller and the daemon disagree again.
-    /// What: a 90-character basename must still yield an acceptable id.
-    /// Test: This is the test.
-    #[test]
-    fn palace_slug_from_a_long_basename_is_acceptable() {
-        let root = PathBuf::from(format!("/Users/bob/Projects/{}", "long-name-".repeat(9)));
-        let slug = palace_slug(None, &root).expect("a long basename still derives");
-        assert!(
-            trusty_common::palace_id_is_valid(&slug),
-            "derived slug must pass the daemon gate, got {slug:?} ({} bytes)",
-            slug.len()
-        );
+    /// Write `body` as the palace pin of `root`.
+    pub(crate) fn write_pin(root: &Path, body: &str) -> PathBuf {
+        let path = root.join(PIN_FILE_REL);
+        std::fs::create_dir_all(path.parent().expect("pin parent")).expect("mkdir");
+        std::fs::write(&path, body).expect("write pin");
+        path
+    }
+
+    /// Resolve with the env override cleared, so the developer's own
+    /// `TRUSTY_MEMORY_PALACE` cannot decide the answer.
+    fn resolve_isolated(root: &Path) -> Result<String, PalaceCreatePlanError> {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_env(&[PALACE_OVERRIDE_ENV]);
+        palace_name_for(root)
     }
 
     /// Why: the index id must be the bare directory basename so it matches
@@ -174,81 +131,78 @@ mod tests {
         assert_eq!(index_id_for(Path::new("/")), None);
     }
 
-    /// Why: a committed pin is authoritative and wins over the basename (parity
-    /// with the daemon's `project_slug_at` step a).
-    /// What: pin `pinned-slug` beats basename `checkout-dir`.
-    /// Test: This is the test.
-    #[test]
-    fn palace_slug_prefers_pin() {
-        let root = PathBuf::from("/some/checkout-dir");
-        assert_eq!(
-            palace_slug(Some("pinned-slug"), &root).as_deref(),
-            Some("pinned-slug")
-        );
-    }
-
-    /// Why: without a pin, the slug is the slugified basename (parity with the
-    /// daemon's `project_slug_at` step b — basename, NOT git owner/repo, which is
-    /// what `validate_palace_name` checks).
-    /// What: `/Users/bob/Projects/Trusty_Tools` → `trusty-tools`.
-    /// Test: This is the test.
-    #[test]
-    fn palace_slug_falls_back_to_basename() {
-        let root = PathBuf::from("/Users/bob/Projects/Trusty_Tools");
-        assert_eq!(palace_slug(None, &root).as_deref(), Some("trusty-tools"));
-    }
-
-    /// Why: an empty/whitespace pin must be ignored so derivation falls through
-    /// to the basename rather than producing an empty palace name.
-    /// What: empty pin + basename `widget` → `widget`.
-    /// Test: This is the test.
-    #[test]
-    fn palace_slug_empty_pin_falls_through() {
-        let root = PathBuf::from("/x/widget");
-        assert_eq!(palace_slug(Some("   "), &root).as_deref(), Some("widget"));
-    }
-
-    /// Why: the I/O edge must read a present pin file and use its `palace` value.
-    /// What: writes a pin under a tempdir, asserts the read picks it up.
+    /// Why: a committed pin is authoritative and wins over the git remote.
+    /// What: pin `pinned-name` in a repo whose remote is `acme/widget`.
     /// Test: This is the test.
     #[test]
     fn palace_name_for_reads_pin() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tctl-ensure-identity-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let pin_dir = tmp.join(".trusty-tools");
-        std::fs::create_dir_all(&pin_dir).expect("mkdir");
-        std::fs::write(
-            tmp.join(PIN_FILE_REL),
-            "schema_version: 1\npalace: pinned-name\n",
-        )
-        .expect("write pin");
-        assert_eq!(palace_name_for(&tmp).as_deref(), Some("pinned-name"));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let (_tmp, root) = git_project("checkout-dir", Some("git@github.com:acme/widget.git"));
+        write_pin(&root, "schema_version: 1\npalace: pinned-name\n");
+        assert_eq!(resolve_isolated(&root).expect("resolves"), "pinned-name");
     }
 
-    /// Why: when no pin file exists the I/O edge must fall back to the basename
-    /// slug (the common first-run case).
-    /// What: a tempdir with no pin file → slugified basename.
+    /// Why (#11823): readers name a remote-backed project `owner-repo`; `ensure`
+    /// used the folder slug (`my-repo`), so it created a palace no reader used.
+    /// What: a repo at `My_Repo` with remote `Acme/My_Repo` → `acme-my-repo`.
     /// Test: This is the test.
     #[test]
-    fn palace_name_for_basename_when_no_pin() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tctl-ensure-identity-nopin-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&tmp).expect("mkdir");
-        let expected = slugify_string(tmp.file_name().unwrap().to_str().unwrap());
-        assert_eq!(palace_name_for(&tmp).as_deref(), Some(expected.as_str()));
-        let _ = std::fs::remove_dir_all(&tmp);
+    fn palace_name_for_uses_owner_repo_from_the_git_remote() {
+        let (_tmp, root) = git_project("My_Repo", Some("https://github.com/Acme/My_Repo.git"));
+        assert_eq!(resolve_isolated(&root).expect("resolves"), "acme-my-repo");
+    }
+
+    /// Why: with no remote and no pin the resolver keys on the main worktree's
+    /// `parent/dir`, and the result must still pass the daemon's id gate even
+    /// for a long folder name (#2443).
+    /// What: `Trusty_Tools` and a 90-character folder, both without a remote.
+    /// Test: This is the test.
+    #[test]
+    fn palace_name_for_without_a_remote_uses_the_parent_dir_slug() {
+        let (_tmp, root) = git_project("Trusty_Tools", None);
+        let id = resolve_isolated(&root).expect("resolves");
+        assert!(id.ends_with("-trusty-tools"), "got {id:?}");
+
+        let (_tmp2, long) = git_project(&"long-name-".repeat(9), None);
+        let id = resolve_isolated(&long).expect("a long folder still resolves");
+        assert!(
+            trusty_common::palace_id_is_valid(&id),
+            "derived id must pass the daemon gate, got {id:?} ({} bytes)",
+            id.len()
+        );
+    }
+
+    /// Why (#11823): a pin that exists but cannot be trusted used to fall back
+    /// to the folder slug silently. It must be an error naming the pin file.
+    /// What: unparsable, empty and invalid-id pins each return `Err` whose text
+    /// names the pin path.
+    /// Test: This is the test.
+    #[test]
+    fn palace_name_for_rejects_an_untrustworthy_pin() {
+        for body in [
+            "palace: [unclosed\n",
+            "schema_version: 1\npalace: \"   \"\n",
+            "schema_version: 1\npalace: ../escape\n",
+        ] {
+            let (_tmp, root) = git_project("widget", Some("https://github.com/acme/widget.git"));
+            let pin = write_pin(&root, body);
+            let err = resolve_isolated(&root).expect_err(body);
+            assert!(
+                err.to_string().contains(&pin.display().to_string()),
+                "error must name the pin path for {body:?}: {err}"
+            );
+        }
+    }
+
+    /// Why (#11823): the daemon ignores `TRUSTY_MEMORY_PALACE` when it
+    /// validates a create, so tctl must too or an exported variable makes
+    /// every `ensure` create a refused name.
+    #[test]
+    fn palace_name_for_ignores_the_palace_env() {
+        let (_tmp, root) = git_project("My_Repo", Some("https://github.com/Acme/My_Repo.git"));
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::commands::test_support::set_env(PALACE_OVERRIDE_ENV, Path::new("exported-palace"));
+        let id = palace_name_for(&root);
+        clear_env(&[PALACE_OVERRIDE_ENV]);
+        assert_eq!(id.expect("resolves"), "acme-my-repo");
     }
 }
