@@ -188,6 +188,7 @@ fn counts_total_and_live_per_project_and_owner() {
             name: "alpha".to_string(),
             total: 3,
             live: 2,
+            dim: false,
         }
     );
     let gamma = rows.iter().find(|r| r.id == proj("zeta", "gamma")).unwrap();
@@ -199,6 +200,49 @@ fn counts_total_and_live_per_project_and_owner() {
             ..
         }
     ));
+}
+
+/// #10990: a decommissioned project draws dim while its kept records are
+/// all stopped, and the dim clears on the poll that shows a live session.
+#[test]
+fn decommissioned_project_dims_until_a_session_is_live() {
+    let dim_of = |projects: &[ProjectRow], sessions: &BTreeMap<String, Vec<SessionRow>>| {
+        let rows = build_tree(projects, sessions, &BTreeSet::new(), &aliases());
+        match &rows
+            .iter()
+            .find(|r| r.id == proj("acme", "alpha"))
+            .expect("alpha row")
+            .kind
+        {
+            TreeRowKind::Project { dim, .. } => *dim,
+            other => panic!("alpha is not a project row: {other:?}"),
+        }
+    };
+    let mut alpha = project("alpha", "https://github.com/acme/alpha");
+    let mut sessions = BTreeMap::new();
+    sessions.insert(
+        "alpha".to_string(),
+        vec![session("s1", "boss", "stopped", None)],
+    );
+    assert!(!dim_of(&[alpha.clone()], &sessions), "active project is lit");
+
+    alpha.decommissioned = true;
+    assert!(dim_of(&[alpha.clone()], &sessions), "decommissioned is dim");
+
+    // A new session registered: the next poll shows it live.
+    sessions
+        .get_mut("alpha")
+        .expect("alpha sessions")
+        .push(session("s2", "fresh", "provisioning", None));
+    assert!(!dim_of(&[alpha.clone()], &sessions), "a live session clears it");
+
+    // The registry cleared the stamp (#10988's spawn path): lit, live or not.
+    alpha.decommissioned = false;
+    sessions.insert(
+        "alpha".to_string(),
+        vec![session("s1", "boss", "stopped", None)],
+    );
+    assert!(!dim_of(&[alpha], &sessions), "cleared stamp is lit");
 }
 
 #[test]
