@@ -26,7 +26,11 @@ const PATH_VARS: [&str; 4] = [
     "CLAUDE_CONFIG_DIR",
 ];
 
-/// Points `HOME` at a scratch dir, clears [`PATH_VARS`], restores all on drop.
+/// The env vars that pick the operator's `gh` config dir (#11821 P3-f1).
+const GH_VARS: [&str; 2] = ["GH_CONFIG_DIR", "XDG_CONFIG_HOME"];
+
+/// Points `HOME` at a scratch dir, clears [`PATH_VARS`] and [`GH_VARS`],
+/// restores all on drop.
 ///
 /// `env_serial` runs one test at a time, so no other test observes the rewrite.
 struct EnvGuard {
@@ -37,12 +41,13 @@ impl EnvGuard {
     fn install(home: &Path) -> Self {
         let saved = std::iter::once("HOME")
             .chain(PATH_VARS)
+            .chain(GH_VARS)
             .map(|k| (k, std::env::var_os(k)))
             .collect();
         // SAFETY: `env_serial` forces one test thread; Drop restores every var.
         unsafe {
             std::env::set_var("HOME", home);
-            for k in PATH_VARS {
+            for k in PATH_VARS.into_iter().chain(GH_VARS) {
                 std::env::remove_var(k);
             }
         }
@@ -237,4 +242,20 @@ fn build_lease_store_fails_closed_on_a_broken_install_file() {
     let err = trusty_mpm::core::build_lease::store::try_canonical_path(&fx.home)
         .expect_err("store path refuses");
     assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f1: `--account-token-stdin` refuses before it touches the token.
+/// Before the fix the state root fell back to `$HOME/.trusty-mpm`. A blank
+/// token keeps the pre-fix run off the network: there the refusal named the
+/// empty token, not install.toml.
+#[test]
+fn gh_session_token_writer_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::gh_session_account::prepare_session_account(
+        "octo",
+        "https://github.com/acme/x",
+        Some(" "),
+    )
+    .expect_err("the token writer refuses");
+    assert_refused_closed(&fx, err);
 }
