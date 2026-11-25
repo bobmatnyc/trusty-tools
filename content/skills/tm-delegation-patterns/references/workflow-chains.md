@@ -48,7 +48,7 @@ sweep** → Engineer (fix) → Ops (deploy, if applicable) → Ops (verify) →
 share the behaviour. Before the engineer is briefed, list:
 
 1. **Callers.** Every other entry point that reaches the changed code. Use
-   trusty-search `get_call_chain` (direction `callers`) on the function. Where
+   trusty-search `get_call_chain` (MCP, direction `callers`; see #11771) on the function. Where
    the project is not indexed, `grep` for the symbol.
 2. **Data states.** Every input state the code branches on: empty, missing,
    zero, boundary, each enum arm. Include the state that fails.
