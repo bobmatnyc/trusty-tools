@@ -100,6 +100,12 @@ plant_leak() { # $1 = leak-<kind>-<tree>, $2 = tree dir
   esac
 }
 
+plant_monolith() { # $1 = file; 600 code lines, over the 500-SLOC cap
+  local i=0
+  : >"$1"
+  while [ "$i" -lt 600 ]; do printf 'x%d = %d\n' "$i" "$i" >>"$1"; i=$((i + 1)); done
+}
+
 plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
   local t="$WORK/$(case_dir "$1")" sub="$WORK/$(case_dir "$1")/python/trusty-architect"
   case "$1" in
@@ -123,6 +129,12 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     # #9997: a content skill with no sub-project source is unguarded too.
     unpaired-skill) printf 'no source\n' >"$t/content/instructions/architect/skills/extra.md" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
+    # #11370: a monolith over the 500-SLOC cap beside the split modules it was
+    # split into (the 2026-11-15 layout); the clean tree already holds
+    # fleet_poll_*.py. hybrid-assets plants it in the shipped tree only.
+    hybrid) plant_monolith "$sub/scripts/fleet-poll.py" ;;
+    hybrid-assets) plant_monolith "$t/crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py" ;;
+    hybrid:*) plant_monolith "$sub/scripts/${1#hybrid:}" ;;
     # #9822: the Rust crate crates/trusty-architect is not the sub-project.
     crate-dependency)
       printf '[workspace]\nmembers = ["crates/*"]\ndefault-members = ["crates/trusty-architect"]\n%s\n%s\n' \
@@ -147,7 +159,9 @@ drift${TAB}DRIFT
 shipped-missing${TAB}DRIFT
 unpaired${TAB}UNPAIRED
 unpaired-skill${TAB}UNPAIRED
-empty${TAB}EMPTY"
+empty${TAB}EMPTY
+hybrid${TAB}HYBRID
+hybrid-assets${TAB}HYBRID"
 # #9996: every new class in the content tree and in the Python tree; the
 # assets copy gets a representative pair.
 for kind in owner_handle owner_first owner_short owner_nul owner_badutf8 org org_repo org_cli org_pages org_gitlab host_local host_local_port host_emphasis host_localdomain host_tailnet slack email gh_config gh_config_long tailnet_ip; do
@@ -170,13 +184,37 @@ for pair in $PAIRS; do
 drift:${pair#*|}${TAB}DRIFT"
 done
 
-fail=0
+# #11370: one planted hybrid per monolith the gate lists in SPLITS.
+SPLITS="$("$GATE" --list-splits 2>/dev/null)" || SPLITS=""
+if [ -z "$SPLITS" ]; then
+  echo "FAIL: the gate lists no monolith/split pairs (--list-splits)" >&2
+  SPLITS_MISSING=1
+else
+  SPLITS_MISSING=0
+fi
+for split in $SPLITS; do
+  CASES="$CASES
+hybrid:${split%%|*}${TAB}HYBRID"
+done
+
+fail=$SPLITS_MISSING
 pass=0
 
 rc=0
 out="$("$GATE" --root "$clean" 2>&1)" || rc=$?
 if [ "$rc" -ne 0 ]; then
   echo "FAIL: clean tree -> exit $rc (expected 0)" >&2
+  printf '%s\n' "$out" | sed 's/^/       /' >&2
+  fail=1
+else
+  pass=$((pass + 1))
+fi
+
+# #11370: the real tree holds the facades, not the monoliths, and must pass.
+rc=0
+out="$("$GATE" --root "$SCRIPT_DIR/.." 2>&1)" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: real tree -> exit $rc (expected 0)" >&2
   printf '%s\n' "$out" | sed 's/^/       /' >&2
   fail=1
 else

@@ -318,8 +318,6 @@ async fn a_timeout_is_typed_and_leaves_the_log_alone() {
 #[cfg(unix)]
 #[tokio::test]
 async fn only_servers_with_allowlisted_tools_are_spawned() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let home = instance(&tmp);
     let mut servers = String::new();
@@ -327,12 +325,12 @@ async fn only_servers_with_allowlisted_tools_are_spawned() {
     for name in ["trusty-search", "slack"] {
         let marker = tmp.path().join(format!("{name}.started"));
         let script = tmp.path().join(format!("{name}.sh"));
-        std::fs::write(
+        // #10248: no write fd to the stub in this process.
+        trusty_common::exec_stub::write_executable(
             &script,
             format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         servers.push_str(&format!(
             "[[servers]]\nname = {name:?}\n[servers.transport]\ntype = \"stdio\"\ncommand = {:?}\n",
             script.display().to_string()

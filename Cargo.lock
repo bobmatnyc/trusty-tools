@@ -12154,7 +12154,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

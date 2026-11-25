@@ -20,6 +20,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+// The one copy of the stub writer lives with the integration tests (#10248).
+#[path = "../../tests/exec_stub/mod.rs"]
+mod exec_stub;
+
 use super::Waker;
 use crate::poller::{Pane, capture};
 use crate::{PaneId, SystemClock, SystemTmux};
@@ -74,9 +78,7 @@ impl Drop for Scratch {
 }
 
 fn write_exec(path: &Path, text: &str) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(path, text)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+    exec_stub::write_executable(path, text) // #10248
 }
 
 #[test]

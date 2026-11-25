@@ -285,7 +285,9 @@ done
 
 echo "sandbox_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_daemon: daemon socket: $DAEMON_SOCK"
-echo "sandbox_daemon: client: TRUSTY_MPM_SOCKET=$DAEMON_SOCK tm <command>"
+# #11077: the sandbox flag and data override make `tm launch`/`tm connect`
+# write their launch files under $SANDBOX/home, not the caller's home.
+echo "sandbox_daemon: client: TRUSTY_SANDBOX=1 TRUSTY_DATA_DIR_OVERRIDE=$SANDBOX/data TRUSTY_MPM_SOCKET=$DAEMON_SOCK tm <command>"
 echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
 echo "sandbox_daemon: working directory: $SANDBOX/home"
 echo "sandbox_daemon: tmux socket: $SOCK"

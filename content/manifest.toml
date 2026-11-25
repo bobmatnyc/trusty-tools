@@ -96,7 +96,7 @@ version = "0.1.3"
 
 [[member]]
 path = "agents/memory-manager.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/mpm-agent-manager.md"
@@ -268,7 +268,7 @@ version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-dashboard.md"
-version = "0.3.2"
+version = "0.3.3"
 
 [[member]]
 path = "instructions/architect/skills/architect-drift-check.md"
@@ -280,7 +280,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-host-admin.md"
-version = "0.2.0"
+version = "0.2.1"
 
 [[member]]
 path = "instructions/architect/skills/architect-improvements.md"
@@ -308,7 +308,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-search-memory.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "instructions/architect/skills/architect-strategy.md"
@@ -332,7 +332,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/output-styles/owner-plain.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "instructions/trusty-code/skills/api-design-patterns/SKILL.md"
@@ -468,7 +468,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/code-review-standards.md"
-version = "1.2.1"
+version = "1.2.2"
 
 [[member]]
 path = "skills/condition-based-waiting.md"
@@ -544,7 +544,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/self-improvement-loop.md"
-version = "1.0.1"
+version = "1.0.2"
 
 [[member]]
 path = "skills/software-patterns.md"
@@ -588,7 +588,7 @@ version = "1.1.0"
 
 [[member]]
 path = "skills/tm-circuit-breaker.md"
-version = "1.0.1"
+version = "1.0.2"
 
 [[member]]
 path = "skills/tm-cli-operations.md"
@@ -632,7 +632,7 @@ version = "0.1.0"
 
 [[member]]
 path = "skills/tm-postmortem.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/tm-prose-style.md"
@@ -644,11 +644,11 @@ version = "1.7.0"
 
 [[member]]
 path = "skills/tm-session-management.md"
-version = "1.2.1"
+version = "1.2.2"
 
 [[member]]
 path = "skills/tm-session-pause.md"
-version = "1.1.0"
+version = "1.1.1"
 
 [[member]]
 path = "skills/tm-session-resume.md"
@@ -664,15 +664,15 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-ticketing.md"
-version = "2.3.0"
+version = "2.3.1"
 
 [[member]]
 path = "skills/tm-tool-usage-guide.md"
-version = "1.0.2"
+version = "1.0.3"
 
 [[member]]
 path = "skills/tm-verification-protocols.md"
-version = "1.1.0"
+version = "1.1.1"
 
 [[member]]
 path = "skills/tm-workflow.md"
@@ -680,7 +680,7 @@ version = "2.3.0"
 
 [[member]]
 path = "skills/tm.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/verification-before-completion.md"

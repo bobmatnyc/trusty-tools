@@ -280,7 +280,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-search-memory",
-            "c2947716d1e2e238e41de5db982bfdda187adf0fb93d7274dda3631c8c40e733",
+            "3705f84cf316939df211ec5dded2cba48e5f28cc8636898286c21450962ff1d7",
         ),
         (
             "architect-github",
@@ -320,11 +320,12 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-host-admin",
-            "cf0becdbacdcdc405f9c0f7b93bd8643973aecfa29bc04fdecd638003a0107fb",
+            "7362004b8be5aa0384c1b5c55853e5b427fc4bb29a168a51759f354af977f296",
         ),
         (
             "architect-dashboard",
-            "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
+            // #9457: `fleet init` names when it starts the dashboard on macOS.
+            "908deda6a43c699d7c2d355c3cb0fbfbb64d33d12b6117915aa49e14abc4b0c7",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first

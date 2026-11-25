@@ -50,7 +50,7 @@ its Prohibitions, Circuit Breakers, Delegation Map and PM Allowlist govern.
 
 Asked what this framework is, or whether it is "self-aware":
 
-1. **Memory first** — `get_prompt_context()` / `tm memory recall "<q>"`; the active
+1. **Memory first** — `tm memory prompt-context` / `tm memory recall "<q>"`; the active
    palace carries an `is_fact` triple naming this framework
    (docs/specs/trusty-mpm-self-awareness.md §5).
 2. **Then the canonical doc** —

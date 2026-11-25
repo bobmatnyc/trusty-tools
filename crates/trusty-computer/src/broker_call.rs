@@ -19,7 +19,8 @@
 //! [`screenshot::bound`]; the read tools are asked for no screenshot, and
 //! every other reply loses any image part the driver sends (#11694).
 //! A coordinate call (#11696) passes [`Inner::pointer_bounds`] last, against
-//! the window's frame read on that call, and is confirmed by read-back.
+//! the window's frame read on that call (a drag also against the window order,
+//! #11756), and is confirmed by read-back.
 //! A window call (#11696 Phase B) passes [`Inner::window_owner`] last, which
 //! proves the window is the granted pid's and builds its one daemon call.
 //! A clipboard call (#11696 Phase C) needs its own grant flag and is run by
@@ -34,6 +35,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 
 use crate::app_identity::check_same;
+use crate::app_quit;
 use crate::audit::summarize_args;
 use crate::broker::{Ctx, Inner, refusal};
 use crate::clipboard;
@@ -221,7 +223,7 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "bad_args", "args must be an object");
         };
         rec.insert("args".into(), summarize_args(&args_map));
-        // #11696: drag_at is off until a window-on-top check exists; no gate or driver call runs.
+        // #11696: while `DRAG_ENABLED` is false drag_at runs no gate and no driver call.
         if let Some((code, detail)) = pointer::disabled(&tool) {
             return self.refuse(rec, code, detail);
         }
@@ -252,6 +254,8 @@ impl<L: Launcher> Inner<L> {
             window_mgmt::GRANT_FLAG
         } else if let Some(flag) = clipboard::grant_flag(&tool) {
             flag
+        } else if tool == app_quit::QUIT_TOOL {
+            app_quit::GRANT_FLAG
         } else {
             pointer::grant_name(&tool)
         };
@@ -342,6 +346,11 @@ impl<L: Launcher> Inner<L> {
         let (mut reply, outcome) = if clipboard::is_clipboard_tool(&tool) {
             // #11696 Phase C: the bounded daemon has no clipboard resource; the broker runs it.
             let (reply, fields) = clipboard::run(&*self.pasteboard, &tool, &args_map);
+            rec.extend(fields);
+            (reply, Outcome::Known)
+        } else if tool == app_quit::QUIT_TOOL {
+            // #11696 Phase D: a quit Apple event to the granted pid; the daemon is not asked.
+            let (reply, fields) = app_quit::run(&*self.quitter, grant.scope.pid, &grant.bundle_id);
             rec.extend(fields);
             (reply, Outcome::Known)
         } else {
