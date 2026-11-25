@@ -86,11 +86,15 @@ workspace root. For the config dir, not every writer refuses yet:
 
 - These writers refuse: the `pm_guard` trust-anchor floor (it denies every
   write and names the file), the session store, the worktree ledger
-  (including the `tm launch --worktree` ledger in `managed_workspace`), and the
-  OAuth token store.
+  (including the `tm launch --worktree` ledger in `managed_workspace`), the
+  OAuth token store, the gh token supplied with `--account-token-stdin`, the
+  console's auto-resume flag, the per-login gh account dirs
+  (`gh-accounts/<login>`), and the session archive root
+  (`.trusty-tools/archive`, #11821 row P3-f1).
 - The build-lease store does not use `$HOME`'s store. It falls back to its
   per-uid store under `/tmp`.
-- Every other writer still falls back to `$HOME` until #11821 row P3-f1.
+- Readers, caches, logs and derived data still log the error and fall back
+  to `$HOME`.
 
 Fix or remove a broken `install.toml` from your own shell. A hooked session
 cannot write it, because it is a trust anchor.

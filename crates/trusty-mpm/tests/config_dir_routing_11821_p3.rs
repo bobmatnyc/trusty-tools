@@ -287,3 +287,13 @@ fn account_config_dir_writer_fails_closed_on_a_broken_install_file() {
         .expect_err("the account dir refuses");
     assert_refused_closed(&fx, err);
 }
+
+/// #11821 P3-f1: the session archive root refuses; before the fix it was
+/// `$HOME/.trusty-tools/archive`.
+#[test]
+fn archive_root_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::session_manager::archive_move::default_archive_root()
+        .expect_err("the archive root refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
