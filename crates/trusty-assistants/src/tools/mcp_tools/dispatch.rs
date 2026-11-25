@@ -118,7 +118,8 @@ fn load() -> Result<(McpConfigFile, std::path::PathBuf), String> {
 
 /// The shared file's path, or the message to hand the model instead.
 fn shared_path() -> Result<std::path::PathBuf, String> {
-    trusty_mcp::config::default_path()
+    // #11821: the file sits under the configured config dir.
+    crate::mcp::shared::shared_path()
         .map_err(|e| format!("Failed to locate the MCP server file: {e}"))
 }
 

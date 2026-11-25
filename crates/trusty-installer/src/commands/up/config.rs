@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use trusty_common::install_paths::{InstallPaths, InstallPathsError};
 
 /// The `[analyze_core]` tri-state from DOC-12 §3.5 / §8.
 ///
@@ -174,21 +175,44 @@ pub struct BootConfig {
     pub controller: ControllerSection,
 }
 
-/// Compute the #1220 installer config path: `~/.trusty-tools/trusty-installer/config.yaml`.
+/// The tools dir (`<config_dir>/.trusty-tools`) for a resolved install.
+///
+/// Why: the installer's config and boot lock live under the configured
+/// config dir, not a `$HOME` literal (#11821).
+/// What: `Ok(Some(tools_dir))` when resolved; `Ok(None)` when no home
+/// resolves (the pre-#11821 "no home" case); any other resolver error, such as
+/// a broken `install.toml`, is an `Err`, so no caller reads or writes the
+/// default tree instead.
+/// Test: `super::tests::tools_dir_from_follows_the_config_dir`,
+/// `super::tests::tools_dir_from_fails_closed_on_broken_install_file`.
+pub fn tools_dir_from(
+    paths: Result<InstallPaths, InstallPathsError>,
+) -> anyhow::Result<Option<PathBuf>> {
+    match paths {
+        Ok(paths) => Ok(Some(paths.tools_dir())),
+        Err(InstallPathsError::NoHome) => Ok(None),
+        // #11821: fail closed on a broken install.toml.
+        Err(e) => Err(anyhow::Error::new(e).context("install paths unresolved")),
+    }
+}
+
+/// [`tools_dir_from`] for this process's install paths.
+pub fn tools_dir() -> anyhow::Result<Option<PathBuf>> {
+    tools_dir_from(InstallPaths::resolve())
+}
+
+/// Compute the #1220 installer config path:
+/// `<config_dir>/.trusty-tools/trusty-installer/config.yaml`.
 ///
 /// Why: Centralises the one path the loader reads so tests and the loader agree.
 ///
-/// What: Joins `dirs::home_dir()` with `.trusty-tools/trusty-installer/config.yaml`.
-/// Returns `None` only when the home directory cannot be resolved.
+/// What: [`tools_dir`] joined with `trusty-installer/config.yaml` (#11821).
+/// `Ok(None)` only when the home directory cannot be resolved; a broken
+/// `install.toml` is an `Err`.
 ///
-/// Test: `super::tests::config_path_shape`.
-pub fn config_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(
-        home.join(".trusty-tools")
-            .join("trusty-installer")
-            .join("config.yaml"),
-    )
+/// Test: `super::tests::tools_dir_from_follows_the_config_dir`.
+pub fn config_path() -> anyhow::Result<Option<PathBuf>> {
+    Ok(tools_dir()?.map(|dir| dir.join("trusty-installer").join("config.yaml")))
 }
 
 /// Idempotent migration: rename `~/.trusty-tools/trusty-controller/` →
@@ -256,20 +280,20 @@ pub fn load_boot_config_from(path: &Path) -> anyhow::Result<BootConfig> {
 /// Why: The orchestrator entry point wants a one-call "load my config" that
 /// resolves the path itself, runs the startup migration first, then reads.
 ///
-/// What: Resolves the base dir, runs `migrate_config_dir` (idempotent),
-/// resolves `config_path()` then delegates to `load_boot_config_from`;
-/// returns defaults when the home dir is unresolvable (headless/CI).
+/// What: Resolves the tools dir, runs `migrate_config_dir` (idempotent),
+/// then delegates to `load_boot_config_from`; returns defaults when the home
+/// dir is unresolvable (headless/CI). A broken `install.toml` is an error:
+/// neither the migration nor the read runs on the default tree (#11821).
 ///
 /// Test: Covered indirectly; the path-resolving variant is exercised in the
 /// orchestrator integration test under `super::tests`.
 pub fn load_boot_config() -> anyhow::Result<BootConfig> {
     // Run the idempotent migration before resolving the config path so that
     // existing users' trusty-controller state is in place when we read.
-    if let Some(home) = dirs::home_dir() {
-        migrate_config_dir(&home.join(".trusty-tools"));
-    }
-    match config_path() {
-        Some(p) => load_boot_config_from(&p),
-        None => Ok(BootConfig::default()),
-    }
+    // #11821: the tools dir follows the configured config dir.
+    let Some(tools) = tools_dir()? else {
+        return Ok(BootConfig::default());
+    };
+    migrate_config_dir(&tools);
+    load_boot_config_from(&tools.join("trusty-installer").join("config.yaml"))
 }

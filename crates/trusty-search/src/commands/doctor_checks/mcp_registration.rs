@@ -192,13 +192,15 @@ pub fn registered_exe_version(command: &str) -> String {
 /// rather than in `trusty-common` because trusty-search is the only consumer —
 /// the shared-capability rule governs duplication across crates, and there is
 /// no second implementation to converge.
-/// What: parses `<home>/.codex/config.toml` and returns
+/// What: parses the Codex config at `path` (the caller resolves it through
+/// `codex_config::resolve_codex_config_path`, #11821) and returns
 /// `[mcp_servers.<server_key>]`'s `command`, `args`, and `env`. A missing file,
 /// a parse failure, or a missing table all yield `None`: an unreadable config is
 /// reported by the check as "absent", which is the same remediation.
 /// Test: `reads_a_codex_registration`, `codex_missing_file_is_none`.
-pub fn read_codex_registration(home: &Path, server_key: &str) -> Option<McpRegistration> {
-    let path = trusty_common::codex_config::codex_config_path(home);
+pub fn read_codex_registration(path: &Path, server_key: &str) -> Option<McpRegistration> {
+    // #11821: the path is resolved by the caller, so a configured Codex home is read.
+    let path = path.to_path_buf();
     let text = std::fs::read_to_string(&path).ok()?;
     let doc: toml::Value = text.parse().ok()?;
     let entry = doc.get("mcp_servers")?.get(server_key)?;
@@ -507,7 +509,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = read_codex_registration(tmp.path(), "trusty-search").expect("registration");
+        let r = read_codex_registration(&path, "trusty-search").expect("registration");
         assert_eq!(r.command, "trusty-search");
         assert_eq!(r.args, vec!["serve".to_string()]);
         assert_eq!(
@@ -519,7 +521,8 @@ mod tests {
     #[test]
     fn codex_missing_file_is_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(read_codex_registration(tmp.path(), "trusty-search").is_none());
+        let path = trusty_common::codex_config::codex_config_path(tmp.path());
+        assert!(read_codex_registration(&path, "trusty-search").is_none());
     }
 
     /// The scope limit must reach the operator as a verdict, not as silence.

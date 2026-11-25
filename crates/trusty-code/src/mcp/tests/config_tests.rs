@@ -224,3 +224,26 @@ fn probe(server: &trusty_mcp::config::McpServerConfig) -> McpTransportProbe {
         other => panic!("expected a stdio transport, got {other:?}"),
     }
 }
+
+/// #11821: the shared `servers.toml` follows a configured config dir, and a
+/// broken `install.toml` resolves to no path at all.
+#[test]
+fn shared_servers_path_from_follows_the_config_dir() {
+    use trusty_common::install_paths::{InstallPaths, PathOverrides, install_file_path};
+    let home = tempfile::tempdir().expect("tempdir");
+    let moved = InstallPaths::resolve_with(
+        |name| (name == "TRUSTY_MPM_CONFIG_DIR").then(|| "/srv/cfg".to_string()),
+        home.path(),
+        &PathOverrides::default(),
+    );
+    assert_eq!(
+        crate::mcp::shared_servers_path_from(moved).expect("resolved"),
+        std::path::PathBuf::from("/srv/cfg/.trusty-tools/mcp/servers.toml")
+    );
+    let file = install_file_path(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "bogus = 1\n").unwrap();
+    let broken = InstallPaths::resolve_with(|_| None, home.path(), &PathOverrides::default());
+    let err = crate::mcp::shared_servers_path_from(broken).expect_err("refused");
+    assert!(err.contains("install.toml"), "{err}");
+}

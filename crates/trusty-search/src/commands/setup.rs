@@ -120,7 +120,8 @@ pub fn handle_setup() -> Result<()> {
     // #5264: Codex is registered from the same command so one setup run leaves
     // both clients working. A Codex failure never fails the Claude setup.
     println!();
-    if let Err(e) = setup_codex(&home) {
+    // #11821: the Codex home comes from the install paths, not `~/.codex`.
+    if let Err(e) = setup_codex(codex_config::resolve_codex_config_path()) {
         eprintln!("  {} Codex registration: {}", "✗".red(), e);
     }
     Ok(())
@@ -134,16 +135,21 @@ pub fn handle_setup() -> Result<()> {
 /// the model got no search, grep, or index tools from a connection that looked
 /// healthy. Nothing in trusty-search wrote that registration, which is why the
 /// broken shape had no owner to fix it.
-/// What: upserts `[mcp_servers.trusty-search]` in `~/.codex/config.toml` with
+/// What: upserts `[mcp_servers.trusty-search]` in the resolved Codex config
+/// (`<codex_home>/config.toml`, default `~/.codex/config.toml`, #11821) with
 /// `command = "trusty-search"` and `args = ["serve"]`, through the shared
 /// writer in `trusty_common::codex_config` — which repairs an empty, joined, or
 /// nested-JSON-string argument vector and leaves every other table and comment
-/// in the operator's config untouched. Prints one status line either way.
+/// in the operator's config untouched. Prints one status line either way. A
+/// broken `install.toml` is an error and nothing is written (#11821).
 /// Test: `setup_codex_writes_the_serve_entrypoint`,
-/// `setup_codex_is_idempotent`; the repair cases are covered by
-/// `trusty_common::codex_config`'s own tests.
-fn setup_codex(home: &Path) -> Result<()> {
-    let path = codex_config::codex_config_path(home);
+/// `setup_codex_is_idempotent`, `setup_codex_fails_closed_on_broken_install_file`;
+/// the repair cases are covered by `trusty_common::codex_config`'s own tests.
+fn setup_codex(
+    resolved: Result<std::path::PathBuf, trusty_common::install_paths::InstallPathsError>,
+) -> Result<()> {
+    // #11821: fail closed, never fall back to `~/.codex`.
+    let path = resolved?;
     let wrote =
         codex_config::patch_mcp_server(&path, MCP_SERVER_KEY, MCP_SERVER_KEY, MCP_SERVER_ARGS)?;
     if wrote {
@@ -311,7 +317,7 @@ mod tests {
     #[test]
     fn setup_codex_writes_the_serve_entrypoint() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        setup_codex(tmp.path()).expect("codex setup ok");
+        setup_codex(Ok(codex_config::codex_config_path(tmp.path()))).expect("codex setup ok");
 
         let text =
             std::fs::read_to_string(tmp.path().join(".codex").join("config.toml")).expect("read");
@@ -337,10 +343,28 @@ mod tests {
     fn setup_codex_is_idempotent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(".codex").join("config.toml");
-        setup_codex(tmp.path()).expect("first run");
+        setup_codex(Ok(path.clone())).expect("first run");
         let before = std::fs::read_to_string(&path).expect("read");
-        setup_codex(tmp.path()).expect("second run");
+        setup_codex(Ok(path.clone())).expect("second run");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// #11821: a broken `install.toml` refuses the Codex write.
+    #[test]
+    fn setup_codex_fails_closed_on_broken_install_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = trusty_common::install_paths::install_file_path(home.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "bogus = 1\n").unwrap();
+        let broken = trusty_common::install_paths::InstallPaths::resolve_with(
+            |_| None,
+            home.path(),
+            &trusty_common::install_paths::PathOverrides::default(),
+        )
+        .map(|p| codex_config::codex_config_path_in(&p, home.path()));
+        assert!(broken.is_err(), "the broken file must not resolve");
+        setup_codex(broken).expect_err("a broken install.toml must refuse the write");
+        assert!(!codex_config::codex_config_path(home.path()).exists());
     }
 
     /// Why (#6307): the GUI-client path must reject a client it does not know

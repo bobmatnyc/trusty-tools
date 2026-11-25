@@ -139,17 +139,43 @@ impl AllowlistPaths {
 /// it; ignoring it would make a relocated `tm` install silently deny every
 /// project.
 /// What: `$TRUSTY_MPM_ROOT/project-paths.json` when that variable is set and
-/// non-empty, else `~/.trusty-mpm/project-paths.json`.
-/// Test: `default_project_paths_file_ends_at_the_registry`.
+/// non-empty, else `<config_dir>/.trusty-mpm/project-paths.json` from the
+/// install paths (#11821), default `~/.trusty-mpm/project-paths.json`.
+/// Test: `default_project_paths_file_ends_at_the_registry`,
+/// `mpm_root_from_follows_the_config_dir`.
 pub fn default_project_paths_file() -> PathBuf {
     let root = match std::env::var("TRUSTY_MPM_ROOT") {
         Ok(raw) if !raw.trim().is_empty() => PathBuf::from(raw),
-        _ => match dirs::home_dir() {
-            Some(home) => home.join(".trusty-mpm"),
-            None => PathBuf::from(".trusty-mpm"),
-        },
+        _ => mpm_root_from(
+            trusty_common::install_paths::InstallPaths::resolve(),
+            dirs::home_dir(),
+        ),
     };
     root.join("project-paths.json")
+}
+
+/// The tm root for a resolved install, or the home default.
+///
+/// #11821: read-only — this file only grants indexing, so a broken
+/// `install.toml` logs a warning and reads the default registry; the worst
+/// case is a deny, never a write to the wrong tree.
+pub(crate) fn mpm_root_from(
+    paths: Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    >,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    match paths {
+        Ok(paths) => paths.mpm_dir(),
+        Err(e) => {
+            tracing::warn!(error = %e, "install paths unresolved; reading the default tm registry");
+            match home {
+                Some(home) => home.join(".trusty-mpm"),
+                None => PathBuf::from(".trusty-mpm"),
+            }
+        }
+    }
 }
 
 /// One row of `project-paths.json`, as written by

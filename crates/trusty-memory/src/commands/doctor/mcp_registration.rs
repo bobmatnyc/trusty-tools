@@ -197,13 +197,15 @@ fn registered_exe_version(command: &str) -> String {
 ///
 /// Why: `trusty_common::codex_config` owns WRITING this file; until #5265
 /// nothing read it back, so a broken registration had no way to be observed.
-/// What: parses `<home>/.codex/config.toml` and returns
+/// What: parses the Codex config at `path` (resolved by the caller through
+/// the install paths, #11821) and returns
 /// `[mcp_servers.<server_key>]`'s `command`, `args`, and `env`. A missing file,
 /// a parse failure, or a missing table all yield `None` — reported as "absent",
 /// which carries the same remediation.
 /// Test: `reads_a_codex_registration`, `codex_missing_file_is_none`.
-pub(super) fn read_codex_registration(home: &Path, server_key: &str) -> Option<McpRegistration> {
-    let path = trusty_common::codex_config::codex_config_path(home);
+pub(super) fn read_codex_registration(path: &Path, server_key: &str) -> Option<McpRegistration> {
+    // #11821: the caller resolves the configured Codex home.
+    let path = path.to_path_buf();
     let doc: toml::Value = std::fs::read_to_string(&path).ok()?.parse().ok()?;
     let entry = doc.get("mcp_servers")?.get(server_key)?;
     Some(McpRegistration {
@@ -337,21 +339,64 @@ pub(super) fn check_mcp_registrations(server_key: &str) -> Vec<CheckResult> {
         )
     };
 
-    let codex = read_codex_registration(&home, server_key);
-    let mut results = vec![check_registration(
-        codex.as_ref(),
-        "Codex",
-        &trusty_common::codex_config::codex_config_path(&home),
-        &version_of(codex.as_ref()),
+    // #11821: a broken install.toml is reported, never read past to `~/.codex`.
+    let mut results = vec![codex_result(
+        trusty_common::codex_config::resolve_codex_config_path(),
+        server_key,
+        &version_of,
     )];
     results.extend(check_claude_registrations(&home, server_key, &version_of));
     results
+}
+
+/// The Codex registration verdict for a resolved Codex config path.
+///
+/// Why: a broken `install.toml` must show in `doctor`, not read as an absent
+/// registration under the default home (#11821).
+/// What: an unresolved path is `Unknown` naming the error; otherwise the
+/// registration at that path goes through [`check_registration`].
+/// Test: `codex_result_is_unknown_on_broken_install_file`.
+fn codex_result(
+    resolved: Result<std::path::PathBuf, trusty_common::install_paths::InstallPathsError>,
+    server_key: &str,
+    version_of: &dyn Fn(Option<&McpRegistration>) -> String,
+) -> CheckResult {
+    let path = match resolved {
+        Ok(path) => path,
+        Err(e) => {
+            return CheckResult::unknown(
+                "Codex MCP registration",
+                format!("the Codex config path did not resolve: {e}"),
+            );
+        }
+    };
+    let codex = read_codex_registration(&path, server_key);
+    check_registration(codex.as_ref(), "Codex", &path, &version_of(codex.as_ref()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::doctor::CheckStatus;
+
+    /// #11821: a broken `install.toml` is an `Unknown` naming the error.
+    #[test]
+    fn codex_result_is_unknown_on_broken_install_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = trusty_common::install_paths::install_file_path(home.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "bogus = 1\n").unwrap();
+        let broken = trusty_common::install_paths::InstallPaths::resolve_with(
+            |_| None,
+            home.path(),
+            &trusty_common::install_paths::PathOverrides::default(),
+        )
+        .map(|p| trusty_common::codex_config::codex_config_path_in(&p, home.path()));
+        let result = codex_result(broken, "trusty-memory", &|_| "v".to_string());
+        assert_eq!(result.status, CheckStatus::Unknown, "{result:?}");
+        let detail = result.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("install.toml"), "{result:?}");
+    }
 
     fn reg(args: &[&str]) -> McpRegistration {
         McpRegistration {
@@ -472,7 +517,7 @@ mod tests {
         )
         .unwrap();
 
-        let r = read_codex_registration(tmp.path(), "trusty-memory").expect("registration");
+        let r = read_codex_registration(&path, "trusty-memory").expect("registration");
         assert_eq!(r.command, "trusty-memory");
         assert_eq!(r.args, vec!["serve".to_string()]);
         assert_eq!(
@@ -484,7 +529,8 @@ mod tests {
     #[test]
     fn codex_missing_file_is_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(read_codex_registration(tmp.path(), "trusty-memory").is_none());
+        let path = trusty_common::codex_config::codex_config_path(tmp.path());
+        assert!(read_codex_registration(&path, "trusty-memory").is_none());
     }
 
     /// The scope limit must reach the operator as a verdict, not as silence.

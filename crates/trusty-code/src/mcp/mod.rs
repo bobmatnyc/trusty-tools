@@ -50,6 +50,27 @@ use crate::tools::traits::ToolExecutor;
 pub use config::{McpIssue, McpTier, ProjectOverrides, ResolvedMcp, ServerStatus};
 pub use tool::{McpBridgeTool, composed_name};
 
+/// The shared `servers.toml` for this process's install paths.
+///
+/// #11821: read-only; [`McpToolSet::load`] already loads no servers on an
+/// error, so a broken `install.toml` means no connectors, never the `$HOME`
+/// file. Test: `tests::config_tests::shared_servers_path_from_follows_the_config_dir`.
+fn shared_servers_path() -> Result<std::path::PathBuf, String> {
+    shared_servers_path_from(trusty_common::install_paths::InstallPaths::resolve())
+}
+
+/// [`shared_servers_path`] for a resolved install: under its config dir.
+pub(crate) fn shared_servers_path_from(
+    paths: Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    >,
+) -> Result<std::path::PathBuf, String> {
+    paths
+        .map(|p| trusty_mcp::config::default_path_at(&p.config_dir.path))
+        .map_err(|e| e.to_string())
+}
+
 /// Why a recognised but unimplemented transport is not connected.
 ///
 /// Why: one string, so the config-time grading and the spawn-time refusal
@@ -157,7 +178,7 @@ impl McpToolSet {
             tracing::debug!("mcp: test harness detected; not reading the operator's server file");
             return Self::default();
         }
-        match trusty_mcp::config::default_path() {
+        match shared_servers_path() {
             Ok(path) => Self::load_at(&path, project_root).await,
             Err(e) => {
                 tracing::warn!(error = %e, "mcp: no shared MCP server file path resolves; no servers configured");
@@ -217,7 +238,7 @@ impl McpToolSet {
             tracing::debug!("mcp: test harness detected; not reading the operator's server file");
             return Self::default();
         }
-        match trusty_mcp::config::default_path() {
+        match shared_servers_path() {
             Ok(path) => Self::load_at_only(&path, project_root, wanted).await,
             Err(e) => {
                 tracing::warn!(error = %e, "mcp: no shared MCP server file path resolves; no servers configured");
