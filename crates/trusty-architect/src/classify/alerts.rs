@@ -6,7 +6,7 @@
 //! What: pure functions over [`PaneInfo`]; `now` (seconds since the epoch) is
 //! always passed in, never read from the clock.
 //! Test: `test_no_agents_still_idle`, `test_idle_prompt_alerts_after_ten_minutes_only`,
-//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_thresholds_follow_ruling_b7`,
+//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_alert_at_the_new_bar`,
 //! `test_alert_display_and_redaction`, `evaluate_matches_python_goldens`.
 
 use serde::{Deserialize, Serialize};
