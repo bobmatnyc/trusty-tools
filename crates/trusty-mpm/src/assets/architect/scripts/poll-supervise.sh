@@ -3,7 +3,7 @@
 # Why: a hung poller sat in select/poll for hours with stale state and went unnoticed (see #10571).
 # A hung process cannot restart itself; this wrapper is the
 # independent watcher. start-fleet-poll.sh does not start it yet; wiring it in as the
-# poller session command is a follow-up (#10571).
+# poller session command is a follow-up (#11844).
 # What: starts the poller, then every POLL_SUPERVISE_TICK s checks the newest of the state-file
 # mtime and the child start time. Older than POLL_STALE_S (600) => SIGTERM, then SIGKILL, to the
 # child pid only, after `ps` confirms the pid's command line still matches POLL_MATCH. A child that
