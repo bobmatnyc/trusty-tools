@@ -17,12 +17,12 @@
 //! #11540 adds the ledger shim (live and shadow; its failures are `failing`).
 //! #11541 review: the last self-refresh fault and the Architect pane's own
 //! capture or self-ctx read failures are `self_refresh` alerts in `failing`.
-//! #11826 (parity window 7) adds `owner_wont_do`.
+//! #11826 (parity window 7) adds `owner_wont_do` and the `user_state` step.
 //! MB1595 adds the PM-message intake (`pm_message`); PR-B2 the tm health
 //! `dep_degraded` step; the MB1595 fix round the `token` watcher.
 //! Steps owned elsewhere are left out: effort, dashboard, owner_* other than
-//! owner_answer (#11474) and owner_wont_do (#11826), auto_sleep, user_state
-//! and triage rules (#9801); the watchdog and Remote Control (#9779).
+//! owner_answer (#11474) and owner_wont_do (#11826), auto_sleep and triage
+//! rules (#9801); the watchdog and Remote Control (#9779).
 //! Test: `tests/cycle_ported.rs` (the prototype's cycle tests, by name),
 //! `cycle_falls_back_to_transcript_when_status_ctx_is_none`,
 //! `failed_cycle_commits_nothing`.
@@ -52,6 +52,7 @@ use super::steps::live_reminders::shadow_reminder_step;
 use super::steps::scripts::ScriptSteps;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
 use super::token::token_alerts;
+use super::user_state::{USER_STATE_KEY, user_state_step};
 use super::watchdog::Relauncher;
 use super::watchdog::wiring::watchdog_alerts;
 use super::windows::rename_windows;
@@ -336,6 +337,8 @@ pub fn collect<T: Tmux + ?Sized>(
     let (found, lines) = dep_health_step(sock, &read_tm_health, &mut state.other, now);
     candidates.extend(found);
     log.extend(lines);
+    // #11826: the owner's presence state (fleet-poll.py's user_state step).
+    let user_state_ok = user_state_step(s.config, now, &mut candidates, &mut log);
     // #9779 D5r: routines ran; an overdue failure is due a push (never sent).
     let mut failing = watch_found.clone();
     failing.extend(shim_failing);
@@ -379,11 +382,14 @@ pub fn collect<T: Tmux + ?Sized>(
     let quiet = read_quiet_sessions(&s.config.quiet_sessions);
     candidates.retain(|a| !(a.kind == "idle" && quiet.contains(&a.session)));
     // #11474: a failed answer read says nothing about an answer; keep its
-    // keys (#11826: the won't-do keys likewise).
+    // keys (#11826: the won't-do and user_state keys likewise).
     let mut kept = Vec::new();
     if !answers_ok {
         kept.extend(state.alerts.prefixed(ANSWER_KEY));
         kept.extend(state.alerts.prefixed(WONT_DO_KEY));
+    }
+    if !user_state_ok {
+        kept.extend(state.alerts.prefixed(USER_STATE_KEY));
     }
     let (new, suppressed) = dedup(&mut state.alerts, &candidates, now);
     state.alerts.restore(kept);

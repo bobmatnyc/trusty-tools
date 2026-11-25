@@ -3,8 +3,8 @@
 //! own rows (`trusty-architect-sched parity --by-kind --examples`): item ids,
 //! times and notes as the owner-queue store held them when the poller read.
 //!
-//! `owner_wont_do` had no step in the Rust cycle; each test for it is red
-//! on the pre-fix commit. `owner_answer` raised the same
+//! `owner_wont_do` and `user_state` had no step in the Rust cycle; each test
+//! for them is red on the pre-fix commit. `owner_answer` raised the same
 //! fingerprints from the same store; its window-7 misses were the relay race
 //! (the live wake made the Architect relay the answer before the shadow's
 //! next read), shown by `window7_owner_answer_rows_match_the_poller_on_its_store`.
@@ -155,6 +155,91 @@ fn window7_failed_item_read_keeps_the_wont_do_key() -> TestResult {
     put(&env, "items", "Bp2", &wont_do(at, note))?;
     c.run(&env)?;
     assert_eq!(fps(&env, "owner_wont_do")?.len(), 1, "{}", env.log());
+    Ok(())
+}
+
+fn settings(state: &str, at: &str) -> Value {
+    json!({
+        "user_state": state,
+        "user_state_at": at,
+        "user_state_by": "auto: owner activity (turn in tm-architect)",
+        "version": 1,
+    })
+}
+
+/// Window 7's poller-only `user_state` rows: 19:01:12.000Z, then
+/// 22:37:21.000Z. Red before the fix: the cycle had no user_state step.
+#[test]
+fn window7_user_state_rows_raise_on_the_scheduler() -> TestResult {
+    let env = Env::new(&[])?;
+    let mut c = Cycles::new();
+    // No settings document: Python's default, no alert.
+    c.run(&env)?;
+    assert!(fps(&env, "user_state")?.is_empty(), "{}", env.log());
+    put(
+        &env,
+        "meta",
+        "settings",
+        &settings("active", "2026-11-25T19:01:12.000Z"),
+    )?;
+    c.run(&env)?;
+    c.run(&env)?;
+    put(
+        &env,
+        "meta",
+        "settings",
+        &settings("active", "2026-11-25T22:37:21.000Z"),
+    )?;
+    c.run(&env)?;
+    let want = ["2026-11-25T19:01:12.000Z", "2026-11-25T22:37:21.000Z"];
+    assert_eq!(fps(&env, "user_state")?, want, "{}", env.log());
+    let shown = displays(&env, "user_state")?;
+    assert_eq!(shown[0], "[dashboard]: user state -> active", "{shown:?}");
+    // An unknown state is Python's default: no alert.
+    put(
+        &env,
+        "meta",
+        "settings",
+        &settings("napping", "2026-11-25T23:00:00Z"),
+    )?;
+    c.run(&env)?;
+    assert_eq!(fps(&env, "user_state")?, want, "{}", env.log());
+    Ok(())
+}
+
+/// Fail-open check: an unreadable settings document is one
+/// `user_state_error` alert, and the user_state key survives it. Red before
+/// the fix (no user_state alert at all).
+#[test]
+fn window7_unreadable_settings_raise_one_error_and_keep_the_user_state_key() -> TestResult {
+    let env = Env::new(&[])?;
+    let at = "2026-11-25T19:01:12.000Z";
+    put(&env, "meta", "settings", &settings("away", at))?;
+    let mut c = Cycles::new();
+    c.run(&env)?;
+    assert_eq!(fps(&env, "user_state")?, [at], "{}", env.log());
+    fs::write(
+        env.root().join("local/owner-queue/meta/settings.json"),
+        "{ torn",
+    )?;
+    c.run(&env)?;
+    c.run(&env)?;
+    assert_eq!(
+        fps(&env, "user_state_error")?,
+        ["StoreError"],
+        "{}",
+        env.log()
+    );
+    let state = fs::read_to_string(env.state_path())?;
+    assert!(state.contains(&format!("||user_state|{at}")), "{state}");
+    assert!(
+        env.log().contains("user_state ERROR StoreError"),
+        "{}",
+        env.log()
+    );
+    put(&env, "meta", "settings", &settings("away", at))?;
+    c.run(&env)?;
+    assert_eq!(fps(&env, "user_state")?, [at], "{}", env.log());
     Ok(())
 }
 
