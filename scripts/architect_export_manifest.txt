@@ -252,3 +252,12 @@ scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py
 # fleet_alert_dedupe.py (ar-T8a) has no prototype source either.
 # templates/local/il-schedule.json is written in trusty-tools form: the prototype copy holds
 # instance sessions and names, so only its job and threshold shape is kept.
+
+# Prototype re-sync (#10571): section skeleton. Later slices add their rows under
+# the matching header, each hand-merged per the note at the top, and add a seed
+# row for each shipped script (scripts/architect_bundle_meta.py history
+# --from-repo records the live versions).
+# -- Re-sync, Phase 1: dashboard + Intent Ledger.
+# -- Re-sync, Phase 2: poller + PM relay.
+# -- Re-sync, Phase 3: the rest (generic and mixed scripts only).
+# -- Re-sync: tests for the rows above.
