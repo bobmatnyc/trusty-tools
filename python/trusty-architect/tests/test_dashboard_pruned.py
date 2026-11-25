@@ -58,12 +58,12 @@ def test_delete_logs_full_doc(env):
 def test_batch_delete_logs_each(env, tmp_path):
     root, e = env
     for i in ("D01", "D02"):
-        cli(root, "set", "items", i, "--json", json.dumps({**DOC, "n": i}), env=e)
+        cli(root, "set", "items", i, "--json", json.dumps({**DOC, "detail": i}), env=e)   # #10766: a schema field
     ops = tmp_path / "ops.json"
     ops.write_text(json.dumps([{"op": "delete", "collection": "items", "id": "D01"},
                                {"op": "delete", "collection": "items", "id": "D02"}]))
     assert cli(root, "batch", str(ops), env=e)[0] == 0
-    assert [(r["id"], r["data"]["n"]) for r in lines(root)] == [("D01", "D01"), ("D02", "D02")]
+    assert [(r["id"], r["data"]["detail"]) for r in lines(root)] == [("D01", "D01"), ("D02", "D02")]
 
 
 def test_missing_doc_delete_logs_nothing(env):

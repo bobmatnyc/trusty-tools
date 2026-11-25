@@ -329,9 +329,12 @@ async fn a_publisherless_emit_lands_in_the_spool() {
     e.emit(transition_event(&row(1, "h1"), &t))
         .await
         .expect("spooled");
+    // #11869: a sibling test's spawned child can still hold persist's flock,
+    // so the take counts the file held and reads 0 events; see #10748.
+    crate::test_support::relink_spool_files(&dir.path().join("spool"));
     let back = crate::daemon::action_events::spool::take_all(&dir.path().join("spool"))
         .expect("spool readable");
-    assert_eq!(back.events.len(), 1);
+    assert_eq!(back.events.len(), 1, "{back:?}");
     let none = BusEmitter {
         publisher: None,
         spool_dir: None,

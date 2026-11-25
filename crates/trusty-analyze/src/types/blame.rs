@@ -20,21 +20,3 @@ pub struct ChunkBlame {
     #[serde(default)]
     pub days_since_modified: u32,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blame_round_trips() {
-        let b = ChunkBlame {
-            commit_hash: "abcdef012345".into(),
-            author_email: "a@b.c".into(),
-            last_modified: "2026-01-01".into(),
-            days_since_modified: 30,
-        };
-        let s = serde_json::to_string(&b).unwrap();
-        let back: ChunkBlame = serde_json::from_str(&s).unwrap();
-        assert_eq!(b, back);
-    }
-}

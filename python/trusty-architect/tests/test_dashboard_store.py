@@ -287,12 +287,12 @@ class TestCli(StoreCase):
         self.assertEqual((rc, json.loads(out)["version"]), (0, 1))
         rc, out, _ = self.run_cli("list", "items", "--status", "open")
         self.assertEqual([d["id"] for d in json.loads(out)], ["D01"])
-        self.assertEqual(self.run_cli("update", "items", "D01", "--json", '{"a":1}', "--if-version", "9")[0], 3)
+        self.assertEqual(self.run_cli("update", "items", "D01", "--json", '{"detail":"a"}', "--if-version", "9")[0], 3)
         self.assertEqual(self.run_cli("get", "items", "nope")[0], 1)
         self.assertEqual(self.run_cli("set", "items", "../x", "--json", "{}")[0], 2)
         opsf = os.path.join(self._tmp.name, "ops.json")
         with open(opsf, "w") as f:
-            json.dump({"ops": [{"op": "update", "collection": "items", "id": "D01", "data": {"b": 2}},
+            json.dump({"ops": [{"op": "update", "collection": "items", "id": "D01", "data": {"detail": "b"}},
                                {"op": "delete", "collection": "items", "id": "zzz"}]}, f)
         self.assertEqual(self.run_cli("batch", opsf)[0], 1)
         self.assertEqual(self.store.get("items", "D01")["data"], {"status": "open"})
@@ -365,7 +365,7 @@ class TestQuestionValidation(StoreCase):
         with open(opsf, "w") as f:
             json.dump([{"op": "set", "collection": "questions", "id": "Q09", "data": {"question": "q"}}], f)
         self.assertEqual(self.run_cli("batch", opsf)[0], 2)
-        self.assertEqual(self.run_cli("set", "items", "D01", "--json", '{"anything":1}')[0], 0)
+        self.assertEqual(self.run_cli("set", "items", "D01", "--json", '{"detail":"anything"}')[0], 0)   # #10766: only named fields
 
 
 if __name__ == "__main__":

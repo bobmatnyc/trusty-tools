@@ -9,7 +9,7 @@
 //! every `interval` seconds and writes the result into the cache. On failure
 //! the previous cached value is retained and a warning is logged.
 //! Test: `test_metrics_cache_initialises_empty` and
-//! `test_metrics_cache_write_read_roundtrip` in this module.
+//! `test_metrics_cache_overwrite` in this module.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +29,7 @@ use crate::mcp_handle::McpServiceHandle;
 /// What: Wraps `Arc<RwLock<Option<ConsoleMetricsReport>>>`. `None` means no
 /// successful poll has completed yet (first boot or service absent).
 /// Test: `test_metrics_cache_initialises_empty` and
-/// `test_metrics_cache_write_read_roundtrip`.
+/// `test_metrics_cache_overwrite`.
 #[derive(Clone, Debug)]
 pub struct MetricsCache {
     inner: Arc<RwLock<Option<ConsoleMetricsReport>>>,
@@ -61,7 +61,7 @@ impl MetricsCache {
     ///
     /// Why: Route handlers call this to serve the report without blocking.
     /// What: Acquires a read lock, clones the value, releases the lock.
-    /// Test: `test_metrics_cache_write_read_roundtrip`.
+    /// Test: `test_metrics_cache_overwrite`.
     pub async fn get(&self) -> Option<ConsoleMetricsReport> {
         self.inner.read().await.clone()
     }
@@ -70,7 +70,7 @@ impl MetricsCache {
     ///
     /// Why: The poller calls this after each successful poll.
     /// What: Acquires a write lock, replaces the inner value.
-    /// Test: `test_metrics_cache_write_read_roundtrip`.
+    /// Test: `test_metrics_cache_overwrite`.
     pub async fn set(&self, report: ConsoleMetricsReport) {
         *self.inner.write().await = Some(report);
     }
@@ -145,31 +145,6 @@ mod tests {
     async fn test_metrics_cache_initialises_empty() {
         let cache = MetricsCache::new();
         assert!(cache.get().await.is_none(), "cache must start empty");
-    }
-
-    /// Why: After `set`, `get` must return the same report (full round-trip).
-    /// What: Calls `set` with a synthetic report, then `get` and asserts
-    /// all fields match.
-    /// Test: This test.
-    #[tokio::test]
-    async fn test_metrics_cache_write_read_roundtrip() {
-        let cache = MetricsCache::new();
-        let report = make_report(
-            "trusty-analyze",
-            "Trusty Analyze",
-            "0.7.0",
-            ServiceHealth::Ok,
-            serde_json::json!({ "search_reachable": true }),
-            1,
-        );
-        cache.set(report.clone()).await;
-        let got = cache.get().await.expect("must have report after set");
-        assert_eq!(got.service_id, "trusty-analyze");
-        assert_eq!(got.display_name, "Trusty Analyze");
-        assert_eq!(got.version, "0.7.0");
-        assert_eq!(got.status, ServiceHealth::Ok);
-        assert_eq!(got.metrics["search_reachable"], true);
-        assert_eq!(got.metrics_schema_version, 1);
     }
 
     /// Why: A second `set` must replace the previous value so the route always

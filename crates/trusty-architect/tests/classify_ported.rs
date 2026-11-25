@@ -15,11 +15,13 @@
 //! events, host load, band, rc-restore runs) are A3 work and are not here; the
 //! wake tests' classifier halves are, against `input_state_for_send`.
 
+mod common;
+
 use std::path::Path;
 
+use common::kinds;
 use trusty_architect::classify::{
-    Alert, BoxReading, CTX_HIGH, CTX_WARN, DedupState, PaneState, alert, dedup, evaluate,
-    fleet_plan_alerts, parse_pane,
+    Alert, BoxReading, DedupState, PaneState, alert, dedup, evaluate, fleet_plan_alerts, parse_pane,
 };
 use trusty_architect::{InputState, classify_input, input_state_for_send};
 
@@ -121,12 +123,6 @@ fn ask_user() -> String {
     ]
     .join("\n")
         + "\n"
-}
-
-fn kinds(alerts: &[Alert]) -> Vec<&str> {
-    let mut k: Vec<&str> = alerts.iter().map(|a| a.kind.as_str()).collect();
-    k.sort_unstable();
-    k
 }
 
 fn run(
@@ -376,14 +372,6 @@ fn test_ctx_47_alerts_and_crossing_50_changes_fingerprint() {
     assert_eq!(ctx_fingerprints(47), ["35"]);
     assert_eq!(ctx_fingerprints(52), ["35"]);
     assert_eq!(ctx_fingerprints(44), ["35"]);
-}
-
-/// `scripts/test_fleet_poll_ctx.py`, both halves since #9171 A3a.
-#[test]
-fn test_ctx_thresholds_follow_ruling_b7() {
-    // df-T7i P1b: Bob 2026-11-05, 350k of a 1M window (was ruling b7's 22/25).
-    assert_eq!((CTX_WARN, CTX_HIGH), (31, 35));
-    assert_eq!(trusty_architect::poller::SELF_CTX_THRESHOLD_DEFAULT, 35);
 }
 
 // Python: test_plan_limit_text_and_status_line

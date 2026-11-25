@@ -457,8 +457,9 @@ Envelope:
   reply whose `email` differs (`IdentityMismatch`) or whose `tab` differs from
   the request (`TabMismatch`), as today.
 - Refusal: `{"id", "ok": false, "error": <name>, ...}`. Only the fields `tab`,
-  `origin`, `access` and `document` may accompany an error. The broker relays
-  them to the agent and drops any other field.
+  `origin`, `access` and `document` may accompany an error (plus the
+  `typed`/`accepted`/`entered` of #11352 and the `frame` of #11808, below). The
+  broker relays them to the agent and drops any other field.
 - The worker answers within 7 seconds; the broker waits 8 (existing). A
   missing answer is `BrowserDisconnected`, or `OutcomeUnknown` for
   `page_click`, `page_type`, `page_press` and `page_navigate`. A worker refusal named
@@ -665,8 +666,9 @@ parent's grant. The worker finds frames with one
 frame is a root when it is the top frame or its parent is cross-origin (a
 root's walk already covers its same-origin descendants), and each root lists
 the declared `src` origins of the cross-origin frames it embeds. It then reads
-each permitted root child with `documentIds: [documentId]`. Click, type and
-the other actions do not reach child frames (#11318).
+each permitted root child with `documentIds: [documentId]`. Six actions also
+reach child frames through frame-scoped refs (#11808, "Actions in child
+frames" below).
 
 With any child frame read or denied, the result adds:
 
@@ -683,9 +685,44 @@ stay the top document's. A child's ref is frame-scoped:
 The worker records frameKey to `documentId` at read time. A frame-scoped
 `scope_ref` or `within_ref` reads that child document only, after the
 permission check again; once the frame navigated (its `documentId` changed),
-or for a frame key no read recorded, it answers `StaleElement`. A
-frame-scoped ref is not an action `ref`: `page_click` and the other actions
-refuse it as `InvalidRequest`.
+or for a frame key no read recorded, it answers `StaleElement`.
+
+#### Actions in child frames (#11808)
+
+`page_click`, `page_hover`, `page_type`, `page_press`, `page_select` and
+`page_scroll` take a frame-scoped `ref`; `page_drag` and `page_upload` refuse
+one as `InvalidRequest`. Tool names and request fields are unchanged. The
+worker checks, in order: the lease's `document` is still the tab's top
+document (`DocumentChanged`); a read under that top document recorded the
+frame key (`StaleElement`); Chrome still holds host permission for the
+child's own origin (`PermissionNeeded`, with `origin` set to the child's
+origin). It then injects only into the recorded child `documentId`, never the
+top frame; a child that navigated answers `StaleElement`. The tab scope and
+write gate are the same as for any action.
+
+A click is trusted CDP input at a top-frame point. No page-visible message is
+used to place it. The child reports its point, viewport size and URL; the top
+debugger session (`DOM.getDocument` with `pierce`) lists the `<iframe>` owners
+it can see, and their frame URLs come from `Page.getFrameTree` (same-process)
+or `chrome.debugger.getTargets` (out-of-process). Exactly one owner must load
+the child's URL (fragment ignored). The point maps through that owner's
+transformed content quad (`DOM.getBoxModel`); `DOM.getNodeForLocation` must
+then name the owner or its frame. Two matching owners, none, a perspective
+transform, or a covered point answer `Obscured` before any input. After the
+input, the child must confirm that a trusted pointerdown, mousedown or click
+reached the target; otherwise the click answers `OutcomeUnknown`.
+
+`page_press` with a null `ref` while focus sits inside a cross-origin child
+frame answers `NotEditable`: the keys would reach the `<iframe>` element in the
+top document. Pass the child's frame-scoped ref instead.
+
+The reply (worker `result` and agent reply) adds `"frame": {"id": int,
+"origin": str}`, the child it ran in. The broker refuses a `frame` that is not
+exactly that, with `id` above 0 and an http(s) origin (`BrowserRefused`). Every
+refusal raised after the frame resolved (an `OutcomeUnknown` included) carries
+the same `frame`; the broker relays a well-formed one and drops any other. The
+`operation` audit line lists the child's host in `frames`, as a read does, for
+a success and a refusal alike.
 
 Child entries carry no viewport distance: they keep document order and
 `viewport_only` does not filter them. `include_text` reads the top

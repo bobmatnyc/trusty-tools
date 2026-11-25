@@ -11,7 +11,8 @@
 //! [`InferenceError::is_retryable`] and [`InferenceError::is_alarm`] classifiers.
 //! Concrete HTTP adapters (#2403) map `reqwest`/SDK errors into these variants.
 //! Test: inline `tests` — `retryable_classification`, `alarm_classification`,
-//! `unsupported_capability_alarms_and_does_not_retry`, `display_includes_context`.
+//! `unsupported_capability_alarms_and_does_not_retry`, `display_includes_context`,
+//! `bedrock_variant_keeps_the_provider_display_and_classification`.
 
 use crate::inference::registry::ProviderId;
 
@@ -119,6 +120,66 @@ pub enum InferenceError {
     /// Test: `missing_config_alarms_and_does_not_retry`.
     #[error("missing configuration: {0}")]
     MissingConfig(String),
+
+    /// A Bedrock `Converse`/`ConverseStream` send failed; the cause is typed.
+    ///
+    /// Why (#10892): the adapter used to flatten every send failure into
+    /// [`Self::Provider`], so a caller that had to tell a missing credential
+    /// from a throttle from a timeout parsed the display text. The typed
+    /// [`BedrockError`] carries that distinction.
+    /// What: wraps a [`BedrockError`]. The display text is the one
+    /// [`Self::Provider`] produced for the same failure, and
+    /// [`Self::is_retryable`] / [`Self::is_alarm`] both stay `false`, as they
+    /// were for [`Self::Provider`]: a caller's retry and alarm policy does not
+    /// change. A caller that wants a finer policy matches the inner variant.
+    /// Test: `bedrock_variant_keeps_the_provider_display_and_classification`.
+    #[error("inference provider error: {0}")]
+    Bedrock(#[from] BedrockError),
+}
+
+/// Why a Bedrock `Converse` or `ConverseStream` send failed.
+///
+/// Why (#10892): a consumer that must report WHY a call failed — the
+/// delegation-guard evaluator records `timeout|transport|auth|...` on every
+/// unavailable verdict — needs the cause as a value. A display string is not
+/// a contract.
+/// What: one variant per failure class the AWS SDK distinguishes. Every
+/// variant carries the full context message
+/// (`<Operation> call failed (model=…, region=…): <AWS source chain>`); `Api`
+/// also carries the HTTP status and the AWS error code. A failure to resolve
+/// AWS credentials is [`Self::MissingCredential`] whatever SDK phase reported
+/// it, so it is never mistaken for a network fault.
+/// Test: `send_error_service_error_maps_to_api_with_status_and_code`,
+/// `send_error_dispatch_io_maps_to_transport`,
+/// `send_error_timeouts_map_to_timeout`,
+/// `send_error_credentials_error_maps_to_missing_credential`,
+/// `send_error_construction_failure_maps_to_other`,
+/// `chat_without_credentials_returns_missing_credential`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BedrockError {
+    /// AWS answered with a non-2xx service error.
+    #[error("{message}")]
+    Api {
+        /// HTTP status of the AWS response.
+        status: u16,
+        /// AWS error code, e.g. `ThrottlingException`, when AWS sent one.
+        code: Option<String>,
+        /// Full context message.
+        message: String,
+    },
+    /// The request was not delivered: connect, TLS or I/O failure.
+    #[error("{0}")]
+    Transport(String),
+    /// No AWS credential could be resolved, so nothing was sent.
+    #[error("{0}")]
+    MissingCredential(String),
+    /// The SDK gave up waiting: an operation, attempt or connect timeout.
+    #[error("{0}")]
+    Timeout(String),
+    /// Any other SDK failure: request construction or an unreadable response.
+    #[error("{0}")]
+    Other(String),
 }
 
 impl InferenceError {
@@ -263,6 +324,36 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("local"), "{s}");
         assert!(s.contains("structured_output"), "{s}");
+    }
+
+    /// A wrapped Bedrock failure displays and classifies as `Provider` did.
+    ///
+    /// Why (#10892): typing the Bedrock send error must not change a caller's
+    /// log text or its retry/alarm policy.
+    /// What: for each `BedrockError` variant, assert the display equals the
+    /// `Provider` display of the same message and neither classifier fires.
+    /// Test: this test.
+    #[test]
+    fn bedrock_variant_keeps_the_provider_display_and_classification() {
+        let msg = "Converse call failed (model=m, region=r): boom";
+        for inner in [
+            BedrockError::Api {
+                status: 429,
+                code: Some("ThrottlingException".into()),
+                message: msg.into(),
+            },
+            BedrockError::Transport(msg.into()),
+            BedrockError::MissingCredential(msg.into()),
+            BedrockError::Timeout(msg.into()),
+            BedrockError::Other(msg.into()),
+        ] {
+            let e = InferenceError::from(inner);
+            assert_eq!(
+                e.to_string(),
+                InferenceError::Provider(msg.into()).to_string()
+            );
+            assert!(!e.is_retryable() && !e.is_alarm(), "{e:?}");
+        }
     }
 
     /// Why: display strings feed logs and must carry the actionable context.

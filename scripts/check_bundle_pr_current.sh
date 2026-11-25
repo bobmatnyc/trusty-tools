@@ -44,10 +44,10 @@
 #   Fails closed: a failed fetch, an unresolvable head or base, a shallow
 #   repository, no merge base, a failed git command or a failed temp file
 #   exits 2, never 0.
-#   Not guaranteed: it judges main as fetched when it runs, and re-runs only
-#   when the PR changes or a run is re-requested. A bundle PR that passed can
-#   be overtaken by another bundle PR merging first; until a merge queue or a
-#   re-run on every main move exists, merge order (the supervisor) covers that.
+#   It judges main as fetched when it runs, and runs when the PR changes or a
+#   run is re-requested. A bundle PR that passed can be overtaken by another
+#   bundle PR merging first; scripts/rerun_bundle_pr_current.sh re-requests
+#   the run on every open PR when a bundle change lands on main (#11342).
 # Test: scripts/check_bundle_pr_current_selftest.sh
 #
 # Usage: check_bundle_pr_current.sh [--repo DIR] [--fetch <remote>]

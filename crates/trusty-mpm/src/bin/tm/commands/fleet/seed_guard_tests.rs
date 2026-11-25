@@ -87,7 +87,8 @@ fn every_seeded_script_passes_the_guard_at_its_installed_path() {
 /// reason each cannot be changed without changing what it does (#10570).
 /// The first four rows are modules with no `__main__`; the commands that
 /// import them (`datg.py`, `dashboard-serve.py`) pass. `token_watch.py` is a
-/// command; fleet-poll.py loads it in-process (#10571 S1).
+/// command; fleet-poll.py loads it in-process (#10571 S1). `il_remind.py` is a
+/// module datg.py and the poller import (#10571 S2).
 const STILL_REFUSED_10570: &[(&str, &str)] = &[
     (
         "datg_ops.py",
@@ -112,6 +113,12 @@ const STILL_REFUSED_10570: &[(&str, &str)] = &[
         "#10571 S1: STATE_PATH, HOURLY_PATH and THRESHOLDS_PATH name `token-*.json[l]` files, \
          read as token files; the Rust watcher shares the names (#11629, #10598)",
     ),
+    (
+        "il_remind.py",
+        "#10571 S2: the ledger ops it writes, `{\"op\": \"remind_fire\"}` and `{\"op\": \"remind_done\"}`, \
+         read as a 1Password call, as datg_ops.py's `unknown op` does; renaming the key changes \
+         the datg op format (#10598)",
+    ),
 ];
 
 /// #10641: the text each [`STILL_REFUSED_10570`] row's refusal must carry, so a
@@ -132,6 +139,10 @@ const REFUSAL_TEXT_10570: &[(&str, &str)] = &[
         "names a secret-bearing file (#7266)",
     ),
     ("token_watch.py", "names a secret-bearing file (#7266)"),
+    (
+        "il_remind.py",
+        "runs a credential-reading command (a Keychain, token or secret CLI",
+    ),
 ];
 
 /// 🔴 REGRESSION (#10570, #10598): every script `tm fleet init` seeds under

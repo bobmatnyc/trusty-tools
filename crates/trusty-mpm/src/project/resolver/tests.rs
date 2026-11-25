@@ -515,6 +515,67 @@ fn resolver_session_without_repo_url_ignores_a_sibling_path() {
     assert!(resolve_session_project(&session_in(&sibling.join("sub")), &projects).is_none());
 }
 
+/// #11828: a no-repo session (a boot-adopted `tm-*` pane) in a canonical clone
+/// binds to that clone's URL-form row, from the clone and from a worktree of
+/// it; a clone of another repo does not. Before the fix only path-form rows
+/// were compared, so the row showed 0 sessions once registered by URL.
+#[test]
+fn resolver_session_without_repo_url_binds_a_canonical_clone_to_its_url_row_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repos_root = tmp.path().join("repos");
+    let clone = repos_root.join("acme").join("widget");
+    let tree = clone.join(".worktrees").join("x");
+    let other = repos_root.join("acme").join("other");
+    std::fs::create_dir_all(&tree).expect("mkdir");
+    std::fs::create_dir_all(&other).expect("mkdir");
+    let projects = vec![proj("widget", "https://github.com/Acme/Widget")];
+    let bind = |dir: &std::path::Path| {
+        resolve_by_checkout_path_in(&session_in(dir), &projects, None, || repos_root.clone())
+            .map(|p| p.name.clone())
+    };
+
+    assert_eq!(bind(&clone).as_deref(), Some("widget"));
+    assert_eq!(bind(&tree).as_deref(), Some("widget"));
+    assert_eq!(bind(&other), None);
+}
+
+/// #11828: a clone on disk as `Acme/Widget` (pre-#10604) registers by URL
+/// through inode identity, so a no-repo session there binds the
+/// `https://github.com/acme/widget` row on a case-insensitive filesystem; a
+/// directory elsewhere that only shares the tail never binds. A
+/// case-sensitive filesystem has two directories, and only the exact-case one
+/// binds. Before the fix the tail compare was case-sensitive.
+#[test]
+fn resolver_binds_a_canonical_clone_spelled_in_another_case_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repos_root = tmp.path().join("repos");
+    let mixed = repos_root.join("Acme").join("Widget");
+    let elsewhere = tmp.path().join("elsewhere").join("Acme").join("Widget");
+    std::fs::create_dir_all(&mixed).expect("mkdir");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+    // Detected at runtime: the tempdir's volume, not the target OS, decides.
+    let case_insensitive = repos_root.join("acme").join("widget").is_dir();
+    let projects = vec![proj("widget", "https://github.com/acme/widget")];
+    let bind = |dir: &std::path::Path| {
+        resolve_by_checkout_path_in(&session_in(dir), &projects, None, || repos_root.clone())
+            .map(|p| p.name.clone())
+    };
+
+    if case_insensitive {
+        assert_eq!(bind(&mixed).as_deref(), Some("widget"));
+    } else {
+        let exact = repos_root.join("acme").join("widget");
+        std::fs::create_dir_all(&exact).expect("mkdir");
+        assert_eq!(bind(&exact).as_deref(), Some("widget"));
+        assert_eq!(
+            bind(&mixed),
+            None,
+            "a different directory on this filesystem"
+        );
+    }
+    assert_eq!(bind(&elsewhere), None);
+}
+
 #[test]
 fn resolver_session_unregistered_url_returns_none() {
     let projects = vec![proj("trusty-tools", "https://github.com/org/trusty-tools")];

@@ -14,7 +14,6 @@
 
 mod apply;
 mod route;
-mod secret;
 
 pub use apply::{Applied, IlError, apply};
 pub use route::{
@@ -22,6 +21,7 @@ pub use route::{
     mark_pending, pending_unknown, route,
 };
 
+use crate::il::ilio::secret::looks_secret;
 use crate::ledger::model::State;
 use crate::secret::SecretScan;
 
@@ -203,8 +203,9 @@ fn check_row(k: &str, v: &str, st: &State, scan: SecretScan<'_>) -> Result<(), R
     if k.chars().count() + 2 + v.chars().count() > cap {
         return Err(reject("LONG", k, format!("line over {cap} characters")));
     }
-    // ilio `SECRET` as well as the injected scan (G0b critic).
-    if scan(v).is_some() || secret::ilio_secret(v) {
+    // ilio `SECRET` as well as the injected scan (G0b critic); #10571: the
+    // crate's one port of it.
+    if scan(v).is_some() || looks_secret(v) {
         return Err(reject(
             "SECRET",
             k,

@@ -215,7 +215,8 @@ def test_build_output_survives_a_level_read_error(tmp_path, monkeypatch, capsys)
     def boom(root=None):
         raise ValueError("bad store")
     monkeypatch.setattr(tl, "read", boom)
-    assert hook({"hook_event_name": "PostToolUse"}, 1000.0) is None
+    # #10571 S2: user_state.py now ships, so the hook may still say USER STATE; the failed read adds no level line.
+    assert not [x for x in ctx(hook({"hook_event_name": "PostToolUse"}, 1000.0)) if x.startswith("TECH LEVEL: ")]
     assert "technical level line failed" in capsys.readouterr().err
 
 

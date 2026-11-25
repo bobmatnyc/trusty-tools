@@ -155,23 +155,36 @@ mod tests {
         handle.finish_and_clear();
     }
 
-    /// Why: `finish_and_clear` consumes the handle; verify it does not panic
-    /// even with a hidden target.
-    /// What: Finishes a hidden spinner.
+    /// Why: `finish_and_clear` consumes the handle and must stop the spinner,
+    /// with nothing written to a plain-mode sink.
+    /// What: Finishes a hidden spinner, then reads a clone of the handle: the
+    /// bar is finished and the captured output is empty.
     /// Test: This is the test.
     #[test]
     fn finish_and_clear_is_safe() {
-        let (out, _cap) = Output::for_capture(Mode::Plain);
-        ProgressHandle::spinner(&out, "x").finish_and_clear();
+        let (out, cap) = Output::for_capture(Mode::Plain);
+        let handle = ProgressHandle::spinner(&out, "x");
+        let view = handle.clone();
+        handle.finish_and_clear();
+        assert!(view.bar.is_finished(), "the spinner must stop");
+        assert_eq!(cap.contents(), "", "plain mode must write nothing");
     }
 
-    /// Why: `finish_with_message` is the alternate terminal verb; verify it is
-    /// panic-free in plain mode.
-    /// What: Finishes a hidden bar with a message.
+    /// Why: `finish_with_message` is the alternate terminal verb; the line it
+    /// leaves must carry the closing message, with nothing written to a
+    /// plain-mode sink.
+    /// What: Finishes a hidden bar with a message, then reads a clone of the
+    /// handle: the bar is finished, its message is the closing one, and the
+    /// captured output is empty.
     /// Test: This is the test.
     #[test]
     fn finish_with_message_is_safe() {
-        let (out, _cap) = Output::for_capture(Mode::Plain);
-        ProgressHandle::bar(&out, 5, "x").finish_with_message("done");
+        let (out, cap) = Output::for_capture(Mode::Plain);
+        let handle = ProgressHandle::bar(&out, 5, "x");
+        let view = handle.clone();
+        handle.finish_with_message("done");
+        assert!(view.bar.is_finished(), "the bar must stop");
+        assert_eq!(view.bar.message(), "done");
+        assert_eq!(cap.contents(), "", "plain mode must write nothing");
     }
 }

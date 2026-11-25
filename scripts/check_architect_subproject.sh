@@ -98,7 +98,8 @@ TAB="$(printf '\t')"
 # host administration), then the dashboard store set and its schemas (P4a-1),
 # then the serve set, the read-only views, the page, Live and vendor (D3b),
 # then the P1 dashboard routes, siblings, pending-answers set and design tokens (#10571),
-# then the five Architect agents, their two skills and the claim checker (D3c).
+# then the five Architect agents, their two skills and the claim checker (D3c),
+# then the poller helpers and the #11369 poll cadence scripts (#10571 S2, the last block).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -264,6 +265,23 @@ templates/local/mandates/README.md|crates/trusty-mpm/src/assets/architect/templa
 templates/local/mandates/example.toml|crates/trusty-mpm/src/assets/architect/templates/local/mandates/example.toml
 templates/local/architect.json|crates/trusty-mpm/src/assets/architect/templates/local/architect.json
 templates/local/il-schedule.json|crates/trusty-mpm/src/assets/architect/templates/local/il-schedule.json
+scripts/architect-start.sh|crates/trusty-mpm/src/assets/architect/scripts/architect-start.sh
+scripts/poll-supervise.sh|crates/trusty-mpm/src/assets/architect/scripts/poll-supervise.sh
+scripts/poll-reset-wake.py|crates/trusty-mpm/src/assets/architect/scripts/poll-reset-wake.py
+scripts/rc-restore.sh|crates/trusty-mpm/src/assets/architect/scripts/rc-restore.sh
+scripts/rc-disconnect.sh|crates/trusty-mpm/src/assets/architect/scripts/rc-disconnect.sh
+scripts/session-relaunch.sh|crates/trusty-mpm/src/assets/architect/scripts/session-relaunch.sh
+scripts/relaunch_brief.py|crates/trusty-mpm/src/assets/architect/scripts/relaunch_brief.py
+scripts/fleet-restart.sh|crates/trusty-mpm/src/assets/architect/scripts/fleet-restart.sh
+scripts/ids36.py|crates/trusty-mpm/src/assets/architect/scripts/ids36.py
+scripts/il_timeline.py|crates/trusty-mpm/src/assets/architect/scripts/il_timeline.py
+scripts/auto_sleep.py|crates/trusty-mpm/src/assets/architect/scripts/auto_sleep.py
+scripts/user_state.py|crates/trusty-mpm/src/assets/architect/scripts/user_state.py
+scripts/morning_brief.py|crates/trusty-mpm/src/assets/architect/scripts/morning_brief.py
+scripts/dream_catchup.py|crates/trusty-mpm/src/assets/architect/scripts/dream_catchup.py
+scripts/dashboard_updates.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_updates.py
+scripts/il_remind.py|crates/trusty-mpm/src/assets/architect/scripts/il_remind.py
+scripts/dashboard_feed.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_feed.py
 "
 # Monoliths the bundle replaced with a facade plus split modules (#11370):
 # "<script under scripts/>|<split-module prefix>", one per line. A facade

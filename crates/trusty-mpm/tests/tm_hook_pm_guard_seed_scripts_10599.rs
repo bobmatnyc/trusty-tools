@@ -239,6 +239,9 @@ const RESIDUALS: &[Residual] = &[
     residual("dashboard_harness.py", FILE, OWNED_BY_10571),
     residual("dashboard_projects.py", FILE, OWNED_BY_10571),
     residual("datg_ops.py", CRED, OWNED_BY_10571),
+    // #10571 S2: the `{"op": "remind_fire"}` and `{"op": "remind_done"}` ledger ops it writes
+    // read as a 1Password `op` call, as datg_ops.py's `unknown op` does (#10598).
+    residual("il_remind.py", CRED, GUARD_FP_10598),
     // #10571 S1: its state, rollup and threshold files are named `token-*.json[l]`, which
     // the guard reads as token files; the Rust watcher shares those names (#11629).
     residual("token_watch.py", FILE, GUARD_FP_10598),

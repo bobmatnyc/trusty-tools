@@ -5,6 +5,8 @@
 if (!globalThis.TrustyPageRead && typeof importScripts === "function") importScripts("pages_read.js");
 // #11371: tab emulation, which act() shares its debugger attachment with.
 if (!globalThis.TrustyEmulation && typeof importScripts === "function") importScripts("emulation.js");
+// #11808: actions inside cross-origin child frames.
+if (!globalThis.TrustyFrameActs && typeof importScripts === "function") importScripts("pages_frames.js");
 globalThis.TrustyPages = (() => {
   // Returns [origin, title, url] and changes nothing; the InjectionResult supplies the documentId.
   function pageProbe() { return [location.origin, document.title, location.href.slice(0, 2048)]; }
@@ -32,7 +34,8 @@ globalThis.TrustyPages = (() => {
       if (!hit || !(hit === node || node.contains(hit))) return {error:"Obscured"};
       if (root.host) { node = root.host; continue; }
       const frame = root.defaultView?.frameElement;
-      if (!frame || root === document) return {ok:true, x, y};
+      // #11808: the viewport size and URL let a cross-origin child's point be mapped onto its owner.
+      if (!frame || root === document) return {ok:true, x, y, vw:innerWidth, vh:innerHeight, url:location.href};
       const at = frame.getBoundingClientRect(), css = frame.ownerDocument.defaultView.getComputedStyle(frame);
       x += at.left + frame.clientLeft + parseFloat(css.paddingLeft);
       y += at.top + frame.clientTop + parseFloat(css.paddingTop);
@@ -299,6 +302,13 @@ globalThis.TrustyPages = (() => {
     }
     if (el && typeof el.focus === "function") el.focus();
     const active = document.activeElement;
+    // #11808: focus inside a cross-origin child frame is unreachable from here; the keys would land on the
+    //   <iframe> element itself. A press there needs the child's frame-scoped ref.
+    if (!el && (active?.localName === "iframe" || active?.localName === "frame")) {
+      let inner = null;
+      try { inner = active.contentDocument; } catch { inner = null; }
+      if (!inner) return {error:"NotEditable"};
+    }
     let node = el ?? (active && active !== document.body ? active : document.body);
     // The reply: ok (with the counts when maxlength cut the text), or TextDropped when a page handler refused text.
     const outcome = () => {
@@ -522,15 +532,19 @@ TrustyPages.commands = deps => {
   const {pageProbe, pageInspect, pageFrames, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed,
     keyAllowed, modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says what was typed and what landed.
-  const RELAYED = ["tab","origin","access","document","typed","accepted","entered"];
+  // #11808: `frame` names the child a refused frame action had resolved.
+  const RELAYED = ["tab","origin","access","document","typed","accepted","entered","frame"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
-  // #11301: a ref from a cross-origin child frame is "<frameKey>:<epoch>.<n>"; only scope_ref and within_ref take it.
+  // #11301: a ref from a cross-origin child frame is "<frameKey>:<epoch>.<n>"; scope_ref and within_ref take it,
+  //   and (#11808) so do the six actions below that take actRef or scopeRef as `ref`.
   const FRAME_REF = /^([0-9]{1,9}):([0-9]{1,9}\.[0-9]{1,6})$/;
   const scopeRef = v => v === null || ref(v) || (typeof v === "string" && FRAME_REF.test(v));
+  // #11808: click, hover, type, press, select and scroll also act on a frame-scoped ref; drag and upload do not.
+  const actRef = v => scopeRef(v) && v !== null;
   const bool = v => typeof v === "boolean";
   const term = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 200);
   const SCROLL_TO = ["down","up","top","bottom","element"];
@@ -544,7 +558,7 @@ TrustyPages.commands = deps => {
       typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const dialog = v => v === "accept" || v === "dismiss";
   const SPECS = {
-    page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref, dialog},
+    page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref:actRef, dialog},
     page_drag:{tab, document:doc, ref, target:ref},
     // #11356: the broker always sends every read control.
     page_read:{tab, document:doc, scope_ref:scopeRef, viewport_only:bool, include_text:bool,
@@ -552,14 +566,14 @@ TrustyPages.commands = deps => {
     // #11357: at least one of role, name and text; within_ref limits the search to a subtree.
     page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:scopeRef,
       limit:v => Number.isInteger(v) && v >= 1 && v <= 50},
-    page_hover:{tab, document:doc, ref},
-    page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
+    page_hover:{tab, document:doc, ref:actRef},
+    page_type:{tab, document:doc, ref:actRef, text:v => typeof v === "string" && v.length <= 8192},
     // #11291: `ref` is a string exactly when `to` is "element"; `wait_ms` bounds the wait for new content.
-    page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:v => v === null || ref(v),
+    page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:scopeRef,
       wait_ms:v => Number.isInteger(v) && v >= 0 && v <= 5000},
     // #11286: `ref` null presses the key on the focused element.
-    page_press:{tab, document:doc, ref:v => v === null || ref(v), key:keyAllowed, modifiers:modifiersAllowed},
-    page_select:{tab, document:doc, ref, value:v => typeof v === "string" && v.length <= 8192},
+    page_press:{tab, document:doc, ref:scopeRef, key:keyAllowed, modifiers:modifiersAllowed},
+    page_select:{tab, document:doc, ref:actRef, value:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_upload:{tab, document:doc, ref, files}, page_downloads:{tab},
     page_back:{tab}, page_forward:{tab}, page_reload:{tab},
@@ -635,6 +649,8 @@ TrustyPages.commands = deps => {
     return {top, frames, denied:[...denied].map(([origin, reason]) => ({origin, reason}))};
   }
   const frameKey = (tab, id) => tab + ":" + id;
+  // #11808: resolves a frame-scoped action ref to the child document a read recorded.
+  const frameActs = TrustyFrameActs.worker({refuse, probe, granted, frameDocs, frameKey, pageProbe});
   // A child entry's ref (and its container's) gain the frame key; every entry names its frame.
   const inFrame = (id, entry) => id === 0 ? {...entry, frame:0} : {...entry, ref:id + ":" + entry.ref, frame:id,
     ...(entry.in ? {in:{...entry.in, ref:id + ":" + entry.in.ref}} : {})};
@@ -680,7 +696,8 @@ TrustyPages.commands = deps => {
         continue;
       }
       frames.push(frame);
-      frameDocs.set(frameKey(req.tab, frame.id), {document:frame.document, origin:frame.origin, url:frame.url});
+      frameDocs.set(frameKey(req.tab, frame.id), {document:frame.document, origin:frame.origin, url:frame.url,
+        top:base.document});
       out[list].push(...child[list].map(e => inFrame(frame.id, e)));
       // #11284: a child's text joins the result's text under a frame marker; it was read within its share.
       if (mode === "read" && child.text) out.text += "\n\n[frame " + frame.id + "]\n" + child.text;
@@ -700,7 +717,7 @@ TrustyPages.commands = deps => {
     if (!known) throw refuse("StaleElement", {tab:req.tab});
     const top = await probe(req.tab, true);
     if (!top.access || !await granted(known.origin)) throw await needed(req.tab);
-    const frame = {id:Number(id), ...known};
+    const frame = {id:Number(id), document:known.document, origin:known.origin, url:known.url};
     const result = await childInspect(req.tab, frame, mode, {...options, [key]:local});
     const list = mode === "read" ? "elements" : "matches";
     if (!Array.isArray(result?.[list])) {
@@ -770,17 +787,29 @@ TrustyPages.commands = deps => {
     return arrived(tabId, wait);
   }
 
-  // Runs the injected hover/type/press/scroll/select/upload only inside the lease's document; never reports work it
-  //   did not do.
+  // Why: hover/type/press/scroll/select/upload/drag run only inside the lease's document, or inside the
+  //   child document a frame-scoped ref names (#11808), and never report work they did not do.
+  // What: `args(ref)` builds the injected arguments from the ref to resolve: the request's own, or the
+  //   child-local part of a frame ref, which runs in that child's documentId only (never the top). A reply
+  //   from a frame adds `frame: {id, origin}`.
+  // Test: tests/extension/test_frames.mjs `a granted child frame is typed into, submitted and read back`,
+  //   `an action on a child origin without permission is refused and never reaches the top`.
   async function inject(req, func, args) {
     if (req.document === null) {
       const now = await probe(req.tab);
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
+    const frame = await frameActs.of(req);
+    try { return await injected(req, func, args, frame); } catch (error) { throw frameActs.tag(error, frame); }
+  }
+  async function injected(req, func, args, frame) {
+    const target = frame ? frame.document : req.document;
     let hit;
     try {
-      [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]}, func, args});
+      [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[target]}, func,
+        args:args(frame ? frame.childRef : req.ref)});
     } catch {
+      if (frame) throw await frameActs.lost(req, frame);
       const now = await probe(req.tab);
       // The lease's document is still current, so the failure came from the page: the outcome is unknown.
       if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
@@ -795,20 +824,21 @@ TrustyPages.commands = deps => {
       throw refuse(error, {tab:req.tab, typed:result.typed, accepted:result.accepted,
         entered:result.entered.slice(0, 8192)});
     }
-    if (result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
+    if (result?.ok !== true || hit.documentId !== target) throw refuse("OutcomeUnknown");
+    const where = frame ? {frame:{id:frame.id, origin:frame.origin}} : {};
     // #11352: maxlength cut the typed text; the typing still succeeded.
     if (func === pageKeys && result.truncated === true) {
       if (!counts) throw refuse("OutcomeUnknown");
-      return {document:req.document, truncated:true, typed:result.typed, accepted:result.accepted};
+      return {document:req.document, truncated:true, typed:result.typed, accepted:result.accepted, ...where};
     }
     if (func === pageDrag) {
       if (typeof result.dropped !== "boolean") throw refuse("OutcomeUnknown");
       return {document:req.document, dropped:result.dropped};
     }
-    if (func !== pageSelect) return {document:req.document, ...(result.view || {})};
+    if (func !== pageSelect) return {document:req.document, ...(result.view || {}), ...where};
     // #11285: a select reply must say whether the value moved; anything else cannot show what ran.
     if (typeof result.changed !== "boolean" || typeof result.value !== "string") throw refuse("OutcomeUnknown");
-    return {document:req.document, changed:result.changed, value:result.value.slice(0, 8192)};
+    return {document:req.document, changed:result.changed, value:result.value.slice(0, 8192), ...where};
   }
 
   // Why: a click must arrive trusted, yet run only inside the lease's document and never report work it
@@ -830,6 +860,13 @@ TrustyPages.commands = deps => {
     if (req.document === null) throw changed(await probe(req.tab));
     const first = await probe(req.tab);
     if (!first.access || first.document !== req.document) throw changed(first);
+    // #11808: a frame-scoped ref is resolved, and its origin's permission checked, before any attachment.
+    const frame = await frameActs.of(req);
+    try { return await attached(req, drive, first, frame); } catch (error) { throw frameActs.tag(error, frame); }
+  }
+  async function attached(req, drive, first, frame) {
+    const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+    const target = frame ? frame.document : req.document;
     // #11294: once act returns, its leftover work must not reach a later attachment to this tab.
     let aborted = false;
     const debuggee = {tabId:req.tab}, raw = async (method, params = {}) => {
@@ -872,15 +909,17 @@ TrustyPages.commands = deps => {
       chrome.debugger.onEvent.removeListener(answer);
       if (own) await chrome.debugger.detach(debuggee).catch(() => {});
     }
-    return seen ? {document:req.document, dialog:seen} : {document:req.document};
+    const where = frame ? {frame:{id:frame.id, origin:frame.origin}} : {};
+    return seen ? {document:req.document, dialog:seen, ...where} : {document:req.document, ...where};
 
     async function steps() {
       await raw("Page.enable");
       let hit;
       try {
-        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]},
-          func:pageTarget, args:[req.ref]});
+        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[target]},
+          func:pageTarget, args:[frame ? frame.childRef : req.ref]});
       } catch {
+        if (frame) throw await frameActs.lost(req, frame);
         const now = await probe(req.tab);
         // The lease's document is still current, so the failure came from the page: the outcome is unknown.
         if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
@@ -888,13 +927,18 @@ TrustyPages.commands = deps => {
       }
       const point = hit?.result, error = point?.error;
       if (["StaleElement","Obscured"].includes(error)) throw refuse(error, {tab:req.tab});
-      if (point?.ok !== true || hit.documentId !== req.document || !Number.isFinite(point.x) ||
+      if (point?.ok !== true || hit.documentId !== target || !Number.isFinite(point.x) ||
           !Number.isFinite(point.y)) throw refuse("OutcomeUnknown");
-      await drive(send, point);
+      // #11808: a child's point is in its own viewport; CDP maps it through the owner iframe's quad, and the
+      //   child must then confirm a trusted pointer event reached the target.
+      const at = frame ? await frameActs.locate(req, frame, point, raw) : point;
+      const witness = frame ? await frameActs.watch(req, frame) : null;
+      await drive(send, at);
       await raw("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
         .catch(() => {});
       // A dialog Chrome would not close leaves the page blocked: the outcome is not the one reported.
       if (!(await answered)) throw refuse("OutcomeUnknown");
+      if (frame && !await frameActs.witnessed(req, frame, witness)) throw refuse("OutcomeUnknown");
     }
   }
 
@@ -959,13 +1003,13 @@ TrustyPages.commands = deps => {
       return withFrames(req, base, plan, "find", {...terms, within_ref:null}, req.limit, READ_LIMIT);
     },
     page_click:req => act(req, trusted.click),
-    page_type:req => inject(req, pageKeys, [req.ref, "type", req.text]),
-    page_press:req => inject(req, pageKeys, [req.ref, "press", {key:req.key, modifiers:req.modifiers}]),
+    page_type:req => inject(req, pageKeys, at => [at, "type", req.text]),
+    page_press:req => inject(req, pageKeys, at => [at, "press", {key:req.key, modifiers:req.modifiers}]),
     page_scroll(req) {
       if ((req.to === "element") !== (req.ref !== null)) throw refuse("InvalidRequest");
-      return inject(req, pageScroll, [req.to, req.ref, req.wait_ms]);
+      return inject(req, pageScroll, at => [req.to, at, req.wait_ms]);
     },
-    page_upload:req => inject(req, pageSetFiles, [req.ref, req.files]),
+    page_upload:req => inject(req, pageSetFiles, at => [at, req.files]),
     // Why: a download the page starts must be visible to the agent, never another site's (#11289).
     // What: lists the 20 newest Chrome downloads whose referrer, URL or final URL has the tab's current
     //   origin (a blob: URL counts as its creator's origin). Needs page access; without the downloads
@@ -987,9 +1031,9 @@ TrustyPages.commands = deps => {
           started:String(d.startTime || "")}));
       return {origin:seen.origin, downloads};
     },
-    page_select:req => inject(req, pageSelect, [req.ref, req.value]),
-    page_hover:req => inject(req, pageHover, [req.ref]),
-    page_drag:req => inject(req, pageDrag, [req.ref, req.target]),
+    page_select:req => inject(req, pageSelect, at => [at, req.value]),
+    page_hover:req => inject(req, pageHover, at => [at]),
+    page_drag:req => inject(req, pageDrag, at => [at, req.target]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);

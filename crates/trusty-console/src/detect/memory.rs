@@ -374,15 +374,14 @@ mod tests {
     /// object — because the failure mode that recurred on 2026-08-28 was a
     /// running daemon reading as stopped, and a `HealthEnvelope` that grew a
     /// required field would reproduce it exactly.
-    /// What: the real answer, unedited, must read as Running with its version.
+    /// What: the real answer, unedited, must decode as a healthy envelope
+    /// carrying its version. It dials the stub socket through the connector's
+    /// own probe, with the connector's method name and timeout, so it runs on
+    /// a host with no trusty-memory installed (#11268: it used to return early
+    /// there, which made it vacuous on CI).
     /// Test: this is the test.
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_connector_accepts_the_envelope_a_real_daemon_sends() {
-        if which::which("trusty-memory").is_err() {
-            eprintln!("skip: trusty-memory is not on PATH, so detect() short-circuits to Absent");
-            return;
-        }
-
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let socket = tmp.path().join("sockets").join("memory.sock");
         spawn_health_socket(&socket, |_frame| {
@@ -390,18 +389,21 @@ mod tests {
                 .to_string()
         });
 
-        let connector = MemoryConnector::with_socket(socket);
-        let info = tokio::task::spawn_blocking(move || connector.detect())
-            .await
-            .expect("detect");
+        let outcome = tokio::task::spawn_blocking(move || {
+            probe_health(&socket, "trusty-memory", METHOD_HEALTH, HEALTH_TIMEOUT)
+        })
+        .await
+        .expect("probe");
 
-        assert_eq!(
-            info.status,
-            ServiceStatus::Running,
-            "a real daemon's own health frame must read as Running (hint: {:?})",
-            info.hint
-        );
-        assert_eq!(info.version.as_deref(), Some("0.25.2"));
+        match outcome {
+            ProbeOutcome::Healthy(health) => {
+                assert_eq!(health.version.as_deref(), Some("0.25.2"));
+            }
+            ProbeOutcome::Unhealthy(reason) => {
+                panic!("a real daemon's own health frame must decode as health: {reason}")
+            }
+            ProbeOutcome::Silent => panic!("the stub socket answered, so the probe is not silent"),
+        }
     }
 
     /// Why (#6356): telling "answered wrongly" apart from "did not answer" must
