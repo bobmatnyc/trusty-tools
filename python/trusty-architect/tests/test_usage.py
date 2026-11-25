@@ -92,7 +92,7 @@ def test_plan_names_best_next_account_and_ignores_5h():
     now = T("2026-10-07T16:20:00Z")
     rows = fleet([row("2026-10-07T14:30:00Z", "alice@example.com", 1, "2026-10-07T20:50:00Z", 60, "2026-10-09T07:00:00Z")])
     p = u.plan(rows, now, "alice@example.com")  # 60% -> 84% in 1.7 h: weekly gone in ~1.1 h
-    assert p["need"] and p["next"][0] == "carol@example.com"  # lowest weekly (27%); her 100% 5h window no longer excludes her (owner 2026-10-31: "no 5 hour limits")
+    assert p["need"] and p["next"][0] == "carol@example.com"  # lowest weekly (27%); her 100% 5h window no longer excludes her (the owner: "no 5 hour limits")
     assert not any("5h" in why for _, why in p["skipped"])
     assert [a for a, _ in p["alternatives"]] == ["dave@example.com", "frank@example.com", "grace@example.com", "erin@example.com"]  # 93/96 tie within 5 points: later reset first
     text = u.format_plan(p)
@@ -110,7 +110,7 @@ def test_plan_no_cutover_when_healthy_and_limit_reached_means_now():
 
 
 def test_missing_5h_value_is_normal_everywhere():
-    """Owner 2026-10-31: "no 5 hour limits". A weekly-only reading parses, summarises, plans and alerts."""
+    """The owner: "no 5 hour limits". A weekly-only reading parses, summarises, plans and alerts."""
     cap = "  Current week (all models)\n  ████   84% used\n  Resets Oct 9 at 3am (America/New_York)"
     d = u.parse_usage_capture(cap, CAP)
     assert d["pctwk"] == 84 and d["pct5h"] is None and d["reset5h"] is None
@@ -287,7 +287,7 @@ def test_burn_rate_empty_window_returns_none():
 
 
 def test_ingest_refuses_non_email_account_label(monkeypatch, capsys):
-    """ar-T8b: a row-number label ("acct6") reached the dashboard as a fake account."""
+    """#10571: a row-number label ("acct6") reached the dashboard as a fake account."""
     import io
     wrote = []
     monkeypatch.setattr(u, "record_reading", lambda *a, **k: wrote.append(a) or {})

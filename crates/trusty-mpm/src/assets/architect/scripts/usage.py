@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """usage.py — Claude account usage ledger, summary, cutover plan and poller hooks.
 
-Why: the owner (2026-10-07): "let's keep track of usage so we can intelligently plan
+Why: the owner (see #10571): "let's keep track of usage so we can intelligently plan
 cutovers." A cutover is the owner's /login to another Claude account for the whole
-fleet. Each account has a weekly limit with its own reset time (owner 2026-10-31:
+fleet. Each account has a weekly limit with its own reset time (the owner:
 "no 5 hour limits"; the 5h fields are optional, kept for old rows, and never gate
 anything); planning a switch needs the latest reading per account and a burn rate.
 What: one ledger, local/usage/ledger.jsonl, one JSON line per reading:

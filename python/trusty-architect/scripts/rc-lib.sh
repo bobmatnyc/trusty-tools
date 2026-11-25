@@ -5,9 +5,9 @@
 # Why: `/rename <s>` names only the local Claude session. The Remote Control
 # session name (shown in the Claude app) comes from the argument of
 # `/remote-control <s>`; without it the app shows a generated name such as
-# "<host>-local-woolly-dahl" (the owner, 2026-10-02 17:3xZ). When RC is
+# "<host>-local-woolly-dahl" (see #10571). When RC is
 # already active, `/remote-control` opens a dialog instead; rc_connect then leaves
-# the connection alone (ar-T75) and does not disconnect it.
+# the connection alone (see #10571) and does not disconnect it.
 # What: rc_send_cmd types a command and submits it once input-state.py echoes it
 # (exact, or followed by 2+ spaces: the slash-command menu column);
 # rc_connect runs the verified manual procedure (no-op when RC is connected) and sets RC_URL or RC_FAIL.
@@ -77,7 +77,7 @@ _rc_dialog() {
 _rc_active() { _rc_cap | tail -n 12 | grep -Eq '(^|[[:space:]|·])/rc[[:space:]]*$'; }
 
 # Run `/remote-control <s>` unless Remote Control is already connected.
-# ar-T75 (the owner, 2026-10-26 ~20:20Z, "You disconnected yourself."): an active RC is
+# See #10571 (the owner: "You disconnected yourself."): an active RC is
 # success, never toggled; the old disconnect-and-retype dropped a connection the owner
 # had just made by hand. Sets RC_URL on success (returns 0); sets RC_FAIL and
 # returns 1 otherwise.

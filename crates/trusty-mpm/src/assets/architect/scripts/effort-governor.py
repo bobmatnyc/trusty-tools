@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Effort governor: pure decision step (owner ruling 2026-10-11 05:16Z).
+"""Effort governor: pure decision step (an owner ruling; see #10571).
 
 Why: slow plan usage down when the weekly limit passes 90% by lowering
 the `/effort` of the PM sessions on that account, and restore it after the reset.
@@ -7,7 +7,7 @@ What: reads local/usage/ledger.jsonl and inbox/effort-state.json and prints one
 line per session that needs a change: `<session> <level> <reason>` (level is
 medium, low or auto). Never sends keys. Writes only inbox/effort-state.json, and
 only with `--commit <session> <level>` after scripts/effort-send.sh sent it.
-Policy: pctwk for the active account (no 5-hour gate; owner 2026-10-31: "no 5 hour
+Policy: pctwk for the active account (no 5-hour gate; the owner: "no 5 hour
 limits"; the account of the newest ledger row; no session-to-account map exists, so every session is taken
 to run on it). Under 90 normal, 90 to under 95 medium, 95 and over low. Restore
 (`auto`) only for sessions the governor lowered, when the reading drops under 90
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 STATE = os.environ.get("EFFORT_STATE") or os.path.join(ROOT, "inbox", "effort-state.json")
-# ar-T2f: the Architect and its poller are never governed. #10571 S1: the names come from
+# The Architect and its poller are never governed. #10571 S1: the names come from
 # ARCHITECT_SESSION / ARCHITECT_POLL_SESSION as in fleet_poll_cfg.py, never an instance list.
 # tm-supervisor-collector is fleet infrastructure, not an instance name, so it stays fixed.
 ARCHITECT = os.environ.get("ARCHITECT_SESSION") or "tm-architect"

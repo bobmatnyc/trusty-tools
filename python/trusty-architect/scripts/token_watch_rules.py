@@ -56,7 +56,7 @@ LOOKBACK = 3600            # first-sight lookback and file mtime cutoff
 FIRED_TTL = 86400
 PRICE = {"opus": 5.0, "sonnet": 3.0, "haiku": 1.0}
 # Families recognised but with no price in this file. Their units are 0.0 and rollup rows carry
-# units_unknown=true; a price here is the owner's/an engineer's to add, never inferred (ar-Te4).
+# units_unknown=true; a price here is the owner's/an engineer's to add, never inferred (see #10571).
 UNPRICED = ("fable",)
 POLL_RE = re.compile(r"^\s*tm wait\b|\bsleep \d+")
 # The home-directory prefix of a Claude Code project slug (macOS or Linux home).
@@ -299,7 +299,7 @@ class ScanRules:
 
 
 def effort_of(d):
-    """The line's top-level effort, "unknown" when absent (ar-T94@1120)."""
+    """The line's top-level effort, "unknown" when absent (see #10571)."""
     e = d.get("effort")
     return e.replace("|", "/") if isinstance(e, str) and e else "unknown"
 

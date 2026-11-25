@@ -257,7 +257,7 @@ def _dur(seconds):
 
 def _in(dt, now, approx=False):
     """Display text for a future time, relative to now ("in 47 h"). Display only:
-    the ledger and fingerprints keep ISO timestamps (owner ruling 2026-11-21 IN0051).
+    the ledger and fingerprints keep ISO timestamps (an owner ruling; see #10571).
     """
     if dt is None:
         return "-"
@@ -277,7 +277,7 @@ def _reset_text(dt, now):
 def rank_candidates(rows, now, current):
     """Other accounts usable for a cutover, best first, with reasons.
 
-    Eligible: a reading exists and weekly is below 100 (no 5-hour gate; owner 2026-10-31: "no 5 hour limits").
+    Eligible: a reading exists and weekly is below 100 (no 5-hour gate; the owner: "no 5 hour limits").
     Order: lowest effective weekly %, then (within 5 points) the later weekly
     reset, since a later reset spreads that allowance over more days.
     """
@@ -494,4 +494,4 @@ def choose_probe_pane(idle_panes):
     return idle_panes[0] if idle_panes else None
 
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")  # ar-T8b: a non-email label made a fake dashboard account
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")  # #10571: a non-email label made a fake dashboard account

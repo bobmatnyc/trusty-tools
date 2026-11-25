@@ -301,7 +301,7 @@ def test_fanout_counts_live_subagents_only(tmp_path):
 
 
 def test_family_fable_is_not_priced_as_sonnet():
-    # ar-Te4: family() had no fable entry, so Fable turns fell back to sonnet and were priced as Sonnet.
+    # #10571: family() had no fable entry, so Fable turns fell back to sonnet and were priced as Sonnet.
     u = {"input_tokens": 10, "output_tokens": 1000, "cache_read_input_tokens": 50_000}
     assert tw.family("claude-fable-5-2") == "fable"
     assert tw.turn_units("claude-fable-5-2", u) == 0.0           # no price in the file: unknown, not Sonnet's

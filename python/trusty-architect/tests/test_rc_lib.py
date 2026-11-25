@@ -86,7 +86,7 @@ def test_fresh_connect_names_session(tmp_path):
 
 
 def test_active_rc_status_line_is_left_alone(tmp_path):
-    # ar-T75: a connected `/rc` status line means no keys at all, no disconnect.
+    # #10571: a connected `/rc` status line means no keys at all, no disconnect.
     out, st = _run(tmp_path, active=True)
     assert out == "rc=0 url=https://claude.ai/code/session_OLD1 fail="
     assert st["cmds"] == [] and st.get("enters", 0) == 0 and st["active"] is True
