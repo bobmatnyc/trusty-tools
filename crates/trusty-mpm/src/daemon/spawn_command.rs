@@ -225,16 +225,18 @@ pub(crate) fn gui_spawn_line(
     let cli = crate::core::session_launch::cli_launch(&content, workdir, None);
     // #10459: a GUI-spawned Architect needs Claude Code v2.1.295 (`onFailure`).
     crate::core::architect_claude_version::require_for_profile(cli.profile)?;
+    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
+    // #8992: the profile decides whether the skill and tool parts apply.
+    // #11821: provisioned before the prompt write, so a broken install.toml
+    // refuses the spawn with no file to clean up (df-D1w).
+    let settings =
+        crate::core::launch_policy::provision_settings_default(workdir, None, cli.profile)?;
     let file = crate::core::model_inject::write_pm_prompt_file_in(
         prompt_dir,
         &cli.prompt,
         workdir,
         "spawn",
     )?;
-    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
-    // #8992: the profile decides whether the skill and tool parts apply.
-    let settings =
-        crate::core::launch_policy::provision_settings_default(workdir, None, cli.profile);
     let stamp = crate::core::session_profile::launch_env(cli.profile);
     gui_spawn_command_full(
         &file,

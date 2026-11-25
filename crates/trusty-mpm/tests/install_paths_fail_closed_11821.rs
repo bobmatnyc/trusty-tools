@@ -254,3 +254,47 @@ async fn decommission_refuses_on_a_broken_install_file() {
     assert_eq!(format!("{:?}", after.state), before, "no state advanced");
     assert!(workspace.exists(), "the workspace must not be removed");
 }
+
+/// #11821 df-D1w: a launch under a broken install.toml refuses, naming the
+/// file and the bad key, and leaves the owner's last-good record on disk.
+///
+/// The asserts read `{:?}` and the record file, so this compiles on either
+/// side of the signature change: before it, the launch ran with no policy and
+/// no notice and the record was retired.
+#[test]
+fn owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file() {
+    use trusty_mpm::core::launch_policy::last_good::last_good_path;
+    use trusty_mpm::core::launch_policy::{OwnerInputs, provision_settings, resolve_and_record};
+    use trusty_mpm::core::session_profile::SessionProfile;
+
+    let fx = Fixture::new();
+    let state = fx.tmp.path().join("state");
+    let default_root = fx.home.join("trusty-mpm-projects");
+    let cwd = fx.default_checkout();
+    std::fs::create_dir_all(&cwd).expect("mkdir checkout");
+    let owner_file = default_root.join("acme").join(".trusty-mpm-owner.toml");
+    std::fs::write(&owner_file, "[mcp]\ndeny = [\"heygen\"]\n").expect("write owner file");
+    // A good policy on record, then the owner file is no longer where the
+    // defaulted root would look for it.
+    resolve_and_record(&OwnerInputs {
+        cwd: &cwd,
+        repos_root: &default_root,
+        state_root: &state,
+    });
+    let record = last_good_path(&state, "acme");
+    assert!(record.exists(), "setup: a last-good record is on disk");
+    std::fs::remove_file(&owner_file).expect("remove owner file");
+    let _env = EnvGuard::install(&fx.home);
+
+    let outcome = provision_settings(&state, &cwd, None, SessionProfile::Pm);
+
+    let shown = format!("{outcome:?}");
+    assert!(
+        shown.starts_with("Err(") && shown.contains("install.toml") && shown.contains("bogus"),
+        "the launch must refuse naming install.toml and the bad key, got {shown}"
+    );
+    assert!(
+        record.exists(),
+        "an unresolved root must never retire the last-good record"
+    );
+}
