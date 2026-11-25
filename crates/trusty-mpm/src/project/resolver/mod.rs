@@ -448,19 +448,44 @@ pub fn resolve_session_project<'a>(
     }
 }
 
-/// Bind a session with no `repo_url` to the path-form project whose checkout
-/// is the session's directory (#11552).
+/// Bind a session with no `repo_url` to the project whose checkout is the
+/// session's directory (#11552).
 ///
-/// What: the session directory (`workspace_path`, else `cwd`) loses a trailing
-/// `.worktrees/<name>`; it and each project's path-form `repo_url` are
-/// canonicalised and compared whole-path (component equality, never a prefix,
-/// so a parent project never claims a child). Ties break by [`name_order`].
+/// What: [`resolve_by_checkout_path_in`] against the process home and the
+/// managed repos root.
 /// Test: `resolver_session_without_repo_url_binds_by_checkout_path`,
 /// `resolver_session_without_repo_url_binds_from_a_worktree`,
 /// `resolver_session_without_repo_url_ignores_a_sibling_path`.
 fn resolve_by_checkout_path<'a>(
     session: &SessionRecord,
     projects: &'a [Project],
+) -> Option<&'a Project> {
+    resolve_by_checkout_path_in(
+        session,
+        projects,
+        dirs::home_dir().as_deref(),
+        crate::core::repo_paths::repos_root,
+    )
+}
+
+/// [`resolve_by_checkout_path`] with an explicit home and repos root.
+///
+/// What: the session directory (`workspace_path`, else `cwd`) loses a trailing
+/// `.worktrees/<name>`; it and each project's checkout are canonicalised and
+/// compared whole-path (component equality, never a prefix, so a parent
+/// project never claims a child). A path-form row's checkout is its
+/// `repo_url`; a URL-form row's is its managed clone under `repos_root`
+/// (#11828), which is read at most once and only for a row whose clone path
+/// ends in the session directory's last two components (ASCII case ignored),
+/// and which must be the same directory by `identifies_same_path`, as at
+/// registration. Ties break by [`name_order`].
+/// Test: `resolver_session_without_repo_url_binds_a_canonical_clone_to_its_url_row_11828`,
+/// `resolver_binds_a_canonical_clone_spelled_in_another_case_11828`.
+fn resolve_by_checkout_path_in<'a>(
+    session: &SessionRecord,
+    projects: &'a [Project],
+    home: Option<&std::path::Path>,
+    repos_root: impl Fn() -> PathBuf,
 ) -> Option<&'a Project> {
     let dir = session.workspace_path.as_deref().unwrap_or(&session.cwd);
     let dir = match dir.parent() {
@@ -469,14 +494,49 @@ fn resolve_by_checkout_path<'a>(
     };
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let dir = canon(dir);
-    let home = dirs::home_dir();
+    // #11828: the repos root is a config read; resolve it once, lazily.
+    let root = std::cell::OnceCell::new();
     projects
         .iter()
         .filter(|p| {
-            crate::project::project_key::local_repo_path(&p.repo_url, home.as_deref())
-                .is_some_and(|checkout| canon(&checkout) == dir)
+            let path_form = crate::project::project_key::is_path_spelling(&p.repo_url);
+            // #11828: a URL row can only name `dir` when `dir` ends in its clone name.
+            if !path_form && !ends_in_clone_name(&dir, &p.repo_url) {
+                return false;
+            }
+            local_checkout_under(&p.repo_url, home, || root.get_or_init(&repos_root).clone())
+                .is_some_and(|checkout| {
+                    // #11828: the identity registration's `canonical_clone_url` uses (inode;
+                    // case-insensitive on APFS), so a `Acme/Widget` clone binds its row.
+                    if path_form {
+                        canon(&checkout) == dir
+                    } else {
+                        trusty_common::identifies_same_path(&checkout, &dir)
+                    }
+                })
         })
         .min_by(|a, b| name_order(a).cmp(&name_order(b)))
+}
+
+/// `true` when `dir` ends in `<owner>/<repo>` as a URL `repo_url` names its
+/// managed clone (#11828); a cheap test run before the repos root is read.
+/// ASCII case is ignored, as `identifies_same_path` ignores it on APFS.
+fn ends_in_clone_name(dir: &std::path::Path, repo_url: &str) -> bool {
+    trusty_common::github_path::parse_github_path(repo_url.trim()).is_some_and(|gh| {
+        let tail = crate::core::repo_paths::base_clone_path_in(
+            std::path::Path::new(""),
+            &gh.owner,
+            &gh.repo,
+        );
+        let tail: Vec<_> = tail.components().collect();
+        let end: Vec<_> = dir.components().rev().take(tail.len()).collect();
+        end.len() == tail.len()
+            && end.iter().rev().zip(&tail).all(|(a, b)| {
+                a.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+            })
+    })
 }
 
 /// Group a slice of session records by their bound project.
@@ -560,6 +620,16 @@ pub fn local_checkout_for_url_in(
     repo_url: &str,
     home: Option<&std::path::Path>,
 ) -> Option<PathBuf> {
+    local_checkout_under(repo_url, home, crate::core::repo_paths::repos_root)
+}
+
+/// [`local_checkout_for_url_in`] with the repos root supplied by `repos_root`,
+/// called only for a URL `repo_url` (#11828).
+fn local_checkout_under(
+    repo_url: &str,
+    home: Option<&std::path::Path>,
+    repos_root: impl FnOnce() -> PathBuf,
+) -> Option<PathBuf> {
     let trimmed = repo_url.trim();
     if trimmed.is_empty() {
         return None;
@@ -577,8 +647,10 @@ pub fn local_checkout_for_url_in(
     }
     // #9776: `core::repo_paths` — `daemon` is optional.
     // #11821: defaulting resolver kept — a lookup; the caller decides what a missing directory means.
-    Some(crate::core::repo_paths::base_clone_path(
-        &gh.owner, &gh.repo,
+    Some(crate::core::repo_paths::base_clone_path_in(
+        &repos_root(),
+        &gh.owner,
+        &gh.repo,
     ))
 }
 

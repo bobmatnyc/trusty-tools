@@ -83,6 +83,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pm_context_probe_readout import (  # noqa: E402,F401
     CATCHUP_TOOL, LEVERS, PROJECT_LEVERS, ProbeError, parse_stream, render_report, run_problem,
     usage_tokens)
+# #11821 P6a: the managed CLAUDE_CONFIG_DIR follows the configured config dir.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from install_paths import InstallPathsError, managed_claude_config_dir  # noqa: E402
 
 # The current main PM launch, stated in one place. Each entry names its source.
 LAUNCH = {
@@ -114,7 +117,6 @@ LAUNCH = {
     # No --model: the managed spawn passes none; the user tier picks it.
 }
 
-DEFAULT_CONFIG_DIR = Path.home() / ".trusty-tools" / "trusty-mpm" / "claude-config"
 ENV_ALLOWLIST = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR")
 SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|CREDENTIAL|_KEY$|^GH_|^GITHUB_", re.I)
 REFUSED_ROOTS = ("Documents", "Desktop")
@@ -473,7 +475,8 @@ def main(argv: list[str]) -> int:
                      help="run in this CLEAN, disposable git checkout instead of a throwaway project")
     run.add_argument("--tm", default="tm", help="tm binary composing the PM prompt")
     run.add_argument("--model", default=None)
-    run.add_argument("--config-dir", default=os.environ.get("PM_PROBE_CONFIG_DIR", str(DEFAULT_CONFIG_DIR)))
+    run.add_argument("--config-dir", default=os.environ.get("PM_PROBE_CONFIG_DIR"),
+                     help="default: the managed claude-config dir under the configured config dir")
     run.add_argument("--catchup-project", default=None,
                      help="opt-in real checkout for the catchup lever (default: the throwaway project)")
     run.add_argument("--timeout", type=int, default=300)
@@ -484,10 +487,17 @@ def main(argv: list[str]) -> int:
     report = sub.add_parser("report")
     report.add_argument("results")
     penv = sub.add_parser("print-env")
-    penv.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR))
+    penv.add_argument("--config-dir", default=None)
     args = ap.parse_args(argv)
     if args.cmd == "run" and args.levers is None:
         args.levers = ",".join(lv for lv in LEVERS if args.project_dir or lv not in PROJECT_LEVERS)
+    if args.cmd in ("run", "print-env") and not args.config_dir:
+        # #11821 P6a: a broken install.toml refuses; the run deletes under this dir.
+        try:
+            args.config_dir = managed_claude_config_dir()
+        except InstallPathsError as exc:
+            print(f"pm_context_probe: refused: {exc}", file=sys.stderr)
+            return 2
     # #8998 review: TERM/HUP raise into cmd_run's and one_run's `finally`, which
     # reap the process group and remove the temp tree.
     for sig in (signal.SIGTERM, signal.SIGHUP):

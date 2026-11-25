@@ -1,7 +1,8 @@
 """verdict_log.py — read, merge and write docs/test-audit/verdicts.jsonl (#11268).
 
 Why: the owner asked that tests are not re-evaluated; a verdict, once given,
-  must survive every re-run until the test's normalised body changes.
+  must survive every re-run until the test's normalised source (attributes,
+  signature, body) changes.
 What: `merge(old_rows, fresh_rows, scope, rev, date)` reconciles the log:
   - a key outside `scope` (its file is under no scanned directory) is kept
     verbatim, so a pilot run never touches another crate's rows;
@@ -17,6 +18,9 @@ What: `merge(old_rows, fresh_rows, scope, rev, date)` reconciles the log:
     `rereview`, reason `test vanished; was …` (once, then kept verbatim);
   - a new key: the fresh row.
   Rows are written sorted by key, compact JSON, schema field order.
+  `migrate_legacy_sha` runs first: it moves rows written when `body_sha`
+  hashed the body alone onto the current hash, so an unchanged test keeps
+  its verdict.
 Test: scripts/test_audit/tests/test_verdict_log.py
 """
 from __future__ import annotations
@@ -76,6 +80,23 @@ def _same_but_stamp(a: dict[str, object], b: dict[str, object]) -> bool:
 
 def _was(old: dict[str, object]) -> str:
     return f"{old['verdict']}: {old['reason']}"
+
+
+def migrate_legacy_sha(old_rows: list[dict[str, object]],
+                       shas: dict[str, tuple[str, str]]) -> list[dict[str, object]]:
+    """Rewrite a pre-PR0 body-only `body_sha` to the current source hash (#11268).
+
+    `shas` maps key -> (body-only sha, attrs+sig+body sha) for the scanned tests.
+    A row whose `body_sha` equals its test's body-only sha has an unchanged
+    body, so it takes the new sha and keeps every other field; `merge` then
+    sees it as unchanged. Any other row is returned as is. Idempotent: once
+    rewritten, a row no longer matches a body-only sha.
+    """
+    out = []
+    for r in old_rows:
+        pair = shas.get(str(r["key"]))
+        out.append({**r, "body_sha": pair[1]} if pair and r["body_sha"] == pair[0] else r)
+    return out
 
 
 def merge(old_rows: list[dict[str, object]], fresh_rows: list[dict[str, object]],

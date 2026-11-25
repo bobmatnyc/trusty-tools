@@ -82,6 +82,11 @@
 # #7812: re-exec under bash when started from zsh (the harness shell).
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
+# #11821 P6a: --projects-root / --config-dir, shared by every sandbox launcher.
+# Builtins only: a selftest runs this launcher on a PATH with no dirname.
+case "${BASH_SOURCE[0]}" in */*) SIP_DIR="${BASH_SOURCE[0]%/*}" ;; *) SIP_DIR=. ;; esac
+# shellcheck source=scripts/lib/sandbox_install_paths.sh
+. "$SIP_DIR/lib/sandbox_install_paths.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bin_fresh.sh
@@ -98,6 +103,7 @@ die() {
 }
 
 usage() {
+  echo "  install paths (#11821): [--projects-root PATH] [--config-dir PATH], inside --dir" >&2
   echo "usage: scripts/sandbox_code_daemon.sh [--bin PATH] [--dir DIR] [--project PATH] [--allow-stale] [--dry-run]" >&2
   echo "       scripts/sandbox_code_daemon.sh --stop DIR" >&2
   exit 2
@@ -207,6 +213,8 @@ while [ "$#" -gt 0 ]; do
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --project) [ "$#" -ge 2 ] || usage; PROJECT="$2"; shift 2 ;;
     --stop) [ "$#" -ge 2 ] || usage; STOP_DIR="$2"; shift 2 ;;
+    --projects-root) [ "$#" -ge 2 ] || usage; SIP_PROJECTS="$2"; shift 2 ;;
+    --config-dir) [ "$#" -ge 2 ] || usage; SIP_CONFIG="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --allow-stale) ALLOW_STALE=1; shift ;;
     -h|--help) usage ;;
@@ -314,10 +322,13 @@ echo "sandbox_code_daemon: env -i:"
 for w in "${ENV_WORDS[@]}"; do echo "  $w"; done
 echo "sandbox_code_daemon: argv: ${ARGV[*]}"
 
+# #11821 P6a: admit only install paths inside the sandbox dir.
+sip_check sandbox_code_daemon "$SANDBOX" || exit 1
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "sandbox_code_daemon: dry run; nothing started"
   exit 0
 fi
+sip_write sandbox_code_daemon "$SANDBOX" || exit 1
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
 [ -d "$PROJECT" ] || mkdir -p "$PROJECT"

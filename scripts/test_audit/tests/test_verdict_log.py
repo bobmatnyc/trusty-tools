@@ -8,8 +8,10 @@ import subprocess
 
 import pytest
 
+from test_audit.extract import extract_tests
 from test_audit.inventory import main
-from test_audit.verdict_log import LogError, SCHEMA, dumps, merge, read_log, row
+from test_audit.verdict_log import (
+    LogError, SCHEMA, dumps, merge, migrate_legacy_sha, read_log, row)
 
 SCOPE = ["crates/demo/"]
 
@@ -137,3 +139,54 @@ def test_cli_comment_edit_changes_nothing_and_body_edit_flags_reviewed_row(repo)
     after = [json.loads(x) for x in log.read_text().splitlines()]
     assert after[0]["verdict"] == "rereview"
     assert after[0]["reason"] == "body_sha changed; was keep: pins addition"
+
+
+def review_both(log):
+    rows = [json.loads(x) for x in log.read_text().splitlines()]
+    for x in rows:
+        x.update(verdict="keep", reason="ok", reviewer="code-critic", action="#7")
+    log.write_text(dumps(rows))
+    return rows
+
+
+@pytest.mark.parametrize("edit", [
+    ("    #[test]\n    fn adds", "    #[test]\n    #[ignore]\n    fn adds"),  # attribute only
+    ("    #[test]\n    fn adds", "    #[test]\n    #[cfg(unix)]\n    fn adds"),  # attribute only
+    ("fn adds() {", "fn adds() -> Result<(), String> {"),  # signature only
+])
+def test_cli_attribute_or_signature_edit_flags_reviewed_row(repo, edit):
+    assert run(repo) == 0
+    log = repo / "docs/test-audit/verdicts.jsonl"
+    review_both(log)
+    (repo / "crates/demo/src/lib.rs").write_text(LIB.replace(*edit))
+    assert run(repo) == 0
+    adds, runs = [json.loads(x) for x in log.read_text().splitlines()]
+    assert (adds["verdict"], adds["action"]) == ("rereview", "#7")
+    assert adds["reason"] == "body_sha changed; was keep: ok"
+    assert (runs["verdict"], runs["reason"], runs["action"]) == ("keep", "ok", "#7")
+
+
+def test_cli_migrates_body_only_sha_rows_without_losing_verdicts(repo):
+    assert run(repo) == 0
+    log = repo / "docs/test-audit/verdicts.jsonl"
+    rows = review_both(log)
+    scan = extract_tests("demo-pkg", "crates/demo/src/lib.rs", LIB)
+    legacy = {t.key: t.body_only_sha for t in scan.tests}
+    for x in rows:  # a log written when body_sha hashed the body alone
+        x["body_sha"] = legacy[x["key"]]
+    log.write_text(dumps(rows))
+    (repo / "crates/demo/src/lib.rs").write_text(LIB.replace("go();", "go(); go();"))
+    assert run(repo) == 0
+    adds, runs = [json.loads(x) for x in log.read_text().splitlines()]
+    assert (adds["verdict"], adds["reason"], adds["action"]) == ("keep", "ok", "#7")
+    assert adds["body_sha"] == scan.tests[0].body_sha  # migrated to the new hash
+    assert (runs["verdict"], runs["action"]) == ("rereview", "#7")  # its body did change
+    assert run(repo, "--check") == 0
+
+
+def test_migrate_legacy_sha_touches_only_rows_matching_the_body_only_sha():
+    rows = [r(K, sha="old-body"), r("demo::crates/demo/src/lib.rs::tests::b", sha="x")]
+    shas = {K: ("old-body", "new-src"), rows[1]["key"]: ("other", "y")}
+    out = migrate_legacy_sha(rows, shas)
+    assert [x["body_sha"] for x in out] == ["new-src", "x"]
+    assert migrate_legacy_sha(out, shas) == out

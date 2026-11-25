@@ -136,6 +136,12 @@ class Guard(unittest.TestCase):
         with open(page, "w") as f:
             f.write("<html><head></head><body>x</body></html>")
         names = []
+        empty = os.path.join(tmp.name, "architect.json")   # #10760: /api/user re-reads it; keep the operator's file out
+        with open(empty, "w") as f:
+            f.write("{}")
+        env = mock.patch.dict(os.environ, {"ARCHITECT_CONFIG": empty, "ARCHITECT_OWNER_NAME": ""})
+        env.start()
+        self.addCleanup(env.stop)
         for owner in ("Pat", ""):
             srv = self.mod.DashboardServer(0, self.mod.ds.Store(os.path.join(tmp.name, f"store{owner}")), page, owner_name=owner)
             threading.Thread(target=srv.serve_forever, daemon=True).start()

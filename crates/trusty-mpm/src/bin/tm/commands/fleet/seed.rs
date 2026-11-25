@@ -53,8 +53,7 @@ pub(crate) struct Seeded<'a> {
 
 /// The shipped bytes of the compiled-in row seeded at `dest`, if any.
 pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
-    EMBEDDED
-        .iter()
+    table::rows()
         .find(|(d, _, _)| *d == dest)
         .map(|&(_, c, _)| c)
 }
@@ -65,13 +64,12 @@ pub(crate) mod refresh;
 mod table;
 #[path = "seed_wiring.rs"]
 pub(crate) mod wiring;
-use table::EMBEDDED;
 
 /// Every file `tm fleet init` writes, in write order.
 ///
 /// Why: #9132 — the template and the skills are read from content, so the
 /// table is built from `seed` instead of being a compiled-in constant.
-/// What: `CLAUDE.md` from `seed`, then [`EMBEDDED`], then each seed skill at
+/// What: `CLAUDE.md` from `seed`, then [`table::rows`], then each seed skill at
 /// `.claude/skills/<stem>/SKILL.md`.
 /// Test: `a_first_run_seeds_the_architect_project`.
 pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
@@ -80,7 +78,8 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
         contents: &seed.claude_md,
         executable: false,
     };
-    let embedded = EMBEDDED.iter().map(|&(dest, contents, executable)| Seeded {
+    // #10571: the table spans seed_table.rs and seed_table_scripts.rs.
+    let embedded = table::rows().map(|&(dest, contents, executable)| Seeded {
         dest: dest.to_owned(),
         contents,
         executable,

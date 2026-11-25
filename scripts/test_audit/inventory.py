@@ -3,10 +3,10 @@
 
 Why: the audit logs one verdict per test so no test is judged twice. Phase 0
   builds that log's rows without a model: a stable key, a body hash, and the
-  deterministic candidate rules R1-R6 (docs/test-audit/README.md).
+  deterministic candidate rules R3, R5, R6 (docs/test-audit/README.md;
+  R1, R2 and R4 are dropped).
 What: reads tracked `.rs` files under `crates/<dir>/` (git ls-files; nothing
-  is built or run), extracts test fns (extract.py), applies R1 (dupes.py) and
-  R2-R6 (rules.py), and merges the rows into the verdict log (verdict_log.py).
+  is built or run), extracts test fns (extract.py), applies the active per-test rules (rules.py; R1 in dupes.py only when enabled), and merges the rows into the verdict log (verdict_log.py).
   Prints a per-crate summary: tests found, the `git grep -cE
   '#\\[(tokio::)?test'` line count, its code-only share, and rule hits.
     python3 -I scripts/test_audit/inventory.py --crates trusty-secrets trusty-installer
@@ -30,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/, for `t
 from test_audit.assertions import asserting_helpers  # noqa: E402
 from test_audit.dupes import MIN_TOKENS, THRESHOLD, duplicate_rules  # noqa: E402
 from test_audit.extract import FileScan, TestFn, extract_tests  # noqa: E402
-from test_audit.rules import per_test_rules  # noqa: E402
-from test_audit.verdict_log import dumps, merge, read_log, row, write_log  # noqa: E402
+from test_audit.rules import ACTIVE, per_test_rules  # noqa: E402
+from test_audit.verdict_log import (  # noqa: E402
+    dumps, merge, migrate_legacy_sha, read_log, row, write_log)
 
-RULE_IDS = ("R1", "R2", "R3", "R4", "R5", "R6")
+RULE_IDS = ("R3", "R5", "R6")  # #11268: R1, R2 and R4 dropped (rules.DROPPED)
 GREP_RE = re.compile(r"#\[(tokio::)?test")
 DEFAULT_LOG = Path("docs/test-audit/verdicts.jsonl")
 
@@ -86,14 +87,16 @@ def scan_crate(root: Path, crate_dir: str, cache: dict[str, str]) -> tuple[list[
 
 
 def build_rows(found: list[tuple[TestFn, FileScan]], rev: str, date: str,
-               threshold: float, min_tokens: int) -> list[dict[str, object]]:
-    dupes = duplicate_rules([t for t, _ in found], threshold, min_tokens)
+               threshold: float, min_tokens: int,
+               enabled: frozenset[str] = ACTIVE) -> list[dict[str, object]]:
+    dupes = (duplicate_rules([t for t, _ in found], threshold, min_tokens)
+             if "R1" in enabled else {})
     rows = []
     helpers: dict[int, frozenset[str]] = {}
     for t, scan in found:
         if id(scan) not in helpers:
             helpers[id(scan)] = asserting_helpers(scan.helper_bodies)
-        hits = per_test_rules(t, scan.asset_names, helpers[id(scan)])
+        hits = per_test_rules(t, scan.asset_names, helpers[id(scan)], enabled)
         if t.key in dupes:
             hits["R1"] = dupes[t.key]
         rules = sorted(hits)
@@ -144,7 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         stats_by[d] = stats
     fresh = build_rows(found, rev, date, args.near_threshold, args.min_tokens)
     log_path = root / args.log
-    merged = merge(read_log(log_path), fresh, [f"crates/{d}/" for d in dirs], rev, date)
+    shas = {t.key: (t.body_only_sha, t.body_sha) for t, _ in found}
+    old = migrate_legacy_sha(read_log(log_path), shas)
+    merged = merge(old, fresh, [f"crates/{d}/" for d in dirs], rev, date)
 
     per_crate: dict[str, tuple[int, Counter, Counter]] = {}
     for d in dirs:

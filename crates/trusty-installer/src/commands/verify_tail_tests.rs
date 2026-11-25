@@ -449,15 +449,6 @@ fn no_daemon_rows_still_defers_to_ensure_ok() {
     assert!(!VerifyTailReport::build(false, Vec::new()).verified);
 }
 
-/// Why: `print_human`'s colour path must never panic regardless of the
-/// harness's stdout fd; this just confirms it is callable.
-/// What: calls `use_color`, binds the result.
-/// Test: This is the test.
-#[test]
-fn use_color_returns_bool() {
-    let _v: bool = use_color();
-}
-
 /// Why: #3797 critic finding (MEDIUM, demo-relevant) — an OPTIONAL daemon
 /// that is `not_installed` must read as "(optional, skipped)", not a
 /// bare, alarming `not_installed` right above the green `VERIFIED` line.

@@ -58,7 +58,7 @@ pub use resolver::{
 };
 pub use session_registration::{
     CheckoutLookupError, SessionRegistration, SessionRegistrationError, register_session_checkout,
-    registered_checkout,
+    register_session_checkout_in, registered_checkout,
 };
 pub use store::ProjectStoreError;
 pub use worktree_adoption::{

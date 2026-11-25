@@ -38,7 +38,7 @@ name = "trusty-agents-common"
 # already accumulated at 0.7.2 and unpublished). The gate is never advisory
 # (#5050), so this lands where the gate names.
 # #7684: adds OMIT_CLAUDE_MD_LINE / stamp_omit_claude_md (additive, minor pre-1.0).
-version = "0.11.2"
+version = "0.11.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

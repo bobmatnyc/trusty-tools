@@ -712,7 +712,7 @@ pub fn sign_set_strict(
 /// What: Returns the 5-step "enroll → issue cert → install → verify → re-run"
 /// instructions for `tctl sign <target>`.
 ///
-/// Test: `tests::cert_setup_guidance_contains_steps`.
+/// Test: `tests::cert_setup_guidance_reruns_the_requested_target`.
 pub fn cert_setup_guidance(target: &str) -> String {
     format!(
         "No 'Developer ID Application' certificate found in the login keychain.\n\

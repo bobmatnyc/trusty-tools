@@ -39,6 +39,16 @@ pub struct Session {
 /// A reply, the operated tab and the result host.
 pub type Ran = (Json, Option<i64>, Option<String>);
 
+/// #11808: the actions whose `ref` may be frame-scoped, so whose result may carry `frame`.
+const FRAME_OPS: &[&str] = &[
+    "page_click",
+    "page_hover",
+    "page_type",
+    "page_press",
+    "page_select",
+    "page_scroll",
+];
+
 /// Worker refusals that keep the lease (`KEEP_LEASE`).
 const KEEP_LEASE: &[&str] = &[
     "PermissionNeeded",
@@ -290,6 +300,12 @@ pub async fn run(
         });
         (result, hosted(origin.as_deref())?)
     } else {
+        // #11808: an action on a frame-scoped ref names the child frame it ran in.
+        let (raw, frame) = if FRAME_OPS.contains(&op) {
+            crate::pages_frames::acted(&raw)?
+        } else {
+            (raw, None)
+        };
         let cut = matches!(op, "page_type" | "page_press") && raw.get("truncated").is_some();
         let shape: Shape = match op {
             "page_scroll" => pages::SCROLLED,
@@ -298,11 +314,14 @@ pub async fn run(
             _ if cut => pages::CUT,
             _ => pages::DONE,
         };
-        let result = if op == "page_click" {
+        let mut result = if op == "page_click" {
             pages::clicked(&raw)?
         } else {
             pages::shaped(&raw, shape)?
         };
+        if let Some(frame) = frame {
+            result.insert("frame", frame);
+        }
         (result, hosted(claim.origin.as_deref())?)
     };
     renew(core, &claim.token);

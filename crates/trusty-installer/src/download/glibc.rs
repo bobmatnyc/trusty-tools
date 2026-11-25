@@ -255,7 +255,7 @@ pub fn select_asset_suffix(
 /// mirroring the `ORT-RUNTIME-NOTE.txt` the release workflow packages.
 ///
 /// Test: `tests::instructions_mention_dylib_and_arch`,
-/// `tests::instructions_name_the_1_24_runtime_line`.
+/// `tests::ort_runtime_version_matches_al2023_build_workflow`.
 pub fn ort_dylib_instructions(target: &str) -> String {
     let arch = if target.starts_with("aarch64") {
         "aarch64"
@@ -406,14 +406,36 @@ mod tests {
         assert!(choice.load_dynamic);
     }
 
+    /// Read a workflow file under the repo's `.github/workflows/`.
+    fn workflow(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github/workflows")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
     /// Why: The two AL2023 suffixes must never drift from what `release.yml`
     /// publishes; a typo here silently 404s every below-floor install.
-    /// What: Asserts both constants match the workflow's `asset_suffix` values.
+    /// What: Reads `release.yml` and asserts its AL2023 matrix maps each Linux
+    /// target triple to the suffix constant the selector downloads.
     /// Test: This is the test.
     #[test]
     fn al2023_suffixes_match_release_workflow() {
-        assert_eq!(AL2023_ASSET_SUFFIX, "x86_64-linux-al2023");
-        assert_eq!(AL2023_ARM64_ASSET_SUFFIX, "aarch64-linux-al2023");
+        let wf = workflow("release.yml");
+        for (triple, suffix) in [
+            (TARGET_LINUX_X86_64, AL2023_ASSET_SUFFIX),
+            (TARGET_LINUX_ARM64, AL2023_ARM64_ASSET_SUFFIX),
+        ] {
+            let mapped = wf.lines().any(|l| {
+                !l.trim_start().starts_with('#')
+                    && l.contains(&format!("\"{triple}\":"))
+                    && l.contains(&format!("\"{suffix}\""))
+            });
+            assert!(
+                mapped,
+                "release.yml maps no AL2023 leg for {triple} to asset suffix {suffix}"
+            );
+        }
     }
 
     /// Why: macOS ORT assets are static; no glibc routing applies there.
@@ -468,20 +490,29 @@ mod tests {
         assert!(arm.contains("onnxruntime-linux-aarch64-1.24.2"));
     }
 
-    /// Why (#8612): `ort` 2.0.0-rc.12 (`api-24`) refuses a runtime below 1.24,
-    /// so a note pointing at 1.20.1 hands the user a library that never loads.
-    /// What: Asserts the pinned version is on the 1.24 line and that the note
-    /// names it in both the download URL and the `ORT_DYLIB_PATH` line, with no
-    /// 1.20 reference left.
+    /// Why (#8612): `ort` 2.0.0-rc.12 (`api-24`) refuses a runtime below 1.24;
+    /// `al2023-build.yml`'s runtime load check is what proves a version works,
+    /// so the note must point at that version and no other.
+    /// What: Reads `ORT_VERSION` from `al2023-build.yml` and asserts it equals
+    /// `ORT_RUNTIME_VERSION` and that each arch's note names it in both the
+    /// download URL and the `libonnxruntime.so` path.
     /// Test: This is the test.
     #[test]
-    fn instructions_name_the_1_24_runtime_line() {
-        assert!(ORT_RUNTIME_VERSION.starts_with("1.24."));
+    fn ort_runtime_version_matches_al2023_build_workflow() {
+        let wf = workflow("al2023-build.yml");
+        let pinned = wf
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ORT_VERSION:"))
+            .map(|v| v.trim().trim_matches('"').to_owned())
+            .expect("al2023-build.yml sets ORT_VERSION");
+        assert_eq!(ORT_RUNTIME_VERSION, pinned);
         for target in [TARGET_LINUX_X86_64, TARGET_LINUX_ARM64] {
             let note = ort_dylib_instructions(target);
-            assert!(note.contains("/download/v1.24.2/"), "{note}");
-            assert!(note.contains("libonnxruntime.so.1.24.2"), "{note}");
-            assert!(!note.contains("1.20"), "stale 1.20 runtime in: {note}");
+            assert!(note.contains(&format!("/download/v{pinned}/")), "{note}");
+            assert!(
+                note.contains(&format!("libonnxruntime.so.{pinned}")),
+                "{note}"
+            );
         }
     }
 }

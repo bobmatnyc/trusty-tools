@@ -43,8 +43,7 @@ use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessS
 ///      lines and re-publish them rather than mirroring them to the terminal.
 /// What: Match by exact byte prefix; the payload after the space is one JSON
 ///       object decodable as the emitting crate's event envelope.
-/// Test: `super::tests::event_line_prefix_is_stable`,
-///       `super::tests::emit_line_has_prefix_and_parses`, and
+/// Test: `super::tests::emit_line_has_prefix_and_parses` and
 ///       `crate::harness_doc::tests::harness_doc_names_the_relay_prefix`.
 // #5129: value is the one tcode and tagent have always written to stderr;
 // renaming the producers would break parent/child relay across binary versions.

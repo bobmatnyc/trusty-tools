@@ -9,8 +9,8 @@
 //! `--json` is set, emits the DOC-5 capability-discovery object
 //! `{"tool","tool_version","stack_version","contract_floor","contract_target"}`.
 //!
-//! Test: Run `trusty-installer version` and assert stdout contains `"trusty-installer v"`. Run
-//! `trusty-installer version --json` and parse the JSON; assert `"tool"` == `"trusty-installer"`.
+//! Test: `version_human_line_names_tool_and_stack_version`,
+//! `version_json_is_the_capability_discovery_object` (tests/version_output.rs).
 
 use crate::output;
 
@@ -23,8 +23,7 @@ use crate::output;
 ///
 /// What: A constant `&str` used by `run` and surfaced in the `--json` output.
 ///
-/// Test: The integration test for `trusty-installer version --json` asserts
-/// `stack_version == PHASE0_STACK_VERSION`.
+/// Test: `version_json_is_the_capability_discovery_object`.
 pub const PHASE0_STACK_VERSION: &str = "0.0.0-scaffold";
 
 /// Handle the `trusty-installer version` subcommand.
@@ -34,30 +33,8 @@ pub const PHASE0_STACK_VERSION: &str = "0.0.0-scaffold";
 /// What: Calls `output::print_version(json, PHASE0_STACK_VERSION)` and returns
 /// exit code `0`.
 ///
-/// Test: Call `run(false)` and `run(true)` in a test; both should not panic
-/// and the underlying `print_version` is tested in `output::tests`.
+/// Test: `version_human_line_names_tool_and_stack_version`,
+/// `version_json_is_the_capability_discovery_object`.
 pub fn run(json: bool) {
     output::print_version(json, PHASE0_STACK_VERSION);
-}
-
-// ── Unit tests ───────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `PHASE0_STACK_VERSION` is non-empty (sanity check).
-    #[test]
-    fn stack_version_non_empty() {
-        assert!(!PHASE0_STACK_VERSION.is_empty());
-    }
-
-    /// `run` does not panic for either output mode.
-    #[test]
-    fn run_does_not_panic() {
-        // We can't easily assert on stdout in a unit test, but we can
-        // confirm the function returns normally.
-        run(false);
-        run(true);
-    }
 }

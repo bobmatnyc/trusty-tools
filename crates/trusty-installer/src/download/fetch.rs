@@ -335,20 +335,28 @@ pub fn place_binaries(
 mod tests {
     use super::*;
 
-    /// Why: A matching SHA-256 must not return an error; a tampered file must.
-    /// What: Creates a temp file with known content, computes the expected digest,
-    /// calls `sha256_file`, asserts equality. Then overwrites the file and asserts
-    /// a mismatch.
+    /// Why: `download_and_verify` trusts a binary only when this digest equals
+    /// the published one, so the digest must be the real SHA-256 of the bytes.
+    /// What: Hashes two files with known content and compares each with a
+    /// digest computed outside this code (`printf %s <input> | shasum -a 256`).
     /// Test: This is the test.
     #[test]
     fn sha256_file_correct() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.bin");
-        std::fs::write(&path, b"hello trusty").unwrap();
-        // Computed independently: echo -n "hello trusty" | sha256sum
-        let expected = sha256_file(&path).unwrap();
-        assert_eq!(expected.as_hex().len(), 64);
-        assert!(expected.as_hex().chars().all(|c| c.is_ascii_hexdigit()));
+        for (content, digest) in [
+            (
+                &b"hello trusty"[..],
+                "c0420cd52d455a554cb05edb89e129b2d32c8064d200e7ee899360987a0243ec",
+            ),
+            (
+                &b""[..],
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+        ] {
+            let path = dir.path().join("test.bin");
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(sha256_file(&path).unwrap().as_hex(), digest, "{content:?}");
+        }
     }
 
     /// Why: The SHA-256 parse must accept both bare hex and `hex  filename` format.

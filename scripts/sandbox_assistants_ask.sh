@@ -53,6 +53,11 @@
 # #7812: re-exec under bash when started from zsh.
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
+# #11821 P6a: --projects-root / --config-dir, shared by every sandbox launcher.
+# Builtins only: a selftest runs this launcher on a PATH with no dirname.
+case "${BASH_SOURCE[0]}" in */*) SIP_DIR="${BASH_SOURCE[0]%/*}" ;; *) SIP_DIR=. ;; esac
+# shellcheck source=scripts/lib/sandbox_install_paths.sh
+. "$SIP_DIR/lib/sandbox_install_paths.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bin_fresh.sh
@@ -69,6 +74,7 @@ die() {
 }
 
 usage() {
+  echo "  install paths (#11821): [--projects-root PATH] [--config-dir PATH], inside --dir" >&2
   echo "usage: scripts/sandbox_assistants_ask.sh [--bin PATH] [--dir DIR] [--role personal|cto] [--allow-stale] [--dry-run] INSTANCE QUESTION" >&2
   exit 2
 }
@@ -136,6 +142,8 @@ while [ "$#" -gt 0 ]; do
     --bin) [ "$#" -ge 2 ] || usage; BIN="$2"; shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --role) [ "$#" -ge 2 ] || usage; ROLE="$2"; shift 2 ;;
+    --projects-root) [ "$#" -ge 2 ] || usage; SIP_PROJECTS="$2"; shift 2 ;;
+    --config-dir) [ "$#" -ge 2 ] || usage; SIP_CONFIG="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --allow-stale) ALLOW_STALE=1; shift ;;
     -h|--help) usage ;;
@@ -234,10 +242,13 @@ echo "sandbox_assistants_ask: env -i:"
 for w in "${ENV_WORDS[@]}"; do echo "  $w"; done
 echo "sandbox_assistants_ask: argv: ${ARGV[*]}"
 
+# #11821 P6a: admit only install paths inside the sandbox dir.
+sip_check sandbox_assistants_ask "$SANDBOX" || exit 1
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "sandbox_assistants_ask: dry run; nothing started"
   exit 0
 fi
+sip_write sandbox_assistants_ask "$SANDBOX" || exit 1
 
 mkdir -p "$INSTANCE_HOME" "$SANDBOX/data"
 if [ -n "$ROLE" ] && [ ! -f "$INSTANCE_HOME/instructions.md" ]; then

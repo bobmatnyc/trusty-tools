@@ -497,3 +497,109 @@ async fn select_refuses_a_tab_whose_emulation_reset_failed() {
     expect_reset(&mut worker).await;
     broker.close().await;
 }
+
+// #11808: an action on a frame-scoped ref answers with the child frame it ran
+// in, and its `operation` audit line names that child's host in `frames`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_action_is_audited_with_the_frame_origin() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("select-reply")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let typed = format!(
+        r#"{{"op":"page_type","lease":"{A_LEASE}","request_id":"f1","ref":"7:22.0","text":"hi"}}"#
+    );
+    send_json(&mut a, &typed).await;
+    let frame = r#"{"id":7,"origin":"https://b.test:8443"}"#;
+    let cmd = answer(
+        &mut worker,
+        &format!(r#"{{"document":"d","frame":{frame}}}"#),
+    )
+    .await;
+    assert_eq!(cmd.get("ref"), Some(&Json::from("7:22.0")));
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        format!(r#"{{"ok":true,"tab":7,"document":"d","frame":{frame}}}"#)
+    );
+    let audit = fs::read_to_string(state.join("audit.jsonl")).expect("audit");
+    let last = audit.lines().last().expect("a line");
+    let last = Json::parse(last.as_bytes()).expect("json");
+    assert_eq!(last.get("op"), Some(&Json::from("page_type")), "{audit}");
+    assert_eq!(last.get("outcome"), Some(&Json::from("ok")));
+    assert_eq!(
+        last.get("frames"),
+        Some(&Json::Array(vec![Json::from("b.test")]))
+    );
+    // A malformed frame is refused, never relayed as a frame action.
+    let bad =
+        format!(r#"{{"op":"page_hover","lease":"{A_LEASE}","request_id":"f2","ref":"7:22.0"}}"#);
+    send_json(&mut a, &bad).await;
+    let zero = r#"{"document":"d","frame":{"id":0,"origin":"https://b.test"}}"#;
+    answer(&mut worker, zero).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"BrowserRefused"}"#
+    );
+    broker.close().await;
+}
+
+/// Refuse the next worker command with `error` and the extra JSON `fields`.
+async fn refuse_next(worker: &mut UnixStream, error: &str, fields: &str) {
+    let cmd = recv_json(worker).await;
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    let reply = format!(r#"{{"id":"{id}","ok":false,"error":"{error}"{fields}}}"#);
+    send_json(worker, &reply).await;
+}
+
+/// The last audit line of `state`.
+fn last_audit(state: &Path) -> Json {
+    let audit = fs::read_to_string(state.join("audit.jsonl")).expect("audit");
+    Json::parse(audit.lines().last().expect("a line").as_bytes()).expect("json")
+}
+
+// #11808: a refused frame action, an unfinished one included, still names its
+// child frame to the agent and in the `operation` audit line's `frames`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_frame_action_is_audited_with_the_frame_origin() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("select-reply")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let frame = r#"{"id":7,"origin":"https://b.test:8443"}"#;
+    let hosts = Some(Json::Array(vec![Json::from("b.test")]));
+    let typed = format!(
+        r#"{{"op":"page_type","lease":"{A_LEASE}","request_id":"r1","ref":"7:22.0","text":"hi"}}"#
+    );
+    send_json(&mut a, &typed).await;
+    let denied = format!(r#","tab":7,"origin":"https://b.test:8443","frame":{frame}"#);
+    refuse_next(&mut worker, "PermissionNeeded", &denied).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        format!(r#"{{"ok":false,"error":"PermissionNeeded"{denied}}}"#)
+    );
+    let line = last_audit(state);
+    assert_eq!(line.get("outcome"), Some(&Json::from("PermissionNeeded")));
+    assert_eq!(line.get("frames"), hosts.as_ref());
+    let clicked =
+        format!(r#"{{"op":"page_click","lease":"{A_LEASE}","request_id":"r2","ref":"7:22.1"}}"#);
+    send_json(&mut a, &clicked).await;
+    refuse_next(
+        &mut worker,
+        "OutcomeUnknown",
+        &format!(r#","frame":{frame}"#),
+    )
+    .await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        format!(r#"{{"ok":false,"error":"OutcomeUnknown","frame":{frame}}}"#)
+    );
+    let line = last_audit(state);
+    assert_eq!(line.get("op"), Some(&Json::from("page_click")));
+    assert_eq!(line.get("outcome"), Some(&Json::from("OutcomeUnknown")));
+    assert_eq!(line.get("frames"), hosts.as_ref());
+    broker.close().await;
+}

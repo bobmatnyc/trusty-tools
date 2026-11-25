@@ -7,7 +7,7 @@
 //! would name two different things depending on which command saw it.
 //! What: the alias/repo split, shorthand and full-URL resolution, the
 //! rejections inherited from `tm register`, and the agreement between the two
-//! identity primitives.
+//! identity primitives; `tm run`'s daemon check runs before the clone (#11828).
 //! Test: this file IS the test module.
 
 use super::*;
@@ -638,4 +638,41 @@ fn a_token_in_the_url_never_reaches_the_identity_9124() {
         }
         assert_eq!(repo, "x");
     }
+}
+
+/// #11828: with the daemon down, `tm run` refuses before it clones, so no
+/// unregistered clone is left under the repos root. Before the fix the clone
+/// of a real (empty, local) source landed first and the launch refused after.
+#[tokio::test]
+async fn run_refuses_an_unreachable_daemon_before_cloning_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let source = tmp.path().join("source.git");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&source)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git init --bare failed");
+    let repos_root = tmp.path().join("repos");
+    std::fs::create_dir(&repos_root).expect("mkdir repos root");
+    let base_path = repos_root.join("acme").join("widget");
+
+    let err = run_managed_at(
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        &base_path,
+        &source.to_string_lossy(),
+        None,
+        None,
+    )
+    .await
+    .expect_err("an unreachable daemon refuses the run");
+
+    assert!(err.to_string().contains("cannot be reached"), "{err}");
+    let created: Vec<_> = std::fs::read_dir(&repos_root)
+        .expect("read repos root")
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(created.is_empty(), "the refused run created {created:?}");
 }

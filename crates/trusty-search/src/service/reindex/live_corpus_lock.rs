@@ -52,15 +52,32 @@ use crate::core::registry::IndexId;
 /// Why: the lock must outlive the check. Returning a guard rather than a `bool`
 /// makes "checked" and "still held" the same fact, so no caller can drop the
 /// protection between the two by rearranging statements.
-/// What: owns the locked `File`. Dropping it closes the descriptor, which
-/// releases the flock. After the rename that descriptor refers to the replaced
-/// inode, so the release affects nothing the daemon still serves. The field is
-/// `None` in exactly one case — there was no live file to lock — so that
+/// What: owns the locked `File`. Dropping it unlocks, then closes the
+/// descriptor. After the rename that descriptor refers to the replaced inode,
+/// so the release affects nothing the daemon still serves. The field is `None`
+/// in exactly one case — there was no live file to lock — so that
 /// `Some(guard)` means "may promote" on both arms and the caller has one test.
-/// Test: `a_held_live_corpus_refuses_promotion`.
+/// Test: `a_held_live_corpus_refuses_promotion`,
+/// `dropping_the_guard_releases_a_lock_another_descriptor_shares`.
 #[derive(Debug)]
 pub(super) struct LiveCorpusLock {
     _file: Option<File>,
+}
+
+impl Drop for LiveCorpusLock {
+    // #11872: close alone releases the flock only when the LAST descriptor on
+    // the open file description closes. A child forked by any other thread
+    // holds a copy until it execs, so the lock outlived the guard. LOCK_UN
+    // acts on the description itself, as redb's own close does.
+    fn drop(&mut self) {
+        let Some(file) = &self._file else { return };
+        if let Err(e) = file.unlock() {
+            tracing::warn!(
+                "staged corpus swap: could not unlock the live-corpus guard ({e}); the \
+                 lock is released when every descriptor sharing it closes (#11872)"
+            );
+        }
+    }
 }
 
 /// Take the live corpus's advisory lock, or refuse the promotion (#7991).
@@ -179,5 +196,45 @@ fn acquire_blocking(live_path: &Path, index_id: &str) -> Option<LiveCorpusLock> 
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::acquire_for_promotion;
+    use crate::core::corpus::CorpusStore;
+    use crate::core::registry::IndexId;
+
+    /// #11872: the guard must release even while another descriptor shares it.
+    ///
+    /// Why: a child forked by any concurrent thread holds a copy of every
+    /// descriptor until it execs, so a close-only release left the live corpus
+    /// locked after the guard dropped — `an_unheld_live_corpus_is_promotable`
+    /// flaked with `DatabaseAlreadyOpen` on Linux CI.
+    /// What: `try_clone` is `dup(2)`, which shares the open file description
+    /// exactly as a forked child's copy does. The clone outlives the guard,
+    /// and redb must still be able to open the corpus.
+    /// Test: this IS the test.
+    #[tokio::test]
+    #[serial_test::parallel]
+    async fn dropping_the_guard_releases_a_lock_another_descriptor_shares() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("index.redb");
+        drop(CorpusStore::open(&live).expect("create live corpus"));
+
+        let guard = acquire_for_promotion(&live, &IndexId::new("live-lock-11872"))
+            .await
+            .expect("an unheld live corpus must be promotable");
+        let inherited = guard
+            ._file
+            .as_ref()
+            .expect("a live file was locked")
+            .try_clone()
+            .expect("dup the guard's descriptor");
+        drop(guard);
+
+        CorpusStore::open(&live)
+            .expect("#11872: the guard must release the lock while a shared descriptor lives");
+        drop(inherited);
     }
 }

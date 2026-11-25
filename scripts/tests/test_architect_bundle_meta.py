@@ -9,6 +9,7 @@ import argparse
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -19,7 +20,7 @@ _spec.loader.exec_module(meta)
 
 
 def args(**kw):
-    base = {"commit": "", "check": True, "from_git": False}
+    base = {"commit": "", "check": True, "from_git": False, "from_repo": "", "paths": []}
     return argparse.Namespace(**{**base, **kw})
 
 
@@ -28,16 +29,30 @@ def test_checked_in_provenance_and_history_are_current():
     assert meta.history(args()) == 0
 
 
-def test_history_check_fails_when_a_seed_changes(tmp_path):
+def seed_tree(tmp_path):
+    """A copy of every seed table file, the history and the seeded assets under `tmp_path`."""
     rows = meta.seed_rows(ROOT)
     fleet = tmp_path / meta.FLEET.relative_to(ROOT)
     fleet.mkdir(parents=True)
-    shutil.copy(meta.TABLE, fleet / "seed_table.rs")
+    for table in meta.FLEET.glob("seed_table*.rs"):   # #10571: the table spans several files
+        shutil.copy(table, fleet / table.name)
     shutil.copy(meta.HISTORY, fleet / "seed_history.tsv")
     for _, asset in rows:
         dst = tmp_path / asset
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / asset, dst)
+    return rows
+
+
+def test_seed_rows_reads_every_table_file():
+    dests = [d for d, _ in meta.seed_rows(ROOT)]
+    assert "templates/dashboard/index.html" in dests   # seed_table.rs
+    assert "scripts/fleet-poll.py" in dests            # seed_table_scripts.rs
+    assert len(dests) == len(set(dests))
+
+
+def test_history_check_fails_when_a_seed_changes(tmp_path):
+    rows = seed_tree(tmp_path)
     assert meta.history(args(), root=tmp_path) == 0
     (tmp_path / rows[0][1]).write_bytes(b"changed\n")
     assert meta.history(args(), root=tmp_path) == 1
@@ -60,3 +75,58 @@ def test_provenance_check_fails_when_a_pair_source_changes(monkeypatch):
 
 def test_provenance_refuses_a_malformed_commit():
     assert meta.main(["provenance", "--commit", "not-a-sha", "--check"]) == 2
+
+
+def git(repo, *argv):
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                    *argv], check=True, capture_output=True)
+
+
+def commit_file(repo, rel, data):
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_bytes(data)
+    git(repo, "add", rel)
+    git(repo, "commit", "-q", "-m", rel)
+
+
+def history_lines(root):
+    text = (root / meta.HISTORY.relative_to(ROOT)).read_text(encoding="utf-8")
+    return {tuple(line.split("\t")) for line in text.splitlines() if line and not line.startswith("#")}
+
+
+def test_history_from_repo_adds_every_live_script_version(tmp_path):
+    tree, live = tmp_path / "tree", tmp_path / "live"
+    tree.mkdir()
+    seed_tree(tree)
+    live.mkdir()
+    git(live, "init", "-q")
+    versions = [b"v1\n", b"v2\n", b"v3\n"]
+    for data in versions:
+        commit_file(live, "scripts/fleet-poll.py", data)
+    commit_file(live, "scripts/input-state.py", b"input\n")
+    commit_file(live, "scripts/not-seeded.py", b"x\n")   # not a seed row: never recorded
+    commit_file(live, "local/state.md", b"owner\n")        # seeded, not a script: never recorded
+    git(live, "checkout", "-q", "-b", "side")
+    commit_file(live, "scripts/fleet-poll.py", b"side\n")  # a version on another branch counts too
+    before = history_lines(tree)
+
+    assert meta.history(args(check=False, from_repo=str(live)), root=tree) == 0
+    added = history_lines(tree) - before
+    want = {("scripts/fleet-poll.py", meta.sha(d)) for d in versions + [b"side\n"]}
+    want.add(("scripts/input-state.py", meta.sha(b"input\n")))
+    assert added == want
+
+    seed_tree_again = tmp_path / "tree2"
+    seed_tree_again.mkdir()
+    seed_tree(seed_tree_again)
+    assert meta.history(args(check=False, from_repo=str(live), paths=["scripts/input-state.py"]),
+                        root=seed_tree_again) == 0
+    assert history_lines(seed_tree_again) - before == {("scripts/input-state.py", meta.sha(b"input\n"))}
+
+
+def test_history_from_repo_refuses_bad_input(tmp_path):
+    assert meta.main(["history", "--check", "--from-repo", str(tmp_path)]) == 2   # not a git repo
+    git(tmp_path, "init", "-q")
+    assert meta.main(["history", "--check", "--from-repo", str(tmp_path), "--paths", "scripts/nope.py"]) == 2
+    assert meta.main(["history", "--check", "--from-repo", str(tmp_path), "--paths", "local/state.md"]) == 2
+    assert meta.main(["history", "--check", "--paths", "scripts/fleet-poll.py"]) == 2

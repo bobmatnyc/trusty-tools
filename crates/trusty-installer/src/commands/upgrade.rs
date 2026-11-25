@@ -211,7 +211,7 @@ impl UpgradeReport {
 /// applies only on `Apply`. `exclude_self` drops `trusty-installer`/`tctl` from
 /// the set (avoids upgrading the running binary mid-flight). Returns the exit code.
 ///
-/// Test: `tests::run_check_is_readonly` (delegation); the apply path is
+/// Test: `run_check_is_readonly` (tests/upgrade_check_readonly.rs); the apply path is
 /// side-effecting and validated manually.
 pub fn run(
     check: bool,
@@ -283,7 +283,7 @@ pub fn run(
 /// `--yes` + the TTY + (when prompting) an interactive yes/no, and matches the
 /// resulting [`ApplyDecision`] into an [`UpgradeReport`]. Only `Apply` mutates.
 ///
-/// Test: `tests::run_check_is_readonly`; the apply branch is side-effecting.
+/// Test: `run_check_is_readonly`; the apply branch is side-effecting.
 fn resolve_and_apply(
     handle: &Handle,
     candidates: Vec<UpdateCandidate>,

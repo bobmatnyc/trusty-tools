@@ -14,8 +14,9 @@
 
 use serde_json::Value;
 
-use super::super::derive::{days_from_civil, days_in_month};
+use super::super::derive::days_in_month;
 use super::super::ids::py_str;
+use crate::classify::alerts::days_from_civil;
 
 /// `_ts(value)`: microseconds since the epoch, or `None` where Python's
 /// `fromisoformat` raises.

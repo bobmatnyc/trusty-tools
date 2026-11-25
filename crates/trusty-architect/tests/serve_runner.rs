@@ -5,8 +5,8 @@
 mod cycle_support;
 
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use cycle_support::{Env, QuietHost, TestResult};
 use trusty_architect::poller::{PollLock, RunError};
@@ -134,7 +134,15 @@ fn tick_runs_the_poll_cycle() -> TestResult {
     let clock = FakeClock::new(1_000.0);
     let runner = env.runner(&tmux, &clock, &QuietHost);
     let stop = AtomicBool::new(false);
-    let log = |_: &str| {};
+    // #11857: a fixed 450ms stop saw one tick on a loaded host; count tick
+    // cycles from the serve log line and stop after two, under a 10s deadline.
+    let ticks_seen = AtomicU64::new(0);
+    let timed_out = AtomicBool::new(false);
+    let log = |line: &str| {
+        if line.contains("serve cycle trigger=Tick") {
+            ticks_seen.fetch_add(1, Ordering::SeqCst);
+        }
+    };
     let mut lp = ServeLoop {
         opts: ServeOptions {
             tick: Duration::from_millis(100),
@@ -148,11 +156,22 @@ fn tick_runs_the_poll_cycle() -> TestResult {
     };
     let stats = std::thread::scope(|s| {
         s.spawn(|| {
-            std::thread::sleep(Duration::from_millis(450));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while ticks_seen.load(Ordering::SeqCst) < 2 {
+                if Instant::now() >= deadline {
+                    timed_out.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
             stop.store(true, Ordering::SeqCst);
         });
         serve_runner(&runner, &mut lp)
     })?;
+    assert!(
+        !timed_out.load(Ordering::SeqCst),
+        "serve loop did not reach 2 ticks within 10s: {stats:?}"
+    );
     assert!(stats.ticks >= 2, "{stats:?}");
     let cycles = env.log().matches("panes=0").count() as u64;
     assert_eq!(cycles, stats.start + stats.ticks, "{}", env.log());

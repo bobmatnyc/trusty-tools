@@ -8,8 +8,7 @@
 //!
 //! What: pure re-exports from `trusty_symgraph`. No local definitions.
 //!
-//! Test: `entity_type_round_trips` exercises serde round-tripping through the
-//! re-exported types.
+//! Test: none here; the types are tested where trusty-common defines them.
 
 pub use trusty_common::symgraph::contracts::EdgeKind;
 pub use trusty_common::symgraph::{fact_hash_str, EntityType, RawEntity};
@@ -18,24 +17,4 @@ pub use trusty_common::symgraph::{fact_hash_str, EntityType, RawEntity};
 /// `trusty_common::symgraph::contracts::tables`.
 pub mod tables {
     pub use trusty_common::symgraph::contracts::tables::*;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entity_type_round_trips() {
-        let kinds = [
-            EntityType::NamedType,
-            EntityType::ModulePath,
-            EntityType::TestRelation,
-            EntityType::ConceptCluster,
-        ];
-        for k in kinds {
-            let s = serde_json::to_string(&k).unwrap();
-            let back: EntityType = serde_json::from_str(&s).unwrap();
-            assert_eq!(k, back);
-        }
-    }
 }
