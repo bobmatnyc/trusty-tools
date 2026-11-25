@@ -188,24 +188,16 @@ mod tests {
 
     #[test]
     fn token_label_pair_needs_one_fallback_label_and_equal_fingerprints() {
-        let named = key("tm-ai-power-rankings", "token", "ctx_main:350k");
-        let label = key(
-            "trusty-mpm-projects-bobm:accded0b",
-            "token",
-            "ctx_main:350k",
-        );
+        let named = key("tm-proj-04", "token", "ctx_main:350k");
+        let label = key("proj-01:0001abcd", "token", "ctx_main:350k");
         assert!(token_label_pair(&named, &label) && token_label_pair(&label, &named));
-        let other_fp = key(
-            "trusty-mpm-projects-bobm:accded0b",
-            "token",
-            "ctx_main:200k",
-        );
+        let other_fp = key("proj-01:0001abcd", "token", "ctx_main:200k");
         assert!(!token_label_pair(&named, &other_fp));
         let two_names = key("tm-other", "token", "ctx_main:350k");
         assert!(!token_label_pair(&named, &two_names));
         let not_hex = key("mcp:tm-ta-0001", "token", "ctx_main:350k");
         assert!(!token_label_pair(&named, &not_hex));
-        let idle = key("trusty-mpm-projects-bobm:accded0b", "idle", "ctx_main:350k");
+        let idle = key("proj-01:0001abcd", "idle", "ctx_main:350k");
         assert!(!token_label_pair(&named, &idle));
     }
 

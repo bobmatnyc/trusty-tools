@@ -285,7 +285,7 @@ fn parity_by_kind_flag_prints_per_kind_rows_and_examples() {
     assert!(!by.contains("    scheduler-only "), "{by}");
     let (ex, _) = run(dir.path(), &line("--examples 2"), &clock, &runner, None).unwrap();
     assert!(
-        ex.contains("    scheduler-only 2026-11-24T23:46:17Z tm-bta-crm hit_low:main:2026112420\n"),
+        ex.contains("    scheduler-only 2026-11-24T23:46:17Z tm-proj-07 hit_low:main:2026112420\n"),
         "{ex}"
     );
 }

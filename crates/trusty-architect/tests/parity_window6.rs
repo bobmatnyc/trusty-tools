@@ -121,7 +121,7 @@ fn root() -> TestResult<(tempfile::TempDir, trusty_architect::sched::Layout)> {
 fn window6_shadow_restart_reseeds_the_token_state() -> TestResult {
     let (dir, l) = root()?;
     let live = dir.path().join("inbox/token-watch-state.json");
-    let fired = r#"{"fired": {"tm-bta-crm|hit_low:main:2026112420": 1795553360.0}}"#;
+    let fired = r#"{"fired": {"tm-proj-07|hit_low:main:2026112420": 1795553360.0}}"#;
     fs::write(&live, fired)?;
     fs::create_dir_all(l.shadow_dir())?;
     let own = l.shadow_dir().join("token-watch-state.json");
@@ -129,7 +129,7 @@ fn window6_shadow_restart_reseeds_the_token_state() -> TestResult {
     shadow::plan_with_seed(&l, &PollJob::default(), vec![], T0, true)?;
     let seeded: serde_json::Value = serde_json::from_str(&fs::read_to_string(&own)?)?;
     let keys: Vec<&String> = seeded["fired"].as_object().ok_or("fired")?.keys().collect();
-    assert_eq!(keys, ["tm-bta-crm|hit_low:main:2026112420"], "{seeded}");
+    assert_eq!(keys, ["tm-proj-07|hit_low:main:2026112420"], "{seeded}");
     // A later run of the same daemon keeps what the shadow wrote.
     fs::write(&own, r#"{"fired": {"own": 1.0}}"#)?;
     shadow::plan_with_seed(&l, &PollJob::default(), vec![], T0 + 60, false)?;
@@ -159,7 +159,7 @@ fn window6_excludes_kinds_a_dry_run_poll_never_raises() -> TestResult {
         );
         rows += &alert_row("2026-11-24T23:56:38Z", &k);
     }
-    let maxed = key("tm-dogfood", "factory_send_maxed", "tm-dogfood@20782.0");
+    let maxed = key("tm-proj-11", "factory_send_maxed", "tm-proj-11@20782.0");
     rows += &alert_row("2026-11-25T00:47:44Z", &maxed);
     fs::write(l.alerts(), rows)?;
     fs::write(dir.path().join("inbox/triage.jsonl"), "")?;
@@ -175,7 +175,7 @@ fn window6_excludes_kinds_a_dry_run_poll_never_raises() -> TestResult {
 
 // --- Fix 4: a transient idle screen folds; a later re-alert does not ----------
 
-/// Window 6, class D, tm-trusty-computer: the shadow raised episode
+/// Window 6, class D, tm-proj-20: the shadow raised episode
 /// 1795563933 once (5d6a); the live poller raised 5d6a, then cb34 17 minutes
 /// later, then 3d13 73 s after that. The 73 s screen is transient and folds
 /// into cb34; the 17-minute re-alert is its own event and a mismatch.
@@ -184,13 +184,7 @@ fn window6_excludes_kinds_a_dry_run_poll_never_raises() -> TestResult {
 #[test]
 fn window6_idle_re_alert_after_17_minutes_is_its_own_event() -> TestResult {
     let (dir, l) = root()?;
-    let tc = |h: &str| {
-        key(
-            "tm-trusty-computer",
-            "idle",
-            &format!("since-1795563933-{h}"),
-        )
-    };
+    let tc = |h: &str| key("tm-proj-20", "idle", &format!("since-1795563933-{h}"));
     let events = [(t("2026-11-24T23:55:36Z")?, vec![tc("5d6aa0b232ef")], vec![])];
     let from = t("2026-11-24T23:55:36Z")?;
     shadow_log(&l.shadow_log(), from, t("2026-11-25T00:20:36Z")?, &events)?;
@@ -243,18 +237,14 @@ fn window6_pairs_session_exited_without_first_seen_time() -> TestResult {
 
 // --- Fix 6: a token event under the Python fallback label -----------------------
 
-/// Window 6, class F: `ctx_main:350k` of transcript accded0b, labelled
-/// `tm-ai-power-rankings` by Rust and `trusty-mpm-projects-bobm:accded0b` by
+/// Window 6, class F: `ctx_main:350k` of transcript 0001abcd, labelled
+/// `tm-proj-04` by Rust and `proj-01:0001abcd` by
 /// the Python scan after the session exited. Red before the fix.
 #[test]
 fn window6_pairs_a_token_event_under_the_python_fallback_label() -> TestResult {
     let (dir, l) = root()?;
-    let shadow_key = key("tm-ai-power-rankings", "token", "ctx_main:350k");
-    let live_key = key(
-        "trusty-mpm-projects-bobm:accded0b",
-        "token",
-        "ctx_main:350k",
-    );
+    let shadow_key = key("tm-proj-04", "token", "ctx_main:350k");
+    let live_key = key("proj-01:0001abcd", "token", "ctx_main:350k");
     let at = t("2026-11-24T23:58:42Z")?;
     let events = [(at, vec![shadow_key.clone()], vec![shadow_key])];
     let from = t("2026-11-24T23:56:42Z")?;
@@ -292,7 +282,7 @@ fn window6_fixture_moves_toward_the_projection() -> TestResult {
     assert_eq!((rep.cycles, rep.failed_cycles), (122, 1));
     let c = |x: parity::Counts| (x.matched, x.scheduler_only, x.poller_only);
     // #11826 review: idle folds only a transient screen (one live fold), so
-    // the two long idle re-alerts and jira-linear's 11-minute screen stay.
+    // the two long idle re-alerts and tm-proj-12's 11-minute screen stay.
     assert_eq!(c(rep.alerts), (84, 38, 4), "{}", parity::render(&rep));
     assert!(parity::render(&rep).contains("within 2 polls): shadow 0, live 1\n"));
     assert_eq!(c(rep.wakes), (49, 4, 0), "{}", parity::render(&rep));
