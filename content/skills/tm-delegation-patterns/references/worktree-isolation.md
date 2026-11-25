@@ -96,12 +96,12 @@ Memory is awareness only — never a lock, never a message channel. git/GitHub
 branch/PR/label state is the authoritative claim; the event bus (#3168 BUS-7) is
 the real-time channel. Before dispatching multi-agent work on an area:
 
-1. `memory_list(tag: "ws-claim")`, then verify any hit against live git state —
+1. `tm memory list --tag ws-claim`, then verify any hit against live git state —
    a claim whose branch/PR is gone is void.
 2. Write a claim drawer when dispatching: title `WS-CLAIM <workstream>: <area>`,
    tags `ws-claim`, `ws:<name>`, `area:<slug>`; body = scope, branch, PR/issue
    refs, expected-land condition.
-3. Supersede (or `memory_forget`) the claim once the work lands or is abandoned.
+3. Supersede (or `tm memory forget`) the claim once the work lands or is abandoned.
 
 A claim drawer covers the work area, never the merge queue. Who may merge on a
 shared repository is its own claim: `Skill(skill="tm-workflow")`,

@@ -305,8 +305,10 @@ impl Grants {
             // #11696 Phase B/C: one flag grants the three window tools; each
             // clipboard flag grants its one tool. Checked before the policy
             // row, since a clipboard flag shares the driver tool's DENY name.
+            // #11696 Phase D: the `app_quit` flag grants `quit_app` the same way.
             if tool == crate::window_mgmt::GRANT_FLAG
                 || crate::clipboard::FLAGS.contains(&tool.as_str())
+                || tool == crate::app_quit::GRANT_FLAG
             {
                 tools.insert(tool.clone());
                 continue;
@@ -314,6 +316,7 @@ impl Grants {
             if crate::pointer::is_pointer_tool(tool)
                 || crate::window_mgmt::is_window_tool(tool)
                 || crate::clipboard::is_clipboard_tool(tool)
+                || tool == crate::app_quit::QUIT_TOOL
             {
                 return Err(GrantError::BadTool(tool.clone()));
             }

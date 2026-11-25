@@ -30,7 +30,12 @@ pub async fn call(socket: &Path, method: &str, params: Value) -> Result<Value> {
 /// Check the daemon's protocol, then call `method` on it.
 ///
 /// Why: see the module doc. `timeout` bounds the protocol query and the call
-/// separately; the query is skipped while a callable verdict is cached.
+/// separately; the query is skipped while a callable verdict is cached. A
+/// read's first exchange can stall on a cold palace open (#10648).
+/// What: one attempt; a read listed by `memory_first_call::is_retryable_read`
+/// whose exchange timed out is sent once more. A write is never re-sent.
+/// Test: `call_with_timeout_retries_a_stalled_first_recall`,
+/// `a_read_stalled_twice_is_an_error`, `a_stalled_write_is_not_resent`.
 ///
 /// # Errors
 ///
@@ -43,6 +48,23 @@ pub async fn call_with_timeout(
     params: Value,
     timeout: Duration,
 ) -> Result<Value> {
+    use super::memory_first_call::{is_exchange_timeout, is_retryable_read};
+
+    if !is_retryable_read(method) {
+        return call_once(socket, method, params, timeout).await;
+    }
+    match call_once(socket, method, params.clone(), timeout).await {
+        // #10648: a timed-out read is safe to send again; a second timeout surfaces.
+        Err(e) if is_exchange_timeout(&e) => {
+            tracing::debug!(method, "#10648: memory read timed out; retrying once");
+            call_once(socket, method, params, timeout).await
+        }
+        other => other,
+    }
+}
+
+/// One protocol-checked attempt at `method`.
+async fn call_once(socket: &Path, method: &str, params: Value, timeout: Duration) -> Result<Value> {
     ensure_memory_protocol_at(socket, timeout).await?;
     call_memory_tool_at_with_timeout(socket, method, params, timeout).await
 }

@@ -16,7 +16,7 @@
 #                SANDBOX row.
 #   Every row runs the candidate by absolute path, cwd under S/home (outside
 #   any checkout), under `env -i` with HOME, PATH, TERM=dumb,
-#   TRUSTY_SANDBOX=1, TRUSTY_DATA_DIR_OVERRIDE, TMUX_TMPDIR, TMUX_SOCKET (that socket)
+#   TRUSTY_SANDBOX=1, TM_SKIP_MCP_AUTO_SETUP=1, TRUSTY_DATA_DIR_OVERRIDE, TMUX_TMPDIR, TMUX_SOCKET (that socket)
 #   and TRUSTY_MPM_SOCKET, all under S (plus GITHUB_TOKEN/GH_TOKEN when set,
 #   for `content update` only). A row passes when its exit equals the table's
 #   expected exit and its stdout+stderr contains the table's expected-output
@@ -135,6 +135,8 @@ run_row() {
   env_args=("HOME=$H" "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin" "TERM=dumb"
     "TRUSTY_SANDBOX=1" "TRUSTY_DATA_DIR_OVERRIDE=$S/data" "TMUX_TMPDIR=$S/data/tmux"
     "TMUX_SOCKET=$S/data/tmux/tmux-$(id -u)/gate" "TRUSTY_MPM_SOCKET=$S/data/trusty-mpm/trusty-mpm.sock")
+  # See 1.14.13 release blockers (Fix 2)
+  env_args+=("TM_SKIP_MCP_AUTO_SETUP=1")
   if [ "${args[0]:-}" = content ] && [ "${args[1]:-}" = update ]; then
     [ -n "${GITHUB_TOKEN:-}" ] && env_args+=("GITHUB_TOKEN=${GITHUB_TOKEN}")
     [ -n "${GH_TOKEN:-}" ] && env_args+=("GH_TOKEN=${GH_TOKEN}")

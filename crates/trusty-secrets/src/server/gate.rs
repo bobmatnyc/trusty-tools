@@ -442,29 +442,8 @@ impl Gate<'_> {
     /// Test: `gate_finish_asserts_an_allowed_once_call_admitted`,
     /// `gate_finish_asserts_an_allowed_write_ahead_call_wrote_ahead`.
     fn finish(self, result: Result<Value, ErrorKind>) -> Result<Value, ErrorKind> {
-        // #11738: a Keychain read that fell back from a corrupt blob leaves
-        // one extra record naming the source, best-effort.
-        if let Some(fallback) = self.take_blob_fallback()
-            && !self.suppressed
-            && let Ok(mut file) = self.state.audit.open()
-        {
-            let mut record = self.record(result.as_ref().err().copied());
-            record.blob_fallback = Some(fallback);
-            let _ = file.append(&record);
-        }
+        // #11786: no blob-fallback record; a corrupt blob read fails closed.
         self.settle(result)
-    }
-
-    /// The blob fallback this call's Keychain backend noted, if any (#11738).
-    fn take_blob_fallback(&self) -> Option<crate::store::BlobFallback> {
-        if self.backend.as_ref().map(BackendId::as_str) != Some(BackendId::KEYCHAIN) {
-            return None;
-        }
-        self.state
-            .open(&BackendId::keychain())
-            .ok()?
-            .blob_store()?
-            .take_fallback()
     }
 
     /// Write the call's outstanding record; see [`audited`].

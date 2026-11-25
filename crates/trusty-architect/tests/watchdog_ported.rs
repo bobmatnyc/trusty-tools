@@ -6,11 +6,11 @@
 //! script.
 
 mod cycle_support;
+mod exec_stub;
 
 use std::cell::RefCell;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -438,8 +438,7 @@ fn system_runner_reports_exit_codes_and_timeouts() -> TestResult {
     let dir = tempfile::tempdir()?;
     let write = |name: &str, body: &str| -> io::Result<std::path::PathBuf> {
         let p = dir.path().join(name);
-        fs::write(&p, body)?;
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+        exec_stub::write_executable(&p, body)?; // #10248
         Ok(p)
     };
     let quick = write("quick.sh", "#!/bin/sh\nexit 3\n")?;
