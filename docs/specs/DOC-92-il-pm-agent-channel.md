@@ -2,14 +2,14 @@
 
 **Status:** Approved (r2, 2026-11-25)
 **Subsystem:** trusty-mpm — `tm hook`, daemon delegation tracker and ledger methods, `tm dbatg`, runtime adapters (`runtime/`); trusty-code (`tcode`) — `delegate_to_agent`, `finish_task`, search and memory clients; trusty-architect — `ledger` (dbatg) model and writer; instructions (`content/agents/BASE-AGENT.md`, `content/skills/tm-delegation-patterns.md`, PM instructions, generated Codex and tcode content)
-**Owner:** owner (rulings Dn2 2026-11-25; mpm meta-harness ruling 2026-11-25 01:08Z)
+**Owner:** owner
 **Last-updated:** 2026-11-25
 **Spec ID:** `SPEC-ILCHAN-01~approved` … `SPEC-ILCHAN-11~approved` (DOC-92)
 **DOC-N claim:** `DOC-92`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). The catalog's next-free note on `origin/main` at `fc2dae714c` names `DOC-92`; no file or open PR claims it.
-**Builds on:** #11674 / PR #11682 (ar-Tab), [DOC-82](./DOC-82-portfolio-intent-ledger-dashboard.md) (LDG-2.4.1, LDG-3.6), [DOC-89](./DOC-89-compact-handback-v0.md), [DOC-87](./DOC-87-typed-owner-constraints.md), [DOC-81](./DOC-81-multi-runtime-launcher.md) (runtime adapter bundle, Codex §3.2 and §6 B), [ADR-0059](../adr/0059-canonical-agent-behavior-has-generated-host-adapters.md) (content adapters), ar-Ta3 (#11623, #11626, #11625: native UDS memory and search).
+**Builds on:** #11674 / PR #11682, [DOC-82](./DOC-82-portfolio-intent-ledger-dashboard.md), [DOC-89](./DOC-89-compact-handback-v0.md), [DOC-87](./DOC-87-typed-owner-constraints.md), [DOC-81](./DOC-81-multi-runtime-launcher.md) (runtime adapter bundle, Codex §3.2 and §6 B), [ADR-0059](../adr/0059-canonical-agent-behavior-has-generated-host-adapters.md) (content adapters), #11623, #11626, #11625 (native UDS memory and search).
 
-Owner ruling Dn2: the Intent Ledger (IL) is the standard PM-agent channel in both directions. The PM writes the brief into the agent's IL task. The agent reads it there and writes its result back as an IL entry. The PM acts on the entry. Chat carries a one-line pointer.
-Owner ruling 2026-11-25 01:08Z: mpm is the meta harness for every session type: Claude Code, Codex, and trusty-code (`tcode`).
+Decision: the Intent Ledger (IL) is the standard PM-agent channel in both directions. The PM writes the brief into the agent's IL task. The agent reads it there and writes its result back as an IL entry. The PM acts on the entry. Chat carries a one-line pointer.
+Decision: mpm is the meta harness for every session type: Claude Code, Codex, and trusty-code (`tcode`).
 
 Requirement ids are `IC-n`. "MUST" marks a testable requirement. UNCONFIRMED marks a third-party behaviour no source or capture has proven.
 
@@ -37,8 +37,8 @@ Non-goals:
 
 **ID:** SPEC-ILCHAN-02~approved
 
-- **Claude Code.** ar-Tab moves the task id only. No agent reads a brief from the ledger or writes a result to it. The dbatg `Task` has no `done_when`, `pct`, `remaining`, or `constraints`.
-- **Codex.** tm cannot launch Codex. `RuntimeKind` has `ClaudeCode` and `Tcode` only (`crates/trusty-mpm/src/runtime/mod.rs:197-204`), and #7343 (Codex adapter) was closed as idle under D3h. This checkout has a hand-made Codex install from trusty-mpm 1.5.24 (`.codex/config.toml` `developer_instructions`, 37 `.codex/agents/*.toml`, `SessionStart`/`SubagentStart` hooks in `.codex/hooks.json`), git-ignored and marked advisory pending #7344. tm uses `trusty-common::codex_config` only to register MCP servers in `~/.codex/config.toml`. Codex documents `SubagentStop` with `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`, and `decision: block` to continue, and `PreToolUse` matching `spawn_agent` (Codex hooks docs). Multi-agent is an experimental flag. Hooks outside the managed set wait for `/hooks` trust review (DOC-81 §3.2).
+- **Claude Code.** #11674 moves the task id only. No agent reads a brief from the ledger or writes a result to it. The dbatg `Task` has no `done_when`, `pct`, `remaining`, or `constraints`.
+- **Codex.** tm cannot launch Codex. `RuntimeKind` has `ClaudeCode` and `Tcode` only (`crates/trusty-mpm/src/runtime/mod.rs:197-204`), and #7343 (Codex adapter) was closed as idle. This checkout has a hand-made Codex install from trusty-mpm 1.5.24 (`.codex/config.toml` `developer_instructions`, 37 `.codex/agents/*.toml`, `SessionStart`/`SubagentStart` hooks in `.codex/hooks.json`), git-ignored and marked advisory pending #7344. tm uses `trusty-common::codex_config` only to register MCP servers in `~/.codex/config.toml`. Codex documents `SubagentStop` with `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`, and `decision: block` to continue, and `PreToolUse` matching `spawn_agent` (Codex hooks docs). Multi-agent is an experimental flag. Hooks outside the managed set wait for `/hooks` trust review (DOC-81 §3.2).
 - **tcode.** tm launches `tcode run-task engineer <task> --project <cwd>` with `TM_MANAGED_SESSION_ID` (`crates/trusty-mpm/src/runtime/tcode.rs:161-168`), a one-shot run with no PM instructions. tcode's own PM dispatches through `delegate_to_agent` (`crates/trusty-code/src/tools/delegate.rs`). A sub-agent can end with the schema-checked `finish_task` call (`tools/finish_task.rs`). Memory uses the trusty-memory UDS socket (`session/memory_sink.rs`, `tools/recall_session.rs`). Search spawns `trusty-search serve` as a stdio MCP child (`tools/trusty_search.rs`), not native UDS. Agents load from `.trusty-code/agents/` and `.claude/agents/`. ADR-0059's generated content adapters are not started.
 - **Native memory and search.** #11623 moved Claude Code mpm sessions to native UDS commands. #11625 (21 MCP-only verbs, must close before 2.0) is open.
 
@@ -165,7 +165,7 @@ Entry fields: `kind`, `result_id` (`r<n>` per task), `task`, `harness` (`claude-
 | Agents | hand-made `.codex/agents/*.toml` | generated `CODEX_HOME/agents/*.toml` | `.claude/agents/`, `.trusty-code/agents/` | generated `.trusty-code/agents/` |
 | Skills | hand-made copies | generated Agent Skills `SKILL.md` set | `.trusty-code/skill-refs` | generated from the same source |
 | Hooks | `SessionStart`, `SubagentStart` (hand-made) | `tm hook --runtime codex` for PreToolUse(`spawn_agent`), SubagentStop, UserPromptSubmit (turn stamp), pre-trusted in the managed home | n/a (in process) | n/a |
-| Memory | MCP registration only | instructions and hooks name native `tm memory` verbs over UDS; MCP stays for non-tm callers (ruling IN0055) | UDS (native) | none |
+| Memory | MCP registration only | instructions and hooks name native `tm memory` verbs over UDS; MCP stays for non-tm callers | UDS (native) | none |
 | Search | MCP registration only | native `tm search` / `trusty-search` CLI over UDS | stdio MCP child | trusty-search UDS client from `trusty-common` |
 | IL | none | §4 Codex adapter | none | §4 tcode adapter |
 
@@ -175,7 +175,7 @@ All generated content comes from one canonical source per ADR-0059. The launcher
 
 **ID:** SPEC-ILCHAN-08~approved
 
-Approved 2026-11-25 01:11Z (r1 decisions 1-6):
+Approved 2026-11-25 (r1 decisions 1-6):
 1. dbatg is the store of record.
 2. The brief is fields on the Task row; #9759's brief role is not needed.
 3. Constraints are typed, ≤5 × 240; DOC-87 refs where an owner constraint exists.
@@ -187,15 +187,15 @@ Kept from r1 (no decision needed): the PM allocates ids; results append to `log.
 
 New in r2:
 - **Parser location.** The block is parsed once, in the daemon (`ledger.result.submit`). Adapters send raw text, so the three harnesses cannot disagree on the grammar.
-- **tcode write path.** tcode submits through the tm daemon over UDS and links no ledger writer, which keeps one writer per store (LDG-3.6).
+- **tcode write path.** tcode submits through the tm daemon over UDS and links no ledger writer, which keeps one writer per store.
 - **tcode completion.** The block may sit in `finish_task`'s `summary` or in the final text; `finish_task` gains no IL fields. One wire format for all harnesses.
-Approved 2026-11-25 01:17Z (r2 decisions 7-9):
+Approved 2026-11-25 (r2 decisions 7-9):
 7. **Codex multi-agent.** tm-launched Codex sessions turn on the experimental multi-agent flag so `spawn_agent` exists, on the test branch `test/il-multi-harness` only.
 8. **Codex launch scope.** #7343 stays closed. The Codex launch subset (DOC-81 B1, B3, B5, B6) is tracked under #11819. The rest of DOC-81 B (permission mapping, pane cues) stays in the backlog.
 9. **Generated content.** A narrow generator for Codex and tcode (instructions, agents, skills) from the existing canonical files, on the test branch only. It does not wait for ADR-0059's full canonical-source migration. The hand-made `.codex/` install stays live and untouched until after 2.0.
 
 Held for the owner:
-10. **Interactive tcode PM mode.** tm launches `tcode run-task` one-shot. An interactive PM session mode is new surface and is not part of phase T. It is a stretch item pending the owner's ruling. Phase T drives the tcode IL round trip through `tcode run-task`.
+10. **Interactive tcode PM mode.** tm launches `tcode run-task` one-shot. An interactive PM session mode is new surface and is not part of phase T. It is a stretch item pending the owner. Phase T drives the tcode IL round trip through `tcode run-task`.
 
 Open captures (UNCONFIRMED until a dated capture on the Studio):
 - X1: the Codex PreToolUse `spawn_agent` input field that holds the prompt.
@@ -258,11 +258,11 @@ Codex and tcode (test branch):
 |---|---|---|---|---|
 | 0 | Align the id regex (#11135). Decisions 1-9 are approved; decision 10 is held. | — | 1 | — |
 | 1 | One PM (tm-dogfood), Claude Code. Brief fields, `dispatch`, `brief`, `results`, `replay`, daemon bind/submit, SubagentStop adapter, spill. Agent instructions ship in the `brief` output; BASE-AGENT does not change yet. Gated by store config `agent_channel = on`. | main | 5 | 1-10 |
-| T | ar-Tb1. tcode adapter (through `tcode run-task`); Codex launch subset, generated content, Codex adapter; native UDS memory and search for both; Studio live check. | test branch `test/il-multi-harness` | 5 for the adapters; 6 for the CLI and daemon method surface | 11-17 |
+| T | tcode adapter (through `tcode run-task`); Codex launch subset, generated content, Codex adapter; native UDS memory and search for both; Studio live check. | test branch `test/il-multi-harness` | 5 for the adapters; 6 for the CLI and daemon method surface | 11-17 |
 | 2 | All tm-launched Claude Code PMs: bind validation (warn), resume, `close --from-result`, PM instructions, delegation patterns, BASE-AGENT. | main | 5; embedded assets add their bundle tests | 8 |
 | 3 | Refuse mode, unread digest, datg/Architect parity, `task_ingest` credit, file-drop decision; merge phase T after 2.0 ships. | main | 5 | 18 |
 
-ar-Tb1 delivery:
+Phase T delivery:
 - This spec is merged to `docs/specs/` first.
 - Phase T lives on the test branch, rebased on `origin/main` after each phase-1 or phase-2 merge.
 - The live check runs on the Studio.
