@@ -1,18 +1,21 @@
 //! Coordinate input bounded to the granted window (issue #11696 Phase A):
 //! the argument checks, the frame and bounds helpers, the grant flag, and the
 //! broker pipeline against the fake daemon, including the delegation-authority
-//! refusal of a point outside the window as it is at event time.
+//! refusal of a point outside the window as it is at event time, and the
+//! window-on-top gate of a drag (#11756).
 
 mod common;
 
 use common::rig::{Rig, WINDOW, consent, grant_req, pid};
+use std::sync::atomic::Ordering;
+
 use serde_json::{Value, json};
 use trusty_computer::grants::DEFAULT_TOOLS;
 use trusty_computer::pointer::{
-    CLICK_AT_TOOL, DRAG_REFUSAL, DRAG_TOOL, Frame, GRANT_FLAG, driver_args, frame, grant_name,
-    within,
+    CLICK_AT_TOOL, DRAG_TOOL, Frame, GRANT_FLAG, disabled, frame, grant_name, within,
 };
 use trusty_computer::policy::{Scope, Verdict, check_call, rule};
+use trusty_computer::window_order::{REFUSAL, UNAVAILABLE, WindowRecord};
 
 fn scope() -> Scope {
     Scope {
@@ -252,32 +255,84 @@ fn shrunk_window_refuses_a_point_valid_in_the_agents_view() {
     assert_eq!(driver_calls(&rig, "click").len(), 1);
 }
 
-/// #11696: drag is refused before policy, bounds or any daemon call.
+/// The granted window on screen at (100, 100), the rig's 420 x 252 frame at 1x.
+fn granted_on_screen() -> WindowRecord {
+    WindowRecord {
+        window_id: WINDOW,
+        pid: pid(),
+        layer: 0,
+        x: 100.0,
+        y: 100.0,
+        width: 420.0,
+        height: 252.0,
+    }
+}
+
+fn drag(rig: &mut Rig, rid: &str) -> Value {
+    let args = json!({"pid": pid(), "window_id": WINDOW, "from_x": 5, "from_y": 6, "to_x": 50, "to_y": 60});
+    rig.call(DRAG_TOOL, rid, args)
+}
+
+/// #11756: a drag on top along its path reaches the driver, in the foreground.
 #[test]
-fn drag_is_refused_before_any_check_or_driver_call() {
+fn drag_at_reaches_driver_when_on_top() {
+    assert_eq!(disabled(DRAG_TOOL), None);
+    assert!(trusty_computer::manifest::TOOLS.contains(&"drag"));
     let mut rig = pointer_rig(420.0, 252.0);
-    let inside = json!({"pid": pid(), "window_id": WINDOW, "from_x": 5, "from_y": 6, "to_x": 50, "to_y": 60});
-    let reply = rig.call(DRAG_TOOL, "d1", inside);
-    assert_eq!(reply["code"], DRAG_REFUSAL, "{reply}");
-    assert!(
-        reply["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("on top")),
-        "{reply}"
-    );
-    assert!(
-        rig.daemon(|d| d.calls())
-            .iter()
-            .all(|(n, _)| n != "drag" && n != "get_window_state")
-    );
-    assert!(!trusty_computer::manifest::TOOLS.contains(&"drag"));
-    // Kept for when it is enabled: the drag would be driven in the foreground.
-    let args = json!({"pid": 1, "window_id": 2, "from_x": 0, "from_y": 0, "to_x": 1, "to_y": 1});
-    let (name, request) = driver_args(DRAG_TOOL, args.as_object().expect("object"));
+    rig.windows.set(Ok(vec![granted_on_screen()]));
+    let reply = drag(&mut rig, "d1");
+    assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(
-        (name, &request["delivery_mode"]),
-        ("drag", &json!("foreground"))
+        driver_calls(&rig, "drag"),
+        [
+            json!({"pid": pid(), "window_id": WINDOW, "from_x": 5, "from_y": 6,
+            "to_x": 50, "to_y": 60, "delivery_mode": "foreground"})
+        ]
     );
+    let forward = rig
+        .audit()
+        .into_iter()
+        .find(|r| r["phase"] == "forward" && r["tool"] == DRAG_TOOL)
+        .expect("forward line");
+    assert_eq!(forward["activates_app"], true);
+    assert_eq!(forward["frame"]["on_top"]["windows_in_front"], 0);
+}
+
+/// #11756 (Df8): a drag whose path another window covers, or whose window is
+/// not on screen, or whose window order cannot be read, never reaches the
+/// driver and is never forwarded. A click reads no window order.
+#[test]
+fn covered_drag_is_refused_before_the_driver() {
+    let mut rig = pointer_rig(420.0, 252.0);
+    let cover = WindowRecord {
+        window_id: 99,
+        pid: 4242,
+        ..granted_on_screen()
+    };
+    for (i, (list, want)) in [
+        (Ok(vec![cover, granted_on_screen()]), REFUSAL),
+        (Ok(vec![]), REFUSAL),
+        (Err("no window server".to_owned()), UNAVAILABLE),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rig.windows.set(list);
+        let reply = drag(&mut rig, &format!("d{i}"));
+        assert_eq!(reply["code"], want, "{reply}");
+    }
+    assert!(driver_calls(&rig, "drag").is_empty());
+    let forwards = rig
+        .audit()
+        .into_iter()
+        .filter(|r| r["phase"] == "forward")
+        .count();
+    assert_eq!(forwards, 0, "a refused drag is never forwarded");
+    let reads = rig.windows.reads.load(Ordering::SeqCst);
+    assert_eq!(reads, 3);
+    let reply = click_at(&mut rig, "c1", 10.0, 20.0);
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(rig.windows.reads.load(Ordering::SeqCst), reads);
 }
 
 #[test]

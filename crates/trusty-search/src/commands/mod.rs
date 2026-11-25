@@ -84,6 +84,8 @@ pub mod query;
 pub mod reindex;
 pub mod remove;
 pub mod search;
+// #11625: `lexical`, `semantic` and `kg` lane verbs.
+pub mod search_lane_verbs;
 pub mod search_verbs;
 mod search_verbs_render;
 pub mod serve;

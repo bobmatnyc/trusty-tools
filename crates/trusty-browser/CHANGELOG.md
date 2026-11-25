@@ -8,6 +8,24 @@ Unreleased changes live as fragments in `changelog.d/`.
 
 ---
 
+## [0.8.1] — 2026-11-24
+
+### Added
+
+- `page_emulate` disables JavaScript, forces `prefers-color-scheme` light or dark, and sets the viewport size of a leased tab; a call with the defaults resets it. The emulation resets when the lease ends: release, expiry, session close, grant end, a dropped native port or a worker restart, and before a new lease's first probe; a reset the worker refuses is retried, and until it lands `select` refuses the tab with the retryable `EmulationResetPending` (#11371).
+
+### Fixed
+
+- `page_read` with `include_text` keeps up to half of `max_chars` for the page text, so a link-heavy page no longer returns empty text, and granted cross-origin child frames now contribute their text under a `[frame <id>]` marker (#11284).
+- `trusty-browser install-service` restarts an already-loaded broker (`launchctl kickstart -k`), so an upgrade serves the new binary and extension asset stamp. A failed restart exits non-zero with the launchctl error.
+- Grants survive a broker restart. The broker keeps `grants.json` in its state directory (0600, atomic write; grant id, scope, profile id and browser incarnation only, never a key or ticket) and restores it at start, still subject to the 45 s reconnect grace and the incarnation rule. A symlink, a non-owner-only mode, bad JSON or a malformed entry rejects the whole file and restores nothing. Every grant end rewrites the file, and a failed rewrite deletes it. When the rewrite and the delete both fail, the stale file may still name a revoked grant, so the broker refuses every new grant connect (`GrantStoreStale`) until a later persist succeeds; it retries at each grant end and at each connect attempt. Known gap: a broker restart while that stale file is still on disk can restore a revoked grant within the reconnect grace; a follow-up closes it.
+- A stale extension worker recovers when its pairing handshake fails. The broker's refusal frame on `service.sock` now carries the published asset stamp, so the worker reloads on a mismatch. A handshake timeout, or a disconnect before the acknowledgement, shows "Pairing timed out" or "Pairing failed" in the popup status instead of failing silently.
+- A broker restart no longer restores a grant that has a `grant_end` row in the audit log, so a stale grant store left by a failed rewrite and delete cannot bring back a revoked grant. An audit log that cannot be read restores no grants.
+
+### Changed
+
+- `peer`, `private`, `codesign`, `launchd`, `install_host` and `audit` now use the shared `trusty-daemon-common` crate for the peer uid read, owner-only file checks, signing, the plist writer, owned-file writes and audit rotation; public items keep their paths and signatures, and `write_owned` now fsyncs before linking (#11692).
+
 ## [0.8.0] — 2026-11-19
 
 ### Added

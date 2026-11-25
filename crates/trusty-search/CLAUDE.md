@@ -1730,6 +1730,8 @@ trusty-search similar <file> [--function F] [-k N]   # MCP search_similar (#1162
 trusty-search call-chain <entry> [--direction D] [--max-depth N] [--no-source]  # get_call_chain
 trusty-search grep <pattern> [--all] [-F -w -l -A/-B/-C N --glob G ...]  # MCP grep
 trusty-search typeahead <prefix> [--limit N] [--mode lexical|blended]   # MCP typeahead
+trusty-search lexical|semantic|kg <query> [-k N] [--path-prefix P] [--mode M]  # MCP search_lexical/_semantic/_kg
+                                                     # kg: [--refine-query R]; semantic/kg refuse until their stage is ready
 trusty-search list [--details]                       # --details --json = MCP list_indexes
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
 trusty-search ui [--port N]                          # open web management UI in browser

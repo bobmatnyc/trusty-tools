@@ -14,7 +14,7 @@ use trusty_computer::policy::{self, Verdict};
 
 /// Plan section 5, in table order, plus `computer_screenshot` (#11694) and
 /// `computer_invoke_menu` (#11695).
-const PLAN_TOOLS: [&str; 29] = [
+const PLAN_TOOLS: [&str; 30] = [
     "computer_connect",
     "computer_status",
     "computer_release",
@@ -42,6 +42,7 @@ const PLAN_TOOLS: [&str; 29] = [
     "computer_resize_window",
     "computer_clipboard_read",
     "computer_clipboard_write",
+    "computer_quit",
     "computer_wait",
     "computer_refresh",
 ];

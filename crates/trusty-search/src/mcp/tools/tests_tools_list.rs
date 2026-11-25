@@ -18,7 +18,7 @@ use super::tests::req;
 /// semantic → graph order and Title-cases snake_case statuses.
 #[test]
 fn summarise_stages_renders_in_order() {
-    use super::search::summarise_stages;
+    use super::lane::summarise_stages;
     let stages = serde_json::json!({
         "lexical":  { "status": "ready" },
         "semantic": { "status": "in_progress" },
