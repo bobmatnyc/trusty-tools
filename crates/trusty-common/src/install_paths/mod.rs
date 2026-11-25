@@ -16,6 +16,12 @@
 //! no YAML dependency.
 //!
 //! Test: `install_paths::tests` (`src/install_paths/tests.rs`).
+//!
+//! [`InstallPaths::resolve`]: crate::install_paths::InstallPaths::resolve
+//! [`PathSource`]: crate::install_paths::PathSource
+//! [`install_file_path`]: crate::install_paths::install_file_path
+//! [`InstallPathsError`]: crate::install_paths::InstallPathsError
+//! [`write_install_file`]: crate::install_paths::write_install_file
 
 mod file;
 
