@@ -86,7 +86,7 @@ fn wont_do(at: &str, note: &str) -> Value {
     json!({
         "kind": "blocker",
         "status": "wont_do",
-        "wont_do": {"at": at, "attempts": 1, "by": "Bob", "note": note},
+        "wont_do": {"at": at, "attempts": 1, "by": "owner", "note": note},
         "version": 2,
     })
 }
@@ -305,5 +305,26 @@ fn window7_ilio_items_raise_no_owner_alert_for_the_live_architect() -> TestResul
     Cycles::new().run(&env)?;
     assert_eq!(fps(&env, "owner_answer")?, ["D0i@2026-11-25T08:22:02.210Z"]);
     assert!(fps(&env, "owner_wont_do")?.is_empty(), "{}", env.log());
+    Ok(())
+}
+
+/// Architect ruling 22:59Z: the parity target is `fleet-poll.py`, whose
+/// dedup (fleet-poll.py:100-102, 1530-1551) never re-raises `owner_answer`.
+/// An answer still pending after 35 one-minute cycles is raised once. Red
+/// before the fix: the Rust dedup re-raised it every 1800 s.
+#[test]
+fn window7_pending_owner_answer_is_raised_once_across_thirty_minutes() -> TestResult {
+    let env = Env::new(&[])?;
+    put(
+        &env,
+        "items",
+        "D0i",
+        &answered("2026-11-25T08:22:02.210Z", "C"),
+    )?;
+    let mut c = Cycles::new();
+    for _ in 0..35 {
+        c.run(&env)?;
+    }
+    assert_eq!(fps(&env, "owner_answer")?, ["D0i@2026-11-25T08:22:02.210Z"]);
     Ok(())
 }
