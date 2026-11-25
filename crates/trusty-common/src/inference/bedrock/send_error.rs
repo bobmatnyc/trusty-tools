@@ -12,6 +12,7 @@ use aws_sdk_bedrockruntime::config::http::HttpResponse;
 use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
 use aws_smithy_types::error::display::DisplayErrorContext;
 
+use super::arn::mask_account_ids;
 use crate::inference::error::BedrockError;
 
 /// Map one failed `send()` of `operation` to a [`BedrockError`].
@@ -21,7 +22,8 @@ use crate::inference::error::BedrockError;
 /// than as an anonymous provider failure.
 /// What: the message is
 /// `"<operation> call failed (model=<model>, region=<region>): <chain>"`, the
-/// text the adapter produced before #10892. Precedence:
+/// text the adapter produced before #10892, with every ARN account id masked.
+/// Precedence:
 /// 1. a `CredentialsError` anywhere in the source chain → `MissingCredential`
 ///    (the SDK reports identity failures as a dispatch failure);
 /// 2. `TimeoutError`, or a dispatch failure the connector marks as a timeout
@@ -34,7 +36,8 @@ use crate::inference::error::BedrockError;
 /// `send_error_dispatch_io_maps_to_transport`,
 /// `send_error_timeouts_map_to_timeout`,
 /// `send_error_credentials_error_maps_to_missing_credential`,
-/// `send_error_construction_failure_maps_to_other`.
+/// `send_error_construction_failure_maps_to_other`,
+/// `send_error_message_masks_arn_account_ids`.
 pub(crate) fn classify_send_error<E>(
     operation: &str,
     model: &str,
@@ -44,10 +47,12 @@ pub(crate) fn classify_send_error<E>(
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let message = format!(
+    // #11865: mask account ids per #9200
+    let message = mask_account_ids(&format!(
         "{operation} call failed (model={model}, region={region}): {}",
         DisplayErrorContext(err)
-    );
+    ))
+    .into_owned();
     if chain_has_credentials_error(err) {
         return BedrockError::MissingCredential(message);
     }
