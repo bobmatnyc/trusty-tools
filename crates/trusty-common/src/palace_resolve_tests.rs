@@ -970,7 +970,7 @@ fn plan_aliases_for_a_repo_with_no_remote() {
 fn plan_aliases_when_folder_differs_from_repo_name() {
     let _guard = EnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
         eprintln!("skipping plan_aliases_when_folder_differs_from_repo_name: git unavailable");
         return;
@@ -993,7 +993,7 @@ fn plan_aliases_when_folder_differs_from_repo_name() {
 fn plan_exists_when_the_resolved_palace_exists() {
     let _guard = EnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
         eprintln!("skipping plan_exists_when_the_resolved_palace_exists: git unavailable");
         return;
@@ -1018,7 +1018,7 @@ fn plan_exists_when_the_resolved_palace_exists() {
 fn plan_creates_when_neither_palace_exists() {
     let _guard = EnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
         eprintln!("skipping plan_creates_when_neither_palace_exists: git unavailable");
         return;
@@ -1039,7 +1039,7 @@ fn plan_creates_when_neither_palace_exists() {
 fn plan_never_aliases_a_palace_to_itself() {
     let _guard = EnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "acme-my-repo", remote) else {
         eprintln!("skipping plan_never_aliases_a_palace_to_itself: git unavailable");
         return;
@@ -1110,7 +1110,7 @@ fn plan_rejects_a_start_with_no_project_dir() {
 #[serial_test::serial]
 fn plan_never_aliases_an_env_or_pin_choice() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
         eprintln!("skipping plan_never_aliases_an_env_or_pin_choice: git unavailable");
         return;
@@ -1183,7 +1183,7 @@ fn plan_is_the_same_from_a_worktree_and_its_main_checkout() {
 fn plan_refuses_when_a_lookup_fails() {
     let _guard = EnvGuard::clear();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
         eprintln!("skipping plan_refuses_when_a_lookup_fails: git unavailable");
         return;
@@ -1212,7 +1212,7 @@ fn plan_refuses_when_a_lookup_fails() {
 #[serial_test::serial]
 fn project_plan_ignores_the_process_palace_env() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let remote = Some("git@example.com:Acme/My_Repo.git");
     let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
         eprintln!("skipping project_plan_ignores_the_process_palace_env: git unavailable");
         return;

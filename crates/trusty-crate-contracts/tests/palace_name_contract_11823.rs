@@ -55,7 +55,7 @@ async fn tctl_palace_name_is_accepted_by_the_daemon() {
     let pinned = repo(
         tmp.path(),
         "pinned-dir",
-        Some("git@github.com:acme/widget.git"),
+        Some("git@example.com:acme/widget.git"),
     );
     std::fs::create_dir_all(pinned.join(".trusty-tools")).expect("pin dir");
     std::fs::write(
@@ -68,7 +68,7 @@ async fn tctl_palace_name_is_accepted_by_the_daemon() {
             repo(
                 tmp.path(),
                 "My_Repo",
-                Some("git@github.com:Acme/My_Repo.git"),
+                Some("git@example.com:Acme/My_Repo.git"),
             ),
             "acme-my-repo",
         ),

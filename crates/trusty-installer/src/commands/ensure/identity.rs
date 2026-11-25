@@ -136,7 +136,7 @@ pub(crate) mod tests {
     /// Test: This is the test.
     #[test]
     fn palace_name_for_reads_pin() {
-        let (_tmp, root) = git_project("checkout-dir", Some("git@github.com:acme/widget.git"));
+        let (_tmp, root) = git_project("checkout-dir", Some("git@example.com:acme/widget.git"));
         write_pin(&root, "schema_version: 1\npalace: pinned-name\n");
         assert_eq!(resolve_isolated(&root).expect("resolves"), "pinned-name");
     }

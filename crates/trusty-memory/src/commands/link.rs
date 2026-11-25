@@ -251,7 +251,12 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         for args in [
             vec!["init", "-q"],
-            vec!["remote", "add", "origin", "git@github.com:Acme/My_Repo.git"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "git@example.com:Acme/My_Repo.git",
+            ],
         ] {
             let out = std::process::Command::new("git")
                 .args(&args)
