@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use trusty_mpm::core::build_lease::keep_guard::{CheckoutLock, lock_for_checkout};
 use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, checkout_root, invalidate_if_checkout_changed, workspace_packages,
 };
@@ -136,6 +137,53 @@ fn slot_dir(
     Ok(dir.display().to_string())
 }
 
+/// Lock a kept `CARGO_TARGET_DIR` for this checkout and clear another
+/// checkout's fingerprints in it (#11661).
+///
+/// Why: a slot is guarded in [`slot_dir`]; a [`TargetPlan::Keep`] directory
+/// was not, so two worktrees pinning one directory could hand each other's
+/// test binaries to a gate. What: `Ok(None)` for every other plan;
+/// `Ok(Some(lock))` holds the directory until the build exits; `Err` names
+/// why the build must not run there.
+/// Test: `a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661`.
+pub(super) fn guard_kept_dir(
+    plan: &TargetPlan,
+    cwd: &Path,
+    wait: Duration,
+) -> Result<Option<CheckoutLock>, String> {
+    let TargetPlan::Keep(dir) = plan else {
+        return Ok(None);
+    };
+    let root = checkout_root(cwd);
+    let (lock, invalidation) = tokio::task::block_in_place(|| {
+        lock_for_checkout(Path::new(dir), &root, wait, || workspace_packages(&root))
+    })?;
+    report_cleared(Path::new(dir), &invalidation);
+    Ok(Some(lock))
+}
+
+/// Name a clear on stderr; nothing for an unchanged checkout.
+fn report_cleared(dir: &Path, invalidation: &Invalidation) {
+    if let Invalidation::Cleared {
+        previous,
+        removed,
+        all,
+    } = invalidation
+    {
+        eprintln!(
+            "tm build-lease: {} last built {}; cleared {removed} {} fingerprint(s) so this \
+             checkout's crates rebuild instead of reading as Fresh (#8261).",
+            dir.display(),
+            previous.as_deref().unwrap_or("an unrecorded checkout"),
+            if *all {
+                "(ALL — the package list was unreadable)"
+            } else {
+                "workspace-package"
+            },
+        );
+    }
+}
+
 /// Clear the slot's workspace fingerprints when it last built another checkout.
 ///
 /// Why: see `trusty_mpm::core::build_lease::stale_guard` — without this a
@@ -147,24 +195,6 @@ fn guard_against_stale_builds(slot_dir: &Path, cwd: &Path) -> Result<(), String>
     let result = tokio::task::block_in_place(|| {
         invalidate_if_checkout_changed(slot_dir, &root, || workspace_packages(&root))
     });
-    match result {
-        Ok(Invalidation::Cleared {
-            previous,
-            removed,
-            all,
-        }) => eprintln!(
-            "tm build-lease: slot {} last built {}; cleared {removed} {} fingerprint(s) so this \
-             checkout's crates rebuild instead of reading as Fresh (#8261).",
-            slot_dir.display(),
-            previous.as_deref().unwrap_or("an unrecorded checkout"),
-            if all {
-                "(ALL — the package list was unreadable)"
-            } else {
-                "workspace-package"
-            },
-        ),
-        Ok(_) => {}
-        Err(err) => return Err(err),
-    }
+    report_cleared(slot_dir, &result?);
     Ok(())
 }

@@ -117,6 +117,10 @@ pub mod slots;
 pub mod stale_guard;
 pub mod store;
 pub mod target_dir;
+// #11661: a `cargo test` target that filtered out every test unasked fails.
+pub mod test_summary;
+// #11661: a pinned target directory gets the slot's stale-checkout guard.
+pub mod keep_guard;
 
 /// The exit code `tm build-lease` returns when it does not run the build:
 /// no slot freed in time, or no lease can be taken (#8261).

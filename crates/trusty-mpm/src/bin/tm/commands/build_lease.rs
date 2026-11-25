@@ -58,7 +58,7 @@ use trusty_mpm::core::harness_root::linked_worktree_owner;
 
 use super::build_lease_spawn::{Lease, exit_with, spawn_and_wait, write_record};
 use super::build_lease_status::{print_census, print_status};
-use super::build_lease_target::{announce_slot, target_dir};
+use super::build_lease_target::{announce_slot, guard_kept_dir, target_dir};
 use super::build_lease_where::print_where;
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
@@ -287,7 +287,11 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             decision,
         } => {
             warn_degraded(&decision);
-            let target = match target_dir(&target_plan, guard.slot(), &cwd, wait) {
+            // #11661: a kept directory gets the slot's stale-checkout guard.
+            let kept = target_dir(&target_plan, guard.slot(), &cwd, wait).and_then(|target| {
+                guard_kept_dir(&target_plan, &cwd, wait).map(|lock| (target, lock))
+            });
+            let (target, _kept_lock) = match kept {
                 Ok(target) => target,
                 Err(why) => {
                     // #8261 (owner ruling 2026-09-21): an unsafe target never admits.
@@ -365,6 +369,9 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 &[],
             )
             .await;
+            // #11661: unleased, a kept directory is still guarded.
+            let _kept_lock = guard_kept_dir(&target_plan, &cwd, wait)
+                .unwrap_or_else(|why| refuse(&format!("not running the build — {why}")));
             exit_with(spawn_and_wait(&args.command, None, pinned.as_deref(), None).await)
         }
         Outcome::TimedOut { decision, holders } => {
