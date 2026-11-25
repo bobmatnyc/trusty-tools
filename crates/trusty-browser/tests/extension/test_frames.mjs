@@ -26,7 +26,8 @@ const found = (origin, matches) => ({origin, matches:matches.map(m => ({...m, in
 // CDP commands a trusted click sent. #11808: an injected action types into `f.value`, and a trailing newline
 // submits it, which sets the frame's text to "Echo: <value>". `cdp` shapes the top session's DOM: `owners`
 // are the <iframe> nodes ({node, frame, url}), `quad` the owner's content quad, `at` the hit-tested node, and
-// `hit` whether the child's witness saw the trusted click.
+// `hit` whether the child's witness saw the trusted click. `moving` lists the quads read before `quad`, the
+// owner still scrolling.
 function browser({frames, allowed = [TOP + "/*"], injected = null, cdp = {}}) {
   const calls = [], gone = new Set(), input = [];
   const view = {owners:[{node:50, frame:"F7", url:CHILD + "/"}], quad:[100, 200, 500, 200, 500, 500, 100, 500],
@@ -35,7 +36,7 @@ function browser({frames, allowed = [TOP + "/*"], injected = null, cdp = {}}) {
     "DOM.getDocument":() => ({root:{nodeName:"#document", children:view.owners.map(o =>
       ({nodeName:"IFRAME", backendNodeId:o.node, frameId:o.frame}))}}),
     "Page.getFrameTree":() => ({frameTree:{frame:{id:"TOP", url:TOP + "/"}}}),
-    "DOM.getBoxModel":() => ({model:{content:view.quad}}),
+    "DOM.getBoxModel":() => ({model:{content:view.moving?.length ? view.moving.shift() : view.quad}}),
     "DOM.getNodeForLocation":() => view.at,
   };
   const byDoc = new Map(frames.map(f => [f.document, f]));
@@ -380,6 +381,24 @@ test("a trusted click in a child frame lands at the top-frame point", async () =
   const tp = turned.input.find(([m, p]) => m === "Input.dispatchMouseEvent" && p.type === "mousePressed")[1];
   assert.deepEqual([tp.x, tp.y], [Math.round(100 + 200 * 10 / 400 - 50 * 20 / 300),
     Math.round(200 + 100 * 10 / 400 + 100 * 20 / 300)]);
+});
+
+// #11808: the child's scrollIntoView scrolls the top after the first box-model read; the click aims at the
+// quad only once it holds still, never at one the scroll already moved.
+test("a click waits for a scrolling owner to hold still", async () => {
+  const moved = [100, 261, 500, 261, 500, 561, 100, 561];
+  const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"], cdp:{moving:[moved]}});
+  const cmds = commands(b);
+  const reply = plain(await act(cmds, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(cmds)));
+  assert.deepEqual(reply.result, {document:"D0", frame:{id:7, origin:CHILD}});
+  const press = b.input.find(([m, p]) => m === "Input.dispatchMouseEvent" && p.type === "mousePressed")[1];
+  assert.deepEqual([press.x, press.y], [110, 220]);
+  // An owner that never holds still is not clicked.
+  const still = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"],
+    cdp:{moving:Array.from({length:20}, (_, i) => [100, 200 + i, 500, 200 + i, 500, 500 + i, 100, 500 + i])}});
+  const sc = commands(still);
+  await failed(act(sc, "page_click", {ref:"7:22.1", dialog:"dismiss"}, await lease(sc)), "Obscured");
+  assert.ok(!still.input.some(([m]) => m === "Input.dispatchMouseEvent"));
 });
 
 test("a click is refused when the owner is ambiguous, covered or unconfirmed", async () => {

@@ -807,7 +807,7 @@ TrustyPages.commands = deps => {
     let hit;
     try {
       [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[target]}, func,
-        args:args(frame ? frame.local : req.ref)});
+        args:args(frame ? frame.childRef : req.ref)});
     } catch {
       if (frame) throw await frameActs.lost(req, frame);
       const now = await probe(req.tab);
@@ -917,7 +917,7 @@ TrustyPages.commands = deps => {
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[target]},
-          func:pageTarget, args:[frame ? frame.local : req.ref]});
+          func:pageTarget, args:[frame ? frame.childRef : req.ref]});
       } catch {
         if (frame) throw await frameActs.lost(req, frame);
         const now = await probe(req.tab);

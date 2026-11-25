@@ -255,6 +255,7 @@ def test_click_in_a_granted_child_frame_lands_trusted(site, tmp_path):
     def body(ask, child):
         top, probe = find(ask, "Trusted probe")
         clicked = ask("page_click", {"document": top, "ref": probe["ref"], "dialog": "dismiss"})
+        assert "result" in clicked, clicked
         assert clicked["result"]["frame"]["origin"] == f"https://b.test:{site}", clicked
         child.wait_for_selector("text=clicked trusted=true", timeout=3000)
     browse(tmp_path, site, ["a.test", "b.test"], body, "/form")
@@ -289,6 +290,7 @@ def test_click_is_not_redirected_by_a_page_relaying_messages(site, tmp_path):
     def body(ask, child):
         top, probe = find(ask, "Trusted probe")
         clicked = ask("page_click", {"document": top, "ref": probe["ref"], "dialog": "dismiss"})
+        assert "result" in clicked, clicked
         assert clicked.get("result", {}).get("frame", {}).get("origin") == f"https://b.test:{site}", clicked
         child.wait_for_selector("text=clicked trusted=true", timeout=3000)
         log = child.page.evaluate("document.getElementById('log').textContent")
@@ -301,6 +303,7 @@ def test_click_lands_in_a_transformed_child_frame(site, tmp_path):
     def body(ask, child):
         top, probe = find(ask, "Trusted probe")
         clicked = ask("page_click", {"document": top, "ref": probe["ref"], "dialog": "dismiss"})
+        assert "result" in clicked, clicked
         assert clicked.get("result", {}).get("frame", {}).get("origin") == f"https://b.test:{site}", clicked
         child.wait_for_selector("text=clicked trusted=true", timeout=3000)
     browse(tmp_path, site, ["a.test", "b.test"], body, "/transformed")

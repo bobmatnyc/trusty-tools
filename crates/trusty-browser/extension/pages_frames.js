@@ -30,6 +30,9 @@ globalThis.TrustyFrameActs = (() => {
   // #11808: the frame-scoped ref grammar a read hands out (pages.js FRAME_REF).
   const FRAME_REF = /^([0-9]{1,9}):([0-9]{1,9}\.[0-9]{1,6})$/;
   const bare = url => String(url ?? "").split("#")[0];
+  // Resolves after two drawn frames, or after 200 ms where the tab draws none.
+  const SETTLE = "new Promise(done => { requestAnimationFrame(() => requestAnimationFrame(done)); " +
+    "setTimeout(done, 200); })";
   // The <iframe>/<frame> owners the top debugger session sees: the top document and same-process documents.
   function owners(node, out = []) {
     if ((node?.nodeName === "IFRAME" || node?.nodeName === "FRAME") && typeof node.frameId === "string") {
@@ -51,15 +54,16 @@ globalThis.TrustyFrameActs = (() => {
   // What: `of(req)` answers null for a top-document ref. For a frame ref it re-probes the top (DocumentChanged
   //   when it moved), looks up the child a read recorded under the same top document (StaleElement when none),
   //   re-checks the child origin's permission (PermissionNeeded naming the frame) and answers
-  //   {id, local, document, origin}. `tag` adds `frame` to any later refusal. `lost` turns a failed injection
+  //   {id, childRef, document, origin}. `tag` adds `frame` to any later refusal. `lost` turns a failed injection
   //   into StaleElement (the child is gone; nothing ran) or OutcomeUnknown. `locate` maps a child point to
   //   top-frame CSS pixels through CDP: the one owner whose frame URL is the child's, its transformed content
-  //   quad, and a CDP hit test; any doubt answers Obscured. `watch`/`witnessed` confirm a trusted pointer event
-  //   reached the target in the child.
+  //   quad once it holds still across drawn frames, and a CDP hit test; any doubt answers Obscured.
+  //   `watch`/`witnessed` confirm a trusted pointer event reached the target in the child.
   // Test: tests/extension/test_frames.mjs `a granted child frame is typed into, submitted and read back`,
   //   `an action on a child origin without permission is refused and never reaches the top`,
   //   `a trusted click in a child frame lands at the top-frame point`,
-  //   `a click is refused when the owner is ambiguous, covered or unconfirmed`.
+  //   `a click is refused when the owner is ambiguous, covered or unconfirmed`,
+  //   `a click waits for a scrolling owner to hold still`.
   function worker({refuse, probe, granted, frameDocs, frameKey, pageProbe}) {
     const named = frame => ({id:frame.id, origin:frame.origin});
     async function of(req) {
@@ -71,7 +75,7 @@ globalThis.TrustyFrameActs = (() => {
       }
       const known = frameDocs.get(frameKey(req.tab, match[1]));
       if (!known || known.top !== req.document) throw refuse("StaleElement", {tab:req.tab});
-      const frame = {id:Number(match[1]), local:match[2], document:known.document, origin:known.origin};
+      const frame = {id:Number(match[1]), childRef:match[2], document:known.document, origin:known.origin};
       if (!await granted(known.origin)) {
         throw refuse("PermissionNeeded", {tab:req.tab, origin:known.origin, frame:named(frame)});
       }
@@ -114,9 +118,23 @@ globalThis.TrustyFrameActs = (() => {
       const [owner] = hits;
       await cdp("DOM.scrollIntoViewIfNeeded", {backendNodeId:owner.node,
         rect:{x:point.x, y:point.y, width:1, height:1}}).catch(() => {});
-      let q;
-      try { q = (await cdp("DOM.getBoxModel", {backendNodeId:owner.node})).model.content; } catch { throw blocked(); }
-      if (!Array.isArray(q) || q.length !== 8 || !q.every(Number.isFinite)) throw blocked();
+      const quad = async () => {
+        let content;
+        try { content = (await cdp("DOM.getBoxModel", {backendNodeId:owner.node})).model.content; }
+        catch { throw blocked(); }
+        if (!Array.isArray(content) || content.length !== 8 || !content.every(Number.isFinite)) throw blocked();
+        return content;
+      };
+      // #11808: the child's scrollIntoView scrolls the top asynchronously, and the browser routes input to the
+      //   child by the last frame it drew, so the quad is aimed at only once it holds still across drawn frames.
+      let q = await quad();
+      for (let tries = 0; ; tries++) {
+        await cdp("Runtime.evaluate", {expression:SETTLE, awaitPromise:true}).catch(() => {});
+        const next = await quad();
+        if (next.every((v, i) => v === q[i])) break;
+        if (tries >= 8) throw blocked();
+        q = next;
+      }
       // A perspective transform leaves no parallelogram, and no affine map from the child's viewport.
       if (Math.abs(q[0] + q[4] - q[2] - q[6]) > 1 || Math.abs(q[1] + q[5] - q[3] - q[7]) > 1) throw blocked();
       const fx = point.x / point.vw, fy = point.y / point.vh;
@@ -134,7 +152,7 @@ globalThis.TrustyFrameActs = (() => {
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[frame.document]},
-          func:pageWitness, args:[frame.local, nonce]});
+          func:pageWitness, args:[frame.childRef, nonce]});
       } catch { throw await lost(req, frame); }
       if (hit?.result?.error === "StaleElement") throw refuse("StaleElement", {tab:req.tab});
       if (hit?.result?.ok !== true) throw refuse("OutcomeUnknown");
