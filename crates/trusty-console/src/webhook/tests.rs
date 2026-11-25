@@ -884,7 +884,7 @@ async fn retry_sweep_reports_an_orphaned_entry_without_deleting_it() {
 fn router_for(ingress: WebhookIngress) -> axum::Router {
     crate::server::build_router_with_webhooks(
         crate::server::AppState::new(Vec::new()),
-        crate::routes::origin_guard::SelfOrigins::default(),
+        crate::routes::origin_guard::WriteOrigins::default(),
         ingress,
     )
 }
