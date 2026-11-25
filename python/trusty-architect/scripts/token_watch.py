@@ -33,6 +33,7 @@ ROOT = os.path.dirname(HERE)
 
 if HERE not in sys.path:     # python3 -I drops the script directory
     sys.path.insert(0, HERE)
+import architect_config  # noqa: E402
 from token_watch_rules import (  # noqa: E402,F401  (#10571 S1: split for the 500-SLOC cap; re-exported)
     COOLDOWN, DEFAULTS, FIRED_TTL, LOOKBACK, POLL_RE, PRICE, SESSION_DIR_RE, UNPRICED, ScanRules,
     _load_ctx_bar, ctx_bar, effort_of, family, hour_fp, hour_of, new_state, parse_since, parse_ts,
@@ -43,10 +44,10 @@ INBOX = os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ROOT, "inbox")
 STATE_PATH = os.path.join(INBOX, "token-watch-state.json")
 HOURLY_PATH = os.path.join(ROOT, "local", "usage", "token-hourly.jsonl")
 THRESHOLDS_PATH = os.path.join(ROOT, "local", "usage", "token-thresholds.json")
-TRANSCRIPT_BASE = os.environ.get("TRANSCRIPT_BASE") or os.path.expanduser(
-    "~/.trusty-tools/trusty-mpm/claude-config/projects")
-SESSIONS_DIR = os.environ.get("SESSIONS_DIR") or os.path.expanduser(
-    "~/.trusty-tools/trusty-mpm/claude-config/sessions")
+# #11821: the default dir comes from architect_config, the one place it is spelled.
+_CLAUDE_DIR = os.path.expanduser(architect_config.DEFAULT_CLAUDE_CONFIG_DIR)
+TRANSCRIPT_BASE = os.environ.get("TRANSCRIPT_BASE") or os.path.join(_CLAUDE_DIR, "projects")
+SESSIONS_DIR = os.environ.get("SESSIONS_DIR") or os.path.join(_CLAUDE_DIR, "sessions")
 
 BUDGET_S = 20.0            # hard cap per scan; resumes next cycle
 READ_CAP = 16 * 1024 * 1024

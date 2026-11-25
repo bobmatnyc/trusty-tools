@@ -15,7 +15,7 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INBOX="${SUPERVISOR_INBOX_DIR:-$HERE/../inbox}"
-CJ="${USAGE_CLAUDE_JSON:-${CLAUDE_CONFIG_DIR:-$HOME/.trusty-tools/trusty-mpm/claude-config}/.claude.json}"
+CJ="${USAGE_CLAUDE_JSON:-${CLAUDE_CONFIG_DIR:-$HOME/.trusty-tools/trusty-mpm/claude-config}/.claude.json}"  # path-literal: allow (fallback only: tm launches Claude Code with CLAUDE_CONFIG_DIR set)
 TM="${TM_BIN:-$HOME/.cargo/bin/tm}"
 payload=$(cat)
 case "$payload" in
