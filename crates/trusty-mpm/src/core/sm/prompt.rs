@@ -116,7 +116,8 @@ pub fn assemble_sm_prompt(content: &FrameworkContent, harness: &HarnessDoc) -> S
 /// else `None` (the caller then assembles the bundled prompt unconditionally).
 /// Test: `sm_override_dir_under_home`.
 pub fn sm_override_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".trusty-mpm").join(SM_OVERRIDE_SUBDIR))
+    // #11821 P3: under the configured config dir; `None` on a broken install.toml.
+    crate::core::config_base::framework_root_dir().map(|root| root.join(SM_OVERRIDE_SUBDIR))
 }
 
 /// Read an override file, returning `Some(trimmed)` only when present and

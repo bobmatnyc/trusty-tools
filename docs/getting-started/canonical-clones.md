@@ -61,7 +61,7 @@ Two cases look similar but are different:
 
 ## Change the root
 
-The default root is `~/trusty-mpm-projects`. To move it, set `workspace_root_template` in `~/.trusty-tools/trusty-mpm/config.yaml`, or export `TRUSTY_MPM_WORKSPACE_ROOT`. The order is `TRUSTY_MPM_REPOS_ROOT`, then `TRUSTY_MPM_WORKSPACE_ROOT`, then `workspace_root_template`, then the default. `TRUSTY_MPM_REPOS_ROOT`, if set, wins over both of the others. See [config-convention.md](../reference/config-convention.md) for the precedence rules.
+The default root is `~/trusty-mpm-projects`. To move it, set `projects_root` in `~/.trusty-tools/install.toml`, set `workspace_root_template` in `~/.trusty-tools/trusty-mpm/config.yaml`, or export `TRUSTY_MPM_WORKSPACE_ROOT`. The order is `TRUSTY_MPM_REPOS_ROOT`, then `TRUSTY_MPM_WORKSPACE_ROOT`, then `install.toml` `projects_root`, then `workspace_root_template`, then the default: environment, then install file, then template, then default. A broken `install.toml` stops the clone with an error instead of using the default. See [config-convention.md](../reference/config-convention.md) for the precedence rules.
 
 ## Next steps
 

@@ -176,7 +176,13 @@ impl PolicySource for LoaderSource {
 pub fn daemon_request(home: Option<PathBuf>) -> LoadRequest {
     let host_path = home
         .as_deref()
-        .map(|h| trusty_common::crate_config::crate_config_path_at(h, "trusty-mpm"))
+        .map(|h| {
+            // #11821 P3: under the configured config dir of `h`.
+            trusty_common::crate_config::crate_config_path_at(
+                &crate::core::config_base::config_base_under(h),
+                "trusty-mpm",
+            )
+        })
         .unwrap_or_default();
     LoadRequest {
         host_path,

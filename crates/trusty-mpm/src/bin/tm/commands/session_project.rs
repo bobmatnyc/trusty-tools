@@ -19,7 +19,8 @@ use trusty_mpm::project::{SessionRegistration, register_session_checkout};
 /// What: `<home>/.trusty-mpm/project-registry`, the directory
 /// `registry_data_dir()` names when `home` is the process home.
 pub(crate) fn registry_dir_under_home(home: &Path) -> PathBuf {
-    let root = trusty_mpm::core::paths::FrameworkPaths::under(home).root;
+    // #11821 P3: the layout of `home`'s install.
+    let root = trusty_mpm::core::paths::FrameworkPaths::under_home(home).root;
     trusty_mpm::project::registry_data_dir_under(&root)
 }
 

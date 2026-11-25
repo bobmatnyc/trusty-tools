@@ -31,7 +31,9 @@ pub(crate) const INBOX_DIR: &str = "inbox";
 
 /// The tm-managed Claude Code settings under `home`, which the hook goes into.
 pub(crate) fn settings_path(home: &Path) -> PathBuf {
-    managed_claude_config_dir_at(home).join("settings.json")
+    // #11821 P3: under the configured config dir of `home`.
+    let base = trusty_mpm::core::config_base::config_base_under(home);
+    managed_claude_config_dir_at(&base).join("settings.json")
 }
 
 /// The line every Skipped outcome prints.
@@ -169,7 +171,9 @@ fn present(
 /// Test: `the_status_row_reports_each_of_the_four_states`,
 /// `a_relative_inbox_points_elsewhere`.
 pub(crate) fn status_check(dir: &Path, home: &Path, exe: Option<&Path>) -> Check {
-    let hook = MpmConfig::load(&home.join(".trusty-mpm")).notification_hook;
+    // #11821 P3: under the configured config dir.
+    let hook = MpmConfig::load(&trusty_mpm::core::config_base::framework_root_under(home))
+        .notification_hook;
     let inbox = dir.join(INBOX_DIR);
     let (ok, detail) = match &hook.inbox {
         _ if !hook.enabled => (false, "off".to_owned()),

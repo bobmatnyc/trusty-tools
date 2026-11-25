@@ -98,7 +98,8 @@ impl PresenceService {
     pub fn live() -> Self {
         let root = dirs::home_dir()
             .filter(|h| h.is_absolute())
-            .map(|h| h.join(".trusty-mpm"));
+            // #11821 P3: under the configured config dir.
+            .map(|h| crate::core::config_base::framework_root_under(&h));
         let source = root.as_deref().map(KeySource::ambient);
         let config = crate::core::config::MpmConfig::load_default().presence;
         Self::new(

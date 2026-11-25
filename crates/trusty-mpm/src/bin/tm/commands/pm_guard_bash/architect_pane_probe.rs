@@ -90,7 +90,8 @@ impl LivePanes {
         Self {
             root: dirs::home_dir()
                 .filter(|home| home.is_absolute())
-                .map(|home| home.join(".trusty-mpm")),
+                // #11821 P3: under the configured config dir.
+                .map(|home| trusty_mpm::core::config_base::framework_root_under(&home)),
             lineage: OnceCell::new(),
             marks: OnceCell::new(),
             deadline: OnceCell::new(),

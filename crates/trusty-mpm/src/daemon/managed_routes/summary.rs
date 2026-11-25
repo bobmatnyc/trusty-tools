@@ -662,8 +662,8 @@ async fn probe_stale_assets(record: SessionRecord, base: PathBuf) -> bool {
 /// `record_to_summary_checked_still_flags_stale_stopped_session` in
 /// `super::tests`.
 pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSummary {
-    // #5040: production resolves the framework base exactly as before.
-    record_to_summary_checked_under(r, crate::core::paths::FrameworkPaths::home_base()).await
+    // #11821 P3: production resolves the framework base from the config dir.
+    record_to_summary_checked_under(r, crate::core::config_base::config_base()).await
 }
 
 /// [`record_to_summary_checked`] with the framework install's base directory
@@ -743,11 +743,11 @@ pub(super) async fn checked_summaries_with(
     records: &[SessionRecord],
     probe_assets: bool,
 ) -> Vec<SessionSummary> {
-    // #5040: production resolves the framework base exactly as before.
+    // #11821 P3: production resolves the framework base from the config dir.
     checked_summaries_with_under(
         records,
         probe_assets,
-        crate::core::paths::FrameworkPaths::home_base(),
+        crate::core::config_base::config_base(),
     )
     .await
 }

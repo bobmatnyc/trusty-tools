@@ -21,7 +21,8 @@ use super::Step;
 
 /// The PM agent tiers under `home` and under the process's home.
 fn reserved(home: &Path) -> Vec<PathBuf> {
-    let mut tiers = reserved_agent_tiers(&FrameworkPaths::under(home));
+    // #11821 P3: the layout of `home`'s install.
+    let mut tiers = reserved_agent_tiers(&FrameworkPaths::under_home(home));
     tiers.extend(reserved_agent_tiers(&FrameworkPaths::default()));
     tiers
 }

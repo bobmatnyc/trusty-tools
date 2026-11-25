@@ -28,8 +28,8 @@ pub(crate) fn rotate_deps_locally(yes: bool) -> anyhow::Result<()> {
         eprintln!("  could not resolve the home directory — nothing was checked");
         return Ok(());
     };
-    let shared_root = home
-        .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+    // #11821 P3: the configured config dir.
+    let shared_root = trusty_mpm::core::config_base::tools_root_under(&home)
         .join(trusty_mpm::core::build_env::CARGO_TARGET_SUBDIR);
     let pool_root = MpmConfig::load_default()
         .builders

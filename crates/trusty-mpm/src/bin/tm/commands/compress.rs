@@ -569,7 +569,10 @@ fn estimate_tokens_from_bytes(bytes: usize) -> u32 {
 /// explicit path rather than calling this resolver.
 pub(crate) fn compression_log_path() -> PathBuf {
     match dirs::home_dir() {
-        Some(home) => home.join(".trusty-mpm").join("compression.jsonl"),
+        // #11821 P3: under the configured config dir.
+        Some(home) => {
+            trusty_mpm::core::config_base::framework_root_under(&home).join("compression.jsonl")
+        }
         None => PathBuf::from(".trusty-mpm").join("compression.jsonl"),
     }
 }

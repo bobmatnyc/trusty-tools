@@ -638,7 +638,8 @@ impl MpmConfig {
     /// a temp dir to [`load`](crate::core::standalone::load)).
     pub fn load_default() -> Self {
         match dirs::home_dir() {
-            Some(home) => Self::load(&home.join(".trusty-mpm")),
+            // #11821 P3: under the configured config dir.
+            Some(home) => Self::load(&crate::core::config_base::framework_root_under(&home)),
             None => {
                 tracing::warn!("home directory unavailable; using default config");
                 Self::default()

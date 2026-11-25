@@ -116,17 +116,19 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     }
     let home = &inputs.home;
     let ws = &inputs.workspace;
+    // #11821 P3: tm's state sits under the configured config dir.
+    let fw = crate::core::config_base::framework_root_under(home);
     let anchors = [
-        home.join(".trusty-mpm/config.toml"),
-        home.join(".trusty-mpm/architect-launch"),
-        home.join(".trusty-mpm/twin/armed"),
+        fw.join("config.toml"),
+        fw.join("architect-launch"),
+        fw.join("twin/armed"),
     ];
     let secrets = [home.join(".ssh"), home.join(".aws"), ws.join(".env")];
     let mut allow_write = vec![
         home.join(".cargo/registry"),
         home.join(".cargo/git"),
         home.join(".npm"),
-        home.join(".trusty-mpm/build-slots"),
+        fw.join("build-slots"),
     ];
     allow_write.extend(inputs.cargo_target_dir.iter().cloned());
     let tmux = (role == SandboxRole::Pm)

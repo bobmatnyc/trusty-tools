@@ -534,7 +534,11 @@ pub fn active_threshold_at(base: &Path) -> ResolvedThreshold {
 /// Test: `an_absent_section_reads_as_no_configured_value`,
 /// `an_unreadable_config_leaves_the_default_in_force`.
 pub(crate) fn read_configured(base: &Path) -> Option<u8> {
-    let path = trusty_common::crate_config::crate_config_path_at(base, CRATE_NAME);
+    // #11821 P3: under the configured config dir of `base`.
+    let path = trusty_common::crate_config::crate_config_path_at(
+        &crate::core::config_base::config_base_under(base),
+        CRATE_NAME,
+    );
     match trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path) {
         Ok(Some(config)) => config.disk.as_ref().and_then(|d| d.max_usage_pct),
         Ok(None) => None,

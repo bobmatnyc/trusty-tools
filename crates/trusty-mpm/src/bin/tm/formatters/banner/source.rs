@@ -86,8 +86,8 @@ impl BannerEnv {
     /// Test: covered indirectly by `banner_source_*` tests.
     fn home_banner_path(&self) -> Option<std::path::PathBuf> {
         self.home.as_ref().map(|h| {
-            std::path::PathBuf::from(h)
-                .join(".trusty-mpm")
+            // #11821 P3: under the configured config dir of that home.
+            trusty_mpm::core::config_base::framework_root_under(std::path::Path::new(h))
                 .join("banner.txt")
         })
     }

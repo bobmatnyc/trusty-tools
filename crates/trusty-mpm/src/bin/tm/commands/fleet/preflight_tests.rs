@@ -304,6 +304,36 @@ fn the_configured_projects_root_is_refused() {
     assert_workspace_parent(s.refused(&root), &root, "projects root");
 }
 
+/// `<home>/.trusty-tools/install.toml` holding `body`.
+fn write_install_file(home: &Path, body: &str) -> PathBuf {
+    let path = trusty_common::install_paths::install_file_path(home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+/// #11821 P3: install.toml's `projects_root` is a candidate root too.
+#[test]
+fn the_install_file_projects_root_is_refused() {
+    let s = Scratch::new();
+    let root = s.outer().join("installed");
+    write_install_file(
+        &s.home(),
+        &format!("projects_root = {:?}\n", root.display().to_string()),
+    );
+    assert_workspace_parent(s.refused(&root), &root, "projects root");
+}
+
+/// #11821 P3 Fail-Open Check: a broken install.toml hides the configured
+/// root, so it refuses instead of checking only the default.
+#[test]
+fn a_broken_install_file_refuses() {
+    let s = Scratch::new();
+    write_install_file(&s.home(), "bogus = 1\n");
+    let refusal = s.refused(&s.home().join("arch"));
+    assert_unresolvable(refusal, "install.toml");
+}
+
 /// Critic M1: `~/.trusty-mpm` holds the `[supervisor] projects` allowlist.
 /// It holds no repository here, so the repository scan cannot refuse it.
 #[test]

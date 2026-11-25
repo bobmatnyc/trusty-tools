@@ -21,8 +21,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::paths::FRAMEWORK_DIR_NAME;
-
 /// The URL a pre-#6288 daemon recorded in its lock file by default.
 ///
 /// Why: since #6288 S3a the daemon binds no TCP port and writes an empty lock
@@ -53,13 +51,13 @@ pub const DEFAULT_CONSOLE_ADDR: &str = "127.0.0.1:7788";
 /// that resolved the URL from a differently-configured environment (or simply
 /// expected the documented `~/.trusty-mpm` location) never found the lock and
 /// fell back to the default port, reporting "daemon unreachable".
-/// What: `~/.trusty-mpm/daemon.lock`, derived from the same `home_dir` +
-/// [`FRAMEWORK_DIR_NAME`] as `FrameworkPaths`.
+/// What: `daemon.lock` under [`FrameworkPaths::default`](crate::core::paths::FrameworkPaths::default)`.root`
+/// (`~/.trusty-mpm` unless the config dir is relocated, #11821).
 /// Test: `lock_file_path_is_under_framework_root`.
 pub fn lock_file_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(FRAMEWORK_DIR_NAME)
+    // #11821 P3: under the configured config dir.
+    crate::core::paths::FrameworkPaths::default()
+        .root
         .join("daemon.lock")
 }
 
@@ -526,6 +524,7 @@ fn read_lock_file_url() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::paths::FRAMEWORK_DIR_NAME;
 
     #[test]
     fn lock_file_path_is_under_framework_root() {

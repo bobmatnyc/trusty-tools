@@ -254,15 +254,30 @@ fn manual_permit_fails_closed_on_a_closed_lane() {
 #[tokio::test]
 #[serial_test::serial]
 async fn the_sweep_skips_an_unresolved_workspace_root() {
+    use crate::daemon::services::{sweep_state_file, sweep_status};
+
     let (state, _dir) = scratch_root_state();
+    // #11821 P3 (P2 delta LOW): the skip records no sweep-status entry either.
+    let marker = sweep_state_file::marker_path(state.framework_root(), sweep_status::RECLAIM_NAME);
+    let before = sweep_status::RECLAIM.last_pass();
     let broken = crate::test_support::broken_install_error();
     assert!(
         !merged_pr_pass(&state, Err(broken)).await,
         "an unresolved workspace root must not run the pass"
+    );
+    assert!(
+        !marker.exists(),
+        "a skipped pass must record no sweep-status marker"
+    );
+    assert_eq!(
+        sweep_status::RECLAIM.last_pass(),
+        before,
+        "a skipped pass must not record a duration"
     );
     let empty_root = tempfile::tempdir().expect("empty workspace root");
     assert!(
         merged_pr_pass(&state, Ok(empty_root.path().to_path_buf())).await,
         "a resolved root runs the pass"
     );
+    assert!(marker.exists(), "a pass that runs records its marker");
 }

@@ -1118,7 +1118,8 @@ impl DaemonState {
         // Hard guard: a test must NEVER bind to the production managed store.
         // Fail loudly here so the culprit test is easy to identify (#1790).
         if let Some(home) = dirs::home_dir() {
-            let prod_root = home.join(".trusty-mpm");
+            // #11821 P3: the configured config dir is the production root.
+            let prod_root = crate::core::config_base::framework_root_under(&home);
             assert_ne!(
                 root, prod_root,
                 "with_root_isolated_managed must NOT point at the production \

@@ -62,7 +62,8 @@ fn check_session_profile_with(
     home: &Path,
     load: impl FnOnce(&Path) -> Result<FrameworkContent, AgentContentError>,
 ) -> DoctorCheck {
-    let config = MpmConfig::load(&home.join(".trusty-mpm"));
+    // #11821 P3: under the configured config dir.
+    let config = MpmConfig::load(&crate::core::config_base::framework_root_under(home));
     let (mut status, mut message) = profile_verdict(project_dir, &config);
     if let Some(project) = project_dir
         && status == CheckStatus::Ok

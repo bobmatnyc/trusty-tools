@@ -21,7 +21,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use trusty_mpm::core::paths::FRAMEWORK_DIR_NAME;
 use trusty_mpm::core::worktree_ledger::WorktreeLedger;
 use trusty_mpm::core::worktree_ledger::backfill::{
     BackfillReport, backfill_checkouts, registered_checkouts,
@@ -131,9 +130,11 @@ pub(crate) async fn collect(
     measure: bool,
     fetch: bool,
 ) -> anyhow::Result<WorktreesReport> {
-    let ledger = WorktreeLedger::under_home(home);
+    // #11821: the backfill writes the ledger, so it fails closed.
+    let ledger = WorktreeLedger::try_under_home(home)?;
     let registry_dir = trusty_mpm::project::worktree_policy::registry_data_dir_under(
-        &home.join(FRAMEWORK_DIR_NAME),
+        // #11821 P3: under the configured config dir.
+        &trusty_mpm::core::config_base::framework_root_under(home),
     );
     let (report, registry_error) = match registered_checkouts(&registry_dir).await {
         Ok(checkouts) => {

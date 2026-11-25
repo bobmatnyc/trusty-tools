@@ -124,7 +124,8 @@ pub(crate) async fn doctor(
         let check = trusty_mpm::core::standalone::hooks::notification::notification_hook_row(
             &dir.join("settings.json"),
             None,
-            &home.join(".trusty-mpm"),
+            // #11821 P3: the configured config dir.
+            &trusty_mpm::core::config_base::framework_root_under(&home),
         );
         overall = overall.worst(check.status);
         print_check(&check);
