@@ -21,7 +21,7 @@ use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 
 // #11529, #11284, #11371, #11808: re-pinned for the changed worker.js and pages*.js (and the manifest stamp
 // they feed); #11808 adds pages_frames.js.
-const PY_SIGNATURE: &str = "dd48f85de7d93405cefe7b28ca1646b04d38c935aa56eb7bc117dadd5cb64045";
+const PY_SIGNATURE: &str = "d2544c740b32cff7d25f3594ccfa88643eda6b5d56cfa22aef97ba3fbdb3cf69";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";
