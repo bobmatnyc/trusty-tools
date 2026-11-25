@@ -220,6 +220,10 @@ impl CommandExecutor {
             Err(err) => return err,
         };
         match self.client().send_to_managed_session(&id, text).await {
+            // #11796: never print `sent` for a body that says it was not.
+            Ok(resp) if !resp.sent => {
+                CommandResult::Error(format!("send failed: daemon reported sent=false for {id}"))
+            }
             Ok(resp) => CommandResult::ManagedSent {
                 id,
                 tmux_name: resp.tmux_name,
