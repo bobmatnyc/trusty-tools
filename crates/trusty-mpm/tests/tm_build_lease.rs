@@ -1882,3 +1882,51 @@ fn an_unleased_build_in_a_kept_target_dir_is_still_guarded_11661() {
         "an unrecorded checkout's fingerprints are cleared: {err}"
     );
 }
+
+/// #11661 (Architect ruling 23:30Z): a build outside the lease, from another
+/// checkout, rewrites a unit's fingerprint in a kept directory whose marker
+/// still names checkout A. A's next lease must not trust the marker alone:
+/// the seal its last lease wrote no longer matches, so it clears. A lease
+/// after only A's own leased builds clears nothing.
+#[test]
+fn an_unleased_build_of_another_checkout_cannot_pass_as_this_one_11661() {
+    let home = home_with_ceiling(2, "");
+    let a = home.path().join("a");
+    git_repo(&a, None);
+    let kept = home.path().join("kept-target");
+    let unit = kept.join("debug/.fingerprint/widget-0123456789abcdef");
+    let file = unit.join("lib-widget");
+    let lease = |build: &[String]| {
+        let out = build_lease(home.path())
+            .current_dir(&a)
+            .env("CARGO_TARGET_DIR", &kept)
+            .args(["--wait-secs", "3", "--"])
+            .args(build)
+            .output()
+            .expect("run");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        stderr(&out)
+    };
+    // A's leased build writes the unit's fingerprint.
+    let build = format!(
+        "mkdir -p '{}' && printf 0123456789abcdef > '{}'",
+        unit.display(),
+        file.display()
+    );
+    lease(&["sh".into(), "-c".into(), build]);
+    assert!(file.exists(), "A's build wrote its fingerprint");
+    let err = lease(&["true".into()]);
+    assert!(
+        file.exists(),
+        "no spurious clear after A's own lease: {err}"
+    );
+    // Checkout B rebuilds the unit with no lease: same name and size, new mtime.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&file, "0123456789abcdef").expect("B's unleased build");
+    let err = lease(&["true".into()]);
+    assert!(
+        !file.exists(),
+        "A's next lease clears what the unleased build wrote: {err}"
+    );
+    assert!(err.contains("changed since"), "the reason is named: {err}");
+}

@@ -58,7 +58,7 @@ use trusty_mpm::core::harness_root::linked_worktree_owner;
 
 use super::build_lease_spawn::{Lease, exit_with, spawn_and_wait, write_record};
 use super::build_lease_status::{print_census, print_status};
-use super::build_lease_target::{announce_slot, guard_kept_dir, target_dir};
+use super::build_lease_target::{announce_slot, guard_kept_dir, seal_after_build, target_dir};
 use super::build_lease_where::print_where;
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
@@ -338,6 +338,8 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 }),
             )
             .await;
+            // #11661: seal while the slot (or kept-dir lock) is still held.
+            seal_after_build(&target_plan, target.as_deref(), &cwd);
             drop(guard);
             exit_with(status)
         }
@@ -372,7 +374,9 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             // #11661: unleased, a kept directory is still guarded.
             let _kept_lock = guard_kept_dir(&target_plan, &cwd, wait)
                 .unwrap_or_else(|why| refuse(&format!("not running the build — {why}")));
-            exit_with(spawn_and_wait(&args.command, None, pinned.as_deref(), None).await)
+            let status = spawn_and_wait(&args.command, None, pinned.as_deref(), None).await;
+            seal_after_build(&target_plan, None, &cwd);
+            exit_with(status)
         }
         Outcome::TimedOut { decision, holders } => {
             post_decision(

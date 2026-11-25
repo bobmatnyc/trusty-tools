@@ -60,6 +60,11 @@ fn a_different_checkout_clears_only_workspace_fingerprints() {
 fn the_same_checkout_touches_nothing() {
     let slot = slot();
     std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
+    // #11661: the same checkout is trusted only once its lease sealed it.
+    assert_eq!(
+        super::super::marker_seal::seal_marker(slot.path(), Path::new("/wt/a")),
+        Ok(true)
+    );
     let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/a"), || {
         panic!("the package list is not needed for the same checkout")
     })
@@ -69,6 +74,22 @@ fn the_same_checkout_touches_nothing() {
         slot.path(),
         "debug/.fingerprint/trusty-mpm-0123456789abcdef"
     ));
+}
+
+/// #11661: a marker naming this checkout with no seal — the old format, or a
+/// lease that never sealed — clears like another checkout's.
+#[test]
+fn an_unsealed_same_checkout_clears() {
+    let slot = slot();
+    std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
+    let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/a"), || {
+        Ok(vec!["trusty-mpm".into()])
+    })
+    .expect("cleared");
+    assert!(
+        matches!(&got, Invalidation::Cleared { removed: 3, previous: Some(p), .. } if p.contains("no seal")),
+        "{got:?}"
+    );
 }
 
 #[test]

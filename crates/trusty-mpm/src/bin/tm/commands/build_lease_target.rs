@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use trusty_mpm::core::build_lease::keep_guard::{CheckoutLock, lock_for_checkout};
+use trusty_mpm::core::build_lease::marker_seal::seal_marker;
 use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, checkout_root, invalidate_if_checkout_changed, workspace_packages,
 };
@@ -160,6 +161,32 @@ pub(super) fn guard_kept_dir(
     })?;
     report_cleared(Path::new(dir), &invalidation);
     Ok(Some(lock))
+}
+
+/// Seal the target directory's last-checkout marker once the build ended.
+///
+/// Why (#11661): the next lease of this checkout trusts the directory only
+/// while the seal matches its fingerprints, so a build outside the lease
+/// cannot pass as this checkout. What: the slot directory, or the kept one;
+/// nothing for cargo's own `./target`. A failure is named on stderr and
+/// leaves the marker unsealed or stale, so the next lease clears.
+/// Test: `an_unleased_build_of_another_checkout_cannot_pass_as_this_one_11661`.
+pub(super) fn seal_after_build(plan: &TargetPlan, target: Option<&str>, cwd: &Path) {
+    let dir = match plan {
+        TargetPlan::Keep(dir) => Some(dir.as_str()),
+        TargetPlan::Slot { .. } | TargetPlan::UnsetSlot { .. } => target,
+        _ => None,
+    };
+    let Some(dir) = dir else {
+        return;
+    };
+    let root = checkout_root(cwd);
+    if let Err(why) = tokio::task::block_in_place(|| seal_marker(Path::new(dir), &root)) {
+        eprintln!(
+            "tm build-lease: WARNING could not seal {dir} ({why}); the next lease there clears \
+             this checkout's fingerprints (#11661)."
+        );
+    }
 }
 
 /// Name a clear on stderr; nothing for an unchanged checkout.

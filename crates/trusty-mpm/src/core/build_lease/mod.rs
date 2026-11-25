@@ -121,6 +121,8 @@ pub mod target_dir;
 pub mod test_summary;
 // #11661: a pinned target directory gets the slot's stale-checkout guard.
 pub mod keep_guard;
+// #11661: a sealed marker, so a build outside the lease cannot pass as its checkout.
+pub mod marker_seal;
 
 /// The exit code `tm build-lease` returns when it does not run the build:
 /// no slot freed in time, or no lease can be taken (#8261).

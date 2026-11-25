@@ -7,13 +7,13 @@
 //! gate can run the first one's test binary and report green.
 //! What: [`lock_for_checkout`] holds a `flock` on [`CHECKOUT_LOCK`] inside
 //! the directory for the build's whole life, retried until the lease wait
-//! ends. A lease from the checkout the marker names takes it SHARED, so
-//! builds of one checkout run side by side as before. Any other lease takes it
-//! EXCLUSIVE — so it waits for every holder — runs
-//! [`invalidate_if_checkout_changed`] exactly as a slot does, then downgrades
-//! to shared. A directory a build outside any lease is compiling in (cargo's
-//! lock held) while it last built another checkout is refused: its
-//! fingerprints cannot be cleared safely.
+//! ends. A lease that finds no holder takes it EXCLUSIVE, runs
+//! [`invalidate_if_checkout_changed`] exactly as a slot does (the marker's
+//! seal, [`super::marker_seal`]), then downgrades to shared. A lease from the
+//! checkout the marker names joins a live holder SHARED, so builds of one
+//! checkout run side by side as before; any other lease waits for every
+//! holder. A directory a build outside any lease is compiling in (cargo's
+//! lock held) is refused: what it writes cannot be verified or cleared.
 //! Test: `a_kept_dir_last_built_by_another_checkout_is_cleared`,
 //! `a_kept_dir_held_by_another_lease_is_refused_naming_its_checkout`,
 //! `two_leases_of_one_checkout_share_a_kept_dir`,
@@ -26,9 +26,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::stale_guard::{
-    Invalidation, LAST_CHECKOUT_MARKER, cargo_lock_held, invalidate_if_checkout_changed,
-};
+use super::stale_guard::{Invalidation, cargo_lock_held, invalidate_if_checkout_changed};
 
 /// The lock file a lease holds inside a kept target directory.
 pub const CHECKOUT_LOCK: &str = ".trusty-checkout.lock";
@@ -72,21 +70,14 @@ pub fn lock_for_checkout(
     let ours = |dir: &Path| last_checkout(dir).as_deref() == Some(current.as_str());
     let deadline = Instant::now() + wait;
     loop {
-        if ours(dir) {
-            // #11661: the marker only changes under the exclusive lock, so a
-            // shared holder that still reads its own checkout is safe.
-            if try_flock(&file, libc::LOCK_SH) {
-                if ours(dir) {
-                    return Ok((CheckoutLock { _file: file }, Invalidation::SameCheckout));
-                }
-                try_flock(&file, libc::LOCK_UN);
-            }
-        } else if try_flock(&file, libc::LOCK_EX) {
+        if try_flock(&file, libc::LOCK_EX) {
+            // #11661: no lease holds the directory, so it is verified — the
+            // marker's seal — or cleared, never trusted on the marker alone.
             if cargo_lock_held(dir) {
                 return Err(format!(
-                    "CARGO_TARGET_DIR={} is being compiled by a build outside the lease, and it \
-                     last built {}, not {current}; its fingerprints cannot be cleared while that \
-                     build runs, so this checkout's crates could read as Fresh and run another \
+                    "CARGO_TARGET_DIR={} is being compiled by a build outside the lease (it last \
+                     recorded {}); what that build writes cannot be verified or cleared while it \
+                     runs, so this checkout's crates could read as Fresh and run another \
                      checkout's binaries (#11661). Re-run when it ends",
                     dir.display(),
                     last_checkout(dir).unwrap_or_else(|| "an unrecorded checkout".to_string()),
@@ -96,6 +87,13 @@ pub fn lock_for_checkout(
             // A failed downgrade lost the lock to another checkout: retry.
             if try_flock(&file, libc::LOCK_SH) && ours(dir) {
                 return Ok((CheckoutLock { _file: file }, invalidation));
+            }
+            try_flock(&file, libc::LOCK_UN);
+        } else if ours(dir) && try_flock(&file, libc::LOCK_SH) {
+            // A lease of this checkout holds the directory and verified it at
+            // its start; the marker only changes under the exclusive lock.
+            if ours(dir) {
+                return Ok((CheckoutLock { _file: file }, Invalidation::SameCheckout));
             }
             try_flock(&file, libc::LOCK_UN);
         }
@@ -120,16 +118,16 @@ fn try_flock(file: &File, op: libc::c_int) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), op | libc::LOCK_NB) == 0 }
 }
 
-/// The checkout [`LAST_CHECKOUT_MARKER`] in `dir` names, if any.
+/// The checkout [`super::stale_guard::LAST_CHECKOUT_MARKER`] in `dir` names, if any.
 fn last_checkout(dir: &Path) -> Option<String> {
-    std::fs::read_to_string(dir.join(LAST_CHECKOUT_MARKER))
-        .ok()
-        .map(|s| s.trim().to_string())
+    super::marker_seal::read_marker(dir).0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::build_lease::marker_seal::seal_marker;
+    use crate::core::build_lease::stale_guard::LAST_CHECKOUT_MARKER;
 
     fn fingerprint(dir: &Path) -> std::path::PathBuf {
         let fp = dir.join("debug/.fingerprint/pkg-0123456789abcdef");
@@ -150,8 +148,10 @@ mod tests {
         let (lock, got) = lock_for_checkout(&dir, a, Duration::ZERO, pkgs).expect("first");
         assert!(matches!(got, Invalidation::Cleared { previous: None, .. }));
         assert!(!fp.exists(), "a missing marker clears");
-        drop(lock);
+        // The lease's own build, then its seal (#11661).
         let fp = fingerprint(&dir);
+        assert_eq!(seal_marker(&dir, a), Ok(true));
+        drop(lock);
         let (lock, got) = lock_for_checkout(&dir, a, Duration::ZERO, pkgs).expect("same");
         assert_eq!(got, Invalidation::SameCheckout);
         assert!(fp.exists(), "the same checkout keeps its fingerprints");
