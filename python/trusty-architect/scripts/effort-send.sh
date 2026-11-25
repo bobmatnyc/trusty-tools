@@ -21,12 +21,12 @@ skip() { echo "$s SKIP $1"; exit 1; }
 
 state=$(box | cut -d' ' -f1)
 case "$state" in empty|suggestion) ;; *) skip "input box is $state" ;; esac
-tm capture-pane -t "$t" -p -J | tail -n 15 | grep -Eq 'esc to interrupt|\([^)]*tokens\)' && skip "turn running"
+tm capture-pane -t "=$s:" -p -J | tail -n 15 | grep -Eq 'esc to interrupt|\([^)]*tokens\)' && skip "turn running"
 cmd="/effort $level"
-tm send-keys -t "$t" -l "$cmd"
+tm send-keys -t "=$s:" -l "$cmd"
 sleep "${EFFORT_ECHO_SLEEP:-1}"
 b=$(box)
 case "$b" in "typed | $cmd"|"typed | $cmd  "*) ;; *) skip "echo mismatch: $b" ;; esac
-tm send-keys -t "$t" Enter
+tm send-keys -t "=$s:" Enter
 python3 "$HERE/effort-governor.py" --commit "$s" "$level" || skip "commit failed"
 echo "$s SENT $cmd"
