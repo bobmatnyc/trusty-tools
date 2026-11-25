@@ -167,6 +167,77 @@ fn cold_start_refuses_on_a_broken_install_file() {
     );
 }
 
+/// #11828: `tm run <owner>/<repo>` bypasses `ensure_managed_checkout`, so its
+/// own `try_base_clone_path` call is what refuses; with the defaulting
+/// resolver the run got as far as the daemon check instead.
+#[test]
+fn tm_run_refuses_on_a_broken_install_file_before_cloning_11828() {
+    let fx = Fixture::new();
+    // The env is the child's only, so no `EnvGuard` is needed here.
+    let mut cmd = crate::common::tm_command_in(&fx.home);
+    for k in ROOT_VARS {
+        cmd.env_remove(k);
+    }
+    let out = cmd
+        .args(["run", "acme/widget"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn tm run");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "tm run must refuse: {stderr}");
+    assert!(
+        stderr.contains("cannot resolve the repos root") && stderr.contains("install.toml"),
+        "tm run must refuse on the repos root, got: {stderr}"
+    );
+    assert!(
+        !fx.home.join("trusty-mpm-projects").exists(),
+        "nothing may be created under the default root"
+    );
+    assert!(
+        !Path::new("/elsewhere/projects/acme/widget").exists(),
+        "nothing may be cloned under the configured root"
+    );
+}
+
+/// #11828: with a broken install.toml the daemon registers a checkout that
+/// would be canonical under the default root by its path, never by the URL
+/// that defaulted root implies; registration itself still succeeds. Before the
+/// fix the defaulting `repos_root()` stored `https://github.com/acme/widget`.
+#[tokio::test]
+async fn daemon_registers_by_path_on_a_broken_install_file_11828() {
+    use trusty_mpm::project::{ProjectRegistry, SessionRegistration, registry_data_dir_under};
+
+    let fx = Fixture::new();
+    let checkout = fx.default_checkout();
+    std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+    git(&checkout, &["init", "-q"]);
+    // scp syntax with no `user@`, inside the public-content leak guard.
+    git(
+        &checkout,
+        &["remote", "add", "origin", "github.com:acme/widget.git"],
+    );
+    let fw = fx.tmp.path().join("fw");
+    let _env = EnvGuard::install(&fx.home);
+
+    let outcome =
+        trusty_mpm::daemon::session_project::register_seen_session_project(&fw, &checkout).await;
+
+    assert!(
+        matches!(outcome, Ok(SessionRegistration::Registered { .. })),
+        "registration must still succeed, got {outcome:?}"
+    );
+    let rows = ProjectRegistry::load(&registry_data_dir_under(&fw))
+        .await
+        .expect("load registry")
+        .list()
+        .await
+        .expect("list registry");
+    let urls: Vec<_> = rows.iter().map(|p| p.repo_url.as_str()).collect();
+    let path = checkout.canonicalize().expect("canonical checkout");
+    assert_eq!(urls, [path.to_string_lossy()], "the path form, not a URL");
+}
+
 /// An in-project spawn refuses to reuse a clone found under the default root.
 #[test]
 fn inproject_spawn_refuses_on_a_broken_install_file() {
@@ -269,7 +340,7 @@ fn owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file() {
 
     let fx = Fixture::new();
     let state = fx.tmp.path().join("state");
-    let default_root = fx.home.join("trusty-mpm-projects");
+    let default_root = fx.home.join("trusty-mpm-projects"); // path-literal: allow (the test must name the unresolved default root by hand)
     let cwd = fx.default_checkout();
     std::fs::create_dir_all(&cwd).expect("mkdir checkout");
     let owner_file = default_root.join("acme").join(".trusty-mpm-owner.toml");
