@@ -270,6 +270,60 @@ async fn pause_slot_write_survives_a_stalled_first_exchange() {
     assert_eq!(writes, 1, "the write is sent exactly once");
 }
 
+/// A stub daemon whose first warm-up stalls `first_warm_ms` and whose
+/// `memory_remember` answers after `write_ms`; returns the write count.
+async fn slow_daemon(
+    first_warm_ms: u64,
+    write_ms: u64,
+) -> (crate::uds_mock::MockUdsDaemon, Arc<Mutex<usize>>) {
+    let writes = Arc::new(Mutex::new(0usize));
+    let warms = Arc::new(Mutex::new(0usize));
+    let seen = Arc::clone(&writes);
+    let daemon = crate::uds_mock::spawn(move |method: &str, _params: Value| {
+        let delay = if method == "memory_remember" {
+            *seen.lock().unwrap() += 1;
+            write_ms
+        } else {
+            let mut warms = warms.lock().unwrap();
+            *warms += 1;
+            if *warms == 1 { first_warm_ms } else { 0 }
+        };
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            Ok(json!({ "drawer_id": "d1", "palace": "p", "status": "stored", "tier": "C" }))
+        })
+    })
+    .await;
+    (daemon, writes)
+}
+
+/// Why (#10648): the 600 ms per-exchange cap is the warm-up's; the write keeps
+/// the rest of the 2 s pause budget.
+/// What: a write answering in 1.2 s after an instant warm-up is `stored`; a
+/// stalled warm-up (600 ms) plus a 1.6 s write overruns 2 s and is skipped,
+/// with the write sent once in both cases.
+#[tokio::test]
+async fn pause_slot_write_gets_the_rest_of_the_budget() {
+    for (first_warm_ms, write_ms, expected) in [
+        (0, 1200, "stored"),
+        (900, 1600, "skipped:memory_unreachable"),
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        repo_on_branch(tmp.path());
+        let (daemon, writes) = slow_daemon(first_warm_ms, write_ms).await;
+        let memory = ResumeSlotHost {
+            socket: daemon.socket().to_path_buf(),
+            palace: Some("p".to_string()),
+        };
+
+        let result = pause(tmp.path(), &memory).await;
+
+        let case = format!("warm {first_warm_ms} ms, write {write_ms} ms: {result}");
+        assert_eq!(result["resume_slot"], json!(expected), "{case}");
+        assert_eq!(*writes.lock().unwrap(), 1, "one write: {case}");
+    }
+}
+
 /// The PR numbers a pause's free text names, by the module's rule.
 fn prs_of(summary: &str, rest: &[&str]) -> Vec<u64> {
     let completed: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
