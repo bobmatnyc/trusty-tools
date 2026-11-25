@@ -22,7 +22,13 @@ RC_IS="$SUPERVISOR_DIR/scripts/input-state.py"
 RC_URL=""; RC_FAIL=""
 
 _rc_tmux() { tmux ${TMUX_SOCKET:+-S "$TMUX_SOCKET"} "$@"; }
-_rc_cap() { _rc_tmux capture-pane -t "$t" -p -J -S -200; }
+# #8443: the one tmux -t in this file. $t must be a %N pane id or the exact =session: form.
+# Any other form is refused before tmux runs, so no target can prefix-match another session.
+_rc_tx() {
+  [[ $t =~ ^%[0-9]+$ || $t =~ ^=.+:$ ]] || { echo "rc-lib.sh: target '$t' is not a %N pane id or =session:" >&2; return 64; }
+  local verb=$1; shift; _rc_tmux "$verb" -t "$t" "$@"
+}
+_rc_cap() { _rc_tx capture-pane -p -J -S -200; }
 _rc_url() { _rc_cap | grep -o 'https://claude.ai/code/session_[A-Za-z0-9]*' | tail -1; }
 _rc_box() { python3 "$RC_IS" "$t" | cut -d' ' -f2-; }
 
@@ -53,14 +59,14 @@ _rc_box_is_ours() {
 # failed echo, clear the box with C-u only when it holds nothing but our own
 # text, so a retry never stacks a second copy and a user draft is never touched.
 rc_send_cmd() {
-  _rc_tmux send-keys -t "$t" -l "$1"
+  _rc_tx send-keys -l "$1"
   local i
   for i in $(seq 1 "${RC_ECHO_TRIES:-20}"); do
     sleep "${RC_ECHO_SLEEP:-1}"
-    _rc_echoed "$1" && { _rc_tmux send-keys -t "$t" Enter; return 0; }
+    _rc_echoed "$1" && { _rc_tx send-keys Enter; return 0; }
   done
   log "NOT-ECHOED: $1 (input: $(_rc_box))"
-  _rc_box_is_ours "$1" && _rc_tmux send-keys -t "$t" C-u
+  _rc_box_is_ours "$1" && _rc_tx send-keys C-u
   return 1
 }
 
@@ -94,11 +100,11 @@ rc_connect() {
   if _rc_dialog; then
     # The status line was not visible but RC was active: close the dialog, keep RC.
     log "rc: already active (dialog), left alone"
-    _rc_tmux send-keys -t "$t" Escape
+    _rc_tx send-keys Escape
     RC_URL="${before:-already-active}"; return 0
   fi
   for i in $(seq 1 8); do
-    _rc_cap | grep -q '❯ Continue' && { _rc_tmux send-keys -t "$t" Enter; sleep 2; }
+    _rc_cap | grep -q '❯ Continue' && { _rc_tx send-keys Enter; sleep 2; }
     RC_URL=$(_rc_url)
     [ -n "$RC_URL" ] && [ "$RC_URL" != "$before" ] && return 0
     sleep 2

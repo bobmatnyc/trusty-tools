@@ -26,7 +26,7 @@ for _ in $(seq 1 "${USAGE_WAIT_TRIES:-10}"); do
   cap=$(_rc_cap)
   printf '%s\n' "$cap" | grep -q 'Resets' && break
 done
-_rc_tmux send-keys -t "$t" Escape
+_rc_tx send-keys Escape
 if printf '%s\n' "$cap" | python3 "$SUPERVISOR_DIR/scripts/usage.py" ingest --source usage-cmd --account "$account"; then
   log "ok"
 else
