@@ -278,11 +278,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    #[serial_test::serial]
     fn new_succeeds_without_token() {
         // Constructing must not require Telegram credentials so the MCP
-        // handshake and tools/list work in CI without secrets.
+        // handshake and tools/list work in CI without secrets. The sandbox
+        // (#9123) hides env, `.env.local`, the file store and the keychain, so
+        // "no token" is forced rather than assumed.
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
         let client = BaseClient::new().expect("construct base client");
-        let _ = client.has_token();
+        assert!(!client.has_token(), "no bot token is configured");
     }
 
     #[test]
