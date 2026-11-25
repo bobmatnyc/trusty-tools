@@ -13,7 +13,7 @@
 //! own `config_dir` arm (`core/gh_account.rs`, #5851's PR) accepts ANY
 //! operator-chosen directory and defines no per-account convention of its
 //! own, so this is a fresh layout, not a pre-existing one being reused.
-//! `<tm state root>` is `crate::core::paths::FrameworkPaths::default().root`
+//! `<tm state root>` is `crate::core::paths::FrameworkPaths::try_default()?.root`
 //! (`~/.trusty-mpm`) in production; every function here takes it as a
 //! parameter so tests point it at a tempdir instead.
 //!
@@ -201,18 +201,27 @@ fn render_single_account_hosts_yml(login: &str) -> String {
 /// takes its paths as parameters specifically so this is the ONLY place that
 /// reads `$HOME`/`GH_CONFIG_DIR`/`XDG_CONFIG_HOME`.
 /// What: state root is
-/// [`crate::core::paths::FrameworkPaths::default`]`().root` (`~/.trusty-mpm`);
+/// [`crate::core::paths::FrameworkPaths::try_default`]`().root` (`~/.trusty-mpm`),
+/// an `Err` naming `install.toml` when the config dir is unresolved (#11821);
 /// the operator's `gh` config dir is
 /// [`crate::core::gh_account::gh_config_dir`] (honours `GH_CONFIG_DIR` /
 /// `XDG_CONFIG_HOME`, else `~/.config/gh`), or a synthetic
 /// `~/.config/gh` when even `dirs::home_dir()` fails (matches
 /// `gh_config_dir`'s own last-resort fallback shape).
-/// Test: none directly (thin, ambient-environment wiring); the logic it
-/// delegates to is covered by [`ensure_account_config_dir`]'s tests.
+/// Test: `account_config_dir_writer_fails_closed_on_a_broken_install_file`
+/// (env_serial) for the refusal; the logic it delegates to is covered by
+/// [`ensure_account_config_dir`]'s tests.
 // #9776: `pub(crate)`, not `pub(super)`, since the move to `core/` — its
 // caller (`daemon::managed_routes::inproject::account_clone`) is outside `core`.
 pub(crate) fn ensure_account_config_dir_default(login: &str) -> Result<PathBuf, String> {
-    let state_root = crate::core::paths::FrameworkPaths::default().root;
+    // #11821: this builds the per-login dir; a broken install.toml refuses.
+    let state_root = crate::core::paths::FrameworkPaths::try_default()
+        .map_err(|e| {
+            format!(
+                "cannot build the gh account dir for '{login}': the config dir is unresolved: {e}"
+            )
+        })?
+        .root;
     let operator_gh_config_dir = crate::core::gh_account::gh_config_dir()
         .unwrap_or_else(|| PathBuf::from(".config").join("gh"));
     ensure_account_config_dir(&state_root, &operator_gh_config_dir, login)

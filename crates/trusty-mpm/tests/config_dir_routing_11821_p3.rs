@@ -268,3 +268,22 @@ fn auto_resume_writer_fails_closed_on_a_broken_install_file() {
     let err = trusty_mpm::core::auto_resume::write_desired(true).expect_err("write refuses");
     assert_refused_closed(&fx, err.to_string());
 }
+
+/// #11821 P3-f1: the per-login gh account dir refuses; before the fix it was
+/// built under `$HOME/.trusty-mpm/gh-accounts`.
+#[test]
+fn account_config_dir_writer_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let operator_gh = fx.cfg.with_file_name("operator-gh");
+    std::fs::create_dir_all(&operator_gh).expect("mkdir operator gh dir");
+    std::fs::write(
+        operator_gh.join("hosts.yml"),
+        "github.com:\n    users:\n        octo:\n    user: octo\n",
+    )
+    .expect("hosts.yml");
+    // SAFETY: `env_serial`; `EnvGuard` restores the var.
+    unsafe { std::env::set_var("GH_CONFIG_DIR", &operator_gh) };
+    let err = trusty_mpm::daemon::managed_routes::inproject::account_config_dir_for("octo")
+        .expect_err("the account dir refuses");
+    assert_refused_closed(&fx, err);
+}
