@@ -897,3 +897,28 @@ fn python_flock_on_the_lock_file_blocks_the_rust_writer() {
     assert!(blocked.is_err(), "Rust took the lock Python held");
     lock::acquire(&state, Duration::from_secs(1)).expect("free once Python exits");
 }
+
+/// #11826: the shadow reseeds its token state from the live one, and only
+/// under the live watcher's lock; a held lock refuses rather than reads.
+#[test]
+fn reseed_copies_the_live_state_under_its_lock() {
+    let d = tempfile::tempdir().expect("tmp");
+    let live = d.path().join("inbox").join(STATE_FILE);
+    let own = d.path().join("shadow").join(STATE_FILE);
+    let mut st = TokenState::default();
+    st.fired
+        .insert("tm-a|hit_low:main:2026112420".to_owned(), NOW);
+    save(&live, &st).expect("live");
+    save(&own, &TokenState::default()).expect("stale own");
+    let held = lock::acquire(&live, Duration::from_secs(1)).expect("live holder");
+    let err = reseed(&live, &own, Duration::from_millis(100)).expect_err("lock held");
+    assert!(err.to_string().starts_with("lock "), "{err}");
+    assert!(state::load(&own).expect("own").fired.is_empty());
+    drop(held);
+    reseed(&live, &own, Duration::from_secs(1)).expect("reseed");
+    assert_eq!(state::load(&own).expect("own"), st);
+    // No live state: the shadow keeps its own.
+    let gone = d.path().join("none").join(STATE_FILE);
+    reseed(&gone, &own, Duration::from_secs(1)).expect("absent live");
+    assert_eq!(state::load(&own).expect("own"), st);
+}

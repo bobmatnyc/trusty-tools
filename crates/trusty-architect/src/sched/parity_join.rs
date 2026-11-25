@@ -7,16 +7,20 @@
 //! What: [`join`] pairs shadow events with live events. Pass 1 pairs equal
 //! identities (session, kind, fingerprint: the dedupe key; a PM message's id
 //! and an owner item's id are their fingerprints) within
-//! [`IDENTITY_CYCLES`] cycles of the record; pass 1b pairs what is left of
-//! `idle` by [`idle_screen`] (session, kind, screen hash: the two pollers keep
-//! separate idle timers, so the `since-<epoch>` part differs) in the same
-//! window, only when the epochs are within [`IDLE_EPOCH_TOLERANCE_S`]; pass 2, when asked, pairs what
+//! [`IDENTITY_CYCLES`] cycles of the record (a `session_exited` fingerprint
+//! without its `@<time>` suffix, #11826); pass 1b pairs `idle` per episode:
+//! each side's idle events fold into one per (session, since-epoch)
+//! (`parity_pair::idle_episodes`, #11826; the others are [`Fate::Absorbed`]),
+//! and two episodes pair when they share a screen hash ([`idle_screen`]: the
+//! pollers keep separate idle timers, so the epochs differ) and the epochs
+//! are within [`IDLE_EPOCH_TOLERANCE_S`]; pass 2, when asked, pairs what
 //! is left by session and kind, only when at least one side has no identity
-//! (two keyed events with different identities never pair) within [`FALLBACK_CYCLES`] cycles. Each pass takes the nearest unused live
-//! event. A shadow event left over is `scheduler_only`; a live event left
-//! over counts as `poller_only` only when it falls inside some joined
-//! record's own window. [`IL_CRON`] and [`CTXWATCH`] are dropped before the
-//! join, in `parity::compute_full`.
+//! (two keyed events never pair, except one `token` event under the Python
+//! `project:sid` label, #11826) within [`FALLBACK_CYCLES`] cycles. Each pass
+//! takes the nearest unused live event. A shadow event left over is
+//! `scheduler_only`; a live event left over counts as `poller_only` only when
+//! it falls inside some joined record's own window. The excluded kinds are
+//! dropped before the join, in `parity::compute_full`.
 //! Test: `join_pairs_identity_across_phase_skew`,
 //! `idle_pairs_on_screen_hash_across_epoch_skew`,
 //! `idle_with_different_screen_hashes_never_pairs`,
@@ -25,7 +29,10 @@
 //! `fallback_never_pairs_two_keyed_events_with_different_fingerprints`,
 //! `parity_reports_identity_and_fallback_numbers`.
 
+use std::collections::BTreeSet;
+
 use super::parity::Counts;
+use super::parity_pair::{idle_episodes, same_identity, token_label_pair};
 use super::shadow::EventKey;
 
 /// Identity pairs within this many cycles of the record: below the shortest
@@ -77,8 +84,19 @@ impl Event {
     }
 }
 
+/// What became of one event in [`join`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fate {
+    /// Paired with an event on the other side.
+    Matched,
+    /// Left over: scheduler-only or poller-only.
+    Unmatched,
+    /// An `idle` event folded into its episode's first event (#11826).
+    Absorbed,
+}
+
 /// What [`join`] found.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Joined {
     /// Matched (both passes), scheduler-only and poller-only.
     pub counts: Counts,
@@ -86,8 +104,12 @@ pub struct Joined {
     pub by_identity: u64,
     /// Pairs made by the fallback.
     pub by_fallback: u64,
-    /// Of `by_identity`, the `idle` pairs made on the relaxed key (pass 1b).
+    /// Of `by_identity`, the `idle` episode pairs whose first keys differ.
     pub by_relaxed: u64,
+    /// Per shadow event, in input order.
+    pub shadow: Vec<Fate>,
+    /// Per live event, in input order.
+    pub live: Vec<Fate>,
 }
 
 /// An `idle` key's (session, kind, screen hash) and its since-epoch;
@@ -118,13 +140,13 @@ fn nearest(
     live: &[Event],
     used: &[bool],
     cycles: i64,
-    ok: &dyn Fn(&Event) -> bool,
+    ok: &dyn Fn(usize, &Event) -> bool,
 ) -> Option<usize> {
     let (from, to) = (s.ts, s.ts + s.interval);
     let (lo, hi) = (from - cycles * s.interval, to + cycles * s.interval);
     live.iter()
         .enumerate()
-        .filter(|(i, l)| !used[*i] && (lo..hi).contains(&l.ts) && ok(l))
+        .filter(|(i, l)| !used[*i] && (lo..hi).contains(&l.ts) && ok(*i, l))
         .min_by_key(|(_, l)| distance(l.ts, from, to))
         .map(|(i, _)| i)
 }
@@ -152,13 +174,32 @@ fn session_kind(e: &Event) -> Option<(&str, &str)> {
 /// `fallback_pairs_keyed_with_legacy_unkeyed_event`,
 /// `fallback_never_pairs_different_known_kinds`.
 fn fallback_fits(s: &Event, l: &Event) -> bool {
-    if s.key.is_some() && l.key.is_some() {
-        return false;
+    if let (Some(a), Some(b)) = (&s.key, &l.key) {
+        // #11826: one token event under the Python fallback label.
+        return token_label_pair(a, b);
     }
     match (session_kind(s), session_kind(l)) {
         (Some(a), Some(b)) => a == b,
         _ => true,
     }
+}
+
+/// Whether two idle episode heads are one episode: same session, epochs
+/// within [`IDLE_EPOCH_TOLERANCE_S`], and a screen hash in common.
+fn same_episode(
+    s: &Event,
+    l: &Event,
+    ss: Option<&BTreeSet<String>>,
+    ls: Option<&BTreeSet<String>>,
+) -> bool {
+    let (Some((want, epoch)), Some((got, e))) = (
+        s.key.as_ref().and_then(idle_screen),
+        l.key.as_ref().and_then(idle_screen),
+    ) else {
+        return false;
+    };
+    let shared = ss.zip(ls).is_some_and(|(a, b)| !a.is_disjoint(b));
+    want.0 == got.0 && (e - epoch).abs() <= IDLE_EPOCH_TOLERANCE_S && shared
 }
 
 /// Pairs `shadow` with `live`; `in_scope(t)` says a live time falls inside a
@@ -169,35 +210,34 @@ pub fn join(
     in_scope: &dyn Fn(i64) -> bool,
     fallback: bool,
 ) -> Joined {
-    let mut used = vec![false; live.len()];
-    let mut paired = vec![false; shadow.len()];
+    // #11826: an idle episode counts once per side, at its first event.
+    let (es, el) = (idle_episodes(shadow), idle_episodes(live));
+    let mut used: Vec<bool> = (0..live.len()).map(|i| el.absorbed(i)).collect();
+    let mut paired: Vec<bool> = (0..shadow.len()).map(|n| es.absorbed(n)).collect();
     let mut out = Joined::default();
     for (n, s) in shadow.iter().enumerate() {
-        let Some(k) = &s.key else { continue };
-        let same = |l: &Event| l.key.as_ref() == Some(k);
+        let Some(k) = s.key.as_ref().filter(|_| es.rep[n].is_none()) else {
+            continue;
+        };
+        // #11826: session_exited compares without its first-seen time.
+        let same = |_: usize, l: &Event| l.key.as_ref().is_some_and(|lk| same_identity(k, lk));
         if let Some(i) = nearest(s, live, &used, IDENTITY_CYCLES, &same) {
             (used[i], paired[n]) = (true, true);
             out.by_identity += 1;
         }
     }
-    // Pass 1b, MB1595 window 4: idle pairs on the screen hash, epoch ignored.
+    // Pass 1b, MB1595 window 4 and #11826: idle pairs per episode, on a
+    // shared screen hash, epochs within the tolerance.
     for (n, s) in shadow.iter().enumerate() {
-        let Some((want, epoch)) = s.key.as_ref().and_then(idle_screen) else {
-            continue;
-        };
-        if paired[n] {
+        if !es.is_rep(n) || paired[n] {
             continue;
         }
-        let same = |l: &Event| {
-            l.key
-                .as_ref()
-                .and_then(idle_screen)
-                .is_some_and(|(got, e)| got == want && (e - epoch).abs() <= IDLE_EPOCH_TOLERANCE_S)
-        };
+        let ss = es.screens.get(&n);
+        let same = |i: usize, l: &Event| el.is_rep(i) && same_episode(s, l, ss, el.screens.get(&i));
         if let Some(i) = nearest(s, live, &used, IDENTITY_CYCLES, &same) {
             (used[i], paired[n]) = (true, true);
             out.by_identity += 1;
-            out.by_relaxed += 1;
+            out.by_relaxed += u64::from(s.key != live[i].key);
         }
     }
     if fallback {
@@ -205,20 +245,31 @@ pub fn join(
             if paired[n] {
                 continue;
             }
-            let fits = |l: &Event| fallback_fits(s, l);
+            let fits = |_: usize, l: &Event| fallback_fits(s, l);
             if let Some(i) = nearest(s, live, &used, FALLBACK_CYCLES, &fits) {
                 (used[i], paired[n]) = (true, true);
                 out.by_fallback += 1;
             }
         }
     }
+    let fate = |absorbed: bool, hit: bool| match (absorbed, hit) {
+        (true, _) => Fate::Absorbed,
+        (false, true) => Fate::Matched,
+        (false, false) => Fate::Unmatched,
+    };
+    out.shadow = (0..shadow.len())
+        .map(|n| fate(es.absorbed(n), paired[n]))
+        .collect();
+    out.live = (0..live.len())
+        .map(|i| fate(el.absorbed(i), used[i]))
+        .collect();
     out.counts = Counts {
         matched: out.by_identity + out.by_fallback,
-        scheduler_only: paired.iter().filter(|p| !**p).count() as u64,
+        scheduler_only: out.shadow.iter().filter(|f| **f == Fate::Unmatched).count() as u64,
         poller_only: live
             .iter()
-            .zip(&used)
-            .filter(|(l, u)| !**u && in_scope(l.ts))
+            .zip(&out.live)
+            .filter(|(l, f)| **f == Fate::Unmatched && in_scope(l.ts))
             .count() as u64,
     };
     out
@@ -321,8 +372,9 @@ mod tests {
         ];
         let j = join(&shadow, &live, &|_| true, false);
         assert_eq!((j.counts.matched, j.by_identity, j.by_relaxed), (1, 1, 1));
-        // One to one: the second live idle of the same screen stays unpaired.
-        assert_eq!(j.counts.poller_only, 1);
+        // #11826: the second live idle of the same episode folds into the first.
+        assert_eq!(j.counts.poller_only, 0);
+        assert_eq!(j.live, [Fate::Matched, Fate::Absorbed]);
     }
 
     /// Two idle episodes of one screen, epochs 600 s apart: no pair.

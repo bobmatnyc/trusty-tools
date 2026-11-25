@@ -15,7 +15,8 @@
 //! `<inbox>/token-watch-state.json` with the Python watcher; a plain dry run
 //! reads it and writes nothing; a shadow run (`--shadow` or
 //! `ARCHITECT_DRY_RUN_STATE`) keeps its own copy beside its poll state,
-//! seeded once from the live file, so it dedupes across cycles without
+//! seeded from the live file when absent and, through [`reseed`], at every
+//! shadow daemon start (#11826), so it dedupes across cycles without
 //! racing the live watcher's offsets (class D).
 //! A writing scan holds `<state>.lock` (BSD `flock`, shared with the Python
 //! watcher) from load to save and saves through a per-process temp file
@@ -209,6 +210,34 @@ pub fn step(
         state::save(&mode.state, &st)?;
     }
     Ok(alerts)
+}
+
+/// How long [`reseed`] waits for the live watcher's lock (the scan's wait).
+pub const RESEED_LOCK_WAIT: std::time::Duration = lock::LOCK_WAIT;
+
+/// Replaces the shadow's own token state `own` with the live state `live`.
+///
+/// Why: the shadow seeded its token state only when the file was absent, so
+/// a restart after 13 h kept a state that lacked every live fire since and
+/// replayed 30 token alerts in one cycle (#11826, parity window 6, class A).
+/// What: holds `<own>.lock`, then `<live>.lock` (the lock the Python watcher
+/// takes around its write, so the read is never of a half-written file),
+/// loads the live state and saves it over `own`. An absent live state keeps
+/// `own`, as the poll-state reseed does.
+/// Test: `reseed_copies_the_live_state_under_its_lock`,
+/// `window6_shadow_restart_reseeds_the_token_state`.
+///
+/// # Errors
+/// [`StateError`] when a lock is not taken within `wait`, the live state has
+/// the wrong shape, or `own` cannot be written.
+pub fn reseed(live: &Path, own: &Path, wait: std::time::Duration) -> Result<(), StateError> {
+    if !live.exists() {
+        return Ok(());
+    }
+    let _own = lock::acquire(own, wait)?;
+    let _live = lock::acquire(live, wait)?;
+    let st = state::load(live)?;
+    state::save(own, &st)
 }
 
 /// The `token` alert for one raised rule (`fleet-poll.py` `token_alerts`).

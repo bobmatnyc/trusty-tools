@@ -139,7 +139,8 @@ pub fn execute(argv: &[String], d: &Deps<'_>) -> Result<Outcome, SchedError> {
             let th = thresholds(&args);
             let rep = parity::load(&layout, now - th.since_s)?;
             Ok(Outcome {
-                stdout: parity::render_with(&rep, &th),
+                // #11826: --by-kind / --examples N add the per-kind section.
+                stdout: parity::render_by_kind(&rep, &th, by_kind(&args)),
                 code: if rep.passes(&th) { 0 } else { 1 },
             })
         }
@@ -170,6 +171,11 @@ fn system_ops(root: &Path, get: &dyn Fn(&str) -> Option<String>) -> SystemOps {
             .filter(|s| !s.is_empty())
             .unwrap_or(format!("{supervisor}-poll")),
     }
+}
+
+/// Rows per kind for `parity`: `--examples N`, else 0 with `--by-kind`.
+fn by_kind(a: &Args) -> Option<usize> {
+    a.examples.or(a.by_kind.then_some(0))
 }
 
 fn thresholds(a: &Args) -> Thresholds {
