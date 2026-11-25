@@ -39,12 +39,10 @@ impl CommandRunner for Answers {
 /// Writes an executable shell script `name` with `body` into `dir`.
 #[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    let mut perms = std::fs::metadata(&path).expect("stat").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod");
+    // #10248: no write fd to the stub in this process.
+    trusty_common::exec_stub::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+        .expect("write script");
     path
 }
 

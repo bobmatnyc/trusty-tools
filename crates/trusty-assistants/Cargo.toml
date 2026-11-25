@@ -149,7 +149,7 @@ path = "src/bin/tagent.rs"
 # `DISCOVERY_TIMEOUT` on the virtual clock. Declared explicitly rather than
 # relying on `tokio-test` happening to pull the same feature in.
 tokio = { version = "1", features = ["full", "test-util"] }
-serial_test = "3"
+serial_test = { workspace = true }
 # #11632: test-only since the HTTP API was cut. `axum` serves the throwaway
 # Slack/Telegram API stubs the channel adapter tests post to; `base64` and
 # `tokio-tungstenite` are read only by tests (`tests/slack_wss_crypto_provider.rs`

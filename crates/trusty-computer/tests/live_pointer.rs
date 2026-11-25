@@ -9,7 +9,11 @@
 //! sequence: [`pointer::frame_args`] read, [`pointer::frame`],
 //! [`pointer::within`], then [`pointer::driver_args`] to the daemon. It checks:
 //! a click at the "Press Me" button lands (the fixture logs it); a drag
-//! endpoint past the frame is refused (drag itself is off, #11696); a point past the frame is refused before the daemon; after the
+//! endpoint past the frame is refused; a drag is refused
+//! `drag_blocked_window_not_on_top` while the second copy (opened at the same
+//! place) covers the granted window, and lands on the drag pad after the
+//! daemon brings the granted window to the front (#11756, the broker's
+//! [`window_order::on_top`] on the real window server list); a point past the frame is refused before the daemon; after the
 //! window moves, the same window coordinate still presses the button; after
 //! the window shrinks, a point inside the old frame is refused
 //! (delegation-authority refusal at event time); and the second copy's window
@@ -23,6 +27,7 @@ use common::live::{Live, logged, wait_for};
 use serde_json::{Value, json};
 use trusty_computer::driver::{DriverClient, DriverError};
 use trusty_computer::pointer::{self, CLICK_AT_TOOL, DRAG_TOOL, Frame};
+use trusty_computer::window_order::{self, SystemWindowLister, WindowLister};
 
 /// The frame the broker would read now, with its capture scale.
 fn read_frame(client: &DriverClient, (pid, wid): (u64, u64)) -> (Frame, f64) {
@@ -47,7 +52,16 @@ fn send(
 ) -> Result<Result<Value, DriverError>, &'static str> {
     let args = args.as_object().expect("object").clone();
     let (frame, _) = read_frame(client, window);
-    pointer::within(frame, &pointer::points(tool, &args)).map_err(|(code, _)| code)?;
+    let points = pointer::points(tool, &args);
+    pointer::within(frame, &points).map_err(|(code, _)| code)?;
+    if tool == DRAG_TOOL {
+        // #11756: the broker's window-on-top gate, on the real window server list.
+        let windows = SystemWindowLister.on_screen().expect("window order");
+        let pid = u32::try_from(window.0).expect("pid");
+        let order = window_order::on_top(&windows, pid, window.1, frame, &points);
+        println!("on_top: {order:?}");
+        order.map_err(|(code, _)| code)?;
+    }
     let (name, request) = pointer::driver_args(tool, &args);
     Ok(client.call(name, &request))
 }
@@ -83,6 +97,35 @@ fn live_coordinate_input_is_bounded_to_the_granted_window() {
         send(&client, win, DRAG_TOOL, past).err(),
         Some("coordinates_out_of_bounds")
     );
+
+    // #11756: the second copy opened over the granted one; the drag is refused.
+    let pad = json!({"pid": pid, "window_id": wid, "from_x": 30.0 * s, "from_y": bottom(60.0),
+        "to_x": 120.0 * s, "to_y": bottom(40.0)});
+    assert_eq!(
+        send(&client, win, DRAG_TOOL, pad.clone()).err(),
+        Some(window_order::REFUSAL),
+        "the second copy must cover the granted window"
+    );
+    // In front, the same drag passes the gate and lands on the pad.
+    client
+        .call("bring_to_front", &json!({"pid": pid, "window_id": wid}))
+        .expect("bring_to_front");
+    wait_for("granted window in front", 10, || {
+        let windows = SystemWindowLister.on_screen().ok()?;
+        let p = u32::try_from(pid).ok()?;
+        window_order::on_top(
+            &windows,
+            p,
+            wid,
+            frame,
+            &pointer::points(DRAG_TOOL, pad.as_object()?),
+        )
+        .ok()
+    });
+    send(&client, win, DRAG_TOOL, pad)
+        .expect("on top along the path")
+        .expect("drag delivered");
+    logged(&state, "drag 1");
 
     // A moved window keeps its window coordinates: the same point presses again.
     // SAFETY: a pid this test launched.

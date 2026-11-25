@@ -39,6 +39,7 @@ use crate::api::BackendId;
 use crate::api::methods::{LockResponse, UnlockResponse};
 use crate::store::KEYCHAIN_CALL_TIMEOUT;
 use crate::store::SecretCache;
+use crate::store::deadline;
 use crate::store::grant_cache::{DropReason, Status};
 use crate::store::platform::now_unix;
 
@@ -163,10 +164,20 @@ pub(crate) fn person_only(
 ///
 /// What: `Ok(false)` when there is no blob to hold: a sandboxed server, no
 /// Keychain, a backend with no blob store, or the per-item layout. A read
-/// that fails or outlasts [`KEYCHAIN_CALL_TIMEOUT`], or a blob the grant
-/// cannot hold (a refused page lock), is an error.
+/// that fails or outlasts [`keychain_wait`], or a blob the grant cannot
+/// hold (a refused page lock), is an error. A Keychain write during the
+/// read refuses the snapshot (#11786); the read runs once more, and a
+/// second refusal is [`ErrorKind::Internal`], never a stale grant. Each
+/// read first waits up to [`keychain_wait`] for writes in flight to finish;
+/// past that it is [`ErrorKind::KeychainAccessPrompt`]. A blob held after
+/// the request deadline is [`ErrorKind::DeadlineExceeded`], so the caller
+/// closes the grant rather than leave it live behind a failed reply.
 /// Test: `migrate_then_unlock_reads_the_keychain_once`,
-/// `unlock_with_an_unreadable_blob_opens_no_grant`.
+/// `unlock_with_an_unreadable_blob_opens_no_grant`,
+/// `deny_written_during_the_unlock_read_is_honoured_under_the_grant`,
+/// `writes_during_both_unlock_reads_open_no_grant`,
+/// `unlock_waits_for_a_write_in_flight_then_holds`,
+/// `unlock_past_its_deadline_answers_the_prompt_and_opens_no_grant`.
 fn hold_blob(state: &State, generation: u64) -> Result<bool, ErrorKind> {
     if state.sandboxed || !state.keychain_compiled {
         return Ok(false);
@@ -178,6 +189,44 @@ fn hold_blob(state: &State, generation: u64) -> Result<bool, ErrorKind> {
     else {
         return Ok(false);
     };
+    // #11786: a write during the read makes the snapshot stale; read once
+    // more, then fail closed rather than hold stale state. Only reads count.
+    let grant = state.cache.grant();
+    for _ in 0..2 {
+        // #11786: a write still in flight after the read deadline is a
+        // Keychain call left waiting, most often on a prompt.
+        let Some(mark) = grant.drained_mark(keychain_wait()) else {
+            return Err(ErrorKind::KeychainAccessPrompt);
+        };
+        // #11786: a grant that ended is not worth a second read.
+        if !grant.is_live(generation) {
+            return Err(ErrorKind::Internal);
+        }
+        match read_blob(&store)? {
+            None => return Ok(false),
+            // #11786: the router may already have answered; a late hold
+            // must not leave a grant live behind that reply.
+            Some(_) if deadline::passed() => return Err(ErrorKind::DeadlineExceeded),
+            Some(blob) if grant.hold(generation, mark, &blob) => return Ok(true),
+            Some(_) => {}
+        }
+    }
+    Err(ErrorKind::Internal)
+}
+
+/// [`KEYCHAIN_CALL_TIMEOUT`], cut to the request deadline when one is set
+/// (#11786), so unlock answers before the router gives up on it.
+fn keychain_wait() -> Duration {
+    deadline::remaining().map_or(KEYCHAIN_CALL_TIMEOUT, |left| {
+        left.min(KEYCHAIN_CALL_TIMEOUT)
+    })
+}
+
+/// One bounded blob read off the request thread.
+fn read_blob(
+    store: &Arc<crate::store::vault_blob::BlobStore>,
+) -> Result<Option<crate::store::vault_blob::Blob>, ErrorKind> {
+    let store = Arc::clone(store);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("trusty-secrets-blob-read".to_owned())
@@ -187,14 +236,9 @@ fn hold_blob(state: &State, generation: u64) -> Result<bool, ErrorKind> {
         .map_err(|_| ErrorKind::Internal)?;
     // See #7524: an abandoned read stays blocked on its prompt; it holds
     // nothing and writes nothing.
-    let blob = match rx.recv_timeout(KEYCHAIN_CALL_TIMEOUT) {
-        Ok(read) => read.map_err(ErrorKind::from)?,
-        Err(_) => return Err(ErrorKind::BackendTimeout),
-    };
-    match blob {
-        None => Ok(false),
-        Some(blob) if state.cache.grant().hold(generation, &blob) => Ok(true),
-        Some(_) => Err(ErrorKind::Internal),
+    match rx.recv_timeout(keychain_wait()) {
+        Ok(read) => read.map_err(ErrorKind::from),
+        Err(_) => Err(ErrorKind::BackendTimeout),
     }
 }
 

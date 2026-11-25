@@ -328,13 +328,6 @@ const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, Option<&str>, &str)] = &[
          embed a 42 KB tm-* skill it excludes by design",
     ),
     (
-        "*",
-        "tm-workflow",
-        Some("the full gate is in `tm-workflow`"),
-        "the fragment gate an agent must meet is resident in the bullets below \
-         the pointer; the merge-side enforcement is the PM's",
-    ),
-    (
         "ticketing",
         "tm-ticketing",
         None,

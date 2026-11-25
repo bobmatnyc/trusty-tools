@@ -203,6 +203,9 @@ pub(crate) struct LiveSessions {
     /// When the host last booted, Unix seconds; `None` checks no record's
     /// start against it.
     pub(crate) boot: Option<u64>,
+    /// The default server's `<pid>:<start>` identity, read from one of its
+    /// live sessions' panes; `None` when unread (#10700).
+    pub(crate) default_server: Option<String>,
 }
 
 impl LiveSessions {
@@ -260,7 +263,10 @@ impl LiveSet for LiveSessions {
         self.holds_session(&record.tmux_name, record.tmux_socket.as_deref())
     }
 
-    /// What: the default server is lost when it lists nothing. A named
+    /// What: the default server is lost when it lists nothing, or when the
+    /// record's stored server identity differs from the live default
+    /// server's (#10700: a resume recreated the server); an unread identity
+    /// on either side checks nothing. A named
     /// server whose state is unknown is never lost. Otherwise, per the
     /// Architect's ruling on #10101: a record started before the last host
     /// boot was lost to the reboot; a listed server is lost when it listed no
@@ -271,10 +277,20 @@ impl LiveSet for LiveSessions {
     /// `a_vanished_server_with_no_socket_is_a_deliberate_stop`,
     /// `a_vanished_server_whose_socket_refuses_is_lost`,
     /// `a_record_started_before_the_last_boot_is_lost`,
-    /// `a_server_listing_only_unmanaged_sessions_is_not_lost`.
+    /// `a_server_listing_only_unmanaged_sessions_is_not_lost`,
+    /// `reap_keeps_sessions_lost_to_a_restarted_default_server_auto_resumable`,
+    /// `reap_marks_a_targeted_kill_on_the_same_default_server_deliberate`.
     fn server_lost(&self, record: &SessionRecord) -> bool {
         let server = match record_server(record) {
-            Ok(None) => return self.default.is_empty(),
+            // #10700: a record read on an earlier default-server instance lost
+            // that server, even when a resume has since started a new one.
+            Ok(None) => {
+                return self.default.is_empty()
+                    || matches!(
+                        (record.tmux_server.as_deref(), self.default_server.as_deref()),
+                        (Some(was), Some(now)) if was != now
+                    );
+            }
             Ok(Some(server)) => server,
             Err(_) => return false,
         };
@@ -385,6 +401,26 @@ pub(crate) fn observe_workspace_servers(
         }
     }
     live
+}
+
+/// The live default server's `<pid>:<start>` identity, read from the first
+/// of up to three of `names`' panes that answers (#10700).
+///
+/// Why: a default-server record is lost when its stored identity names an
+/// earlier server instance, which only the live identity can show.
+/// What: [`super::pane_identity::capture`] per name, in sorted order; `None`
+/// when no read succeeds, which leaves the reaper's verdict as before #10700.
+/// Test: `reap_marks_a_targeted_kill_on_the_same_default_server_deliberate`.
+pub(crate) fn default_server_identity(
+    tmux: &dyn ManagedTmuxDriver,
+    names: &HashSet<String>,
+) -> Option<String> {
+    let mut sorted: Vec<&String> = names.iter().collect();
+    sorted.sort();
+    sorted
+        .into_iter()
+        .take(3)
+        .find_map(|name| super::pane_identity::capture(tmux, name).1)
 }
 
 /// The managed names `driver` lists within the probe budget, and whether it

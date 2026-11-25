@@ -10,7 +10,6 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Output;
 use std::sync::{Arc, Mutex};
@@ -54,8 +53,8 @@ impl Env {
             .expect("data");
         let bin = tempfile::tempdir().expect("bin");
         let tm = bin.path().join("tm");
-        std::fs::write(&tm, FAKE_TM).expect("fake tm");
-        std::fs::set_permissions(&tm, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // #10248: no write fd to the stub in this process.
+        trusty_common::exec_stub::write_executable(&tm, FAKE_TM).expect("fake tm");
         Self { home, data, bin }
     }
 

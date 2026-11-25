@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.8] — 2026-11-24
+
+### Fixed
+
+- The candle embedder's first-use model download no longer fails with `RelativeUrlWithoutBase`: hf-hub moves to 0.5, which follows HuggingFace's relative 307 redirect. `HF_HOME` is still honoured, and concurrent first-use downloads in one process are serialized (#10866). Candle-only builds now verify TLS against bundled Mozilla roots instead of the system trust store, so custom or corporate CAs are not trusted on that path.
+
 ## [0.70.7] — 2026-11-23
 
 ### Added

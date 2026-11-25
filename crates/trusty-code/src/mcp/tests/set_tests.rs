@@ -92,16 +92,17 @@ async fn the_live_path_loads_nothing_under_a_test_harness() {
 #[cfg(unix)]
 #[tokio::test]
 async fn an_unwanted_server_is_never_spawned() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = tempdir().expect("tempdir");
     let project = tempdir().expect("tempdir");
     let script = |name: &str| {
         let marker = home.path().join(format!("{name}.started"));
         let path = home.path().join(format!("{name}.sh"));
-        std::fs::write(&path, format!("#!/bin/sh\ntouch '{}'\n", marker.display()))
-            .expect("write script");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // #10248: no write fd to the stub in this process.
+        trusty_common::exec_stub::write_executable(
+            &path,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .expect("write script");
         (path, marker)
     };
     let (wanted_cmd, wanted_marker) = script("wanted");
