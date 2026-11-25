@@ -4,6 +4,8 @@ import os
 import stat
 import subprocess
 
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # #10571 S1: the shipped layout keeps the modules in ../scripts, the tests in tests/.
 LIB = os.path.join(os.path.dirname(HERE), "scripts", "rc-lib.sh")
@@ -120,3 +122,34 @@ def test_send_cmd_clears_only_its_own_duplicate(tmp_path):
     out, st = _run(tmp_path, active=False, call='rc_send_cmd "/rename tm-x"', input="/rename tm-x")
     assert out.startswith("rc=1")
     assert st.get("enters", 0) == 0 and st["cu"] == 1 and st["input"] == ""
+
+
+def _rc_tx(tmp_path, target):
+    """Run `_rc_tx send-keys -l hi` with t=target against a fake tmux that logs its argv."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "tmux.log"
+    fake = bindir / "tmux"
+    fake.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n')
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    script = f'. "{LIB}"; t="$1"; _rc_tx send-keys -l hi; echo "rc=$?"'
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    env.pop("TMUX_SOCKET", None)
+    out = subprocess.run(["bash", "-c", script, "rc_tx", target], env=env, capture_output=True,
+                         text=True, timeout=20)
+    return out.stdout.strip(), log.read_text() if log.exists() else ""
+
+
+@pytest.mark.parametrize("target", ["tm-x", "tm-x:0", "tm-x:", ""])
+def test_rc_tx_refuses_bare_and_session_window_targets(tmp_path, target):
+    # #8443: a target tmux could prefix-match is refused with 64 before any tmux call.
+    out, calls = _rc_tx(tmp_path, target)
+    assert out == "rc=64"
+    assert "send-keys" not in calls
+
+
+@pytest.mark.parametrize("target", ["=tm-x:", "%3"])
+def test_rc_tx_passes_exact_targets_through(tmp_path, target):
+    out, calls = _rc_tx(tmp_path, target)
+    assert out == "rc=0"
+    assert calls == f"send-keys -t {target} -l hi\n"
