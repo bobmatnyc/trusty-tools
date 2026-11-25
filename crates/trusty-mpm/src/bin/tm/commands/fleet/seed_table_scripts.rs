@@ -146,4 +146,25 @@ pub(super) const SCRIPTS: &[Embedded] = &[
     script!("effort-send.sh", true),
     script!("statusline-tee.sh", true),
     script!("rc-lib.sh", false),
+    // #10571 S2: the poller helpers and the #11369 cadence scripts. architect-start.sh and
+    // poll-supervise.sh read poll_interval_s through architect_config.py; relaunch_brief.py
+    // is the brief session-relaunch.sh --il renders. rc-lib.sh, which the rc set sources,
+    // ships with S1.
+    script!("architect-start.sh", true),
+    script!("poll-supervise.sh", true),
+    script!("poll-reset-wake.py", true),
+    script!("rc-restore.sh", true),
+    script!("rc-disconnect.sh", true),
+    script!("session-relaunch.sh", true),
+    script!("relaunch_brief.py", false),
+    script!("fleet-restart.sh", true),
+    script!("ids36.py", false),
+    script!("il_timeline.py", false),
+    script!("auto_sleep.py", false),
+    script!("user_state.py", false),
+    script!("morning_brief.py", false),
+    script!("dream_catchup.py", false),
+    script!("dashboard_updates.py", false),
+    script!("il_remind.py", false),
+    script!("dashboard_feed.py", false),
 ];

@@ -20,8 +20,10 @@ type, an out-of-range or non-finite value, a missing `ARCHITECT_CONFIG` file or
 an unreadable path raises `ConfigError`, which names the path and the key and
 never the value. Unknown keys are kept out of the config and listed in
 `Config.unknown`. Session names stay env-only (#8436). Standard library only,
-Python 3.9+; import it as `architect_config` from a sibling script.
-Test: tests/test_architect_config.py; tailnet_url in tests/test_dashboard_footer.py.
+Python 3.9+; import it as `architect_config` from a sibling script. A shell script reads one value with
+`python3 architect_config.py poll-interval|owner-name` (#11369): it prints the value, or exits 2 with the
+ConfigError text on stderr.
+Test: tests/test_architect_config.py; tailnet_url in tests/test_dashboard_footer.py; the CLI in tests/test_poll_cadence.py.
 """
 # No `from __future__ import annotations`: a dataclass with string annotations
 # fails when a sibling loads this file by path without registering it.
@@ -252,3 +254,25 @@ def _caps(path: str, value: Any) -> dict:
             _positive(path, key, item)
         caps[name] = item
     return caps
+
+
+# #11369: the shell start paths (architect-start.sh, poll-supervise.sh) read the cadence through this loader.
+_CLI = {"poll-interval": lambda c: str(c.poll_interval_s), "owner-name": lambda c: c.owner_name}
+
+
+def main(argv=None) -> int:
+    import sys
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1 or args[0] not in _CLI:
+        print("usage: architect_config.py " + "|".join(_CLI), file=sys.stderr)
+        return 2
+    try:
+        print(_CLI[args[0]](load()))
+    except ConfigError as err:
+        print(f"architect_config: {err}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
