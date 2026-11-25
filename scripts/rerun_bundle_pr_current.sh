@@ -11,6 +11,8 @@
 #   latest `pull_request` run of BUNDLE_PR_WORKFLOW (default
 #   bundle-pr-current.yml) for each PR's head SHA.
 #   - No run: nothing stale to fail; logged, not counted.
+#   - Run created more than 29 days ago: GitHub will not re-run it; warned,
+#     not counted.
 #   - Completed run: re-run through the Actions API.
 #   - Queued or in-progress run that started after PUSHED_AT: it fetches the
 #     new main itself; counted as current.
@@ -23,8 +25,9 @@
 # Exit: 0 when every counted PR is re-run or current (or none is counted);
 #   1 when any counted PR could not be re-run, so a stale green is never
 #   silent; 2 on missing input or when the open PRs cannot be listed.
-# Not guaranteed: GitHub re-runs only runs from the last 30 days; an older run
-#   is refused and fails the job, and a push to that PR is then the remedy.
+# Not guaranteed: GitHub refuses to re-run a run created more than 30 days
+#   ago. A run older than 29 days is a ::warning:: (that PR needs a push before
+#   it merges) and is not counted, so one idle PR cannot turn main red.
 # Env: GITHUB_REPOSITORY (owner/repo) and PUSHED_AT (the push's
 #   head_commit.timestamp, ISO 8601) required; GH_TOKEN for gh; BASE_BRANCH,
 #   BUNDLE_PR_WORKFLOW, WAIT_MAX, WAIT_POLL.
@@ -66,16 +69,22 @@ ok=0
 while read -r num sha; do
   [ -n "${num}" ] || continue
   run="$(gh api "repos/${REPO}/actions/workflows/${WORKFLOW}/runs?event=pull_request&head_sha=${sha}&per_page=1" \
-    --jq '.workflow_runs[0] // empty | "\(.id) \(.status) \(.run_started_at)"' 2>&1)" || {
+    --jq '.workflow_runs[0] // empty | "\(.id) \(.status) \(.run_started_at) \(.created_at)"' 2>&1)" || {
     total=$((total + 1)); echo "::warning::PR #${num}: cannot list ${WORKFLOW} runs: ${run}"; continue; }
   if [ -z "${run}" ]; then
     echo "PR #${num}: no ${WORKFLOW} run for head ${sha}; nothing to re-run, not counted"
     continue
   fi
-  total=$((total + 1))
-  read -r id status started <<EOF
+  read -r id status started created <<EOF
 ${run}
 EOF
+  # GitHub re-runs only runs from the last 30 days; a day of margin.
+  cr_epoch="$(epoch "${created}")" || cr_epoch="$(date +%s)"
+  if [ "${cr_epoch}" -lt $(( $(date +%s) - 29 * 86400 )) ]; then
+    echo "::warning::PR #${num}: run ${id} was created ${created}, too old for GitHub to re-run; the PR needs a push before it merges. Not counted."
+    continue
+  fi
+  total=$((total + 1))
   if [ "${status}" != "completed" ]; then
     st_epoch="$(epoch "${started}")" || st_epoch=0
     if [ "${st_epoch}" -ge "${pushed}" ]; then
