@@ -56,10 +56,55 @@ fn every_rule1_error_arm_refuses() {
         assert_eq!(line["fact"]["error"], kind);
         assert_eq!(line["enforced"], true, "{kind}");
     }
-    let deep = format!("{}rm -rf ~{}", "$(".repeat(5000), ")".repeat(5000));
-    let raw = json!({ "tool_name": "Bash", "tool_input": { "command": deep } });
-    // Bounded recursion: no stack overflow; the answer itself does not matter.
-    let _ = judge(raw.to_string().as_bytes(), home.path(), &test_env);
+}
+
+/// #10690 (critic HIGH 2): a Bash call whose parse dropped commands (nesting
+/// past the depth bound) is refused, even when the dropped part is the anchor
+/// write. Before: allowed. The `bash -c` bound: `a_script_past_the_shell_bound_is_dropped`.
+#[test]
+fn a_dropped_bash_parse_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    let write = "cp x ~/.cargo/bin/tm";
+    let deep = |inner: &str| format!("{}{inner}{}", "$(".repeat(5000), ")".repeat(5000));
+    for cmd in [deep("rm -rf ~"), deep(write)] {
+        let raw = json!({ "tool_name": "Bash", "tool_input": { "command": cmd } });
+        let line = judge(raw.to_string().as_bytes(), home.path(), &test_env).expect("refused");
+        assert_eq!(line["rule"], "R1");
+        assert_eq!(line["fact"]["error"], "bash_unjudged", "{line}");
+    }
+}
+
+/// #10690 (critic LOW): an edit tool with no string target path is refused.
+#[test]
+fn an_edit_with_no_target_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    for input in [json!({ "content": "x" }), json!({ "file_path": 7 })] {
+        let raw = json!({ "tool_name": "Write", "tool_input": input });
+        let line = judge(raw.to_string().as_bytes(), home.path(), &test_env).expect("refused");
+        assert_eq!(line["fact"]["error"], "no_target");
+    }
+}
+
+/// #10690 (critic HIGH 1): a FIFO planted at the log path never blocks the
+/// log write. Before: the open waited for a reader forever.
+#[test]
+fn a_fifo_at_the_log_path_never_blocks() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(LOG_PATH);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo reads it only.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = home.path().to_path_buf();
+    std::thread::spawn(move || {
+        append_log(&dir, &json!({ "rule": "R1" }));
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "append_log blocked on a FIFO"
+    );
 }
 
 /// #10690: a panic before rule 1 answers is a refusal, not an unwind or an allow.

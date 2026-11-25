@@ -104,3 +104,54 @@ fn no_stdin_or_no_home_refuses() {
         assert!(refusal_reason(&line).contains(kind));
     }
 }
+
+/// #10690 (Architect ruling 2): the release install paths for a new `tm`
+/// pass rule 1, run from outside the workspace; a hand copy onto the
+/// installed binary is still refused. `cargo install` and the installers
+/// write `~/.cargo/bin/tm` from inside their own process, which no rule-1
+/// write target names, so the anchor needs no narrowing.
+#[test]
+fn the_release_install_paths_pass_rule_1() {
+    let home = tempfile::tempdir().unwrap();
+    let outside = home.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let env = move |_: &Value, home: &Path| GuardEnv {
+        home: home.to_path_buf(),
+        project_dir: None,
+        cwd: home.join("elsewhere"),
+        r5_allow: Vec::new(),
+        architect: false,
+    };
+    let bash = |cmd: &str| {
+        decide(
+            Some(&payload("Bash", json!({ "command": cmd }))),
+            Some(home.path()),
+            &env,
+        )
+    };
+    for cmd in [
+        "cargo install trusty-mpm --version 0.99.0 --locked",
+        "cargo install --path crates/trusty-mpm --locked",
+        "scripts/install-trusty-mpm-signed.sh",
+        "make install-mpm-signed",
+        "tctl install trusty-mpm",
+        "tctl sign trusty-mpm",
+        "codesign --force --sign - ~/.cargo/bin/tm",
+    ] {
+        assert!(
+            !matches!(bash(cmd), Outcome::Refuse(_)),
+            "{cmd} must pass rule 1"
+        );
+    }
+    for cmd in [
+        "cp target/release/tm ~/.cargo/bin/tm",
+        "mv /tmp/tm ~/.cargo/bin/tm",
+        "cat /tmp/tm > ~/.cargo/bin/tm",
+        "install -m 755 /tmp/tm ~/.cargo/bin/trusty-mpm",
+    ] {
+        assert!(
+            matches!(bash(cmd), Outcome::Refuse(_)),
+            "{cmd} must be refused"
+        );
+    }
+}

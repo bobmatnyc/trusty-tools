@@ -107,3 +107,45 @@ fn an_r1_write_is_refused_and_a_malformed_call_too() {
     refused(home.path(), write.to_string().as_bytes());
     assert!(base.join("guard").is_file(), "the blocker is untouched");
 }
+
+/// #10690 (critic HIGH 1): a FIFO planted at the log path does not delay the
+/// deny; the hook prints it and exits within the bound.
+#[test]
+fn a_fifo_log_path_still_gets_the_deny() {
+    let home = tempfile::tempdir().expect("home");
+    let log = home.path().join(".trusty-mpm/guard/shadow.jsonl");
+    std::fs::create_dir_all(log.parent().expect("dir")).expect("dir");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&log)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success());
+    let anchor = home.path().join(".claude/settings.json");
+    let write =
+        json!({ "tool_name": "Write", "tool_input": { "file_path": anchor, "content": "{}" } });
+    let mut child = common::tm_command_in(home.path())
+        .args(["hook", "--pm-guard-shadow"])
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(write.to_string().as_bytes())
+        .expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while child.try_wait().expect("try_wait").is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("the hook blocked on a FIFO log path");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().expect("output");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"permissionDecision\":\"deny\""), "{text}");
+}

@@ -84,15 +84,19 @@ pub(crate) fn pm_guard_shadow() {
         Outcome::Record(line) => (line, false),
         Outcome::Refuse(line) => (line, true),
     };
-    if let Some(home) = &home {
-        guarded(|| append_log(home, &line));
-    }
+    // #10690: the deny goes out before the log write, so a log path that
+    // stalls or fails can never turn a refusal into a timeout-allow.
     if refuse {
         let deny = build_pm_guard_deny_response(
             guard_policy::for_rule(TRUST_ANCHOR_RULE),
             &refusal_reason(&line),
         );
-        let _ = writeln!(std::io::stdout(), "{deny}");
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "{deny}");
+        let _ = out.flush();
+    }
+    if let Some(home) = &home {
+        guarded(|| append_log(home, &line));
     }
 }
 
@@ -170,12 +174,14 @@ pub(crate) fn decide(
         return refuse("oversized");
     }
     let input = &payload["tool_input"];
-    let Ok((env, r1, facts)) = catch_unwind(AssertUnwindSafe(|| {
+    let decided = catch_unwind(AssertUnwindSafe(|| {
         let env = make_env(&payload, home);
-        let (r1, facts) = rules::r1_decide(tool, input, &env);
-        (env, r1, facts)
-    })) else {
-        return refuse("panic");
+        rules::r1_decide(tool, input, &env).map(|(r1, facts)| (env, r1, facts))
+    }));
+    let (env, r1, facts) = match decided {
+        Ok(Ok(decided)) => decided,
+        Ok(Err(kind)) => return refuse(kind),
+        Err(_) => return refuse("panic"),
     };
     let line = |hit: Hit, unparsed: usize, enforced: bool| {
         log_line(&payload, tool, input, &env, hit, unparsed, enforced)
@@ -289,10 +295,11 @@ pub(crate) fn r5_allow(path: &Path, session: &str) -> Vec<String> {
 /// What: the directory is created 0700 and the file 0600 (an existing file is
 /// re-tightened to 0600). Past [`MAX_LOG_BYTES`] the file rotates once to
 /// `shadow.jsonl.1`, replacing an older `.1`. The open uses `O_NOFOLLOW`
-/// and writes only to a regular file, so a planted symlink is never
-/// followed. Every error is dropped.
+/// and `O_NONBLOCK` and writes only to a regular file, so a planted symlink
+/// is never followed and a planted FIFO never blocks (#10690). Every error
+/// is dropped.
 /// Test: `the_log_is_private_and_rotates_at_the_cap`, `an_unwritable_log_is_dropped`,
-/// `a_symlink_at_the_log_path_is_not_followed`.
+/// `a_symlink_at_the_log_path_is_not_followed`, `a_fifo_at_the_log_path_never_blocks`.
 pub(crate) fn append_log(home: &Path, line: &Value) {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -306,15 +313,21 @@ pub(crate) fn append_log(home: &Path, line: &Value) {
     {
         return;
     }
-    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() > MAX_LOG_BYTES) {
-        let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
+    match std::fs::symlink_metadata(&path) {
+        // #10690: only a regular file (or none yet) is ever opened.
+        Ok(m) if !m.is_file() => return,
+        Ok(m) if m.len() > MAX_LOG_BYTES => {
+            let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
+        }
+        _ => {}
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         // #11431: a symlink planted at the log path is never followed.
-        .custom_flags(libc::O_NOFOLLOW)
+        // #10690: a FIFO swapped in after the check fails the open, never blocks.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path);
     if let Ok(mut f) = file
         && f.metadata().is_ok_and(|m| m.is_file())

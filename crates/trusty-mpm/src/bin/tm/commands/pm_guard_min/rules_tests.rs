@@ -42,13 +42,20 @@ fn an_unreadable_project_settings_file_is_an_r1_hit() {
     std::fs::write(&settings, "{\"hooks\":\"tm hook --pm-guard\"}").unwrap();
     let env = env_in(h.path(), h.path());
     let write = json!({ "file_path": settings, "content": "{}" });
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        // Root reads a 0o000 file, so the unreadable arm cannot be built.
+        eprintln!("SKIPPED an_unreadable_project_settings_file_is_an_r1_hit: running as root");
+        return;
+    }
     std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let unreadable = std::fs::read_to_string(&settings).is_err();
+    assert!(
+        std::fs::read_to_string(&settings).is_err(),
+        "0o000 is unreadable"
+    );
     let got = evaluate("Write", &write, &env).0.map(|h| h.rule);
     std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o600)).unwrap();
-    if unreadable {
-        assert_eq!(got, Some("R1"), "an unreadable settings file is refused");
-    }
+    assert_eq!(got, Some("R1"), "an unreadable settings file is refused");
     // Absent file: no guard entry to protect, so a plain write passes.
     std::fs::remove_file(&settings).unwrap();
     assert_eq!(evaluate("Write", &write, &env).0.map(|h| h.rule), None);
