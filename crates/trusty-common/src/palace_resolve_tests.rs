@@ -913,3 +913,337 @@ fn a_caller_with_no_git_identity_still_resolves() {
         "level 4 must still produce a usable id"
     );
 }
+
+// ---------------------------------------------------------------------------
+// plan_palace_create (#11823)
+// ---------------------------------------------------------------------------
+
+/// Plan for `start` against a fixed set of existing palace ids, recording
+/// every id the oracle was asked about.
+fn plan_against(
+    start: &Path,
+    existing: &[&str],
+) -> (Result<PalaceCreatePlan, PalaceCreatePlanError>, Vec<String>) {
+    let asked = std::cell::RefCell::new(Vec::new());
+    let plan = plan_palace_create(start, |id| {
+        asked.borrow_mut().push(id.to_string());
+        Ok::<_, std::convert::Infallible>(existing.contains(&id))
+    });
+    (plan, asked.into_inner())
+}
+
+/// Build `<tmp>/<dir>` as a git repo with an optional origin remote, or `None`
+/// when git is unavailable.
+fn plan_repo(tmp: &Path, dir: &str, remote: Option<&str>) -> Option<PathBuf> {
+    let root = tmp.join(dir);
+    fs::create_dir_all(&root).unwrap();
+    init_repo(&root, remote).then_some(root)
+}
+
+/// Why: a repo with no remote resolves to `parent-dir`, but older creators
+/// named its palace after the folder alone; the launch-time alias step never
+/// covered this shape (#11823).
+#[test]
+#[serial_test::serial]
+fn plan_aliases_for_a_repo_with_no_remote() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Some(root) = plan_repo(&tmp.path().join("projects"), "my-repo", None) else {
+        eprintln!("skipping plan_aliases_for_a_repo_with_no_remote: git unavailable");
+        return;
+    };
+    let (plan, _) = plan_against(&root, &["my-repo"]);
+    assert_eq!(
+        plan.expect("plans"),
+        PalaceCreatePlan::AliasToFolder {
+            resolved: "projects-my-repo".into(),
+            folder: "my-repo".into(),
+        }
+    );
+}
+
+/// Why: `Acme/My_Repo` checked out as `checkout-dir` resolves to
+/// `acme-my-repo`; the palace an older creator made is `checkout-dir`, and it
+/// must be linked, not hidden behind a new empty palace (#11823).
+#[test]
+#[serial_test::serial]
+fn plan_aliases_when_folder_differs_from_repo_name() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
+        eprintln!("skipping plan_aliases_when_folder_differs_from_repo_name: git unavailable");
+        return;
+    };
+    let (plan, asked) = plan_against(&root, &["checkout-dir"]);
+    assert_eq!(
+        plan.expect("plans"),
+        PalaceCreatePlan::AliasToFolder {
+            resolved: "acme-my-repo".into(),
+            folder: "checkout-dir".into(),
+        }
+    );
+    assert_eq!(asked, ["acme-my-repo", "checkout-dir"]);
+}
+
+/// Why: an existing resolved palace needs nothing, even when a folder palace
+/// also exists — the folder palace is left alone.
+#[test]
+#[serial_test::serial]
+fn plan_exists_when_the_resolved_palace_exists() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
+        eprintln!("skipping plan_exists_when_the_resolved_palace_exists: git unavailable");
+        return;
+    };
+    let (plan, asked) = plan_against(&root, &["acme-my-repo", "checkout-dir"]);
+    assert_eq!(
+        plan.expect("plans"),
+        PalaceCreatePlan::Exists {
+            id: "acme-my-repo".into()
+        }
+    );
+    assert_eq!(
+        asked,
+        ["acme-my-repo"],
+        "the folder palace is never consulted"
+    );
+}
+
+/// Why: a new project with no palace under either name gets the resolved one.
+#[test]
+#[serial_test::serial]
+fn plan_creates_when_neither_palace_exists() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
+        eprintln!("skipping plan_creates_when_neither_palace_exists: git unavailable");
+        return;
+    };
+    let (plan, _) = plan_against(&root, &["unrelated"]);
+    assert_eq!(
+        plan.expect("plans"),
+        PalaceCreatePlan::Create {
+            id: "acme-my-repo".into()
+        }
+    );
+}
+
+/// Why: when the folder slug equals the resolved id there is no second palace
+/// to link; the plan must not alias a name to itself.
+#[test]
+#[serial_test::serial]
+fn plan_never_aliases_a_palace_to_itself() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "acme-my-repo", remote) else {
+        eprintln!("skipping plan_never_aliases_a_palace_to_itself: git unavailable");
+        return;
+    };
+    let (plan, asked) = plan_against(&root, &[]);
+    assert_eq!(
+        plan.expect("plans"),
+        PalaceCreatePlan::Create {
+            id: "acme-my-repo".into()
+        }
+    );
+    assert_eq!(asked, ["acme-my-repo"]);
+}
+
+/// Why: a malformed pin blocks the create and is reported; no fallback name is
+/// planned and the daemon is never asked (#11823).
+#[test]
+#[serial_test::serial]
+fn plan_propagates_a_malformed_pin() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("some-project");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::create_dir_all(root.join(TRUSTY_TOOLS_DIR)).unwrap();
+    fs::write(
+        root.join(PIN_FILE_REL),
+        "schema_version: 1\npalace:\n  not: a-string\n",
+    )
+    .unwrap();
+
+    let (plan, asked) = plan_against(&root, &["some-project"]);
+    let err = plan.expect_err("a malformed pin must not plan");
+    assert!(
+        matches!(
+            err,
+            PalaceCreatePlanError::Resolve(PalaceResolveError::PinMalformed { .. })
+        ),
+        "expected Resolve(PinMalformed), got {err:?}"
+    );
+    assert!(
+        asked.is_empty(),
+        "the oracle must not be consulted: {asked:?}"
+    );
+}
+
+/// Why: Q5 of the #11823 ruling — a create with no project directory is
+/// rejected, even though the resolver can still derive a name for it.
+#[test]
+#[serial_test::serial]
+fn plan_rejects_a_start_with_no_project_dir() {
+    let _guard = EnvGuard::clear();
+    let missing = Path::new("/nonexistent-trusty-test-root-11823/deeper");
+    let (plan, asked) = plan_against(missing, &[]);
+    let err = plan.expect_err("no project dir must not plan");
+    assert!(
+        matches!(err, PalaceCreatePlanError::NoProjectDir { .. }),
+        "expected NoProjectDir, got {err:?}"
+    );
+    assert!(
+        asked.is_empty(),
+        "the oracle must not be consulted: {asked:?}"
+    );
+}
+
+/// Why: an env override or a committed pin is the user's explicit choice, so
+/// a missing chosen palace is created, never redirected to the folder palace.
+#[test]
+#[serial_test::serial]
+fn plan_never_aliases_an_env_or_pin_choice() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
+        eprintln!("skipping plan_never_aliases_an_env_or_pin_choice: git unavailable");
+        return;
+    };
+
+    {
+        let _guard = EnvGuard::set("operator-choice");
+        let (plan, asked) = plan_against(&root, &["checkout-dir"]);
+        assert_eq!(
+            plan.expect("plans"),
+            PalaceCreatePlan::Create {
+                id: "operator-choice".into()
+            }
+        );
+        assert_eq!(asked, ["operator-choice"]);
+        let (plan, _) = plan_against(&root, &["operator-choice"]);
+        assert_eq!(
+            plan.expect("plans"),
+            PalaceCreatePlan::Exists {
+                id: "operator-choice".into()
+            }
+        );
+    }
+
+    let _guard = EnvGuard::clear();
+    write_pin(&root, "pinned-name");
+    let (plan, asked) = plan_against(&root, &["checkout-dir"]);
+    assert_eq!(
+        plan.expect("plans"),
+        PalaceCreatePlan::Create {
+            id: "pinned-name".into()
+        }
+    );
+    assert_eq!(asked, ["pinned-name"]);
+}
+
+/// Why: a worktree and its main checkout share one palace (ADR-0012 §1), so
+/// they must plan the same action — including the same folder alias target.
+#[test]
+#[serial_test::serial]
+fn plan_is_the_same_from_a_worktree_and_its_main_checkout() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Some((main, wt)) = repo_with_worktree(tmp.path()) else {
+        eprintln!(
+            "skipping plan_is_the_same_from_a_worktree_and_its_main_checkout: git unavailable"
+        );
+        return;
+    };
+    let (from_main, _) = plan_against(&main, &["my-project"]);
+    let (from_wt, _) = plan_against(&wt, &["my-project"]);
+    let from_main = from_main.expect("main plans");
+    assert_eq!(from_main, from_wt.expect("worktree plans"));
+    assert!(
+        matches!(
+            &from_main,
+            PalaceCreatePlan::AliasToFolder { folder, .. } if folder == "my-project"
+        ),
+        "expected an alias to the main checkout's folder palace, got {from_main:?}"
+    );
+}
+
+/// Why (#11823, fail-open check): a lookup that cannot answer must refuse the
+/// plan. Read as "absent", it would plan a `Create` over an existing palace or
+/// skip the folder alias.
+/// What: fails the lookup first for the resolved id, then only for the folder
+/// id; both refuse with `Lookup` naming the id.
+#[test]
+#[serial_test::serial]
+fn plan_refuses_when_a_lookup_fails() {
+    let _guard = EnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
+        eprintln!("skipping plan_refuses_when_a_lookup_fails: git unavailable");
+        return;
+    };
+    for failing in ["acme-my-repo", "checkout-dir"] {
+        let err = plan_palace_create(&root, |id| {
+            if id == failing {
+                Err(std::io::Error::other("daemon unreachable"))
+            } else {
+                Ok(false)
+            }
+        })
+        .expect_err("a failed lookup must not plan");
+        match err {
+            PalaceCreatePlanError::Lookup { id, .. } => assert_eq!(id, failing),
+            other => panic!("expected Lookup for {failing}, got {other:?}"),
+        }
+    }
+}
+
+/// Why (#11823): the daemon's own `TRUSTY_MEMORY_PALACE` must not name a
+/// client's project palace.
+/// What: with the variable set, the project form resolves and plans the git
+/// `owner/repo` name, while the honouring form still returns the variable.
+#[test]
+#[serial_test::serial]
+fn project_plan_ignores_the_process_palace_env() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let remote = Some("git@github.com:Acme/My_Repo.git");
+    let Some(root) = plan_repo(tmp.path(), "checkout-dir", remote) else {
+        eprintln!("skipping project_plan_ignores_the_process_palace_env: git unavailable");
+        return;
+    };
+    let _guard = EnvGuard::set("daemon-palace");
+    let resolved = resolve_palace_for_project(&root).expect("resolves");
+    assert_eq!(resolved.id, "acme-my-repo");
+    assert_eq!(resolved.source, PalaceSource::GitOwnerRepo);
+    let plan = plan_palace_create_for_project(&root, |id| {
+        Ok::<_, std::convert::Infallible>(id == "checkout-dir")
+    })
+    .expect("plans");
+    assert_eq!(
+        plan,
+        PalaceCreatePlan::AliasToFolder {
+            resolved: "acme-my-repo".into(),
+            folder: "checkout-dir".into(),
+        }
+    );
+    assert_eq!(resolve_palace(&root).expect("resolves").id, "daemon-palace");
+}
+
+/// Why: the folder slug is the one rule both the plan and trusty-memory's
+/// `project_slug_from_basename` use.
+#[test]
+fn folder_palace_slug_clamps_and_slugifies() {
+    assert_eq!(
+        folder_palace_slug(Path::new("/x/My_Repo")).as_deref(),
+        Some("my-repo")
+    );
+    assert_eq!(folder_palace_slug(Path::new("/")), None);
+    let long = folder_palace_slug(&Path::new("/x").join("a".repeat(80))).expect("slug");
+    assert!(palace_id_is_valid(&long), "{long}");
+}
