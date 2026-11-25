@@ -62,6 +62,15 @@ summary counts `#[test]` templates inside `macro_rules!`), assertion helpers
 defined in another file are not seen (R3 can flag a test whose helper asserts),
 and R1 compares only the crates in the same run.
 
+## Review procedure
+
+Reviewed per crate, from the verdict log rows with `verdict: null`.
+
+- **Flagged tests** (`rules` not empty) all get a full read of the test source.
+- **Unflagged sample**: the unflagged test whose `sha256(key)`, read as an integer, is divisible by 10. That is a fixed ~10% of each crate, stable across re-runs and independent of file order.
+- Each reviewed row gets `verdict`, a one-line `reason`, `reviewer: code-critic`, `audit_rev` and `date`. `evidence` stays the fn's `file:line`; `action` stays `none` until a fix PR names the issue.
+- A verdict is judged on the code, not on the rule hit. Rule false-flag rate = flagged rows judged `keep` / flagged rows.
+
 ## Re-running
 
 ```
