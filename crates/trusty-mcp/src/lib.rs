@@ -316,34 +316,32 @@ mod tests {
 
     /// Why: the doc comment on `run_stdio_loop` references this test by name
     /// to document where the dispatch + notification-suppress behaviour is
-    /// verified; the test was previously missing.
-    /// What: drives the loop with two requests — one normal call (echo'd back
-    /// as an `ok` result) and one notification (no `id` → suppressed) — piped
-    /// through an in-memory `tokio::io::duplex`. Asserts exactly one JSON line
-    /// appears on the write end.
+    /// verified.
+    /// What: drives the loop with two lines — one request (echoed back as an
+    /// `ok` result) and one notification (no `id`; the dispatcher returns
+    /// `Response::suppressed()`) — through an in-memory `tokio::io::duplex`,
+    /// then reads everything the loop wrote and asserts exactly one line: the
+    /// response to the request. Nothing is written for the notification.
     /// Test: self-contained async unit test; no real stdin/stdout.
     #[tokio::test]
     async fn stdio_loop_dispatches_and_suppresses_notifications() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        // in-memory pipe: we write JSON-RPC lines into `client_tx` and read
-        // the responses from `server_rx`.
+        // in-memory pipes: we write JSON-RPC lines into `client_tx` and read
+        // the loop's output from `client_rx`.
         let (mut client_tx, server_rx) = tokio::io::duplex(4096);
-        let (server_tx, client_rx) = tokio::io::duplex(4096);
+        let (server_tx, mut client_rx) = tokio::io::duplex(4096);
 
-        // Two requests: a normal call and a notification (no id).
-        let normal = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        let notification = r#"{"jsonrpc":"2.0","method":"ping"}"#;
-
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let notification = r#"{"jsonrpc":"2.0","method":"notify"}"#;
         client_tx
-            .write_all(format!("{normal}\n{notification}\n").as_bytes())
+            .write_all(format!("{request}\n{notification}\n").as_bytes())
             .await
             .unwrap();
         // Drop the write side so the loop sees EOF after processing both lines.
         drop(client_tx);
 
-        // Dispatcher: echo the method back as the result.
-        let fut = run_stdio_loop_with_io(
+        run_stdio_loop_with_io(
             |req| async move {
                 if req.id.is_none() {
                     Response::suppressed()
@@ -353,14 +351,24 @@ mod tests {
             },
             server_rx,
             server_tx,
+        )
+        .await
+        .expect("loop should return Ok on EOF");
+
+        // The loop consumed and dropped `server_tx`, so this reads to EOF.
+        let mut out = String::new();
+        client_rx.read_to_string(&mut out).await.unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "one reply for the request, none for the notification: {out:?}"
         );
-
-        fut.await.expect("loop should return Ok on EOF");
-
-        // Read all output that the loop wrote.
-        drop(client_rx); // we only need the buffer the duplex already holds
-        // Collect what was written by reading from the client-side reader.
-        // (The duplex buffers the data even after server_tx is gone.)
+        let reply: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(
+            reply,
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"method": "ping"}})
+        );
     }
 
     /// Why: the root cause of issue #457 is that `serve` processes did not
