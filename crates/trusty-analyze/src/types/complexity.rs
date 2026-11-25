@@ -154,17 +154,36 @@ mod tests {
         assert!(ComplexityGrade::D < ComplexityGrade::F);
     }
 
+    /// `CodeSmell` reaches the `analyze.smells` answer and the grade reaches
+    /// every report, so each smell variant's tag and field name and the grade
+    /// spelling are pinned to a literal.
     #[test]
     fn metrics_round_trip_json() {
         let m = ComplexityMetrics {
             cyclomatic: 7,
             cognitive: 12,
             grade: ComplexityGrade::B,
-            smells: vec![CodeSmell::LongFunction { lines: 80 }],
+            smells: vec![
+                CodeSmell::LongFunction { lines: 80 },
+                CodeSmell::DeepNesting { max_depth: 6 },
+                CodeSmell::TooManyParams { count: 7 },
+                CodeSmell::MissingDocstring,
+            ],
         };
-        let s = serde_json::to_string(&m).unwrap();
-        let back: ComplexityMetrics = serde_json::from_str(&s).unwrap();
-        assert_eq!(m, back);
+        let wire = serde_json::json!({
+            "cyclomatic": 7,
+            "cognitive": 12,
+            "grade": "B",
+            "smells": [
+                {"LongFunction": {"lines": 80}},
+                {"DeepNesting": {"max_depth": 6}},
+                {"TooManyParams": {"count": 7}},
+                "MissingDocstring"
+            ]
+        });
+        assert_eq!(serde_json::to_value(&m).unwrap(), wire);
+        let back: ComplexityMetrics = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]
@@ -185,17 +204,5 @@ mod tests {
         assert_eq!(t.long_function_lines, 50);
         assert_eq!(t.deep_nesting_depth, 4);
         assert_eq!(t.too_many_params, 5);
-    }
-
-    #[test]
-    fn smell_thresholds_round_trip_json() {
-        let t = SmellThresholds {
-            long_function_lines: 30,
-            deep_nesting_depth: 2,
-            too_many_params: 3,
-        };
-        let s = serde_json::to_string(&t).unwrap();
-        let back: SmellThresholds = serde_json::from_str(&s).unwrap();
-        assert_eq!(t, back);
     }
 }

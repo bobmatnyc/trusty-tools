@@ -3,7 +3,7 @@ name: architect-host-admin
 description: Architect skill, macOS host commands. Load for a resource or plan-usage report, a builder-band measurement, a host load or disk check, a subsystem-health check, a tmux priority question, a build-cache or disk question, or any step that touches a secret or backup. Holds the measurement commands the Architect cites. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.1"
 category: monitoring
 tags: [architect, host, resources, subsystem-health, secrets]
 effort: medium
@@ -91,7 +91,7 @@ Read-only checks, one call each (MCP tools unless noted):
 | --- | --- | --- |
 | trusty-mpm fleet | `mcp__trusty-mpm__console_metrics`, `supervisor_status` | errored > 0, pending decisions, stale supervisor metrics, daemon version behind the installed `tm` |
 | Recent errors (all daemons) | `mcp__trusty-mpm__list_recent_errors` | new fingerprints or rising counts; vector-lane loss (`usearch ... EMPTY in memory`), corpus open failures |
-| trusty-search | `mcp__trusty-search__search_health`, `console_metrics` | `healthy: false`, `warm_boot_degraded`, watcher inactive, `vectors_unavailable_reason`, search `latency_ms` > 2000 |
+| trusty-search | `trusty-search health`, `mcp__trusty-search__console_metrics` | `healthy: false`, `warm_boot_degraded`, watcher inactive, `vectors_unavailable_reason`, search `latency_ms` > 2000 |
 | trusty-memory | `mcp__trusty-memory__console_metrics` | `ram_bytes` growth, drawers without vectors (drawer_count > vector_count), many empty palaces holding disk |
 | Daemon memory | `ps -o rss= -p $(pgrep -f trusty-search)` (Bash) | RSS far above the index size on disk, or growth between checks |
 | Disk | `mcp__trusty-mpm__disk_survey` | growth of palace store or index dirs |
@@ -138,6 +138,49 @@ output with a newline. When piping it into `vercel env add` (or any store),
 strip it: `... -w | tr -d '\r\n' | vercel env add NAME production --sensitive`.
 A trailing newline makes the receiving service reject the key. Never echo the
 value; check the length only.
+
+## Builder bands
+
+<!-- rule:r-028 -->
+Builder slots are not a fixed per-PM number. On every pass, read the
+15-minute load (L15; a 5-minute load is too twitchy) against the core count
+(C) and the free space on the data volume, and set the band:
+- **Open:** L15 below 1.0 x C and at least 200 GiB free. PMs may start new
+  builders, highest-ranked goal first.
+- **Hold:** L15 from 1.0 to 1.875 x C, or 100-200 GiB free. Running builders
+  finish; a new one starts only when another ends.
+- **Hysteresis (x1.0 / x1.25 edges).** The open/hold load line has two edges
+  so a load near the line does not flap the band. From hold or stop the band
+  opens only when L15 is below 1.0 x C. From open it returns to hold only
+  when L15 is above 1.25 x C. Between the edges the band keeps its previous
+  state. The disk, memory and swap tests are unchanged.
+- **Stop new:** L15 above 1.875 x C, under 100 GiB free, memory free under
+  20%, or active swapping (swap-ins or swap-outs during a 3-second sample;
+  leftover swap with no activity is logged, not counted). No new builders;
+  prune build outputs if disk is the cause, and tell the owner.
+
+`builders.max_concurrent` stays the hard ceiling. A builder is any agent that
+compiles or runs a test suite. **Rust cap:** at most `rust_builder_cap` Rust
+(cargo) builders run machine-wide, in every band; the current value and its
+per-PM split are in AGENTS.md. The cap applies only to Rust; other stacks
+follow the band alone. Relay a band change to the compiling PMs the same
+pass; do not relay an unchanged band. Measure with `uptime` and `df -h` on
+the data volume, and record the band in `local/state.md`.
+
+<!-- rule:r-107 -->
+**Who gets a band relay.** Relay a band change only to a PM whose next action
+it changes: OPEN only to a PM with queued builder work and a free slot under
+its own cap; HOLD only to a PM about to start a new builder; STOP NEW to every
+compiling PM. A PM at its cap, or with no queued builder, gets nothing; log
+the change in `local/actions.md` instead.
+
+## Single-account mode
+
+<!-- rule:r-191 -->
+When `meta/settings.account_mode` is `single` (default `auto`: fewer than two
+accounts in the usage ledger), never plan, recommend or wait for an account
+switch. Set the token band from the plan meters and apply its levers,
+tightest first at Hold.
 
 ## Related skills
 

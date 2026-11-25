@@ -35,6 +35,7 @@ use commands::{
     hooks::clean as hooks_clean,
     install::install,
     launch::{connect, launch},
+    launch_home::launch_home,
     managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
@@ -72,6 +73,11 @@ mod divert_cli_tests;
 #[cfg(test)]
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
+
+// #11470: every clap command has a row in the release-gate table.
+#[cfg(test)]
+#[path = "release_gate_drift_tests.rs"]
+mod release_gate_drift_tests;
 
 // #6441: parse-layer coverage for the bare `tm <github-url>` form. Its own
 // file rather than `tests.rs` because the `infer_subcommands` /
@@ -283,7 +289,9 @@ async fn main() -> anyhow::Result<()> {
     // #8378 PR-C: `tm content` is daemon-less as well.
     match cli.command {
         Some(Command::Fleet { action }) => return commands::fleet::run(action).await,
-        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
+        Some(Command::Architect { action }) => {
+            std::process::exit(commands::architect::run_any(action).await)
+        }
         Some(Command::Presence { action }) => return commands::presence::run(action),
         Some(Command::Env { action }) => return commands::env_file::run(action),
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
@@ -535,9 +543,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::PromptFeedback(args)) => commands::prompt_feedback_cli::run(args).await,
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
+        // #11033: the read side of the compress and opportunity ledgers.
+        Some(Command::Savings { action }) => commands::savings_status::run(action),
         Some(Command::Memory { action }) => memory(action).await,
         // #10973: a command after `--` selects the run mode (`compress_run`).
-        Some(Command::Compress { tool, command }) => compress_run::run(&tool, &command).await,
+        Some(compress @ Command::Compress { .. }) => compress_run::dispatch(compress).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),
@@ -550,7 +560,8 @@ async fn main() -> anyhow::Result<()> {
             mcp,
             force,
             sandbox,
-        }) => run_daemon(addr, tailscale, mcp, force, sandbox).await,
+            sandbox_credential,
+        }) => run_daemon(addr, tailscale, mcp, force, sandbox, sandbox_credential).await,
         Some(Command::Supervisor {
             interval,
             auto_resume,
@@ -572,7 +583,6 @@ async fn main() -> anyhow::Result<()> {
                 commands::session_account::pin_account_for_dir(&daemon, &target, login, token)
                     .await?;
             }
-            let home = dirs::home_dir();
             launch(
                 &client,
                 &url,
@@ -580,15 +590,16 @@ async fn main() -> anyhow::Result<()> {
                 style,
                 worktree,
                 LaunchDir::OperatorCwd,
-                home.as_deref(),
-                twin, // #8878: only an operator's `tm launch --twin` arms.
+                launch_home()?.as_deref(), // #11077: the sandbox home when sandboxed.
+                twin,                      // #8878: only an operator's `tm launch --twin` arms.
                 commands::launch_handoff::Handoff::from_detach(detach), // #8406
             )
             .await
         }
         Some(Command::Connect { dir }) => {
             let attach = commands::launch_handoff::Handoff::Attach; // #8406
-            connect(&client, &url, dir, dirs::home_dir().as_deref(), attach).await
+            // #11077: a sandboxed client writes under the sandbox home.
+            connect(&client, &url, dir, launch_home()?.as_deref(), attach).await
         }
         Some(Command::Attach {
             target,
@@ -599,7 +610,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         // #8436: dispatched before daemon resolution above; kept exhaustive.
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
-        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
+        Some(Command::Architect { action }) => {
+            std::process::exit(commands::architect::run_any(action).await)
+        }
         Some(Command::Env { action }) => commands::env_file::run(action),
         Some(Command::Presence { action }) => commands::presence::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,

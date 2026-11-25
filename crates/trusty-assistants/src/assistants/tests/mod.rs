@@ -1,0 +1,26 @@
+//! Tests for the per-assistant home + OKG store model (#4325).
+//!
+//! Why: the home is a USER-OWNED directory the app generates, so the two things
+//! worth pinning are the ones a user can break — the layout contract itself,
+//! and what the system says when a user changes it from outside.
+//! What: `instance_tests` (id validation), `home_tests` (layout, resolution,
+//! idempotent creation), `store_root_tests` (the new `[[stores]] root` field's
+//! confinement), `health_tests` (detection of missing/malformed entries),
+//! `provision_tests` (startup provisioning, including the failure modes that
+//! must not take startup down), `roster_tests` (which configs are instances).
+//! Test: this module IS the test surface.
+
+mod health_tests;
+mod home_tests;
+mod instance_provision_tests;
+mod instance_tests;
+// #11649: per-instance instructions and project directory.
+mod instructions_tests;
+// #7454: the assistant tier of MCP configuration.
+mod mcp_tests;
+// #7428: one palace per assistant, opt-in fan-out.
+mod memory_tests;
+mod project_tests;
+mod provision_tests;
+mod roster_tests;
+mod store_root_tests;

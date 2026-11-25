@@ -38,11 +38,11 @@ relevant `references/*.md` file here when you need an exact answer.
 
 | Question | Load |
 |---|---|
-| "What are the exact `tm <command>` subcommands / flags?" | `references/cli.md` (71 top-level commands) |
-| "What MCP tools exist and what parameters do they take?" | `references/mcp-tools.md` (40 tools, plus sibling-daemon pointers) |
+| "What are the exact `tm <command>` subcommands / flags?" | `references/cli.md` (72 top-level commands) |
+| "What MCP tools exist and what parameters do they take?" | `references/mcp-tools.md` (42 tools, plus sibling-daemon pointers) |
 | "What agents can I delegate to, and what do they declare?" | `references/agents.md` (39 concrete agents) |
-| "What skills exist, and are they user-invocable?" | `references/skills.md` (62 bundled skills) |
-| "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (80 checks) |
+| "What skills exist, and are they user-invocable?" | `references/skills.md` (64 bundled skills) |
+| "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (81 checks) |
 | "Where do agents/skills/instructions actually live, and which tier wins?" | `references/framework.md` (install layout, tier precedence, doc index) |
 | "How do the pieces fit into an end-to-end flow?" | `references/workflows.md` (hand-authored, not generated) |
 

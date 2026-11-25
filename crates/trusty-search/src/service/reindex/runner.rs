@@ -30,7 +30,6 @@ use super::finish::{BatchTotals, FileHashes, FinishCtx};
 use super::guard::ReindexTerminationGuard;
 use super::hash::hashes_for;
 use super::hash_cache;
-use super::hnsw_swap::begin_staged_hnsw_swap;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::root_gate;
@@ -90,7 +89,9 @@ pub(super) async fn run_reindex(
     // each other regardless of which reindex priority track is in play —
     // closing the gap where an interactive reindex (a separate 2-permit
     // semaphore never touched by the old guard) could still race a catch-up.
-    let _index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
+    // #10738: moved into `term_guard` once staging begins, so a rollback after
+    // a death mid-run still holds it.
+    let index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
         "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
     );
     // #8659: name this reindex to a migration waiting on the same permit.
@@ -103,7 +104,7 @@ pub(super) async fn run_reindex(
     // #3049: the reindex is the longest-running writer — hold the teardown
     // lock's shared side for its whole duration. The cancel flag above is what
     // keeps a waiting DELETE bounded to one batch rather than one corpus.
-    let _teardown_guard = acquire_index_teardown_read(&handle.id).await;
+    let teardown_guard = acquire_index_teardown_read(&handle.id).await;
 
     // Arm the termination guard. Any early exit — panic, early return, or
     // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which logs
@@ -179,7 +180,7 @@ pub(super) async fn run_reindex(
     };
 
     // Issue #109, Phase 1: reset the staged-pipeline status surface.
-    super::stages::reset_stages_for_reindex(&handle).await;
+    let pre_walk_stages = super::stages::reset_stages_for_reindex(&handle).await;
 
     // Phase 1: walk + filter the source tree.
     {
@@ -187,7 +188,7 @@ pub(super) async fn run_reindex(
         diag.last_walk_started_at = Some(now_rfc3339());
         diag.last_walk_files_seen = 0;
         diag.last_walk_files_skipped = 0;
-        diag.last_walk_error = None;
+        diag.clear_walk_outcome();
     }
     // Issue #744: stamp the walk end time.
     //
@@ -260,12 +261,12 @@ pub(super) async fn run_reindex(
     if let Err(over) = budget {
         let reason = over.to_string();
         tracing::warn!("reindex[{}]: {}", index_id.0, reason);
-        handle.walk_diagnostics.write().await.last_walk_error = Some(reason.clone());
         // NOT `mark_reindex_failed`: that one leaves `lexical` alone because
         // the BM25 lane was genuinely built. Here nothing was, and leaving it
         // at the `InProgress` that `reset_stages_for_reindex` just set would
         // strand the index mid-walk with no reindex in flight.
-        super::stages::mark_reindex_failed_before_lexical(&handle, &reason).await;
+        // #10692: lanes Ready before the walk are restored from the snapshot.
+        super::stages::mark_reindex_failed_before_lexical(&handle, &reason, &pre_walk_stages).await;
         // #6386: status and frame in one hold — see `push_terminal`.
         let frame = serde_json::json!({
             "event": "error",
@@ -496,7 +497,12 @@ pub(super) async fn run_reindex(
     // not-worse fallback: `spawn_incremental_persist` never learns
     // `reindexing` was set, so it keeps writing straight to the live path
     // exactly as it did before this fix.
-    let hnsw_swap_paths = begin_staged_hnsw_swap(&handle, &index_id).await;
+    // #10738: the guard records both stagings, the index permit and the
+    // teardown guard, so a run that dies before `finish` resolves them is
+    // rolled back, not left staged, and no delete interleaves the rollback.
+    let hnsw_swap_paths = term_guard
+        .begin_staged(&handle, &corpus_swap_tmp, index_permit, teardown_guard)
+        .await;
 
     // Per-subsystem timing accumulators.
     let mut total_parse_ms: u64 = 0;

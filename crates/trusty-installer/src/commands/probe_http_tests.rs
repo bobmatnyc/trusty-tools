@@ -256,6 +256,28 @@ fn warming_daemon_is_degraded_not_serving() {
     assert_eq!(effective_status(&already), "degraded");
 }
 
+/// Why: trusty-mpm reports `status: "degraded"` while trusty-memory or
+/// trusty-search is down, but `alive: true` says the member itself is up; `tctl
+/// up` must not restart it for another daemon's outage.
+/// Test: This is the test.
+#[test]
+fn alive_degraded_member_reads_ok() {
+    let mpm = serde_json::json!({ "status": "degraded", "alive": true });
+    assert_eq!(effective_status(&mpm), "ok");
+    assert_eq!(
+        classify_status(&effective_status(&mpm)),
+        MemberHealth::HealthyVersionOk
+    );
+    // Without `alive`, or with `alive: false`, degraded stays degraded.
+    let plain = serde_json::json!({ "status": "degraded" });
+    assert_eq!(effective_status(&plain), "degraded");
+    let dead = serde_json::json!({ "status": "degraded", "alive": false });
+    assert_eq!(effective_status(&dead), "degraded");
+    // A readiness gap still degrades an alive member.
+    let warming = serde_json::json!({ "status": "degraded", "alive": true, "embedder": "stalled" });
+    assert_eq!(effective_status(&warming), "degraded");
+}
+
 // ── The dual-resolution precedence rule ─────────────────────────────────────
 
 /// Why: THE rule that stops the fix re-shipping the bug. trusty-memory port-walks
@@ -1480,4 +1502,71 @@ fn on_demand_members_are_a_subset_of_the_uds_members() {
             "{resident} is still resident; a dead socket there IS a failure"
         );
     }
+}
+
+/// #11074: only the console gets the console token; every other member's
+/// probe is unchanged.
+#[test]
+fn console_token_is_for_the_console_only_11074() {
+    for other in [
+        "trusty-memory",
+        "trusty-search",
+        "trusty-mpm",
+        "trusty-events",
+    ] {
+        assert!(console_token_for(other).is_none(), "{other}");
+    }
+}
+
+/// #11074: a console with its token on answers `/health` only to a caller
+/// that sends it. The stub answers 200 to the right bearer and 401 to
+/// anything else, so the plain client must read `HttpError` and the console
+/// client `Serving`.
+#[tokio::test]
+async fn console_probe_sends_the_token_11074() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    const TOKEN: &str = "beefcafe11074beefcafe11074beefcafe11074beef";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("console-token");
+    std::fs::write(&path, TOKEN).expect("write token");
+    std::fs::set_permissions(
+        &path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .expect("chmod");
+    let token = trusty_common::console_token::load_from_path(&path).expect("token loads");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let want = format!("authorization: bearer {}", TOKEN.to_ascii_lowercase());
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            let (status, body) = if head.contains(&want) {
+                ("200 OK", r#"{"status":"ok","version":"0.14.0"}"#)
+            } else {
+                ("401 Unauthorized", r#"{"error":"unauthorized"}"#)
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    let plain = build_probe_client().expect("plain client");
+    let refused = probe_bases(&plain, Some(base.clone()), None).await;
+    assert!(
+        matches!(refused, ProbeOutcome::HttpError { status: 401, .. }),
+        "{refused:?}"
+    );
+    let client = build_console_probe_client(&token).expect("console client");
+    let served = probe_bases(&client, Some(base), None).await;
+    assert!(matches!(served, ProbeOutcome::Serving { .. }), "{served:?}");
 }

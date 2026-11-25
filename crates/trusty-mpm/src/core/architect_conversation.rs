@@ -271,6 +271,44 @@ pub fn record_conversation(root: &Path, project_dir: &Path, id: &str) -> Result<
     write_owner_only(&conversation_path(root), &body)
 }
 
+/// Follow the Architect's `/clear` to its new conversation id (#10594).
+///
+/// Why: `/clear` starts a new Claude conversation in the same process, and
+/// only the launch wrote the record, so a relaunch resumed the pre-clear
+/// conversation. The daemon's #4337 guard cannot see this: the old transcript
+/// stays on disk after `/clear`.
+/// What: acts only when `source` is `"clear"` and a record exists whose
+/// directory is `cwd`; then it rewrites the record to `id`. Any other source,
+/// no record, another directory, or the same id is `Ok(false)`, nothing
+/// written. An unusable record or an id that is not a canonical UUID is `Err`,
+/// nothing written. `Ok(true)` means the record now holds `id`.
+/// Test: `a_clear_in_the_architect_dir_moves_the_record_to_the_new_id`,
+/// `a_clear_elsewhere_or_another_source_leaves_the_record_alone`.
+pub fn follow_clear(
+    root: &Path,
+    cwd: &Path,
+    id: &str,
+    source: Option<&str>,
+) -> Result<bool, String> {
+    if source != Some("clear") {
+        return Ok(false);
+    }
+    let path = conversation_path(root);
+    let Some(text) = read_owner_only(&path)? else {
+        return Ok(false);
+    };
+    let record: ConversationRecord =
+        serde_json::from_str(&text).map_err(|e| format!("{} is corrupt: {e}", path.display()))?;
+    if !same_dir(&record.project_dir, cwd) || record.conversation_id == id {
+        return Ok(false);
+    }
+    if uuid::Uuid::try_parse(id).map(|u| u.to_string()).as_deref() != Ok(id) {
+        return Err(format!("{id:?} is not a valid conversation id"));
+    }
+    record_conversation(root, &record.project_dir, id)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 #[path = "architect_conversation_tests.rs"]
 mod tests;

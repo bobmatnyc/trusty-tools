@@ -225,6 +225,7 @@ async fn refs_outside_the_raw_body_are_never_fetched() {
         pr_description: Some("Refs #5".into()),
         pr_discussion: Some("Fixes #6".into()),
         referenced_code: Some("// Closes #8".into()),
+        author_intent: None,
     };
     let source = FakePrSource::new("Adds an invoice total.", &billing_diff());
     let seen = review(source, on(), Some(issue_12()), "", github_input(caller)).await;

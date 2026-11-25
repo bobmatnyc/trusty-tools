@@ -3,7 +3,7 @@ name: tm-tool-usage-guide
 description: Detailed tool usage patterns and examples for the trusty-mpm PM agent
 user-invocable: false
 metadata:
-  version: "1.0.1"
+  version: "1.0.3"
 category: pm-reference
 tags: [tools, mcp, delegation, pm-required]
 effort: medium
@@ -11,9 +11,11 @@ effort: medium
 
 # tm Tool Usage Guide
 
-Detailed usage patterns for the PM's real tool families:
-`mcp__trusty-mpm__*`, `mcp__trusty-memory__*`, `mcp__trusty-search__*`, and
-`mcp__trusty-review__*`. This is the concrete "how" behind the constraints in
+Detailed usage patterns for the PM's real tool families: the native `tm
+memory` and `trusty-search` commands, plus `mcp__trusty-mpm__*` and
+`mcp__trusty-review__*`. MCP adapters for memory and search are for non-mpm
+callers only, except the search verbs the released `trusty-search` CLI lacks
+(see #11771). This is the concrete "how" behind the constraints in
 `tm-circuit-breaker`.
 
 ## Deferred MCP Tool Loading (Mandatory Before Any "Unavailable" Fallback)
@@ -44,37 +46,42 @@ that applies to every skill instructing a direct MCP call, including
 
 Before delegating to Research or reading any file:
 
-1. `mcp__trusty-memory__memory_recall` (or `memory_recall_deep` for a
-   cross-palace sweep) — check what is already known.
-2. `mcp__trusty-search__search` (hybrid BM25+vector) or `search_semantic` /
-   `search_lexical` — omit `index_id`; it defaults to this session's pinned
-   project index. Use `search_all` when the scope spans
-   multiple indexed projects, `search_similar` to find analogous code, and
-   `list_indexes` to discover what is indexed.
+1. `tm memory recall "<q>"` — check what is already known. For a
+   cross-palace sweep, `tm memory recall-deep` or `recall-all`.
+2. `trusty-search search "<q>" --json` from the repo, or
+   `trusty-search query "<q>" -i <index>` from elsewhere (hybrid BM25+vector).
+   The narrower `search_semantic` / `search_lexical`, `search_similar` and
+   `list_indexes` stay MCP tools until a `trusty-search` release ships #11771.
 3. Only if both are insufficient — delegate to Research.
 
 Both tools are mandatory-first, not optional. Skipping straight to Read/Grep
 is CB#2 / CB#10 in `tm-circuit-breaker`.
 
-## mcp__trusty-search__* — Code Search
+## Code Search — `trusty-search` CLI first
 
-| Tool | Use |
+MCP adapters are for non-mpm callers only. In an mpm session, run the native
+command:
+
+```
+trusty-search search "skill deploy no-op" --json        # from the repo
+trusty-search query "skill deploy no-op" -i <index-id>  # from elsewhere
+```
+
+A `TRUSTY_INDEX` variable in the environment can override the index; pass
+`-i` from outside the repo. The `mcp__trusty-search__*` rows stay MCP until a
+`trusty-search` release ships #11771/#11774:
+
+| Command | Use |
 |---|---|
-| `search` | Hybrid BM25 + vector search; first choice for "find code that does X" |
-| `search_semantic` / `search_lexical` | Narrower single-strategy search when hybrid over- or under-matches |
-| `search_all` | Cross-project search when the scope is unclear |
-| `search_similar` | Find code semantically similar to a known snippet |
-| `search_kg` / `get_call_chain` | Structural queries — call graphs, symbol relationships |
-| `grep` / `typeahead` | Lexical lookup once you already know the token to find |
-| `search_health` | Health check — **use instead of `curl`/`lsof`** (CB#7). Returns `Ok` even when the daemon is down; branch on the response's `healthy` field, never on the call succeeding |
-| `list_indexes` / `index_status` | Discover what projects are indexed and their freshness |
+| `search_semantic` / `search_lexical` (MCP) | Narrower single-strategy search when hybrid over- or under-matches |
+| `trusty-search query "<q>" --indexes "*"` | Cross-project search when the scope is unclear |
+| `search_similar` (MCP) | Find code semantically similar to a known snippet |
+| `search_kg` / `get_call_chain` (MCP) | Structural queries — call graphs, symbol relationships |
+| `grep` / `typeahead` (MCP) | Lexical lookup once you already know the token to find |
+| `trusty-search health` | Health check — **use instead of `curl`/`lsof`** (CB#7) |
+| `trusty-search list` / `index-status`; `list_indexes` (MCP) for details | Discover what projects are indexed and their freshness |
 
-**Example:**
-```
-mcp__trusty-search__search(query="skill deploy no-op", limit=5)
-```
-
-**Index Pinning (Automatic):** In managed sessions, your `.mcp.json` pinpoints
+**Index Pinning (Automatic, MCP tools):** In managed sessions, your `.mcp.json` pinpoints
 the session's own project index (via `trusty-search serve --index <id>`) so bare
 `search` calls never hit the wrong project. Resolution is pinned-first (#5213):
 an explicit `index_id` wins, otherwise the pin is used, and only an unpinned
@@ -83,26 +90,31 @@ session with no id fans out across every index. An unresolvable id fails with
 `docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md` § 3 (per-worktree index model)
 for the design and lifecycle.
 
-## mcp__trusty-memory__* — Persistent Context
+## Persistent Context — `tm memory` first
 
-| Tool | Use |
+MCP adapters are for non-mpm callers only. Recall, remember and note run as
+native commands over the trusty-memory Unix socket (#8352):
+
+```
+tm memory recall "<q>"                    # call BEFORE research/delegation
+tm memory remember "<text>" [--tag ruling]
+tm memory note "<fact>"                   # short curated fact, importance 1.0
+```
+
+Each works in this session's own palace, with `--palace` to override it,
+`--top-k` / `--room` / `--tag` for scope, and `--json` for a parseable
+envelope (`verb`, `palace`, `socket`, `count`, `result`). With trusty-memory
+down each exits non-zero naming the socket. Store findings as you learn them,
+not at session end.
+
+The other memory verbs are native too:
+
+| Command | Use |
 |---|---|
-| `memory_recall` | Recall relevant context by query — call BEFORE research/delegation |
-| `memory_recall_deep` / `memory_recall_all` | Cross-palace / exhaustive recall |
-| `memory_remember` / `memory_note` | Store important findings immediately, not at session end |
-
-**These tools unavailable? Use the `tm memory` verbs instead (#8352).** A dead
-MCP connection does not cut this session off from the palace: `tm memory recall
-<query>`, `tm memory remember <text>` and `tm memory note <text>` call the same
-daemon methods over its Unix socket, in this session's own palace, with
-`--palace` to override it, `--top-k` / `--room` / `--tag` mirroring the tool
-arguments, and `--json` for a parseable envelope (`verb`, `palace`, `socket`,
-`count`, `result`). With trusty-memory down each exits non-zero naming the
-socket. This is the ONE Bash exception to the memory rule — the MCP tools stay
-first whenever they answer.
-| `task_add` / `task_list` / `task_complete` | Lightweight session-local task tracking (see `tm-session-management`, `tm-ticketing`) |
-| `get_prompt_context` | Load current aliases/conventions at turn start — pass a `query` to scope it |
-| `kg_assert` / `kg_query` / `kg_gaps` | Knowledge-graph assertions and structural recall |
+| `tm memory recall-deep` / `recall-all` / `list` | Deep, cross-palace and listing recall |
+| `tm memory task add` / `list` / `complete` | Lightweight session-local task tracking (see `tm-session-management`, `tm-ticketing`) |
+| `tm memory prompt-context ["<q>"]` | Load current aliases/conventions at turn start — pass a query to scope it |
+| `tm memory kg assert` / `query` / `gaps` | Knowledge-graph assertions and structural recall |
 
 ## mcp__trusty-mpm__* — Orchestration
 
@@ -156,19 +168,19 @@ read this turn? does my task contain investigation keywords ("check",
 ## Bash Tool — Navigation and Git Tracking Only
 
 **Allowed**: `ls`, `pwd`, `cd`; `git status`, `git add`, `git commit`, `git
-log`, `git diff`; `tm memory recall|remember|note` when the
-`mcp__trusty-memory__*` tools are unavailable (#8352).
+log`, `git diff`; `tm memory recall|recall-deep|recall-all|remember|note|list|prompt-context|task|kg`
+and `trusty-search search|query|health|list|index-status` — the native memory
+and search verbs.
 
 **Forbidden (delegate instead)**:
 - Verification commands (`curl`, `lsof`, `ps`, `wget`, `nc`, `make`, `pytest`,
   `npm test`) → Local Ops or QA (CB#7); trusty-* daemon health specifically
-  uses `mcp__trusty-search__search_health` / `mcp__trusty-memory__memory_recall`,
-  not Bash.
+  uses `trusty-search health`.
 - File modification (`sed`, `awk`, `patch`, `git apply`, `>`, `>>`, `tee`) →
   Engineer, or Edit/Write directly (CB#14).
 - Implementation commands (`npm start`, `docker run`, `cargo build --release`
   as a deploy step) → the appropriate Ops agent.
-- Browser automation (`mcp__claude-in-chrome__*`, `mcp__playwright__*`) →
+- Browser automation (`mcp__trusty-browser__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*`) →
   Web QA (CB#6).
 
 ## Forbidden MCP Tools for the PM
@@ -178,6 +190,6 @@ log`, `git diff`; `tm memory recall|remember|note` when the
 | Code modification | `Edit`, `Write` of source **past the direct-action budget** — delegate once a task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight (#4594). Non-source writes and `.git/COMMIT_EDITMSG` are unbudgeted | `engineer` |
 | Deep investigation | `Grep`/`Glob` used repeatedly | Research |
 | Ticketing | `mcp__mcp-ticketer__*`, `mcp__github__*` issue/PR tools, `WebFetch` on ticket URLs | ticketing agent (see `tm-ticketing`) |
-| Browser | `mcp__claude-in-chrome__*`, `mcp__playwright__*` | web-qa |
+| Browser | `mcp__trusty-browser__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | web-qa (on trusty-browser) |
 
 See `tm-circuit-breaker` for the full enforcement model and `tm-delegation-patterns` for agent selection.

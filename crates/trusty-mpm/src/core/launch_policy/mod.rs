@@ -1,7 +1,7 @@
 //! Per-owner launch config: discovery, schema, `extends`, last-good (#8988).
 //!
-//! Why: one operator works for several owners (bobmatnyc, bob-duetto,
-//! duettoresearch) whose sessions should load different MCP servers. Owner
+//! Why: one operator works for several owners (bobmatnyc, acme-admin,
+//! acme) whose sessions should load different MCP servers. Owner
 //! state lives outside every repository, so a clone cannot write it.
 //! What: [`resolve`] maps a cwd to its owner ([`owner::owner_for`]),
 //! reads `<repos_root>/<owner>/.trusty-mpm-owner.toml` and its `extends` chain
@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 use compose::{OwnerPolicy, ResolvedChain, owner_file_path, resolve_chain};
 use last_good::{LastGood, read_last_good, record_last_good, retire_last_good};
 
-pub use carrier::{LaunchFiles, LaunchSettings, provision_settings, provision_settings_default};
+pub use carrier::{
+    LaunchFiles, LaunchSettings, ProvisionError, provision_settings, provision_settings_default,
+};
 use schema::OwnerPolicyError;
 
 /// What [`resolve`] reads from.

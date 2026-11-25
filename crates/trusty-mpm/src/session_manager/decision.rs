@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use crate::core::trusty_tools_config::{TrustyToolsConfig, try_workspace_root};
 
 use super::decommission::is_session_worktree;
 use super::decommission_force::{DecommissionReport, ProvisioningDirt};
@@ -520,7 +520,8 @@ impl SessionManager {
                 .workspace_path
                 .as_deref()
                 .is_some_and(is_session_worktree);
-        let managed_root = workspace_root(&TrustyToolsConfig::load());
+        // #11821: fail closed on a broken install.toml (df-D1t).
+        let managed_root = try_workspace_root(&TrustyToolsConfig::load())?;
         self.decommission_with_root_checked(
             id,
             &managed_root,
@@ -571,19 +572,23 @@ impl SessionManager {
     /// failure must close the decision rather than reopen it (D4).
     /// What: sends `answer` to `pane`, then settles `Delivered` or
     /// `DeliveryFailed`; a failure (including a pane that could not be
-    /// proven) returns [`ManagedError::DeliveryFailed`].
+    /// proven) returns [`ManagedError::DeliveryFailed`]. #10101: the send runs
+    /// on `record`'s own tmux server.
     /// Test: `send_failure_after_claim_closes_decision_as_failed`,
+    /// `answering_a_named_server_record_types_on_its_server_10101`,
     /// `repeat_answer_names_first_answerer_and_time`.
     pub(crate) async fn deliver_answer(
         &self,
         id: &ManagedSessionId,
-        tmux_name: &str,
+        record: &SessionRecord,
         pane: Result<String, ManagedError>,
         answer: &str,
         claim: Claim,
     ) -> Result<Option<DecisionId>, ManagedError> {
+        let tmux_name = record.tmux_name.as_str();
+        // #10101: type on the server the pane was proven on, never the default.
         let sent = pane.and_then(|pane| {
-            self.tmux
+            super::tmux_route::route(self.tmux.as_ref(), record)?
                 .send_line_to_pane(tmux_name, &pane, answer)
                 .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
         });

@@ -78,6 +78,9 @@ pub struct FakeTmuxDriver {
     pub send_calls: Mutex<Vec<(String, String)>>,
     pub kill_calls: Mutex<Vec<String>>,
     pub capture_responses: Mutex<HashMap<String, String>>,
+    /// #8407: escaped captures keyed BY PANE ID; a missing key is a capture
+    /// failure, so a test can drive the unreadable-pane arm.
+    pub escaped_capture_responses: Mutex<HashMap<String, String>>,
     /// Names to return from `list_sessions`.
     pub seeded_names: Mutex<Vec<String>>,
     /// Records `(session_name, workdir)` for every `create_session` call.
@@ -126,6 +129,8 @@ pub struct FakeTmuxDriver {
     /// Records every `send_keys_literal_to_pane` call as `(session_name,
     /// pane_id, text)` (issue #2468).
     pub pane_literal_calls: Mutex<Vec<(String, String, String)>>,
+    /// #10747: every `send_key_to_pane` call as `(pane_id, key)`.
+    pub pane_key_calls: Mutex<Vec<(String, String)>>,
     /// Records every `send_interrupt_to_pane` call as `(session_name,
     /// pane_id)` (issue #2468).
     pub pane_interrupt_calls: Mutex<Vec<(String, String)>>,
@@ -165,6 +170,9 @@ pub struct FakeTmuxDriver {
     pub watched_store: Mutex<Option<Arc<tokio::sync::RwLock<super::store::SessionStore>>>>,
     /// #9101: whether an ownership probe ran with `watched_store` locked.
     pub probed_under_guard: Mutex<bool>,
+    /// #11798: captures `capture_pane` answers in order before it falls back
+    /// to `capture_responses`, so a test can change the pane between reads.
+    pub capture_script: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl FakeTmuxDriver {
@@ -174,6 +182,7 @@ impl FakeTmuxDriver {
             send_calls: Mutex::new(Vec::new()),
             kill_calls: Mutex::new(Vec::new()),
             capture_responses: Mutex::new(HashMap::new()),
+            escaped_capture_responses: Mutex::new(HashMap::new()),
             seeded_names: Mutex::new(Vec::new()),
             create_cwd_calls: Mutex::new(Vec::new()),
             graceful_stop_calls: Mutex::new(Vec::new()),
@@ -186,6 +195,7 @@ impl FakeTmuxDriver {
             pane_harness_calls: Mutex::new(Vec::new()),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
+            pane_key_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
             pane_capture_calls: Mutex::new(Vec::new()),
             rename_calls: Mutex::new(Vec::new()),
@@ -197,6 +207,7 @@ impl FakeTmuxDriver {
             scrollback_option_calls: Mutex::new(0),
             watched_store: Mutex::new(None),
             probed_under_guard: Mutex::new(false),
+            capture_script: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 }
@@ -472,6 +483,14 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
 
     /// Records `(name, pane_id)` (issue #2468) — proves `inject`'s
     /// `Submit::Interrupt` dispatch chose the pane-scoped path.
+    fn send_key_to_pane(&self, _name: &str, pane_id: &str, key: &str) -> Result<(), ManagedError> {
+        self.pane_key_calls
+            .lock()
+            .unwrap()
+            .push((pane_id.to_owned(), key.to_owned()));
+        Ok(())
+    }
+
     fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
         self.pane_interrupt_calls
             .lock()
@@ -494,6 +513,9 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .lock()
             .unwrap()
             .push((name.to_owned(), pane_id.to_owned()));
+        if let Some(next) = self.capture_script.lock().unwrap().pop_front() {
+            return Ok(next);
+        }
         Ok(self
             .capture_responses
             .lock()
@@ -501,6 +523,21 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .get(pane_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// #8407: the seeded escaped capture for `pane_id`, or a capture failure.
+    fn capture_pane_escaped(
+        &self,
+        _name: &str,
+        pane_id: &str,
+        _lines: usize,
+    ) -> Result<String, ManagedError> {
+        self.escaped_capture_responses
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .cloned()
+            .ok_or_else(|| ManagedError::TmuxUnavailable(format!("no pane {pane_id}")))
     }
 }
 

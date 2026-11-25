@@ -240,6 +240,32 @@ async fn rescan_reconcile_indexes_files_written_during_the_gap() {
     );
 }
 
+/// Why: #11456 — the walker canonicalizes, so a root given through a symlink
+/// alias (macOS tempdirs live under `/var` -> `/private/var`) keyed no walked
+/// file and the pass returned Ok with every counter at 0.
+/// What: reconcile through a symlink alias of the root and assert the new file
+/// is reindexed. Fails before the fix: `files_reindexed == 0`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rescan_reconcile_keys_files_under_a_symlinked_root_alias() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).expect("real root");
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).expect("symlink alias");
+    std::fs::write(real.join("aliased.rs"), "fn aliased_11456() {}\n").expect("write");
+    let (index_id, indexer, tracker) = fixture(&alias);
+
+    let stats = reconcile_after_rescan(&index_id, &alias, &alias, &indexer, &tracker)
+        .await
+        .expect("reconcile succeeds");
+    assert_eq!(
+        stats.files_reindexed, 1,
+        "the file under the alias: {stats:?}"
+    );
+    assert!(indexer.read().await.chunk_count() > 0, "its chunks landed");
+}
+
 /// Why: an overflow drops deletions as readily as writes. A deletion that is
 /// never applied leaves a phantom file answering searches forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -98,8 +98,8 @@ fn build_system_prompt_includes_trusty_block() {
     // session knows to prefer `memory_recall` and `search`.
     let prompt = build_system_prompt(rc()).expect("trusty block is always present");
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
-    assert!(prompt.contains("mcp__trusty-memory__memory_recall"));
-    assert!(prompt.contains("mcp__trusty-search__search"));
+    assert!(prompt.contains("tm memory recall"));
+    assert!(prompt.contains("trusty-search search"));
     // The bundled PM instructions are also part of the assembled prompt.
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
@@ -1456,11 +1456,11 @@ fn write_project_hooks_registers_pm_guard() {
     let groups = value["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be an array");
-    // #8454: plus the egress-guard group every writer adds.
+    // #8454: plus the egress-guard group every writer adds; #11431: and the shadow guard.
     assert_eq!(
         groups.len(),
-        3,
-        "PreToolUse must carry the PM-guard, lifecycle-triad and egress-guard groups"
+        4,
+        "PreToolUse must carry the PM-guard, lifecycle-triad, egress-guard and shadow-guard groups"
     );
     let guard = groups
         .iter()
@@ -1582,9 +1582,10 @@ fn write_project_hooks_replaces_existing() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
+    // #11398: the trusty-memory prompt-context group and the PM turn-task group.
     assert_eq!(
         value["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
-        1
+        2
     );
 }
 
@@ -1788,7 +1789,7 @@ fn preseed_trust_preserves_other_keys() {
     let workspace = tmp.path().join("ws");
     std::fs::write(
         &claude_json,
-        r#"{"oauthAccount":{"emailAddress":"r@1mc.io"},"projects":{"/other":{"hasTrustDialogAccepted":true}}}"#,
+        r#"{"oauthAccount":{"emailAddress":"owner@example.com"},"projects":{"/other":{"hasTrustDialogAccepted":true}}}"#,
     )
     .unwrap();
 
@@ -1799,7 +1800,7 @@ fn preseed_trust_preserves_other_keys() {
     // OAuth survives untouched (issue #1269: OAuth must be preserved).
     assert_eq!(
         value["oauthAccount"]["emailAddress"],
-        serde_json::json!("r@1mc.io")
+        serde_json::json!("owner@example.com")
     );
     // Pre-existing project survives.
     assert_eq!(
@@ -1902,9 +1903,9 @@ fn deploy_output_style_writes_all_styles() {
         let written = std::fs::read_to_string(&path).expect("style file readable");
         assert_eq!(written, style.content(rc()), "{} content matches", style.id);
     }
-    // Sanity: exactly the four bundled styles are written (#8453 added the
-    // supervisor style).
-    assert_eq!(crate::core::bundle::OUTPUT_STYLES.len(), 4);
+    // Sanity: exactly the five bundled styles are written (#8453 added the
+    // supervisor style, #10576 `owner-plain`).
+    assert_eq!(crate::core::bundle::OUTPUT_STYLES.len(), 5);
 }
 
 #[test]

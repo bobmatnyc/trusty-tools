@@ -199,7 +199,74 @@ impl McpToolSet {
         project_root: &Path,
         budget: std::time::Duration,
     ) -> Self {
-        let resolved = config::resolve_at(global_path, project_root);
+        Self::load_selected(global_path, project_root, budget, &|_: &str| true).await
+    }
+
+    /// [`McpToolSet::load`], spawning only the servers `wanted` names.
+    ///
+    /// Why: #11650 — a caller that can use the tools of only some servers
+    /// (the ask engine's read-only allowlist) should not start every server
+    /// the operator configured on every call.
+    /// What: as [`McpToolSet::load`], including loading nothing under a test
+    /// harness, but a server whose name `wanted` rejects is never spawned and
+    /// is left out of the diagnostics; one `debug` line names the skipped
+    /// servers.
+    /// Test: `tests::set_tests::an_unwanted_server_is_never_spawned`.
+    pub async fn load_only(project_root: &Path, wanted: &(dyn Fn(&str) -> bool + Sync)) -> Self {
+        if trusty_common::running_under_test_harness() {
+            tracing::debug!("mcp: test harness detected; not reading the operator's server file");
+            return Self::default();
+        }
+        match trusty_mcp::config::default_path() {
+            Ok(path) => Self::load_at_only(&path, project_root, wanted).await,
+            Err(e) => {
+                tracing::warn!(error = %e, "mcp: no shared MCP server file path resolves; no servers configured");
+                Self::default()
+            }
+        }
+    }
+
+    /// [`McpToolSet::load_only`] against an injected global file.
+    /// Test: `tests::set_tests::an_unwanted_server_is_never_spawned`.
+    pub async fn load_at_only(
+        global_path: &Path,
+        project_root: &Path,
+        wanted: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Self {
+        Self::load_selected(global_path, project_root, spawn::HANDSHAKE_TIMEOUT, wanted).await
+    }
+
+    /// The shared body of every loader: resolve, drop the servers `wanted`
+    /// rejects, then connect the rest concurrently.
+    async fn load_selected(
+        global_path: &Path,
+        project_root: &Path,
+        budget: std::time::Duration,
+        wanted: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Self {
+        let mut resolved = config::resolve_at(global_path, project_root);
+        // #11650: `servers` and `statuses` are index-aligned; filter them as pairs.
+        let mut skipped = Vec::new();
+        let (servers, statuses): (Vec<_>, Vec<_>) = resolved
+            .servers
+            .into_iter()
+            .zip(resolved.statuses)
+            .filter(|(server, _)| {
+                let keep = wanted(&server.name);
+                if !keep {
+                    skipped.push(server.name.clone());
+                }
+                keep
+            })
+            .unzip();
+        if !skipped.is_empty() {
+            tracing::debug!(
+                ?skipped,
+                "mcp: servers this caller did not ask for were not spawned"
+            );
+        }
+        resolved.servers = servers;
+        resolved.statuses = statuses;
         let mut set = Self {
             tools: Vec::new(),
             diagnostics: McpDiagnostics {

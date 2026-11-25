@@ -47,10 +47,21 @@ use crate::daemon::error::DaemonError;
 use crate::daemon::services::TmuxService;
 use crate::daemon::state::DaemonState;
 
-/// Liveness plus the HR-3 catalog-staleness signal (`GET /health`, `mpm.health`).
+/// Liveness, dependency health and the HR-3 catalog-staleness signal
+/// (`GET /health`, `mpm.health`).
 ///
+/// Why: the owner ruled that health is degraded when trusty-memory or
+/// trusty-search is not running, so `status` stops being a liveness word;
+/// `alive` carries liveness for callers that only ask "is the process up".
+/// What: `degraded[]` collects the parked-subsystem reasons plus one entry per
+/// dependency that is not up (from the bounded-age cache in
+/// [`super::health_deps`]); `status` is `"degraded"` when the list is
+/// non-empty, else `"ok"`. `pending[]` lists dependencies with no current
+/// answer and never sets `status` (PR-B2). `alive` is always `true`.
 /// Test: `health_reports_ok_status`, `parity_health_agrees_across_transports`,
-/// `health_answers_while_the_catalog_read_is_stalled`.
+/// `health_answers_while_the_catalog_read_is_stalled`,
+/// `memory_down_reports_degraded`, `search_down_reports_degraded`,
+/// `both_up_reports_ok`.
 pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
     // #7968: served from a bounded-age cache refreshed on the blocking pool; the
     // catalog walk used to run inline here, on a runtime worker, per request.
@@ -59,8 +70,26 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
         state,
         chrono::Utc::now(),
     );
+    // Never probes inline: serves the bounded-age dependency cache.
+    let deps = state
+        .dependency_cache()
+        .get(super::health_deps::REFRESH_WAIT)
+        .await;
+    let mut degraded: Vec<String> = crate::core::pr_cleanup::auth_backoff::shared()
+        .degraded_reason()
+        .into_iter()
+        .collect();
+    degraded.extend(super::health_deps::degraded_entries(&deps));
+    // PR-B2: pending is listed apart and never makes `status` degraded.
+    let pending = super::health_deps::pending_entries(&deps);
+    let status = if degraded.is_empty() {
+        "ok"
+    } else {
+        "degraded"
+    };
     HealthResponse {
-        status: "ok".to_owned(),
+        status: status.to_owned(),
+        alive: true,
         catalog_stale: report.stale,
         catalog_unknown: report.unknown,
         catalog_changes: report.summary_lines(),
@@ -79,10 +108,8 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
         // #8058: the pr-cleanup sweep's backoff gate is process-wide, so the
         // reason it parked itself is readable here without threading state
         // through the supervisor. Empty is the healthy answer.
-        degraded: crate::core::pr_cleanup::auth_backoff::shared()
-            .degraded_reason()
-            .into_iter()
-            .collect(),
+        degraded,
+        pending,
         // #9007: the records live in this process's memory only.
         unbound_delegations: unbound.as_ref().ok().copied(),
         unbound_delegations_error: unbound.err(),

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# sled-profile steady|login|show — switch the proxy's allowlist profile (DOC-90
+# OUT-4). Run as root in the proxy container:
+#   docker exec tm-trusty-cloud-sled-egress sled-profile login
+# Each switch is recorded as "<epoch> <profile>" in /var/log/squid/profile.log;
+# check_v1.sh accepts a login-host tunnel only inside a logged login window.
+# The record is written before the reconfigure, so a window never looks wider
+# than it was. Refs #11073
+set -euo pipefail
+
+ACTIVE=/etc/squid/profile.d/active.conf
+PLOG=/var/log/squid/profile.log
+
+case "${1:-}" in
+    login) src=/etc/squid/login.conf ;;
+    steady) src=/etc/squid/steady.conf ;;
+    show)
+        if grep -q login_hosts "${ACTIVE}"; then echo login; else echo steady; fi
+        exit 0
+        ;;
+    *) echo "usage: sled-profile steady|login|show" >&2; exit 2 ;;
+esac
+
+cp "${src}" "${ACTIVE}"
+if ! out="$(squid -k parse -f /etc/squid/squid.conf 2>&1)"; then
+    printf '%s\n' "${out}" >&2
+    exit 1
+fi
+echo "$(date +%s) $1" >> "${PLOG}"
+squid -k reconfigure -f /etc/squid/squid.conf
+echo "profile: $1"

@@ -1,6 +1,6 @@
 # tm tui: console look and Architect view
 
-Status: owner questions Q1-Q5 resolved (see section 9). Goal `ar-G01` (Bob, 2026-11-10), tracked in #10966. Scope: design only.
+Status: owner questions Q1-Q5 resolved (see section 9). Tracked in #10966. Scope: design only.
 Foundry (`README.md` here) is the web design system; this note maps its Night Shift dark
 palette and the console Overview layout onto a ratatui screen. No new design tokens.
 

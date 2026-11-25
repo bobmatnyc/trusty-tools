@@ -18,13 +18,16 @@ use std::path::Path;
 use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
 use trusty_secrets::api::methods::{
-    CopyResponse, DeleteResponse, ListResponse, ScopesResponse, SetOutcome, SetResponse, method,
+    CopyResponse, CopySource, DeleteResponse, KeychainLabel, ListResponse, ScopesResponse,
+    SetOutcome, SetResponse, method,
 };
 use trusty_secrets::store::parse_dotenv;
-use trusty_secrets::{BackendId, SecretKey, SecretValue};
+use trusty_secrets::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 use super::Ctx;
+use super::import_json;
 use super::session::{check_group, entry_key};
+use crate::cli::ImportFormat;
 
 /// Refusal for a third positional argument to `set`.
 const ARGV_REFUSED: &str =
@@ -95,7 +98,10 @@ pub(super) async fn set(
 
 /// `list`: the key names of the project scope, then the owner scope.
 ///
-/// Test: `list_prints_key_names_only`.
+/// What: one line per key; #10998: a key push-only for agents is suffixed
+/// `(push-only for agents)`.
+/// Test: `list_prints_key_names_only`,
+/// `list_marks_a_push_only_key`.
 pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<()> {
     let scopes: ScopesResponse = ctx.call(method::SCOPES, Value::Null).await?;
     for scope in scopes.scopes {
@@ -107,7 +113,13 @@ pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<(
             writeln!(out, "  (no keys)")?;
         }
         for meta in listed.keys {
-            writeln!(out, "  {}", meta.name)?;
+            // #10998: the mark is metadata, never a value.
+            let mark = if meta.agents_push_only {
+                " (push-only for agents)"
+            } else {
+                ""
+            };
+            writeln!(out, "  {}{mark}", meta.name)?;
         }
     }
     Ok(())
@@ -152,9 +164,11 @@ pub(super) async fn remove(
 ///
 /// Why: DOC-74 §9 — bulk-load a `.env` file without printing a value; the
 /// file is left in place.
-/// What: checks the group, then reads and parses the whole file with
-/// `parse_dotenv` before any socket call, so a syntax error stores nothing;
-/// its error names the line number and a fixed reason, never the line. Each
+/// What: checks the group, then reads and parses the whole file before any
+/// socket call, so a syntax error stores nothing. The parser is `format`,
+/// else [`import_json::detect`]'s pick: `parse_dotenv` (its error names the
+/// line number and a fixed reason, never the line), `parse_json`, or
+/// `parse_google_oauth`, whose keys default to the `google-oauth` group. Each
 /// `secret://` entry is skipped and named. Each other entry is sent with
 /// `secrets.set`; a key that fails is named with the server's fixed text and
 /// the rest continue. Ends with a count line; any failed key makes the exit
@@ -162,20 +176,34 @@ pub(super) async fn remove(
 /// Test: `import_loads_a_dotenv_file_and_prints_names_only`,
 /// `import_fails_by_name_on_a_refused_key_and_imports_the_rest`,
 /// `import_syntax_error_names_the_line_not_its_text`,
-/// `import_with_an_invalid_group_stores_nothing`.
+/// `import_with_an_invalid_group_stores_nothing`,
+/// `import_json_nested_file_stores_upper_snake_names`,
+/// `import_google_oauth_stores_one_group_per_project`,
+/// `import_json_never_shows_a_value_in_any_output`.
 pub(super) async fn import(
     ctx: &Ctx<'_>,
     path: &Path,
     group: Option<&str>,
+    format: Option<ImportFormat>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     check_group(group)?;
     let shown = path.display();
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("tm secrets import: cannot read {shown}"))?;
-    // #7521: `DotenvSyntax` carries the line number and a fixed reason only.
-    let entries = parse_dotenv(&text).map_err(|e| anyhow!("tm secrets import: {shown}: {e}"))?;
+    // See G0b secrets JSON import: every parser yields `EnvEntry`s for the
+    // one storage loop below.
+    let (entries, group) = match import_json::detect(format, path, &text) {
+        // #7521: `DotenvSyntax` carries the line number and a fixed reason only.
+        ImportFormat::Dotenv => (parse_dotenv(&text).map_err(|e| anyhow!("{e}")), group),
+        ImportFormat::Json => (import_json::parse_json(&text), group),
+        ImportFormat::GoogleOauth => (
+            import_json::parse_google_oauth(&text),
+            group.or(Some(import_json::GOOGLE_GROUP)),
+        ),
+    };
     drop(text);
+    let entries = entries.map_err(|e| anyhow!("tm secrets import: {shown}: {e}"))?;
     // #7521: project scope only (§15.3).
     let vault = ctx.project_vault().await?;
     let (mut imported, mut skipped, mut failed) = (0usize, 0usize, Vec::new());
@@ -248,6 +276,72 @@ pub(super) async fn copy(
     // #7521: no vault in the request — the server keeps the copy in-project.
     let params = json!({ "from_backend": from, "to_backend": to, "keys": keys });
     let response: CopyResponse = ctx.call(method::COPY, params).await?;
+    report_copy(&from, &to, &response, out)
+}
+
+/// The source a named copy reads (#10998), as typed on the command line.
+pub(super) enum NamedSource<'a> {
+    /// `--from-service S --from-account A`: any Keychain item.
+    Item { service: &'a str, account: &'a str },
+    /// `--from-vault V --from-key K`: a key of any trusty vault.
+    Vault { vault: &'a str, key: &'a str },
+}
+
+/// `copy --from A --to B (--from-service S --from-account A | --from-vault V
+/// --from-key K) KEY`: copy one value from a named source into this
+/// project's scope as `KEY` (#10998).
+///
+/// Why: owner ruling 2026-11-10 — copying a secret between stores is a
+/// user-allowable action that needs no one to see the value.
+/// What: validates the backends, the source names and exactly one KEY
+/// locally, then one `secrets.copy` carrying `source`. The value moves
+/// inside the server; tm sends and receives names only. Prints the same
+/// lines as [`copy`]. A refusal — an unknown or unreadable source, a key
+/// denied to agents — is the server's typed error, exit status 1.
+/// Test: `copy_named_moves_an_owner_key_without_printing_it`,
+/// `copy_named_needs_exactly_one_key_and_fails_on_a_missing_source`.
+pub(super) async fn copy_named(
+    ctx: &Ctx<'_>,
+    from: &str,
+    to: &str,
+    source: NamedSource<'_>,
+    keys: &[&str],
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let fail = |e: SecretsError| anyhow!("tm secrets copy: {e}");
+    let (from, to) = (
+        BackendId::new(from).map_err(fail)?,
+        BackendId::new(to).map_err(fail)?,
+    );
+    let [key] = keys else {
+        bail!("tm secrets copy: a named source copies exactly one KEY, the destination name");
+    };
+    let key = SecretKey::new(key).map_err(fail)?;
+    let source = match source {
+        NamedSource::Item { service, account } => CopySource::keychain_item(
+            KeychainLabel::new(service).map_err(fail)?,
+            KeychainLabel::new(account).map_err(fail)?,
+        ),
+        NamedSource::Vault { vault, key } => CopySource::vault(
+            VaultName::new(vault).map_err(fail)?,
+            SecretKey::new(key).map_err(fail)?,
+        ),
+    };
+    // #10998: the destination is still this project's vault; only the
+    // source is named.
+    let params = json!({ "from_backend": from, "to_backend": to, "keys": [key], "source": source });
+    let response: CopyResponse = ctx.call(method::COPY, params).await?;
+    report_copy(&from, &to, &response, out)
+}
+
+/// Print a copy's `copied`/`not copied` lines and count; fail on any miss.
+// #11015: shared with `assign`.
+pub(super) fn report_copy(
+    from: &BackendId,
+    to: &BackendId,
+    response: &CopyResponse,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     for key in &response.copied {
         writeln!(out, "copied {key}")?;
     }

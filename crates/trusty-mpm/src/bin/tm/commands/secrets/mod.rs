@@ -11,7 +11,8 @@
 //! directory as the project, the system clipboard and stdin — and
 //! [`dispatch`]es one verb from `verbs`. Output goes to one writer; errors
 //! carry fixed text, key names and paths only. Nothing here logs. Every
-//! write — `set`, `remove`, `import`, `copy` — stays in the project scope.
+//! write — `set`, `remove`, `import`, `copy` — stays in the project scope;
+//! `assign` (#11015) writes the scope of the project it names.
 //! Test: `tests.rs` beside this file, against an in-process server over a
 //! `MemoryBackend` in a temp dir, plus a second one as the `copy` target.
 //!
@@ -23,6 +24,9 @@ use std::io::Write;
 
 use crate::cli::SecretsAction;
 
+// #11015: `tm secrets assign`.
+#[cfg(unix)]
+mod assign;
 #[cfg(unix)]
 mod doctor;
 // #9621: `tm secrets exec` and its hidden stub.
@@ -39,6 +43,11 @@ mod exec_stub;
 mod exec_token;
 #[cfg(unix)]
 mod exec_wire;
+// See G0b secrets JSON import.
+#[cfg(unix)]
+mod import_json;
+#[cfg(all(test, unix))]
+mod import_json_tests;
 #[cfg(unix)]
 mod paste;
 // #9072: `tm secrets resolve`, the tier-3 grant client.
@@ -46,6 +55,9 @@ mod paste;
 mod resolve;
 #[cfg(unix)]
 mod session;
+// #10524: `tm secrets unlock` and `lock`.
+#[cfg(unix)]
+mod unlock;
 #[cfg(unix)]
 mod value;
 #[cfg(unix)]
@@ -117,6 +129,11 @@ pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
         stdin: &StdinSource,
         ci: doctor::is_ci(std::env::var("CI").ok().as_deref()),
     };
+    // #10524: the presence prompt is the real one only here; tests pass a fake.
+    if let SecretsAction::Unlock = action {
+        let auth = trusty_mpm::core::presence_local::LocalAuthenticator;
+        return unlock::unlock(&ctx, &auth, &mut std::io::stdout()).await;
+    }
     dispatch(&ctx, action, &mut std::io::stdout()).await
 }
 
@@ -132,6 +149,20 @@ pub(crate) async fn run(_action: SecretsAction) -> anyhow::Result<()> {
 #[cfg(unix)]
 pub(crate) async fn dispatch(
     ctx: &Ctx<'_>,
+    action: SecretsAction,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    dispatch_with(ctx, assign::PRODUCTION, action, out).await
+}
+
+/// [`dispatch`], with `assign`'s project resolver and caller check from
+/// `seam` (#11015).
+///
+/// Test: `assign_tests.rs`.
+#[cfg(unix)]
+pub(crate) async fn dispatch_with(
+    ctx: &Ctx<'_>,
+    seam: assign::Seam<'_>,
     action: SecretsAction,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
@@ -155,15 +186,72 @@ pub(crate) async fn dispatch(
         SecretsAction::Remove { key, group } => {
             verbs::remove(ctx, key.text(), group.as_ref().map(|g| g.text()), out).await
         }
-        SecretsAction::Import { path, group } => {
-            verbs::import(ctx, &path, group.as_ref().map(|g| g.text()), out).await
+        SecretsAction::Import {
+            path,
+            group,
+            format,
+            google_oauth,
+        } => {
+            // See G0b secrets JSON import.
+            let format = format.or(google_oauth.then_some(crate::cli::ImportFormat::GoogleOauth));
+            let group = group.as_ref().map(|g| g.text());
+            verbs::import(ctx, &path, group, format, out).await
         }
-        SecretsAction::Copy { from, to, keys } => {
+        SecretsAction::Copy {
+            from,
+            to,
+            from_service,
+            from_account,
+            from_vault,
+            from_key,
+            keys,
+        } => {
             let keys: Vec<&str> = keys.iter().map(|k| k.text()).collect();
-            verbs::copy(ctx, &from, &to, &keys, out).await
+            // #10998: clap pairs the flags; a lone half cannot reach here.
+            let source = match (&from_service, &from_account, &from_vault, &from_key) {
+                (Some(service), Some(account), _, _) => Some(verbs::NamedSource::Item {
+                    service: service.as_str(),
+                    account: account.as_str(),
+                }),
+                (_, _, Some(vault), Some(key)) => Some(verbs::NamedSource::Vault {
+                    vault: vault.as_str(),
+                    key: key.as_str(),
+                }),
+                _ => None,
+            };
+            match source {
+                Some(source) => verbs::copy_named(ctx, &from, &to, source, &keys, out).await,
+                None => verbs::copy(ctx, &from, &to, &keys, out).await,
+            }
+        }
+        SecretsAction::Assign {
+            src,
+            project,
+            dest,
+            from_backend,
+            to_backend,
+        } => {
+            let args = assign::AssignArgs {
+                src: src.text(),
+                project: &project,
+                dest: dest.as_deref(),
+                from: &from_backend,
+                to: &to_backend,
+            };
+            assign::assign(ctx, seam, args, out).await
         }
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
         SecretsAction::Resolve { key } => resolve::run(key.text(), out).await,
+        SecretsAction::Lock => unlock::lock(ctx, out).await,
+        SecretsAction::Migrate {
+            dry_run,
+            finish,
+            rollback,
+        } => unlock::migrate(ctx, unlock::step_of(finish, rollback), dry_run, out).await,
+        // #10524: the presence prompt runs only from the command line.
+        SecretsAction::Unlock => {
+            anyhow::bail!("tm secrets unlock: runs only from the command line")
+        }
         // #9621: both end the process, so only [`run`] dispatches them.
         SecretsAction::Exec { .. } | SecretsAction::ExecStub { .. } => {
             anyhow::bail!("tm secrets exec: runs only from the command line")

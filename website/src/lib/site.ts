@@ -107,7 +107,7 @@ export interface CrateGroup {
  * What: two groups, split on release state rather than on subject matter.
  * Placement was checked per crate against crates.io and this repository's
  * release tags on 2026-08-08, not inferred from version numbers —
- * `trusty-agents` reads 0.38.6 in its manifest while having no tag and no
+ * `trusty-assistants` (formerly trusty-agents) reads 0.38.6 in its manifest while having no tag and no
  * crates.io release at all.
  *
  * Deliberately omitted here, like the crate COUNT above: any per-crate version
@@ -130,7 +130,7 @@ export const CRATE_GROUPS: CrateGroup[] = [
 	{
 		group: 'In development',
 		crates: [
-			{ name: 'trusty-agents', description: 'Agentic harness with multi-model routing (tagent)' },
+			{ name: 'trusty-assistants', description: 'Agentic harness with multi-model routing (ta)' },
 			{ name: 'trusty-channels', description: 'Chat-channel MCP servers, starting with Slack' },
 			{ name: 'trusty-sld-lint', description: 'Linter for spec-linked documentation' },
 			{ name: 'trusty-code-gui', description: 'Desktop shell for the tcode daemon' }
@@ -188,14 +188,15 @@ export const INSTALL_OPTIONS: InstallOption[] = [
 	}
 ];
 
-/** The nine crates `tctl install` manages, in `stable_set.rs` order. */
+/** The nine `stable_set.rs` members, in order. `tctl install` skips trusty-events. */
 export const STABLE_SET = [
 	'trusty-search',
 	'trusty-memory',
 	'trusty-analyze',
 	'trusty-review',
 	'tga',
-	// #10042: the optional event-bus daemon (ADR-0065), installed softly with producers.
+	// #10975: the optional event-bus daemon (ADR-0065); internal, not published, so
+	// `tctl install` and `tctl upgrade` skip it (#10130).
 	'trusty-events',
 	'trusty-console',
 	'trusty-mpm',

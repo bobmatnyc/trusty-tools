@@ -851,7 +851,7 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
     assert_eq!(values.len(), 1, "{:?}", spec.args);
     let body: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
     assert_eq!(body["deniedMcpServers"][0]["serverName"], "x");
-    assert_eq!(body["disableClaudeAiConnectors"], true);
+    assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}"); // #10735
     let deny = body["permissions"]["deny"].as_array().expect("deny");
     for glob in ARCHITECT_DENY_GLOBS {
         for rule in [(*glob).to_owned(), capitalised(glob)] {
@@ -948,8 +948,9 @@ async fn session_start_in_place_launches_on_the_workspace_server_10101() {
 
     // The workspace server the rule names (`cli_launch_server`), spelled with
     // pieces that predate it so this test also runs against a pre-#10101 tree.
-    let opted_out = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "0");
-    let expected = (!opted_out).then(|| {
+    // #10101: the workspace server is opt-in (`TM_WORKSPACE_TMUX=1`).
+    let opted_in = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "1");
+    let expected = opted_in.then(|| {
         let server = trusty_mpm::core::tmux_server::workspace_server_name(target.path());
         let socket = trusty_mpm::core::tmux_server::ambient_socket_dir().join(&server);
         (server, socket)
@@ -970,7 +971,7 @@ async fn session_start_in_place_launches_on_the_workspace_server_10101() {
                 "every call must reach {server}: {argv}"
             );
         }
-        // `TM_WORKSPACE_TMUX=0` in this environment: the default server.
+        // `TM_WORKSPACE_TMUX` is not `1` here: the default server.
         None => {
             assert!(posts[0]["tmux_socket"].is_null(), "{posts:?}");
             assert!(!new_session.starts_with("-L "), "{new_session}");
@@ -1064,6 +1065,48 @@ async fn an_in_place_start_never_types_into_a_session_that_already_existed_10101
     assert!(!argv.contains("kill-session"), "{argv}");
     assert!(seen.lock().expect("seen").deletes.is_empty());
     result.expect("an existing session is left in place");
+}
+
+/// A spec built by the in-place seam with `profile`'s stamp.
+fn reused_spec(
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let mut prompt = probe_prompt("/p.txt");
+    prompt.stamp = trusty_mpm::core::session_profile::launch_env(profile);
+    super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
+        .expect("a spec builds")
+}
+
+/// #11270 (Fail-Open Check): an Architect start into a session already
+/// running is an error naming the remedy, never a notice with exit 0.
+#[test]
+fn a_reused_session_refuses_an_architect_spec_11270() {
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let err = super::reused_session_notice(
+        &reused_spec(SessionProfile::Architect),
+        "tm-architect",
+        "the default tmux server",
+    )
+    .expect_err("an Architect start into a running session is refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("tm-architect") && text.contains("tm fleet relaunch"),
+        "{text}"
+    );
+}
+
+/// #11270: a PM start into a session already running keeps the notice it
+/// printed before, word for word.
+#[test]
+fn a_reused_session_keeps_the_notice_for_a_pm_spec_11270() {
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let notice = super::reused_session_notice(&reused_spec(SessionProfile::Pm), "tm-w", "srv")
+        .expect("a PM start is left in place");
+    assert_eq!(
+        notice,
+        "tmux session tm-w already existed on srv; left in place, claude was not started in it"
+    );
 }
 
 /// #10101: a `tm connect` that fails after its registration, here while
@@ -1275,4 +1318,22 @@ async fn connect_refuses_an_unreachable_daemon_before_any_write_10101() {
         .collect();
     assert!(written.is_empty(), "the refused connect wrote {written:?}");
     assert!(!log.exists(), "tmux ran");
+}
+
+/// #11077: a sandboxed `tm session start` resolves its home and framework
+/// paths under `<sandbox>/home`, never the process home.
+#[test]
+fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    let home = crate::commands::launch_home::resolve_launch_home(
+        Some(OsStr::new("1")),
+        Some(OsStr::new("/tmp/sbx/data")),
+        Some(PathBuf::from("/Users/example")),
+    )
+    .expect("a sandbox with a data override resolves");
+    let fw = super::start_framework_paths(home.as_deref());
+    let sandbox_home = Path::new("/tmp/sbx/home");
+    assert!(fw.crate_config_root().starts_with(sandbox_home), "{fw:?}");
+    assert!(fw.root.starts_with(sandbox_home), "{fw:?}");
 }

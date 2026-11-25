@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.0] — 2026-11-16
+
+### Added
+
+- trusty-console now serves its own Unix socket at `{data_dir}/trusty-console.sock` beside its HTTP listener (#10902). It answers `console.health` (`status`, `service`, `version`, `uptime_secs`) and `console.fleet_status`, which returns the same services snapshot as `GET /api/console/services`, read from the poller cache with no probe per call. The socket is `0600` in a `0700` directory, checks the peer uid, and is removed on shutdown. A failed bind logs a warning and the console keeps serving HTTP.
+- `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` now live in `trusty_common::console_rpc`; `trusty_console::connector` re-exports them, so existing paths are unchanged.
+- The console socket now answers `console.machine_status` and `console.history` (#10942). `console.machine_status` returns the `GET /api/console/machine-status` body under `machine`, with `ready: false` and `machine: null` before the first host sample. `console.history` returns the `GET /api/console/machine-status/history` body, including the per-service CPU/RSS rings in `service_samples` (#10943). Both read the existing caches; a params value that is not absent, `null`, an object or `[]` is answered `invalid_params`. The HTTP routes are unchanged.
+- `HistorySnapshot`, `ServiceSample`, `ServiceTransition`, `ServiceState` and `MACHINE_HISTORY_SCHEMA_VERSION` now live in `trusty_common::console_rpc::metrics`; `trusty_console::machine_history` re-exports them, so existing paths are unchanged.
+- Linux only: `trusty-console start`, `stop` and `restart`, on `trusty_common::linux_lifecycle` (#11085). `start` spawns `serve` from the install dir and returns once it serves the console socket. `stop` exits 1 when no console runs. `restart` stops, confirms the stop, then starts, and starts a console that is not running. A console whose socket bind failed is found through the listener its `http_addr` file names, and is signalled only after the lifecycle module confirms it is this console. `start` and `restart` pass `TRUSTY_CONSOLE_TOKEN_FILE` (the token file's path) to the spawned console, so it keeps its TCP token gate, and `GITHUB_WEBHOOK_SECRET`, so it keeps accepting webhooks. They also pass every non-credential setting of the daemons the console's stdio bridges auto-start (trusty-memory, trusty-search, trusty-analyze, trusty-mpm), so a daemon a bridge starts keeps multi-tenant mode, its embedder model and device, its loader paths, the analyze facts store path (`TRUSTY_ANALYZER_FACTS`), the mpm daemon's Architect dashboard store root (`DASHBOARD_ROOT`, `ARCHITECT_PROJECT_DIR`), its background-service and supervisor settings, the AWS profile, region, endpoint, FIPS, dual-stack, metadata and retry settings the Bedrock provider uses, and the `trusty-secrets serve` cache and idle tunables. Two credential pointers pass on purpose: `SSH_AUTH_SOCK`, so bridge-started daemons keep ssh agent access as under a shell-started console, and `AWS_CONFIG_FILE`. Other credentials and credential pointers (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`) are not passed. Neither is `AWS_ROLE_ARN`: without its token file it would make the mpm daemon pick Bedrock and fail instead of falling through to OpenRouter. macOS is unchanged.
+- Limit: `restart` respawns plain `serve`, so `--http`, `--tailscale` and `--poll-interval` given to the original `serve` are not carried over. Set `TRUSTY_CONSOLE_BIND` to keep tailnet exposure across a restart.
+- Limit: a restart through `http_addr` of an HTTP-only console whose socket bind keeps failing stops that console; the new child then fails readiness after 60 s, the console stays down, and `restart` exits non-zero (`NotReady`).
+- Limit: a verb-started console runs with cwd `/`, so a daemon its bridges start loads only the user-level `~/.env.local`, not the project-level one a shell-started console finds from its cwd.
+
+### Fixed
+
+- The console's upstream error table lists `gate_refused` (a `secrets.gate` call from a peer that is not the remote gate) and `remote_refused` (a refused `secrets.gate` call), the trusty-secrets kinds it was missing, so the table stays closed over the server's kinds. The page's kind text lists `gate_refused` too (#11464).
+
+### Changed
+
+- The Linux lifecycle stop and restart tests scan an injected process table of their own processes, so a host trusty-console no longer changes their result (#11085). `stop` and `restart` behaviour is unchanged.
+- Test fixtures use neutral placeholder org names.
+
+### Security
+
+- With `TRUSTY_CONSOLE_TOKEN_FILE` set, every route on the console's TCP listeners needs the console token (#11074, DOC-90 §4). This covers the loopback and tailnet listeners; the Host/Origin check and the tailnet peer gate still run first. A request without the token gets `401` with `WWW-Authenticate: Bearer` and a fixed body; a browser page load is redirected to `/login`. Callers send `Authorization: Bearer <token>`. In a browser, `POST /login` sets an `HttpOnly; Secure; SameSite=Strict` session cookie that holds a random session id, never the token. Sessions last 12 hours and end on restart. The gate removes `Authorization` and the session cookie before request logging, the handlers and the reverse proxy see the request. The console's Unix socket is not covered; its peer-uid check gates it.
+- The console exits non-zero before it binds when the token file is missing, empty, shorter than 32 bytes, or has a group or other permission bit set. The error names the path and the problem, never the content. With the variable unset, the console behaves exactly as before.
+
 ## [0.13.0] — 2026-11-07
 
 ### Added

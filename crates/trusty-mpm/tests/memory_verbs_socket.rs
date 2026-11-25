@@ -24,9 +24,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_common::uds::server::{RpcError, RpcFallback, RpcRouter, RpcServeOptions, serve_until};
+use trusty_mpm::core::memory_first_call::WARM_METHOD;
 
 /// Every `(method, params)` frame the stub was sent.
-type Calls = Arc<Mutex<Vec<(String, Value)>>>;
+pub(crate) type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A stub daemon answering one canned body to every method.
 struct Canned {
@@ -41,6 +42,10 @@ impl RpcFallback for Canned {
         if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
             let max = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
             return Ok(json!({ "protocol_version": max }));
+        }
+        // #10648: a write warms its palace first; that read is not the verb's call.
+        if method == WARM_METHOD {
+            return Ok(json!({}));
         }
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params));
@@ -68,7 +73,8 @@ fn recall_body(palace: &str, hits: usize) -> Value {
 }
 
 /// Bind a stub at `socket`, serving until the returned guard is dropped.
-async fn serve(socket: &Path, body: Value) -> (tokio::sync::oneshot::Sender<()>, Calls) {
+// #11625: shared with `memory_tool_verbs_socket`.
+pub(crate) async fn serve(socket: &Path, body: Value) -> (tokio::sync::oneshot::Sender<()>, Calls) {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let listener = trusty_common::uds::bind_hardened(socket).expect("bind the stub socket");
     let router = Arc::new(RpcRouter::new().fallback(Canned {
@@ -91,7 +97,7 @@ async fn serve(socket: &Path, body: Value) -> (tokio::sync::oneshot::Sender<()>,
 /// `TRUSTY_MEMORY_PALACE` in the spawned process's environment, which is what
 /// `core::mcp_session_env` exports and what trusty-memory's own MCP server
 /// reads.
-async fn run_tm(socket: &Path, palace: Option<&str>, args: &[&str]) -> Output {
+pub(crate) async fn run_tm(socket: &Path, palace: Option<&str>, args: &[&str]) -> Output {
     let mut cmd = common::tm_command();
     cmd.arg("memory");
     cmd.args(args);
@@ -107,7 +113,7 @@ async fn run_tm(socket: &Path, palace: Option<&str>, args: &[&str]) -> Output {
 }
 
 /// The single call the stub recorded.
-fn only_call(calls: &Calls) -> (String, Value) {
+pub(crate) fn only_call(calls: &Calls) -> (String, Value) {
     let seen = calls.lock().expect("recorded calls");
     assert_eq!(seen.len(), 1, "expected exactly one RPC: {seen:?}");
     seen[0].clone()
@@ -467,6 +473,10 @@ impl RpcFallback for ByMethod {
         if method == trusty_common::memory_rpc::METHOD_PROTOCOL {
             let max = *trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.end();
             return Ok(json!({ "protocol_version": max }));
+        }
+        // #10648: a write warms its palace first; that read is not the verb's call.
+        if method == WARM_METHOD {
+            return Ok(json!({}));
         }
         if let Ok(mut calls) = self.calls.lock() {
             calls.push((method.to_string(), params));

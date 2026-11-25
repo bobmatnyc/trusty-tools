@@ -92,6 +92,7 @@ pub fn discovered_roots(
     home: Option<&Path>,
 ) -> (Option<PathBuf>, PathBuf) {
     let old = home.map(old_root_at);
+    // #11821: defaulting resolver kept — a read-only scan; a missing root contributes nothing.
     let new = workspace_root(config);
     (old, new)
 }

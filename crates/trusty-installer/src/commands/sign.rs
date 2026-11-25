@@ -30,7 +30,7 @@ use super::macos_signing;
 
 /// Handle `tctl sign <target>` (target: `trusty-search`, `trusty-mpm`,
 /// `trusty-memory` / `trusty-analyze` — owner ruling 2026-08-06 — or
-/// `trusty-agents` — #4277).
+/// `trusty-assistants` — #4277, renamed in #11632).
 ///
 /// Why: The CLI-facing entry point for standalone Developer-ID signing,
 /// separate from the fail-soft hooks `commands::install` runs automatically.
@@ -48,7 +48,7 @@ use super::macos_signing;
 pub fn run(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     if macos_signing::binaries_for_set(target).is_empty() {
         eprintln!(
-            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-agents')"
+            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-assistants')"
         );
         return 2;
     }
@@ -90,6 +90,11 @@ fn run_macos(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i
                     "{target}: signed with Developer ID. The macOS grant will persist across \
                      all future reinstalls."
                 );
+            }
+            // #10607: signing rewrites the bytes the record's digests name.
+            if let Err(why) = super::deployment_record::refresh_digests(target) {
+                eprintln!("tctl sign: could not update the install record: {why}");
+                return 1;
             }
             0
         }

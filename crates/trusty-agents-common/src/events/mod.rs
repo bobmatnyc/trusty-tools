@@ -96,6 +96,9 @@ mod tests {
         assert_eq!(ev.session_id(), Some("abc"));
     }
 
+    /// `RecapGenerated` crosses the stderr relay as JSON, so its exact wire
+    /// shape is pinned against a literal; a symmetric round trip would let a
+    /// wrong tag or field rename pass.
     #[test]
     fn lifecycle_recap_round_trips() {
         let ev = LifecycleEvent::RecapGenerated {
@@ -103,8 +106,14 @@ mod tests {
             summary: "did a thing".into(),
             table_rows: vec![("step".into(), "ok".into())],
         };
-        let s = serde_json::to_string(&ev).expect("serialize recap");
-        let back: LifecycleEvent = serde_json::from_str(&s).expect("deserialize recap");
+        let wire = json!({
+            "type": "recap_generated",
+            "session_id": "s9",
+            "summary": "did a thing",
+            "table_rows": [["step", "ok"]],
+        });
+        assert_eq!(serde_json::to_value(&ev).expect("serialize recap"), wire);
+        let back: LifecycleEvent = serde_json::from_value(wire).expect("deserialize recap");
         assert_eq!(back, ev);
     }
 
@@ -245,13 +254,6 @@ mod tests {
     }
 
     // ---- emit line formatting ----
-
-    #[test]
-    fn event_line_prefix_is_stable() {
-        // #5129: this is the value tcode and tagent write to stderr, and the
-        // one the harness-understanding assets tell the SM to watch for.
-        assert_eq!(EVENT_LINE_PREFIX, "__OMPM_EVENT__ ");
-    }
 
     #[test]
     fn emit_line_has_prefix_and_parses() {

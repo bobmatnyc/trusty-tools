@@ -74,7 +74,7 @@ Per the
 (bundled into `BASE_SM.md` and every output style — see that spec for the
 exact wording):
 
-1. **Consult memory first** — call `get_prompt_context()` / `memory_recall`
+1. **Consult memory first** — run `tm memory prompt-context` / `tm memory recall`
    against the active trusty-memory palace before answering.
 2. **Then consult this doc** — read it from
    `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md` (deployed by
@@ -90,13 +90,13 @@ exact wording):
 
 ## Memory seeding (R3)
 
-`get_prompt_context()` surfaces `is_fact` triples from every registered
+`tm memory prompt-context` surfaces `is_fact` triples from every registered
 trusty-memory palace (see `crates/trusty-memory/src/prompt_facts.rs`), but no
 identity fact exists until one is seeded.
 
 **Automatic (DOC-28 §7 Phase 2, epic #1855):** every time `tm` provisions a
 brand-new managed-session workspace, it attempts this seed once
-against the session's derived palace. The attempt is guarded by a `kg_query`
+against the session's derived palace. The attempt is guarded by a `tm memory kg query`
 idempotency check (skips the assert if the triple already exists) and is
 fail-open: an unreachable trusty-memory daemon, a non-2xx response, or a parse
 error is logged and swallowed, never blocking or failing provisioning. This
@@ -108,17 +108,13 @@ install/upgrade if you are not going through the managed-session provisioner
 (any palace — the fact is visible cross-palace):
 
 ```
-kg_assert(
-  palace: "<any palace, e.g. trusty-tools or session-manager>",
-  subject: "trusty-mpm",
-  predicate: "is_fact",
-  object: "trusty-mpm (binary tm) is the Rust Meta-Harness / control plane, NOT the Python claude-mpm project; see content/instructions/docs/WHAT-IS-TRUSTY-MPM.md or ~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md",
-  provenance: "DOC-28 self-awareness seed"
-)
+tm memory kg assert trusty-mpm is_fact \
+  "trusty-mpm (binary tm) is the Rust Meta-Harness / control plane, NOT the Python claude-mpm project; see content/instructions/docs/WHAT-IS-TRUSTY-MPM.md or ~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md" \
+  --palace "<any palace, e.g. trusty-tools or session-manager>" \
+  --provenance "DOC-28 self-awareness seed"
 ```
 
-Via the MCP tool surface this is `mcp__trusty-memory__kg_assert` with the same
-arguments. Re-running it is safe (idempotent in effect — it re-asserts the
+Re-running it is safe (idempotent in effect — it re-asserts the
 same triple), and it uses the identical subject/predicate/object as the
 automatic path, so the two are interchangeable.
 

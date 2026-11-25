@@ -927,3 +927,172 @@ fn grouped_exec_output_to_shell_is_logged() {
         assert_logged_inline_and_as_body(command);
     }
 }
+
+/// #10702: a signal to the tmux server process is refused in every spelling.
+#[test]
+fn a_tmux_process_kill_is_refused() {
+    let allowed: Vec<&str> = [
+        "pkill tmux",
+        "pkill -x tmux",
+        "pkill -9 -x tmux",
+        "/usr/bin/pkill -x tmux",
+        "sudo pkill -KILL TMUX",
+        "killall tmux",
+        "killall -9 tmux",
+        "kill $(tmux display -p '#{pid}')",
+        "kill -9 `tmux display-message -p '#{pid}'`",
+        "kill -TERM $(pgrep -x tmux)",
+        "pgrep tmux | xargs kill",
+        "cd /tmp && pkill -x tmux",
+        "sh -c 'killall tmux'",
+        "pkill -f 'tmux -L default'",
+        // #10702 r2: a scratch server excuses only its own operand.
+        "kill $(pgrep -x tmux) $(tmux -L scratch1 display -p '#{pid}')",
+        "pkill -f 'tmux|tmux -L scratch1'",
+        // #10702 r2: wrappers with options or counts.
+        "timeout 5 pkill -x tmux",
+        "nice -n 10 pkill tmux",
+        "time pkill tmux",
+        "setsid pkill tmux",
+        "! pkill tmux",
+        "sudo -u root pkill tmux",
+        "env -u X pkill tmux",
+        // #10702 r2: compound heads and nested commands.
+        "(pkill tmux)",
+        "{ pkill tmux; }",
+        "`pkill tmux`",
+        "for p in $(pgrep -x tmux); do kill $p; done",
+        "if true; then pkill tmux; fi",
+        "echo $(pkill tmux)",
+        "x=$(killall tmux)",
+        "eval 'pkill tmux'",
+        "find . -maxdepth 0 -exec pkill tmux \\;",
+        "pgrep tmux | xargs sh -c 'kill $0'",
+        // #10702 r2: a pid list built by ps.
+        "ps ax | grep tmux | awk '{print $1}' | xargs kill",
+        "kill $(ps ax | awk '/tmux/{print $2}')",
+    ]
+    .into_iter()
+    .filter(|command| !refused(command))
+    .collect();
+    assert!(allowed.is_empty(), "should be refused: {allowed:#?}");
+}
+
+/// #10702: unrelated kills, tmux readers, text and scratch servers run.
+#[test]
+fn a_scratch_or_unrelated_process_kill_is_allowed() {
+    for command in [
+        "pkill -f trusty-search",
+        "kill %1",
+        "kill -9 12345",
+        "pgrep tmux",
+        "ps aux | grep tmux",
+        "echo 'pkill -x tmux'",
+        "gh issue comment 1 --body 'killall tmux is refused'",
+        "kill $(tmux -L scratch1 display -p '#{pid}')",
+        "pkill -f 'tmux -L scratch1'",
+        "killall trusty-search",
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command} should be allowed"
+        );
+    }
+}
+
+/// #10702 r3: a kill word that is an operand, not a command, is data.
+#[test]
+fn a_kill_word_outside_command_position_is_allowed() {
+    for command in [
+        "grep kill tmux.log",
+        "grep -e kill tmux.log",
+        "rg -n pkill crates/tmux",
+        "git log --grep killall -- tmux",
+        "grep -c kill tmux.log",
+    ] {
+        assert!(!refused(command), "{command} should be allowed");
+    }
+    // The same words in command position are still refused.
+    for command in ["grep x f; pkill tmux", "grep x f | xargs kill; echo tmux"] {
+        assert!(refused(command), "{command} should be refused");
+    }
+}
+
+/// #10702 r3: `;`, `&&`, `||` and newline separate independent commands.
+#[test]
+fn each_compound_segment_is_judged_alone() {
+    for command in [
+        "kill -9 12345\nls tmux",
+        "kill %1\necho tmux",
+        "kill 12345; echo tmux",
+        "kill 12345 && ls tmux",
+        "kill 12345 || ls tmux",
+        "grep kill f\nls tmux",
+    ] {
+        assert!(!refused(command), "{command:?} should be allowed");
+    }
+    for command in [
+        "echo hi\npkill tmux",
+        "true && pkill tmux",
+        "false || killall tmux",
+        "ls; kill $(pgrep -x tmux)",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+}
+
+/// #10702 r4: a single `|` and a bare `&` end a command; redirects do not.
+#[test]
+fn pipe_and_background_segments_are_judged_alone() {
+    for command in [
+        "echo x|pkill tmux",
+        "echo x | pkill tmux",
+        "sleep 1 &pkill tmux",
+        "sleep 1 & pkill tmux",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+    for command in ["grep kill tmux.log 2>&1", "grep kill f &> o; ls tmux"] {
+        assert!(!refused(command), "{command:?} should be allowed");
+    }
+}
+
+/// #10702 r4: `if`, `while` and `until` heads put a kill in command position.
+#[test]
+fn a_kill_in_a_loop_or_if_head_is_refused() {
+    for command in [
+        "if pkill tmux; then :; fi",
+        "while pkill tmux; do :; done",
+        "until pkill tmux; do :; done",
+        "case x in a)pkill tmux;; esac",
+        "case x in a) pkill tmux;; esac",
+        "case $x in *)kill -9 $(pgrep tmux);; esac",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+}
+
+/// #10702 r4: a kill word after an unlisted opener fails closed when the
+/// segment names `tmux`; a data program opener stays allowed.
+#[test]
+fn an_unlisted_wrapper_or_leading_redirect_fails_closed() {
+    for command in [
+        "watch pkill tmux",
+        "caffeinate pkill tmux",
+        "flock /tmp/l pkill tmux",
+        "chrt -f 1 pkill tmux",
+        "arch -arm64 pkill tmux",
+        ">/dev/null pkill tmux",
+        "2>/dev/null kill -9 $(pgrep tmux)",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+    for command in [
+        "grep kill tmux.log",
+        "cat x | rg pkill tmux",
+        "watch pkill foo",
+    ] {
+        assert!(!refused(command), "{command:?} should be allowed");
+    }
+}

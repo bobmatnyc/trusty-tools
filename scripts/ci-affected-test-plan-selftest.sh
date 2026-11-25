@@ -70,19 +70,19 @@ if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" matrix)" = '{"include":[
 else fail "empty selection: $out"; fi
 
 # 3. Only Tauri UI crates selected -> nothing for the headless runner.
-stub 0 trusty-code-gui trusty-agents-ui
+stub 0 trusty-code-gui
 out="$(plan -- --files x)"
 if [ "$(field "$out" count)" = 0 ] && field "$out" reason | grep -q 'Tauri'; then
   pass "Tauri-only selection -> count=0"
 else fail "Tauri-only selection: $out"; fi
 
 # 4. Tauri crates are dropped, everything else kept, one leg per crate.
-stub 0 alpha trusty-agents-ui beta gamma
+stub 0 alpha trusty-code-gui beta gamma
 out="$(plan -- --files x)"
 m="$(field "$out" matrix)"
 if [ "$(field "$out" count)" = 3 ] && [ "$(field "$out" crates)" = "alpha beta gamma" ] &&
   [ "$(printf '%s' "$m" | jq -r '.include[0].total')" = 3 ] &&
-  ! printf '%s' "$m" | grep -q trusty-agents-ui; then
+  ! printf '%s' "$m" | grep -q trusty-code-gui; then
   pass "mixed selection -> 3 crates, 3 legs, Tauri crate dropped"
 else fail "mixed selection: $out"; fi
 

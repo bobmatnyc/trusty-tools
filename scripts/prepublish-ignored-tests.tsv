@@ -23,9 +23,9 @@
 #
 # Format (tab-separated):  <package>	<exact test name>	<what it needs>
 
-trusty-agents	memory::embed::tests::smoke_single_embedding_shape_and_finiteness	HuggingFace ONNX model download; no key, no daemon, no binary
-trusty-agents	memory::embed::tests::batch_returns_distinct_vectors_per_input	HuggingFace ONNX model download; no key, no daemon, no binary
-trusty-agents	memory::embed::tests::semantic_sanity_paraphrase_beats_unrelated	HuggingFace ONNX model download; asserts paraphrase similarity ordering
+trusty-assistants	memory::embed::tests::smoke_single_embedding_shape_and_finiteness	HuggingFace ONNX model download; no key, no daemon, no binary
+trusty-assistants	memory::embed::tests::batch_returns_distinct_vectors_per_input	HuggingFace ONNX model download; no key, no daemon, no binary
+trusty-assistants	memory::embed::tests::semantic_sanity_paraphrase_beats_unrelated	HuggingFace ONNX model download; asserts paraphrase similarity ordering
 trusty-common	embedder::tests::fastembed_returns_correct_dim	the real fastembed AllMiniLML6V2Q model (~22 MB), pre-seeded by the workflow
 trusty-common	embedder::tests::fastembed_cache_hit_is_idempotent	the real fastembed model; asserts a second init reuses the cache
 trusty-common	embedder::provider_tests::fast_embedder_model_name_reports_fp32_default	model registry lookup only — the fp32 default is the #3493 CoreML regression guard
@@ -246,5 +246,24 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # install (see the #9663 r2 tmux note above), so it stays unselected.
 # 145 + 1 -> 146 (Refs #10476; failing run 42363121200).
 #
+# #10781 (PR #10971) adds one: trusty-analyze
+# `scoped_review_p95_under_target` (tests/scoped_p95_bench.rs),
+# `#[ignore = "load test: needs an operator-named trusty-search daemon holding
+# a 300K-chunk index"]`. It needs a live daemon with a 300K-chunk index, which
+# this job does not have, so it stays unselected.
+# 146 + 1 -> 147 (Refs #10781; failing run 43129439454). The same PR's
+# macOS-only `presence_local_tests` test is not enumerated on Linux.
+#
+# #11696 (Phases A, B, C) added five trusty-computer live test files across PRs
+# #11755, #11757, #11760, and #11744: `live_pointer` (coordinate input + drag,
+# Phase A, #11755), `live_window_mgmt` (window management, Phase B, #11757),
+# `live_clipboard` (clipboard with redaction, Phase C, #11760), and both
+# `live_screenshot` and `live_menu` (bounded screenshot and menu invocation,
+# #11744). The baseline rises by 4 not 5 because one was already counted
+# (possibly an earlier live test from before these PRs). Each needs macOS
+# hardware (builds and runs CuaDriver.app bounded, needs an unlocked screen or
+# TRUSTY_SANDBOX=1), so all stay unselected.
+# 147 + 4 -> 151 (Refs #11696; failing runs 45344995292, 45346805627).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 146
+# UNSELECTED-BASELINE: 151

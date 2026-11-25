@@ -5,7 +5,7 @@
 //! Claude harness — for ANY `repo_url` the caller supplies, with zero operator
 //! confirmation. A PM agent working in one repo asked for a session against an
 //! entirely unrelated repo and the daemon obliged, creating dozens of orphan
-//! worktrees under `~/trusty-mpm-projects/duettoresearch/aria/.worktrees/`. The
+//! worktrees under `~/trusty-mpm-projects/acme/aria/.worktrees/`. The
 //! blast radius has two independent dimensions the tickets separate: (1)
 //! MCP-initiated spawning must be OFF by default (#1836) so a careless or
 //! misbehaving LLM call can never provision anything without an explicit
@@ -144,6 +144,7 @@ fn looks_like_remote_url(s: &str) -> bool {
 /// `tests::a_degenerate_registered_root_is_never_a_containment_root`.
 fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Option<PathBuf> {
     let declared = if looks_like_remote_url(&project.repo_url) {
+        // #11821: defaulting resolver kept — an allowlist lookup; the spawn it admits clones through `try_base_clone_path`.
         workspace_subpath(config, &parse_github_path(&project.repo_url)?)
     } else {
         PathBuf::from(&project.repo_url)
@@ -194,6 +195,7 @@ fn degenerate_root_reason(root: &Path, config: &TrustyToolsConfig) -> Option<&'s
     if dirs::home_dir().is_some_and(|home| same_path(&home, root)) {
         return Some("it is the operator's home directory");
     }
+    // #11821: defaulting resolver kept — this check can only add a refusal.
     if same_path(&workspace_root(config), root) {
         return Some("it is the daemon's workspace root");
     }
@@ -404,6 +406,8 @@ mod tests {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 
@@ -683,7 +687,7 @@ mod tests {
         assert!(!is_known_repo(
             &projects,
             &TrustyToolsConfig::default(),
-            "https://github.com/duettoresearch/aria"
+            "https://github.com/acme/aria"
         ));
     }
 
@@ -730,10 +734,9 @@ mod tests {
         let registry = ProjectRegistry::load(dir.path()).await.expect("load");
         let cfg = TrustyToolsConfig::default();
 
-        let err =
-            ensure_mcp_spawn_allowed(&registry, &cfg, "https://github.com/duettoresearch/aria")
-                .await
-                .expect_err("must refuse when MCP spawning is disabled by default");
+        let err = ensure_mcp_spawn_allowed(&registry, &cfg, "https://github.com/acme/aria")
+            .await
+            .expect_err("must refuse when MCP spawning is disabled by default");
         assert!(err.contains("disabled"), "{err}");
         assert!(err.contains("allow_mcp_spawn"), "{err}");
     }
@@ -751,10 +754,9 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            ensure_mcp_spawn_allowed(&registry, &cfg, "https://github.com/duettoresearch/aria")
-                .await
-                .expect_err("must refuse an unregistered repo even when spawning is enabled");
+        let err = ensure_mcp_spawn_allowed(&registry, &cfg, "https://github.com/acme/aria")
+            .await
+            .expect_err("must refuse an unregistered repo even when spawning is enabled");
         assert!(err.contains("unregistered"), "{err}");
         assert!(err.contains("project_register"), "{err}");
     }

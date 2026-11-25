@@ -53,24 +53,39 @@ pub(crate) async fn project(
 ) -> anyhow::Result<()> {
     match action {
         ProjectAction::Init { dir } => {
+            // #10586: deprecated (owner ruling 2026-10-31); stderr keeps stdout stable.
+            eprintln!("note: `tm project init` is deprecated; use `tm projects register`");
             let path = resolve_dir(dir)?;
-            let body: serde_json::Value =
-                trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
-                    .post("/projects")
-                    .json(&serde_json::json!({ "path": path }))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
+            let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                .post("/projects")
+                .json(&serde_json::json!({ "path": path }))
+                .send()
+                .await?;
+            // #10586: a refused init (no `origin` remote) names its fix.
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                let detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                    .unwrap_or(text);
+                anyhow::bail!("tm project init failed ({status}): {detail}");
+            }
+            let body: trusty_mpm::core::project::RegisterProjectResponse = resp.json().await?;
             let report = scaffold_project_dir(&path)?;
             for line in &report {
                 println!("  {line}");
             }
-            let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = &body.info.name;
             println!("registered project '{name}' at {}", path.display());
+            // #10586: a kept record is named, never reported as a silent write.
+            if let Some(kept) = &body.kept_existing {
+                println!("project registry: {}", kept.notice());
+            }
         }
         ProjectAction::List => {
+            // #10586: deprecated (owner ruling 2026-10-31).
+            eprintln!("note: `tm project list` is deprecated; use `tm projects list`");
             // #5994: rows come from the persistent registry, not the daemon's
             // in-memory session-derived project map.
             for row in list_rows(client, url).await? {
@@ -98,6 +113,49 @@ pub(crate) async fn project(
             );
         }
         ProjectAction::Trust { dir, revoke } => trust_cmd(dir, revoke)?,
+        // #10592: ledger-only, handled locally.
+        ProjectAction::Unadopt { paths, dry_run } => unadopt_cmd(&paths, dry_run)?,
+    }
+    Ok(())
+}
+
+/// `tm project unadopt` — ledger-only removal of adopted worktrees (#10592).
+///
+/// Why: init adopts legacy worktrees and nothing took a record back out.
+/// What: local, no daemon round-trip; calls
+/// [`trusty_mpm::project::unadopt_paths`] on the CLI's registry data dir and
+/// prints one line per path. A store error fails the command, so a removal is
+/// never printed unless it reached disk; a real run with any unmatched path
+/// exits non-zero too.
+/// Test: `project_unadopt_removes_the_record_and_keeps_the_folder_10592`,
+/// `project_unadopt_dry_run_writes_nothing_10592`,
+/// `project_unadopt_fails_on_a_corrupt_ledger_10592`,
+/// `project_unadopt_fails_when_a_path_matches_no_record_10592`,
+/// `project_unadopt_matches_a_deleted_folder_by_relative_and_symlinked_path_10592`.
+fn unadopt_cmd(paths: &[std::path::PathBuf], dry_run: bool) -> anyhow::Result<()> {
+    let store_dir = trusty_mpm::project::registry_data_dir();
+    let report = trusty_mpm::project::unadopt_paths(&store_dir, paths, dry_run)
+        .map_err(|e| anyhow::anyhow!("tm project unadopt: ledger unchanged: {e}"))?;
+    let verb = if dry_run { "would remove" } else { "removed" };
+    for entry in &report.removed {
+        println!(
+            "{verb} {} (project '{}') from the adoption ledger",
+            entry.path.display(),
+            entry.project
+        );
+    }
+    for path in &report.not_adopted {
+        println!("not adopted: {}", path.display());
+    }
+    if dry_run {
+        println!("dry run: ledger not written; worktree folders are never touched");
+    } else if !report.not_adopted.is_empty() {
+        // #10592: a real run that misses a path must not read as success.
+        anyhow::bail!(
+            "tm project unadopt: {} path(s) matched no ledger record; {} removed",
+            report.not_adopted.len(),
+            report.removed.len()
+        );
     }
     Ok(())
 }

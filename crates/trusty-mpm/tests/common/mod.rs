@@ -143,6 +143,9 @@ pub fn tm_bin() -> &'static str {
 /// server and session rather than the fixture's. #6288: `TRUSTY_MPM_SOCKET`,
 /// `TRUSTY_DATA_DIR_OVERRIDE` and `XDG_DATA_HOME` pick the daemon socket the
 /// socket-only commands dial, so each points a child at the developer's daemon.
+/// #11273: `TRUSTY_MPM_SESSION_PROFILE` and `CLAUDE_MPM_SUB_AGENT` stamp the
+/// child's role and thread, so a child inheriting them is judged as the
+/// developer's own session; each harness starts unstamped and stamps itself.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
 /// environment, so the `#5544` hazard — a `set_var` visible to every test
@@ -164,6 +167,10 @@ const CHILD_STATE_ENV: &[&str] = &[
     "TMUX_PANE",
     "REPOS_ROOT",
     "GH_CONFIG_DIR",
+    "TRUSTY_MPM_SESSION_PROFILE",
+    // #11353: a managed launch's model stamp decides the Fable cap.
+    "TRUSTY_MPM_LAUNCH_MODEL",
+    "CLAUDE_MPM_SUB_AGENT",
 ];
 
 /// Point `cmd`'s child at `home` and strip every other state-pointing variable.
@@ -185,6 +192,8 @@ pub fn isolate_spawned_tm<'a>(cmd: &'a mut Command, home: &Path) -> &'a mut Comm
     // #9396: a child under a scratch `$HOME` has no content installed; it
     // must report that, never fetch the release from GitHub.
     cmd.env(trusty_mpm::content::first_use::OFFLINE_ENV, "1");
+    // See G0b auto-setup: a scratch-HOME child never runs a real `cargo install`.
+    cmd.env("TM_SKIP_MCP_AUTO_SETUP", "1");
     for key in CHILD_STATE_ENV {
         cmd.env_remove(key);
     }
@@ -376,13 +385,14 @@ pub fn assert_refusal_names_a_policy(reason: &str) {
 /// What: a gzip tar of every file under `content/{agents,skills,instructions}`
 /// (#9012: skills, PM sections, output styles and SM instructions are content
 /// too) under the bundle paths the packager uses, plus `bundle-manifest.toml`,
-/// written as `content-v0.0.1.tar.gz` with a `content-lock.toml` pinning its
+/// written as `<MIN_CONTENT_TAG>.tar.gz` with a `content-lock.toml` pinning its
 /// sha256. Idempotent per `home`.
 pub fn stage_repo_content(home: &Path) {
     use trusty_common::content::{ContentLock, LOCK_FILE_NAME};
     use trusty_common::integrity::Sha256Digest;
 
-    const TAG: &str = "content-v0.0.1";
+    // #11470: at the minimum, so the launch resolver serves it.
+    const TAG: &str = trusty_mpm::content::min_content::MIN_CONTENT_TAG;
     let cache = home.join(".trusty-mpm").join("content");
     if cache.join(LOCK_FILE_NAME).exists() {
         return;

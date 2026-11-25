@@ -752,6 +752,11 @@ fn on_dispatch_locked(state: &DaemonState, session: SessionId, payload: &Value) 
         .and_then(Value::as_str)
         .unwrap_or_default();
     let tool_use_id = field(payload, "tool_use_id").map(str::to_string);
+    // #11674: the ledger task the prompt binds, distinct from `task`.
+    let ledger_task = input
+        .and_then(|i| i.get("prompt"))
+        .and_then(Value::as_str)
+        .and_then(crate::core::subagent_task_roundtrip::dispatch_task);
 
     // Idempotence: an already-tracked tool_use_id means this hook was redelivered.
     if let Some(id) = tool_use_id.as_deref()
@@ -777,6 +782,7 @@ fn on_dispatch_locked(state: &DaemonState, session: SessionId, payload: &Value) 
             d.cwd = cwd.clone();
             d.isolation = isolation.clone();
             d.transcript_path = transcript.clone();
+            d.ledger_task = ledger_task.clone();
             if d.task.is_empty() && !task.is_empty() {
                 d.task = task.to_string();
             }
@@ -788,6 +794,7 @@ fn on_dispatch_locked(state: &DaemonState, session: SessionId, payload: &Value) 
     delegation.cwd = cwd;
     delegation.isolation = isolation;
     delegation.transcript_path = transcript;
+    delegation.ledger_task = ledger_task;
     state.upsert_delegation(delegation);
 }
 

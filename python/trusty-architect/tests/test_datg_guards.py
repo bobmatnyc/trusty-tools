@@ -1,7 +1,8 @@
 """#10800 G1-G3 (DOC-87, scope D0c): policy-file conflicts, work-card binding, delivery displacement.
 
 G1: a file CLAUDE.md imports restates a threshold the owner changed; the resume digest flags it.
-G2: a dispatch names its work card; a card closes on an outcome that cites evidence. Shadow by default.
+G2: a dispatch names its work card (`Task: <code>-Txx`, #11101; `Card:` before); a card closes on an outcome
+that cites evidence. Shadow by default.
 G3: idle ready work, checker/repair work holding every running slot, and a repair loop are flagged.
 """
 import json
@@ -69,27 +70,32 @@ class Base(unittest.TestCase):
 class CardCase(Base):
     def test_dispatch_without_a_card_warns_in_shadow_and_is_recorded_10800(self):
         out = self.hook("Goal: th-G01\nimplement the export")
-        self.assertIn("names no work card", out["additionalContext"])
+        # #11101: the Task check answers the hook first; G2 still records its shadow finding
+        self.assertIn("names no task id", out["additionalContext"])
         self.assertNotIn("permissionDecision", out)
         self.assertEqual([r["guard"] for r in self.guards_log()], ["card"])
+        self.assertIn("names no work card", self.guards_log()[0]["text"])
 
     def test_dispatch_with_an_open_card_under_its_goal_passes_10800(self):
-        self.assertIsNone(self.hook("Goal: th-G01 Card: th-T01\nimplement the export"))
+        self.assertIsNone(self.hook("Goal: th-G01 Task: th-T01\nimplement the export"))
         self.assertEqual(self.guards_log(), [])
 
     def test_card_under_another_goal_or_unknown_is_flagged_10800(self):
-        self.assertIn("under th-G01, not th-G02", self.hook("Goal: th-G02 Card: th-T01 x")["additionalContext"])
-        self.assertIn("not an open task", self.hook("Goal: th-G01 Card: th-T7f x")["additionalContext"])
+        self.assertIn("under th-G01, not th-G02", self.hook("Goal: th-G02 Task: th-T01 x")["additionalContext"])
+        # #11101: an unknown own-ledger task fails the Task check too, which answers; G2 records it
+        self.assertIn("unknown or closed task th-T7f", self.hook("Goal: th-G01 Task: th-T7f x")["additionalContext"])
+        self.assertIn("not an open task", self.guards_log()[-1]["text"])
 
     def test_enforce_denies_a_dispatch_without_a_card_10800(self):
         self.enforce()
         self.assertEqual(self.hook("Goal: th-G01 go")["permissionDecision"], "deny")
-        self.assertIsNone(self.hook("Goal: th-G01 Card: th-T01 go"))
+        self.assertIsNone(self.hook("Goal: th-G01 Task: th-T01 go"))
         r = self.cli("check-dispatch", "--prompt", "Goal: th-G01 go")
         self.assertEqual((r.returncode, r.stdout.split(":")[0]), (2, "block"))
 
     def test_rules_name_the_card_and_the_evidence_10800(self):
-        self.assertIn("Card: {code}-Txx", datg.RULES)
+        self.assertIn("Task: {code}-Txx@MMDD", datg.RULES)   # #11101: the card is named with `Task:`
+        self.assertNotIn("Card:", datg.RULES)
         self.assertIn("evidence", datg.RULES)
 
 
@@ -143,19 +149,19 @@ class HookFailureCase(Base):
         for bad in (good[:-20],                                                        # truncated JSON
                     json.dumps({"code": "th", "config": {"guard_mode": "enforce"}})):  # load_state's shape check
             self.corrupt(bad)
-            out = self.hook("Goal: th-G01 Card: th-T01 go")
+            out = self.hook("Goal: th-G01 Task: th-T01 go")
             self.assertEqual(out["permissionDecision"], "deny", bad[:40])
             self.assertIn("guard_mode enforce", out["permissionDecisionReason"])
 
     def test_corrupt_state_in_shadow_fails_open_and_is_recorded_10800(self):
         self.corrupt("garbage")
-        self.assertIsNone(self.hook("Goal: th-G01 Card: th-T01 go"))
+        self.assertIsNone(self.hook("Goal: th-G01 Task: th-T01 go"))
         self.assertEqual([r["guard"] for r in self.guards_log()], ["hook_error"])
 
     def test_a_raising_card_check_under_enforce_denies_10800(self):
         self.enforce()
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Agent",
-                              "tool_input": {"prompt": "Goal: th-G01 Card: th-T01 go"}})
+                              "tool_input": {"prompt": "Goal: th-G01 Task: th-T01 go"}})
         with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.p}), \
                 mock.patch.object(datg, "dispatch_card", side_effect=RuntimeError("boom")):
             out = json.loads(datg.run_hook(payload))["hookSpecificOutput"]

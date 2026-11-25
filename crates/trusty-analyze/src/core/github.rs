@@ -232,6 +232,8 @@ mod tests {
         }
     }
 
+    /// The request is the `analyze.review_github_pr` params object, so its
+    /// field names are pinned to the literal a client sends.
     #[test]
     fn github_pr_request_round_trips_json() {
         let req = GithubPrRequest {
@@ -241,9 +243,16 @@ mod tests {
             index_id: "idx".into(),
             post_comment: true,
         };
-        let json = serde_json::to_string(&req).unwrap();
-        let back: GithubPrRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(req, back);
+        let wire = serde_json::json!({
+            "owner": "bobmatnyc",
+            "repo": "trusty-analyze",
+            "pr": 12,
+            "index_id": "idx",
+            "post_comment": true
+        });
+        assert_eq!(serde_json::to_value(&req).unwrap(), wire);
+        let back: GithubPrRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, req);
     }
 
     #[test]

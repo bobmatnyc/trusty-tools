@@ -110,11 +110,15 @@ pub(crate) fn purge_body(result: &Result<(usize, usize), String>) -> serde_json:
 /// is held. The guard lint declares this with a `CALLER:` row in
 /// `scripts/teardown-guard-manifest.tsv`.
 /// Nothing selected touches nothing. Returns `(files, chunks)` removed.
-/// Test: `a_profile_patch_removes_newly_excluded_files_and_does_not_rebuild`.
+/// #10739: `Some(roots)` also selects every file under none of `roots`, the
+/// new `include_paths` subtrees plus the additional roots.
+/// Test: `a_profile_patch_removes_newly_excluded_files_and_does_not_rebuild`,
+/// `setting_include_paths_purges_newly_refused_files`.
 pub(crate) async fn purge_newly_excluded(
     handle: &IndexHandle,
     index_id: &IndexId,
     new_globs: &[String],
+    roots: Option<&[std::path::PathBuf]>,
 ) -> Result<(usize, usize), String> {
     let indexer = handle.indexer.read().await;
     let files = indexer
@@ -129,6 +133,7 @@ pub(crate) async fn purge_newly_excluded(
         .filter(|f| {
             let abs = crate::core::index_roots::resolve_absolute(primary, additional, f);
             crate::service::index_admission::globs_exclude(primary, additional, new_globs, &abs)
+                || roots.is_some_and(|roots| !super::path_admits::under_any_root(roots, &abs))
         })
         .collect();
     if newly.is_empty() {

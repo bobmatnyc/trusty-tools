@@ -28,7 +28,7 @@ use super::tool_schemas_canvas;
 ///
 /// Why: Both `tool_list_response` (indirectly) and `is_known_tool` must agree
 /// on the exact surface; a single constant array prevents drift.
-/// What: The 22 chat-as-tools operations implemented by the native Slack MCP —
+/// What: The 23 chat-as-tools operations implemented by the native Slack MCP —
 /// the original nine (#2639/#2640), ten added for claude.ai Slack-connector
 /// parity (epic #3611), two more from epic #3744 slice 1's `slack_canvas_*`
 /// tools, and `slack_canvas_push` from epic #3744 slice 2 (CommonMark →
@@ -61,6 +61,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "slack_canvas_create",
     "slack_canvas_lookup_sections",
     "slack_canvas_push",
+    "slack_canvas_access_set",
 ];
 
 /// Report whether `name` is a planned Slack tool.
@@ -192,15 +193,30 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_list_channels",
-            "List channels visible to the authenticated principal.",
+            "List one page of channels visible to the authenticated principal. \
+             Default `types` is 'public_channel,private_channel', so private \
+             channels the bot is a member of are included; a token without \
+             the groups:read scope gets public channels only. The result's \
+             `types` names the set actually listed. To list every channel, \
+             pass the previous call's `next_cursor` back as `cursor`, with \
+             its `types`, until `next_cursor` is null.",
             json!({
                 "types": {
                     "type": "string",
-                    "description": "Comma-separated channel types (e.g. public_channel,private_channel).",
+                    "description": "Comma-separated channel types: public_channel, \
+                        private_channel, mpim, im. Default \
+                        'public_channel,private_channel', narrowed to \
+                        'public_channel' without groups:read. An explicit \
+                        value is sent as is.",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of channels to return.",
+                    "description": "Maximum number of channels to return per page.",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous \
+                        call's `next_cursor`; fetches the next page.",
                 },
             }),
             &[],
@@ -399,6 +415,7 @@ mod canvas_split_tests {
             "slack_canvas_create",
             "slack_canvas_lookup_sections",
             "slack_canvas_push",
+            "slack_canvas_access_set",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
@@ -476,6 +493,21 @@ mod tests {
                 "slack_read_thread schema must declare '{key}'"
             );
         }
+    }
+
+    #[test]
+    fn list_channels_schema_advertises_cursor_and_default_types() {
+        let v = tool_list_response();
+        let list = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "slack_list_channels")
+            .expect("slack_list_channels is a known tool");
+        assert!(list["inputSchema"]["properties"].get("cursor").is_some());
+        let description = list["description"].as_str().unwrap();
+        assert!(description.contains("public_channel,private_channel"));
+        assert!(description.contains("next_cursor"));
     }
 
     #[test]

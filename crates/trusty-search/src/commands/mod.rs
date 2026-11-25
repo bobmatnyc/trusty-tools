@@ -62,6 +62,9 @@ pub mod index_status;
 pub mod init;
 pub mod integrate;
 pub mod list;
+// #11085: Linux start/stop/restart on trusty_common::linux_lifecycle.
+#[cfg(target_os = "linux")]
+pub mod linux_lifecycle;
 pub mod migrate;
 pub mod migrate_redb;
 pub mod migrate_storage;
@@ -81,6 +84,10 @@ pub mod query;
 pub mod reindex;
 pub mod remove;
 pub mod search;
+// #11625: `lexical`, `semantic` and `kg` lane verbs.
+pub mod search_lane_verbs;
+pub mod search_verbs;
+mod search_verbs_render;
 pub mod serve;
 // #5264: working-directory index scoping for a bare `serve` MCP session.
 pub mod serve_scope;

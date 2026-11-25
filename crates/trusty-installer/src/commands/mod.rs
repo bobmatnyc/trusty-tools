@@ -19,6 +19,9 @@ pub mod config;
 // #9396: `tm content update` once trusty-mpm lands.
 pub mod content_step;
 pub mod dependency_graph;
+// #10607: what install placed, and whether the machine still matches it.
+mod deployment_probe;
+pub mod deployment_record;
 pub mod doctor;
 pub mod ensure;
 // #10042: the launchd plist tctl writes for the trusty-events bus daemon.

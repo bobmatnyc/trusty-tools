@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use trusty_architect::poller::{Pane, PollState, Waker, dispatch_wake};
+use trusty_architect::poller::digest::WakeItem;
+use trusty_architect::poller::{Pane, PollState, WakeContext, Waker, dispatch_wake_with};
 use trusty_architect::{FakeClock, PaneId, ScriptedTmux, WakeError, to_python_json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -205,14 +206,32 @@ fn dispatch_wake_matches_python_goldens() -> TestResult {
             let clock = FakeClock::new(now);
             let mut calls: VecDeque<Value> = VecDeque::new();
             let scripted = args[3].clone();
-            let result = dispatch_wake(
+            // df-T7i P1b: the woken alerts and the held PM messages ride the digest.
+            let woken: Vec<WakeItem> = serde_json::from_value(args[4].clone()).unwrap_or_default();
+            let inbox = tempfile::tempdir()?;
+            let messages = inbox.path().join("pm-messages.jsonl");
+            let lines: String = arr(&case["messages"])
+                .iter()
+                .map(|m| match m.as_str() {
+                    Some(text) => format!("{text}\n"),
+                    None => format!("{}\n", to_python_json(m, true).unwrap_or_default()),
+                })
+                .collect();
+            std::fs::write(&messages, lines)?;
+            let ctx = WakeContext {
+                woken: &woken,
+                messages: Some(&messages),
+                ..WakeContext::default()
+            };
+            let result = dispatch_wake_with(
                 &mut state,
                 args[0].as_u64().unwrap_or_default(),
                 args[1].as_u64(),
                 args[2].as_bool().unwrap_or_default(),
                 &clock,
-                |n, logged| {
-                    calls.push_back(json!([n, logged]));
+                &ctx,
+                |n, logged, digest| {
+                    calls.push_back(json!([n, logged, digest]));
                     match scripted.get("raise") {
                         Some(_) => Err(WakeError::NotOwner {
                             pane: "%1".to_owned(),

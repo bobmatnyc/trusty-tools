@@ -125,6 +125,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::Value::Null,
         ),
+        // #10739: the per-path admission query is a read.
+        (
+            reads::METHOD_INDEX_PATH_ADMITS,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "path": "index.md" }),
+        ),
         (reads::METHOD_CHUNKS_LIST, Lane::Free, scoped.clone()),
         (reads::METHOD_GRAPH_GET, Lane::Free, scoped.clone()),
         (reads::METHOD_GRAPH_STATS, Lane::Free, index.clone()),

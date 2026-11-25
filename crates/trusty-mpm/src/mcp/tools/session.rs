@@ -216,6 +216,40 @@ pub(super) fn session_tools() -> Vec<Value> {
                 "additionalProperties": false
             }),
         ),
+        // #10991: owner ruling D8b.
+        tool(
+            "session_archive",
+            "Move a managed session's project directory (its workspace, else \
+             its start directory) to the owner-only archive \
+             `~/.trusty-tools/archive` (mode 0700), with a manifest recording \
+             the origin path so it can be restored. A same-filesystem move is a \
+             rename; across filesystems the copy must verify before the source \
+             is removed. FAIL-CLOSED: a session still running in the directory \
+             is REFUSED unless `force` is true, which stops it first; an \
+             Architect session is always refused. `dry_run` runs the same checks \
+             and returns the plan without changing anything. Session records \
+             are kept; the project is marked archived until a new session runs. \
+             Returns `{ dry_run, plan, stopped, manifest }`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Managed session id (UUID)."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Report the plan only. Defaults to false."
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Stop sessions running in the directory instead of refusing. Defaults to false."
+                    }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        ),
         tool(
             "session_activity",
             "Inspect a managed session's recent activity. ALWAYS returns the raw \
@@ -246,13 +280,21 @@ pub(super) fn session_tools() -> Vec<Value> {
             "session_send",
             // #5699: `sent` alone could not fail, so the description now names
             // the observed verdict a caller must read instead.
+            // #11796: list every `sent: false` state, input_not_empty included.
             "Send a line of text into a managed session's tmux pane (followed by \
              Enter), e.g. to answer a prompt or drive the harness. Returns the \
-             target tmux session name plus `submit_state`: `submitted`, \
-             `unsubmitted_paste` (the harness collapsed a long message into a \
-             bracketed paste and the Enter did not commit it — resend in \
-             smaller parts), or `unverified` (the pane could not be read). \
-             `sent` is false only for `unsubmitted_paste`.",
+             target tmux session name plus `submit_state` and, when `sent` is \
+             false, a `reason`: `submitted`; `input_not_empty` (the input box \
+             already held a draft or a paste, or could not be read — nothing \
+             was typed and nothing was cleared); `not_echoed` (the box never \
+             showed the full text — Enter was not pressed and the box was \
+             cleared); `unsubmitted_paste` (the harness collapsed a long \
+             message into a bracketed paste and the Enter did not commit it — \
+             resend in smaller parts); or `unverified` (the pane could not be \
+             read, or a busy receiver still showed the paste after a few \
+             seconds of re-reads — do not resend; read the pane first). `sent` \
+             is false for `input_not_empty`, `not_echoed` and \
+             `unsubmitted_paste`.",
             json!({
                 "type": "object",
                 "properties": {

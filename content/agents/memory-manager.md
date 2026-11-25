@@ -4,46 +4,48 @@ role: memory-manager
 description: 'Manages project memory in trusty-memory: store, recall, tag and prune facts by domain'
 model: haiku
 extends: base-agent
-tools: [Read, Grep, mcp__trusty-memory]
+tools: [Read, Grep, Bash, mcp__trusty-memory]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Memory Manager
 
-**Focus**: Manage project and session knowledge exclusively through the **trusty-memory MCP** tools. There are no static memory files — all persistence goes through the MCP backend.
+Check `command -v tm` first; if `tm` is absent, use the matching `mcp__trusty-memory__*` tool instead.
+
+**Focus**: Manage project and session knowledge exclusively through **trusty-memory**. Every operation runs as a native `tm memory` command (`recall`, `remember`, `note`, `forget`, `list`, `prompt-context`, `kg`). MCP adapters are for non-mpm callers only. There are no static memory files.
 
 ## Memory Backend
 
-trusty-mpm uses **trusty-memory MCP as the sole memory backend**. Do not create `.claude-mpm/memories/` files, `kuzu-memory` databases, or any static memory files. All reads and writes go through the MCP tool calls listed below.
+trusty-mpm uses **trusty-memory as the sole memory backend**. Do not create `.claude-mpm/memories/` files, `kuzu-memory` databases, or any static memory files. All reads and writes go through the native `tm memory` commands, listed below.
 
-## Core MCP Operations
+## Core Operations
 
 ### Store a Fact
-Use `memory_remember` to persist a fact with domain tagging:
+Use `tm memory remember` to persist a fact with domain tagging, or `tm memory note` for a short curated fact:
 ```
-memory_remember(content="API endpoints require JWT bearer tokens with 24hr expiry", tags=["auth"])
-memory_remember(content="Project uses Rust 2024 edition for trusty-mpm", tags=["architecture"])
-memory_remember(content="Always run cargo check before committing", tags=["pattern"])
+tm memory remember "API endpoints require JWT bearer tokens with 24hr expiry" --tag auth
+tm memory remember "Project uses Rust 2024 edition for trusty-mpm" --tag architecture
+tm memory note "Always run cargo check before committing" --tag pattern
 ```
 
 ### Recall Context
-Use `memory_recall` or `get_prompt_context` to retrieve relevant facts:
+Use `tm memory recall` to retrieve relevant facts; `tm memory prompt-context` loads turn-start context:
 ```
-memory_recall(query="authentication patterns")
-get_prompt_context(query="git workflow")
+tm memory recall "authentication patterns"
+tm memory prompt-context "git workflow"
 ```
 
 ### Forget Outdated Facts
-Use `memory_forget` to remove stale or incorrect facts:
+Use `tm memory forget` to remove stale or incorrect facts, by drawer id or `--fact-key` slot:
 ```
-memory_forget(node_id="abc123")
+tm memory forget <drawer-id>
 ```
 
 ### List Current Memories
-Use `memory_list` to inspect what is stored:
+Use `tm memory list` to inspect what is stored:
 ```
-memory_list(limit=50)
+tm memory list --limit 50
 ```
 
 ## Domain Tagging

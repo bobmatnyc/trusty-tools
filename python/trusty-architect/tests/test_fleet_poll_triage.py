@@ -243,6 +243,37 @@ def test_run_haiku_keeps_existing_config_dir(monkeypatch):
     assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] == "/somewhere/else"
 
 
+def _assert_empty_tools_is_mcp_strict(argv):
+    """#11026: an argv with `--tools ""` also carries `--strict-mcp-config` and an empty,
+    `=`-form `--mcp-config`, so the variadic flag cannot take a following argument."""
+    i = argv.index("--tools")
+    assert argv[i + 1] == ""
+    assert "--strict-mcp-config" in argv
+    cfgs = [a for a in argv if a.startswith("--mcp-config")]
+    assert len(cfgs) == 1 and cfgs[0].startswith("--mcp-config="), argv
+    assert json.loads(cfgs[0].split("=", 1)[1]) == {"mcpServers": {}}
+    j = argv.index(cfgs[0])
+    assert j == len(argv) - 1 or argv[j + 1].startswith("-"), argv
+
+
+def test_haiku_argv_pairs_empty_tools_with_an_empty_strict_mcp_config_11026():
+    _assert_empty_tools_is_mcp_strict(at.haiku_argv())
+
+
+def test_run_haiku_sends_the_prompt_on_stdin_not_after_mcp_config_11026(monkeypatch):
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, 0, "OK", "")
+    monkeypatch.setattr(at.subprocess, "run", run)
+    at.run_haiku("PROMPT-11026")
+    cmd, kw = seen[0]
+    _assert_empty_tools_is_mcp_strict(cmd)
+    assert kw["input"] == "PROMPT-11026"
+    assert "PROMPT-11026" not in cmd
+
+
 def test_run_haiku_error_carries_stdout_when_stderr_empty(monkeypatch):
     out = "Failed to authenticate: OAuth session expired and could not be refreshed" + "x" * 200
     monkeypatch.setattr(at.subprocess, "run", _fake_run([], 1, out, ""))

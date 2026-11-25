@@ -23,6 +23,14 @@ use crate::session_manager::worktree_repo_slug::parse_repo_slug;
 /// The owner shown for a project whose `repo_url` names no remote repository.
 pub const LOCAL_OWNER: &str = "(local)";
 
+/// The registry name of the Architect's project, the basename of
+/// `core::architect_store::DEFAULT_ARCHITECT_DIR`.
+// #11554: the Architect draws as a privileged top-level row
+pub const ARCHITECT_PROJECT: &str = "architect";
+
+/// The owner key a top-level (ownerless) node carries; no owner bar has it.
+pub const TOP_LEVEL_OWNER: &str = "";
+
 /// The deepest worker indentation drawn; a deeper chain draws at this depth.
 const MAX_WORKER_DEPTH: usize = 4;
 
@@ -51,6 +59,8 @@ impl NodeId {
     pub fn parent(&self) -> Option<NodeId> {
         match self {
             NodeId::Owner(_) => None,
+            // #11554: a top-level project has no owner bar above it
+            NodeId::Project { owner, .. } if owner == TOP_LEVEL_OWNER => None,
             NodeId::Project { owner, .. } => Some(NodeId::Owner(owner.clone())),
         }
     }
@@ -83,6 +93,13 @@ pub enum TreeRowKind {
     },
     /// A project (a leaf) with its session counters.
     Project {
+        name: String,
+        total: usize,
+        live: usize,
+    },
+    /// The Architect's project: top level, above every owner bar, marked
+    /// privileged (#11554).
+    Architect {
         name: String,
         total: usize,
         live: usize,
@@ -127,6 +144,17 @@ pub(crate) fn owner_key(owner: &str) -> String {
     owner.to_lowercase()
 }
 
+/// The [`NodeId`] owner key of `project`: [`TOP_LEVEL_OWNER`] for the
+/// Architect's project, else the [`owner_key`] of its `repo_url` owner.
+///
+/// Test: `architect_is_a_top_level_privileged_row_not_under_local`.
+pub(crate) fn tree_owner_key(project: &ProjectRow, aliases: &SshHostAliases) -> String {
+    if project.name == ARCHITECT_PROJECT {
+        return TOP_LEVEL_OWNER.to_string();
+    }
+    owner_key(&owner_of_repo_url(&project.repo_url, aliases))
+}
+
 /// True when a session's lifecycle state counts as live for a counter.
 fn is_live(state: &str) -> bool {
     matches!(state, "active" | "provisioning")
@@ -137,7 +165,9 @@ fn is_live(state: &str) -> bool {
 /// Why: the pane, the key handler and the selection clamp all need the same
 /// row list; one pure builder keeps them in agreement.
 /// What: projects group by [`owner_key`]; an owner row shows the first-seen
-/// spelling and its [`NodeId`] carries the key. Owners are sorted by key with
+/// spelling and its [`NodeId`] carries the key. The Architect's project
+/// ([`ARCHITECT_PROJECT`]) draws first, as a top-level
+/// [`TreeRowKind::Architect`] row under no owner (#11554). Owners are sorted by key with
 /// [`LOCAL_OWNER`] last; projects keep registry order inside their owner. An
 /// owner is expanded unless its [`NodeId`] is in `collapsed`, so an owner
 /// first seen on any poll starts open. Counters count the polled (non-
@@ -147,7 +177,8 @@ fn is_live(state: &str) -> bool {
 /// Test: `counts_total_and_live_per_project_and_owner`,
 /// `collapsed_owner_hides_projects`, `left_column_draws_no_session_rows`,
 /// `owner_expand_state_survives_first_seen_spelling_change`,
-/// `fresh_state_shows_every_node_expanded_without_sessions`.
+/// `fresh_state_shows_every_node_expanded_without_sessions`,
+/// `architect_is_a_top_level_privileged_row_not_under_local`.
 pub(crate) fn build_tree(
     projects: &[ProjectRow],
     sessions_by_project: &BTreeMap<String, Vec<SessionRow>>,
@@ -155,8 +186,27 @@ pub(crate) fn build_tree(
     aliases: &SshHostAliases,
 ) -> Vec<TreeRow> {
     // #10476: D1c — case-only owner variants group as one owner
+    let empty = Vec::new();
+    let mut rows = Vec::new();
     let mut by_owner: BTreeMap<String, (String, Vec<&ProjectRow>)> = BTreeMap::new();
     for project in projects {
+        // #11554: the Architect is a top-level row, never under an owner
+        if tree_owner_key(project, aliases) == TOP_LEVEL_OWNER {
+            let sessions = sessions_by_project.get(&project.name).unwrap_or(&empty);
+            let (total, live) = counters(sessions);
+            rows.push(TreeRow {
+                id: NodeId::Project {
+                    owner: TOP_LEVEL_OWNER.to_string(),
+                    name: project.name.clone(),
+                },
+                kind: TreeRowKind::Architect {
+                    name: project.name.clone(),
+                    total,
+                    live,
+                },
+            });
+            continue;
+        }
         let shown = owner_of_repo_url(&project.repo_url, aliases);
         by_owner
             .entry(owner_key(&shown))
@@ -168,8 +218,6 @@ pub(crate) fn build_tree(
     // `(local)` sorts before letters; it belongs last.
     owners.sort_by_key(|(owner, _)| (owner == LOCAL_OWNER, owner.clone()));
 
-    let empty = Vec::new();
-    let mut rows = Vec::new();
     for (owner, (shown, owner_projects)) in owners {
         let counts: Vec<(usize, usize)> = owner_projects
             .iter()

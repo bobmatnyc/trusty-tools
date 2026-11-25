@@ -26,6 +26,9 @@ pub(crate) struct HostInputs<'a> {
     pub(super) hook_exe: Option<&'a Path>,
     pub(super) palace_registry: Option<&'a Path>,
     pub(super) claude_config_dir: Option<&'a Path>,
+    /// The session's own directory, when it differs from the prepared
+    /// project directory (a launch redirected to the managed checkout).
+    pub(super) content_dir: Option<&'a Path>,
 }
 
 impl<'a> HostInputs<'a> {
@@ -37,4 +40,27 @@ impl<'a> HostInputs<'a> {
             ..Self::default()
         }
     }
+
+    /// The launch content for `project_dir`.
+    ///
+    /// What: with `content_dir` set, the checkout enclosing it, else the
+    /// installed release — never `project_dir` or the cwd; without it,
+    /// [`crate::core::content_source::launch_content_for`] `project_dir`. A
+    /// failure is [`super::PrepError::Content`], which refuses the launch.
+    /// Test: `a_redirected_launch_composes_from_the_session_worktree`.
+    pub(super) fn launch_content(
+        &self,
+        project_dir: &Path,
+    ) -> Result<crate::core::content_source::LaunchContent, super::PrepError> {
+        use crate::core::content_source::{launch_content_for, launch_content_for_session};
+        match self.content_dir {
+            Some(dir) => launch_content_for_session(dir),
+            None => launch_content_for(project_dir),
+        }
+        .map_err(|source| super::PrepError::Content { source })
+    }
 }
+
+#[cfg(test)]
+#[path = "host_inputs_tests.rs"]
+mod tests;

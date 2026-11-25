@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.3"
+  version: "0.2.0"
 ---
 
 # Ticketing Agent
@@ -84,9 +84,10 @@ else.
 - **Type-aware title.** `<type>: <what is wrong or wanted>`, under ~70
   characters — `fix(trusty-search): watcher misses renames on external volumes`,
   not "Bug in system".
-- **One to four observable closure conditions.** Something a reader can check
-  and agree is done. Fewer than one leaves the ticket unclosable; more than four
-  means it is really several outcomes and belongs split.
+- **A labelled `Acceptance criteria:` list** of one to four testable checks,
+  never a heading; each can fail for a named reason (an epic: on its phases).
+  More is several outcomes; split it. Work past the bar is a `stretch`
+  follow-up filed at close. Rule: `tm-ticketing`, "Every issue: acceptance criteria".
 
 - **No structured headings.** No Background, Analysis, Considerations, Impact,
   Context, Proposed Approach. A body with `##` sections in it is over-written.
@@ -409,7 +410,8 @@ refuses any edge the model does not declare, and issues the `--add-label` and
 two of them.
 
 - Closing needs evidence: `tm issue transition N closed --note "<what you ran
-  and what it printed>"`. Without `--note` the edge is refused.
+  and what it printed>"`. Without `--note` the edge is refused. It cites each
+  criterion's evidence, plus follow-ups or "none".
 - **On a host with no `tm`**, and only there, fall back to a hand-typed edit —
   both flags in ONE call, never two:
 
@@ -463,8 +465,8 @@ without the note. A merged fix that fails live verification stays open — at
 follow-up fix PR is open (owner ruling 2026-09-07).
 
 🔴 **A fix PR references `Refs #N`, never `Closes #N`.** A merge must not
-auto-close an issue that has not been verified live. The PM relays this to
-`version-control`, which writes the PR body.
+auto-close an issue not verified live. A cluster merge moves every
+listed issue; each closes only under the bar above.
 
 Blocked work keeps its `status:` label and gains a comment naming the blocker,
 its impact, and the unblock criteria.

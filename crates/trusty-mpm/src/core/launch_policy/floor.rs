@@ -17,11 +17,10 @@ use crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS;
 
 /// Floor servers beyond tm's builtins.
 ///
-/// Why: `content/agents/web-qa.md` grants `mcp__claude-in-chrome`, and the PM
-/// routes browser work to web-qa.
-/// What: `["claude-in-chrome"]`.
+/// Why: the web-QA agent grants access to these browser servers for its configured workflows.
+/// What: keeps both browser server names available to the web-QA agent.
 /// Test: `floor_covers_every_agent_tools_mcp_grant`.
-pub const EXTRA_FLOOR: &[&str] = &["claude-in-chrome"];
+pub const EXTRA_FLOOR: &[&str] = &["claude-in-chrome", "trusty-browser"];
 
 /// Whether `name` is a never-deny MCP server.
 ///
@@ -115,6 +114,9 @@ pub const SKILL_FLOOR_EXACT: &[&str] = &[
     "architect-review",
     // #10161 D3b: the dashboard skill.
     "architect-dashboard",
+    // #10161 D3c: the skills that run the drift-guard and improver agents.
+    "architect-drift-guard",
+    "architect-improver",
     "cargo-publish",
     "git-workflow",
     "code-review-standards",

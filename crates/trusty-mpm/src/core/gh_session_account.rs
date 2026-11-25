@@ -242,15 +242,35 @@ pub(crate) fn store_supplied_token(
             "the token on stdin authenticates as '{actual}'"
         )));
     }
-    refuse_unlistable(&dir).map_err(refuse)?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| refuse(format!("cannot create {} ({e})", dir.display())))?;
-    make_private(&dir).map_err(refuse)?;
-    ensure_config_version(&dir).map_err(refuse)?;
+    store_proven_token(&dir, &host, &actual, token, keyring).map_err(refuse)
+}
+
+/// Store a token `GET /user` already proved to be `login`'s in gh's keyring
+/// entry, with `dir` (tm's per-account dir) naming it (#10037).
+///
+/// Why: the stdin setup path (#8914) and the `github.token_env` session path
+/// (#10487) share the dir and keyring steps; only the proof differs.
+/// What: refuses an unlistable dir, creates it 0700 with `config.yml` at
+/// `version: "1"`, then [`store_in_keyring`]; a keyring failure writes no
+/// `hosts.yml`. Returns the dir. `Err` is the bare reason, never a token.
+/// Test: `a_stdin_token_is_proven_then_stored`,
+/// `a_stdin_keyring_failure_never_falls_back_to_hosts_yml`,
+/// `a_token_env_keyring_failure_refuses_and_injects_no_token_10487`.
+pub(crate) fn store_proven_token(
+    dir: &Path,
+    host: &str,
+    login: &str,
+    token: &str,
+    keyring: &dyn GhKeyringWriter,
+) -> Result<PathBuf, String> {
+    refuse_unlistable(dir)?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {} ({e})", dir.display()))?;
+    make_private(dir)?;
+    ensure_config_version(dir)?;
     // #10037: the keyring, never hosts.yml; a keyring failure writes no file.
-    store_in_keyring(&dir, &host, &actual, token, keyring).map_err(refuse)?;
-    make_private(&dir).map_err(refuse)?;
-    Ok(dir)
+    store_in_keyring(dir, host, login, token, keyring)?;
+    make_private(dir)?;
+    Ok(dir.to_path_buf())
 }
 
 /// `Err` when `dir` exists but cannot be listed; a missing dir is `Ok`.

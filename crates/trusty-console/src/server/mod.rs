@@ -165,6 +165,16 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/analyze_uds_bridge.rs` sets it on every case.
     pub(crate) analyze_socket: Option<Arc<PathBuf>>,
+    /// #11747: override for the assistants root; `None` resolves it as `ta`
+    /// does. Test: `tests/assistants_routes.rs` sets it on every case.
+    pub(crate) assistants_root: Option<Arc<PathBuf>>,
+    /// #11748: override for the ask-socket directory; `None` resolves it as
+    /// `ta` does. Test: `tests/assistants_ask.rs` sets it on every case.
+    pub(crate) assistants_data_dir: Option<Arc<PathBuf>>,
+    /// #11748: the bounds every ask runs under.
+    pub(crate) assistants_ask_limits: crate::assistants_uds::ask::AskLimits,
+    /// #11748 review: one permit per in-flight ask.
+    pub(crate) assistants_ask_permits: Arc<tokio::sync::Semaphore>,
     /// #9076: what console's `trusty-events` client has seen — its state and
     /// the events it relays. `Starting` until `run_serve` starts the client.
     events: Arc<crate::events_uds::EventsRelay>,
@@ -184,6 +194,9 @@ pub struct AppState {
     /// What: set once in [`AppState::new`]; read only by [`health_handler`].
     /// Test: `test_health_route`, `health_uptime_is_monotonic`.
     started_at: Instant,
+    /// #10907: request counters, written by the router-wide middleware and
+    /// read by `console.console_metrics`.
+    request_metrics: Arc<crate::request_metrics::RequestMetrics>,
 }
 
 impl AppState {
@@ -286,10 +299,17 @@ impl AppState {
             search_socket: None,
             memory_socket: None,
             analyze_socket: None,
+            assistants_root: None,
+            assistants_data_dir: None,
+            assistants_ask_limits: crate::assistants_uds::ask::AskLimits::default(),
+            assistants_ask_permits: Arc::new(tokio::sync::Semaphore::new(
+                crate::assistants_uds::ask_route::MAX_CONCURRENT_ASKS,
+            )),
             events: Arc::new(crate::events_uds::EventsRelay::new()),
             #[cfg(unix)]
             secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),
             started_at: Instant::now(),
+            request_metrics: Arc::new(crate::request_metrics::RequestMetrics::new()),
         }
     }
 
@@ -323,6 +343,12 @@ impl AppState {
     /// Test: Used by `run_serve` in `main.rs`.
     pub fn connectors(&self) -> Arc<Vec<Box<dyn ServiceConnector>>> {
         Arc::clone(&self.connectors)
+    }
+
+    /// The request counters (#10907): the router's middleware writes them and
+    /// `console.console_metrics` reads them.
+    pub fn request_metrics(&self) -> Arc<crate::request_metrics::RequestMetrics> {
+        Arc::clone(&self.request_metrics)
     }
 
     /// Whole seconds since this state was built (#10902: `console.health`).
@@ -465,7 +491,10 @@ impl AppState {
 // routes pushed this file over the 500-SLOC cap. The re-export keeps every
 // call site — `main`, `lib::run_serve`, and every test — unchanged.
 mod router;
-pub use router::{build_router, build_router_with_self_origins, build_router_with_webhooks};
+pub use router::{
+    build_router, build_router_with_self_origins, build_router_with_webhooks,
+    guard_loopback_listener,
+};
 
 // ─── handlers ────────────────────────────────────────────────────────────────
 

@@ -33,6 +33,12 @@
 #                       or under content/instructions/architect/skills/ or
 #                       templates/, is no pair's shipped copy, so no source
 #                       guards it
+#     HYBRID            a monolith in SPLITS holds more than 500 SLOC (the
+#                       scripts/check_line_cap.sh Python rule) and sits beside
+#                       the split modules it was split into, under the
+#                       sub-project or the assets dir: the 2026-11-15 deploy
+#                       left fleet-poll.py (2213 SLOC) beside fleet_poll_*.py
+#                       it no longer loaded (#11370)
 #     EMPTY             the sub-project holds no files (a vacuous pass)
 #   Runtime state (inbox/, __pycache__/, .pytest_cache/) is not scanned.
 #   The leak classes (#9996) come from scripts/architect_leak_patterns.txt,
@@ -42,10 +48,13 @@
 #   another pattern file; ARCHITECT_LEAK_DENY_FILE names an optional
 #   out-of-tree file of private names (unset = skipped; CI leaves it unset).
 #
-# Usage: scripts/check_architect_subproject.sh [--root <repo-root>] [--list-pairs]
-#   --root points the gate at another tree; the selftest uses it.
+# Usage: scripts/check_architect_subproject.sh [--root <repo-root>] [--list-pairs] [--list-splits]
+#   --root points the gate at another tree; the selftest uses it. A host
+#   layout checks the same way when it keeps the repo-relative directories.
 #   --list-pairs prints the shipped-copy pairs, one "<source>|<copy>" per
 #   line, and exits 0; the selftest plants a drift in each copy it names.
+#   --list-splits prints the SPLITS rows, one "<monolith>|<prefix>" per line,
+#   and exits 0; the selftest plants a hybrid for each monolith it names.
 #
 # Test: scripts/check_architect_subproject_selftest.sh plants each violation
 #   class in a temporary tree and asserts the gate fails on it.
@@ -54,16 +63,19 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$SCRIPT_DIR")"
 LIST_PAIRS=0
+LIST_SPLITS=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root)
-      [ -n "${2:-}" ] || { echo "usage: $0 [--root <repo-root>] [--list-pairs]" >&2; exit 2; }
+      [ -n "${2:-}" ] || { echo "usage: $0 [--root <repo-root>] [--list-pairs] [--list-splits]" >&2; exit 2; }
       ROOT="$(cd "$2" && pwd)"
       shift 2 ;;
     --list-pairs) LIST_PAIRS=1; shift ;;
-    *) echo "usage: $0 [--root <repo-root>] [--list-pairs]" >&2; exit 2 ;;
+    --list-splits) LIST_SPLITS=1; shift ;;
+    *) echo "usage: $0 [--root <repo-root>] [--list-pairs] [--list-splits]" >&2; exit 2 ;;
   esac
 done
 
@@ -85,7 +97,9 @@ TAB="$(printf '\t')"
 # then the six D2 skills (review, drift, provisioning, macOS, improvements,
 # host administration), then the dashboard store set and its schemas (P4a-1),
 # then the serve set, the read-only views, the page, Live and vendor (D3b),
-# then the P1 dashboard routes, siblings, pending-answers set and design tokens (#10571).
+# then the P1 dashboard routes, siblings, pending-answers set and design tokens (#10571),
+# then the five Architect agents, their two skills and the claim checker (D3c),
+# then the poller helpers and the #11369 poll cadence scripts (#10571 S2, the last block).
 PAIRS="
 skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|content/instructions/architect/skills/tm-fleet-check.md
@@ -105,7 +119,26 @@ skills/architect-macos.md|content/instructions/architect/skills/architect-macos.
 skills/architect-improvements.md|content/instructions/architect/skills/architect-improvements.md
 skills/architect-host-admin.md|content/instructions/architect/skills/architect-host-admin.md
 skills/architect-dashboard.md|content/instructions/architect/skills/architect-dashboard.md
+skills/architect-drift-guard.md|content/instructions/architect/skills/architect-drift-guard.md
+skills/architect-improver.md|content/instructions/architect/skills/architect-improver.md
+agents/runner.md|content/instructions/architect/agents/runner.md
+agents/event-extractor.md|content/instructions/architect/agents/event-extractor.md
+agents/improver.md|content/instructions/architect/agents/improver.md
+agents/improvement-curator.md|content/instructions/architect/agents/improvement-curator.md
+agents/drift-guard.md|content/instructions/architect/agents/drift-guard.md
+scripts/verify-claim.py|crates/trusty-mpm/src/assets/architect/scripts/verify-claim.py
+scripts/verify_claim_input.py|crates/trusty-mpm/src/assets/architect/scripts/verify_claim_input.py
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
+scripts/usage.py|crates/trusty-mpm/src/assets/architect/scripts/usage.py
+scripts/usage_calc.py|crates/trusty-mpm/src/assets/architect/scripts/usage_calc.py
+scripts/token_watch.py|crates/trusty-mpm/src/assets/architect/scripts/token_watch.py
+scripts/token_watch_rules.py|crates/trusty-mpm/src/assets/architect/scripts/token_watch_rules.py
+scripts/effort-governor.py|crates/trusty-mpm/src/assets/architect/scripts/effort-governor.py
+scripts/ctx_bar.py|crates/trusty-mpm/src/assets/architect/scripts/ctx_bar.py
+scripts/usage-probe.sh|crates/trusty-mpm/src/assets/architect/scripts/usage-probe.sh
+scripts/effort-send.sh|crates/trusty-mpm/src/assets/architect/scripts/effort-send.sh
+scripts/statusline-tee.sh|crates/trusty-mpm/src/assets/architect/scripts/statusline-tee.sh
+scripts/rc-lib.sh|crates/trusty-mpm/src/assets/architect/scripts/rc-lib.sh
 scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/fleet_poll_cfg.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_cfg.py
 scripts/fleet_poll_io.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_io.py
@@ -113,6 +146,7 @@ scripts/fleet_poll_alerts.py|crates/trusty-mpm/src/assets/architect/scripts/flee
 scripts/fleet_poll_wake.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_wake.py
 scripts/fleet_poll_watchdog.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_watchdog.py
 scripts/fleet_poll_selfrefresh.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_selfrefresh.py
+scripts/fleet_poll_deps.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_poll_deps.py
 scripts/fleet_alert_dedupe.py|crates/trusty-mpm/src/assets/architect/scripts/fleet_alert_dedupe.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
@@ -130,6 +164,10 @@ scripts/datg_log.py|crates/trusty-mpm/src/assets/architect/scripts/datg_log.py
 scripts/datg_read.py|crates/trusty-mpm/src/assets/architect/scripts/datg_read.py
 scripts/datg_ready.py|crates/trusty-mpm/src/assets/architect/scripts/datg_ready.py
 scripts/datg_guards.py|crates/trusty-mpm/src/assets/architect/scripts/datg_guards.py
+scripts/datg_task.py|crates/trusty-mpm/src/assets/architect/scripts/datg_task.py
+scripts/task_tag.py|crates/trusty-mpm/src/assets/architect/scripts/task_tag.py
+scripts/task_pulse.py|crates/trusty-mpm/src/assets/architect/scripts/task_pulse.py
+scripts/task_pulse_io.py|crates/trusty-mpm/src/assets/architect/scripts/task_pulse_io.py
 scripts/datg-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/datg-hook.sh
 scripts/ctx-watch.py|crates/trusty-mpm/src/assets/architect/scripts/ctx-watch.py
 scripts/il-cron.py|crates/trusty-mpm/src/assets/architect/scripts/il-cron.py
@@ -158,8 +196,13 @@ scripts/dashboard_harness.py|crates/trusty-mpm/src/assets/architect/scripts/dash
 scripts/dashboard_routes.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_routes.py
 scripts/dashboard_fleet.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_fleet.py
 scripts/dashboard_harness_base.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_harness_base.py
+scripts/dashboard_mask.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_mask.py
+scripts/dashboard_pane_tail.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_pane_tail.py
 scripts/dashboard_attach.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_attach.py
 scripts/dashboard_projects.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py
+scripts/dashboard_watch.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_watch.py
+scripts/dashboard_keynames.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_keynames.py
+scripts/dashboard_toml.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_toml.py
 scripts/dashboard_archctx.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_archctx.py
 scripts/brief_ids.py|crates/trusty-mpm/src/assets/architect/scripts/brief_ids.py
 scripts/brief-id.py|crates/trusty-mpm/src/assets/architect/scripts/brief-id.py
@@ -167,6 +210,8 @@ scripts/turn-active.py|crates/trusty-mpm/src/assets/architect/scripts/turn-activ
 scripts/pm_cursor.py|crates/trusty-mpm/src/assets/architect/scripts/pm_cursor.py
 scripts/pending-answers.py|crates/trusty-mpm/src/assets/architect/scripts/pending-answers.py
 scripts/pending_hook_dedupe.py|crates/trusty-mpm/src/assets/architect/scripts/pending_hook_dedupe.py
+scripts/technical_level.py|crates/trusty-mpm/src/assets/architect/scripts/technical_level.py
+scripts/level_lint.py|crates/trusty-mpm/src/assets/architect/scripts/level_lint.py
 scripts/pending-answers-hook.sh|crates/trusty-mpm/src/assets/architect/scripts/pending-answers-hook.sh
 templates/dashboard/tokens.css|crates/trusty-mpm/src/assets/architect/dashboard/tokens.css
 provenance.json|crates/trusty-mpm/src/assets/architect/provenance.json
@@ -195,6 +240,7 @@ schemas/dashboard/watch_changes.schema.json|crates/trusty-mpm/src/assets/archite
 scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
 scripts/relay.sh|crates/trusty-mpm/src/assets/architect/scripts/relay.sh
 scripts/relay_provenance.py|crates/trusty-mpm/src/assets/architect/scripts/relay_provenance.py
+scripts/relay_supersession.py|crates/trusty-mpm/src/assets/architect/scripts/relay_supersession.py
 scripts/posted.sh|crates/trusty-mpm/src/assets/architect/scripts/posted.sh
 scripts/relay-marker.py|crates/trusty-mpm/src/assets/architect/scripts/relay-marker.py
 scripts/architect_config.py|crates/trusty-mpm/src/assets/architect/scripts/architect_config.py
@@ -219,7 +265,39 @@ templates/local/mandates/README.md|crates/trusty-mpm/src/assets/architect/templa
 templates/local/mandates/example.toml|crates/trusty-mpm/src/assets/architect/templates/local/mandates/example.toml
 templates/local/architect.json|crates/trusty-mpm/src/assets/architect/templates/local/architect.json
 templates/local/il-schedule.json|crates/trusty-mpm/src/assets/architect/templates/local/il-schedule.json
+scripts/architect-start.sh|crates/trusty-mpm/src/assets/architect/scripts/architect-start.sh
+scripts/poll-supervise.sh|crates/trusty-mpm/src/assets/architect/scripts/poll-supervise.sh
+scripts/poll-reset-wake.py|crates/trusty-mpm/src/assets/architect/scripts/poll-reset-wake.py
+scripts/rc-restore.sh|crates/trusty-mpm/src/assets/architect/scripts/rc-restore.sh
+scripts/rc-disconnect.sh|crates/trusty-mpm/src/assets/architect/scripts/rc-disconnect.sh
+scripts/session-relaunch.sh|crates/trusty-mpm/src/assets/architect/scripts/session-relaunch.sh
+scripts/relaunch_brief.py|crates/trusty-mpm/src/assets/architect/scripts/relaunch_brief.py
+scripts/fleet-restart.sh|crates/trusty-mpm/src/assets/architect/scripts/fleet-restart.sh
+scripts/ids36.py|crates/trusty-mpm/src/assets/architect/scripts/ids36.py
+scripts/il_timeline.py|crates/trusty-mpm/src/assets/architect/scripts/il_timeline.py
+scripts/auto_sleep.py|crates/trusty-mpm/src/assets/architect/scripts/auto_sleep.py
+scripts/user_state.py|crates/trusty-mpm/src/assets/architect/scripts/user_state.py
+scripts/morning_brief.py|crates/trusty-mpm/src/assets/architect/scripts/morning_brief.py
+scripts/dream_catchup.py|crates/trusty-mpm/src/assets/architect/scripts/dream_catchup.py
+scripts/dashboard_updates.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_updates.py
+scripts/il_remind.py|crates/trusty-mpm/src/assets/architect/scripts/il_remind.py
+scripts/dashboard_feed.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_feed.py
 "
+# Monoliths the bundle replaced with a facade plus split modules (#11370):
+# "<script under scripts/>|<split-module prefix>", one per line. A facade
+# stays under the cap; the same file over the cap beside its split modules is
+# the old monolith, which the bundle no longer loads.
+SPLITS="
+fleet-poll.py|fleet_poll_
+datg.py|datg_
+dashboard-serve.py|dashboard_
+dashboard_harness.py|dashboard_harness_
+"
+SLOC_CAP=500
+if [ "$LIST_SPLITS" -eq 1 ]; then
+  for split in $SPLITS; do echo "$split"; done
+  exit 0
+fi
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done
   exit 0
@@ -407,6 +485,25 @@ for pair in $PAIRS; do
   fi
 done
 
+# #11370: a monolith over the cap beside its split modules is a hybrid. The
+# SLOC rule is scripts/check_line_cap.sh's own Python counter.
+# shellcheck source=lib/sloc_awk.sh
+. "$SCRIPT_DIR/lib/sloc_awk.sh"
+for dir_rel in "$SUB_REL/scripts" "$ASSETS_REL/scripts"; do
+  for split in $SPLITS; do
+    mono="$ROOT/$dir_rel/${split%%|*}"
+    prefix="${split#*|}"
+    [ -f "$mono" ] || continue
+    sloc="$(awk "$SLOC_PY_AWK" "$mono")"
+    [ "$sloc" -gt "$SLOC_CAP" ] || continue
+    for mod in "$ROOT/$dir_rel/$prefix"*.py; do
+      [ -f "$mod" ] || continue
+      report HYBRID "$dir_rel/${split%%|*} holds $sloc SLOC (cap $SLOC_CAP) beside split modules ($(basename "$mod") and others named $prefix*.py)"
+      break
+    done
+  done
+done
+
 # #8436 P4 fix: a new asset file with no pair would ship unguarded. #9997:
 # the content skills and templates are shipped copies too; the manual and the
 # core (architect.md, core.md) have no sub-project source, so they are not.
@@ -414,6 +511,7 @@ NL="
 "
 for unpaired_rel in "crates/trusty-mpm/src/assets/architect" \
                     "content/instructions/architect/skills" \
+                    "content/instructions/architect/agents" \
                     "content/instructions/architect/templates"; do
   [ -d "$ROOT/$unpaired_rel" ] || continue
   shipped="$(find "$ROOT/$unpaired_rel" -type f ! -name .DS_Store \

@@ -5,7 +5,9 @@
     {"id": "Q03", "data": {"status": "answered", "answer": "maybe", "answer_note": "Acknowledged"}},
     {"id": "Q04", "data": {"status": "answered", "answer": "x", "relayed": "2026-10-11T11:00Z S01"}},
     {"id": "Q05", "data": {"status": "answered", "answer": "x", "relayed": "   "}},
-    {"id": "Q06", "data": {"status": "answered", "answer": 42, "answered_at": null}}
+    {"id": "Q06", "data": {"status": "answered", "answer": 42, "answered_at": null}},
+    {"id": "Q07", "data": {"status": "answered", "answer": "Other", "answered_at": "2026-10-11T10:05:00Z", "answer_note": "  use the staging bucket "}},
+    {"id": "Q08", "data": {"status": "answered", "answer": "Done", "answer_note": "   "}}
   ]}},
   {"name": "architect_do", "now": 1791763200, "snap": {"items": [
     {"id": "A01", "data": {"status": "answered", "answer": "Architect Do", "answered_at": "2026-10-11T09:00Z", "answer_note": "  run the sweep  "}},

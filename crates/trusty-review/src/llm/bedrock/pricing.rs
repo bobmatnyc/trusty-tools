@@ -107,6 +107,13 @@ fn family_rates(family: &str) -> Option<FamilyRates> {
             global: (4.00, 20.00),
             geo: (4.40, 22.00),
         },
+        // #10757: Claude Haiku 5.5 — compare set. Effective 2026-11-01
+        // (Price List retrieved 2026-11-22). SKUs CT2JY6DA5N94ZAXN,
+        // 9C6E7ATQE23Q4W66 / GWDHRAKM6RFD2XYJ, KYPW3D8EBWFD83XS.
+        "anthropic.claude-haiku-5-5" => FamilyRates {
+            global: (0.10, 0.50),
+            geo: (0.11, 0.55),
+        },
         // Claude Sonnet 4.6 — compare set. Effective 2026-09-01. SKUs
         // 4BCSX42248MW35W4, CMWTKXQCAJ2T8A4U / KPFGPZJ8VWMREGAV, GMB9AQ5DYNAGYZEC.
         "anthropic.claude-sonnet-4-6" => FamilyRates {
@@ -138,6 +145,10 @@ fn family_rates(family: &str) -> Option<FamilyRates> {
         // Legacy Claude 3 Haiku (one rate, no global profile).
         // Effective 2026-07-01. SKUs XQ9Q5XG2HVDMTF2S, NNM89KRFHHY9RWAT.
         "anthropic.claude-3-haiku" => FamilyRates::flat(0.25, 1.25),
+        // #11527: Amazon Nova Pro — default verifier. Service code
+        // `AmazonBedrock`, effective 2026-11-01. SKUs 8X836UXRHN5Q5T2H,
+        // ARFVY95XGU794VBG (on-demand; no separate global rate).
+        "amazon.nova-pro" => FamilyRates::flat(0.80, 3.20),
         _ => return None,
     };
     Some(rates)

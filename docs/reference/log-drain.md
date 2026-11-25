@@ -91,7 +91,7 @@ The destination prefix comes from the URI (`s3://bucket/PREFIX`) and is joined
 by the adapter; everything after it is built by `DrainTarget`. For
 `file://` destinations the URI's path is the store root, so the prefix is empty.
 A destination of `s3://acme-logs/live` therefore writes
-`live/duettoresearch/pricing/trusty-code/daemon.log`.
+`live/acme/pricing/trusty-code/daemon.log`.
 
 `DrainTarget { owner, project }` is **supplied by the caller**. The core does
 not resolve the identity — trusty-mpm's config layer does, from the git
@@ -387,7 +387,7 @@ log_drain:
   interval_secs: 900
   # Used only by sources that resolve no project of their own — the daemon's
   # own log directory is inside no checkout.
-  owner: "duettoresearch"
+  owner: "acme"
   project: "workstation"
   sources:
     - crate_name: trusty-mpm
@@ -396,14 +396,14 @@ log_drain:
       level: info
     # Inside the checkout, so owner and project come from its git origin.
     - crate_name: trusty-code
-      root: "~/src/duettoresearch/pricing/logs"
+      root: "~/src/acme/pricing/logs"
       include: ["*.log"]
       destination: "s3://pricing-logs/live?profile=pricing&region=us-east-1"
     # Logs live outside the checkout, so this one names its project.
     - crate_name: trusty-agents
       root: "~/Library/Logs/trusty-agents"
       include: ["daemon-*.log"]
-      owner: "duettoresearch"
+      owner: "acme"
       project: "insights"
     # Off for now, without deleting the entry.
     - crate_name: trusty-search
@@ -412,9 +412,9 @@ log_drain:
 ```
 
 That config produces three passes per tick, writing
-`live/duettoresearch/workstation/trusty-mpm/…` to `team-shared-logs`,
-`live/duettoresearch/pricing/trusty-code/…` to `pricing-logs` signed with the
-`pricing` profile, and `live/duettoresearch/insights/trusty-agents/…` back to
+`live/acme/workstation/trusty-mpm/…` to `team-shared-logs`,
+`live/acme/pricing/trusty-code/…` to `pricing-logs` signed with the
+`pricing` profile, and `live/acme/insights/trusty-agents/…` back to
 `team-shared-logs`.
 
 Two sources share a pass only when they resolved to the same destination AND
@@ -428,7 +428,7 @@ The entry stays in the config and `tm doctor` still names it, so an operator can
 tell a deliberate opt-out from a project that fell out of the file:
 
 ```
-log drain enabled (s3 → s3://team-shared-logs/live [duettoresearch/workstation],
+log drain enabled (s3 → s3://team-shared-logs/live [acme/workstation],
   trusty-search → s3://team-shared-logs/live: disabled) ...
 ```
 
@@ -442,10 +442,10 @@ drains, the tick reports `Failed`, and the `log_drain` doctor row names which
 destination broke:
 
 ```
-log drain enabled (s3 → s3://team-shared-logs/live [duettoresearch/workstation], s3 → s3://pricing-logs/live?profile=pricing [duettoresearch/pricing])
+log drain enabled (s3 → s3://team-shared-logs/live [acme/workstation], s3 → s3://pricing-logs/live?profile=pricing [acme/pricing])
   but the last run FAILED at 2026-09-02T11:40:12Z —
-  s3 → s3://team-shared-logs/live [duettoresearch/workstation]: ok — 2 file(s) uploaded (48122 B), 7 unchanged, 0 over the size ceiling (0 newly recorded);
-  s3 → s3://pricing-logs/live?profile=pricing [duettoresearch/pricing]: FAILED — cannot reach the destination: …
+  s3 → s3://team-shared-logs/live [acme/workstation]: ok — 2 file(s) uploaded (48122 B), 7 unchanged, 0 over the size ceiling (0 newly recorded);
+  s3 → s3://pricing-logs/live?profile=pricing [acme/pricing]: FAILED — cannot reach the destination: …
 ```
 
 ## Not implemented

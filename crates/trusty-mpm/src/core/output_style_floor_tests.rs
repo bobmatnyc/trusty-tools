@@ -251,3 +251,27 @@ fn a_symlinked_composite_is_refused() {
     assert!(err.to_string().contains("symlink"), "{err}");
     assert_eq!(std::fs::read_to_string(&target).expect("read"), "UNTOUCHED");
 }
+
+/// #11685: several PMs share one folder, so a folder-derived identity gives
+/// two PMs one name (crossed relays, an overwritten ledger). Every PM style
+/// must name the tmux session of `$TMUX_PANE`, never the directory basename.
+#[test]
+fn every_pm_style_takes_identity_from_the_tmux_session_not_the_folder() {
+    for bundled in OUTPUT_STYLES {
+        if bundled.id == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID {
+            continue;
+        }
+        let body = bundled.content(rc());
+        assert!(
+            body.contains("tmux display-message -p '#S'"),
+            "{} does not take identity from the tmux session",
+            bundled.id
+        );
+        assert!(
+            !body.contains("project directory's basename")
+                && !body.contains("basename of the project directory"),
+            "{} still derives identity from the folder",
+            bundled.id
+        );
+    }
+}

@@ -6,7 +6,7 @@
 //! What: pure functions over [`PaneInfo`]; `now` (seconds since the epoch) is
 //! always passed in, never read from the clock.
 //! Test: `test_no_agents_still_idle`, `test_idle_prompt_alerts_after_ten_minutes_only`,
-//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_thresholds_follow_ruling_b7`,
+//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_alert_at_the_new_bar`,
 //! `test_alert_display_and_redaction`, `evaluate_matches_python_goldens`.
 
 use serde::{Deserialize, Serialize};
@@ -19,11 +19,15 @@ use crate::sha1::sha1_hex;
 
 /// Seconds an idle pane waits before it alerts.
 pub const IDLE_AFTER: f64 = 600.0;
-// #9171: fleet-poll.py's live bar (ruling b7, 2026-10-07), not fleet-classify.py's 45/50.
+// df-T7i P1b: the PM bar of ctx_bar.py (Bob 2026-11-05: 350k of a 1M window,
+// "approaching" at 90% of it); was 22/25 (ruling b7). The Architect's own bar
+// differs, but its pane is never evaluated (SKIP_SESSIONS).
 /// Context percent that raises a `ctx` alert.
-pub const CTX_WARN: u64 = 22;
+pub const CTX_WARN: u64 = 31;
 /// Context percent whose `ctx` alert carries the higher fingerprint.
-pub const CTX_HIGH: u64 = 25;
+pub const CTX_HIGH: u64 = 35;
+/// Sessions idle by design: never an `idle` alert (ar-T63, df-T7i P1b).
+pub const IDLE_EXEMPT_SESSIONS: [&str; 1] = ["tm-architect-questions"];
 /// Plan usage percent that raises the fleet-wide `plan-limit` alert.
 pub const PLAN_HIGH: u64 = 90;
 /// Characters an alert detail keeps.
@@ -58,7 +62,28 @@ pub struct PaneState {
     /// Error lines seen last cycle; `None` before the first sight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<String>>,
+    /// The last cycle that read the pane idle.
+    // See parity window 5: C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_seen: Option<f64>,
+    /// The epoch a not-idle read cleared, kept for [`IDLE_GRACE`] s.
+    // See parity window 5: C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_held: Option<f64>,
+    /// The `idle` fingerprint this pane last alerted.
+    // See parity window 5: D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_alerted: Option<String>,
+    /// The idle screen hash last read, and when it first appeared.
+    // See parity window 5: D.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_screen: Option<(String, f64)>,
 }
+
+/// Seconds between two idle reads within which one idle episode continues
+/// across not-idle reads: one missed 60 s cycle, with slack.
+// See parity window 5: C.
+pub const IDLE_GRACE: f64 = 150.0;
 
 /// Short stable fingerprint: the first 12 hex digits of SHA-1.
 pub fn fingerprint(text: &str) -> String {
@@ -124,7 +149,8 @@ pub(crate) fn clean(text: &str) -> String {
 }
 
 /// `(year, month, day)` of `days` since 1970-01-01 (H. Hinnant's algorithm).
-// #9801: shared with the usage step's UTC and New York times.
+// #9801, #10571: the crate's one copy; every civil-date caller imports it.
+/// Test: `civil_helpers_match_the_removed_copies`.
 pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -199,10 +225,12 @@ pub fn alert(
 ///
 /// Why: one place decides which facts need the Architect.
 /// What: `dialog`, `question`, `idle` (after [`IDLE_AFTER`] s with an empty or
-/// suggestion box, no dialog, not busy), `ctx` (at [`CTX_WARN`]%, fingerprint
-/// `22`/`25`), `plan-limit`, and `error` for error lines new since last cycle
+/// suggestion box, no dialog, not busy; never for [`IDLE_EXEMPT_SESSIONS`]),
+/// `ctx` (at [`CTX_WARN`]%, fingerprint `31`/`35`), `plan-limit`, and `error` for error lines new since last cycle
 /// (the first sight only seeds the baseline).
 /// Test: `test_idle_prompt_alerts_after_ten_minutes_only`,
+/// `window5_transient_not_idle_read_keeps_the_idle_epoch`,
+/// `window5_alerted_epoch_does_not_alert_again_on_a_new_screen`,
 /// `test_error_alerts_only_for_lines_new_since_last_cycle`,
 /// `evaluate_matches_python_goldens`.
 pub fn evaluate(
@@ -226,18 +254,49 @@ pub fn evaluate(
         super::BoxReading::Input(InputState::Empty | InputState::Suggestion)
     );
     if info.has_box && idle_box && info.dialog.is_none() && !info.busy {
-        let since = *ps.idle_since.get_or_insert(now);
-        if now - since >= IDLE_AFTER {
+        // See parity window 5: C. A not-idle stretch shorter than
+        // IDLE_GRACE between two idle reads keeps the episode's epoch.
+        let held = ps
+            .idle_held
+            .take()
+            .filter(|_| ps.idle_seen.is_some_and(|seen| now - seen <= IDLE_GRACE));
+        let since = *ps.idle_since.get_or_insert(held.unwrap_or(now));
+        ps.idle_seen = Some(now);
+        if ps
+            .idle_screen
+            .as_ref()
+            .is_none_or(|(s, _)| *s != info.screen)
+        {
+            ps.idle_screen = Some((info.screen.clone(), now));
+        }
+        if now - since >= IDLE_AFTER && !IDLE_EXEMPT_SESSIONS.contains(&session) {
             // Python's int() truncates toward zero; `//` floors.
             let mins = ((now - since) / 60.0).floor() as i64;
-            add(
-                "idle",
-                &format!("since-{}", since.trunc() as i64),
-                &format!("idle {mins} min, no agents running"),
-            );
+            let epoch = format!("since-{}-", since.trunc() as i64);
+            // See MB1595: the screen hash re-alerts a changed idle screen.
+            let fp = format!("{epoch}{}", info.screen);
+            // See parity window 5: D. An alerted epoch re-alerts a new
+            // screen only once that screen has itself been idle IDLE_AFTER s;
+            // a transitional screen on a stale epoch never alerts.
+            let settled = ps
+                .idle_screen
+                .as_ref()
+                .is_some_and(|(_, at)| now - at >= IDLE_AFTER);
+            let stale = !settled
+                && ps
+                    .idle_alerted
+                    .as_ref()
+                    .is_some_and(|a| a.starts_with(&epoch) && *a != fp);
+            if !stale {
+                add("idle", &fp, &format!("idle {mins} min, no agents running"));
+                ps.idle_alerted = Some(fp);
+            }
         }
     } else {
-        ps.idle_since = None;
+        // See parity window 5: C. Held, not dropped, until IDLE_GRACE.
+        if let Some(since) = ps.idle_since.take() {
+            ps.idle_held = Some(since);
+        }
     }
     if let Some(ctx) = info.ctx.filter(|c| *c >= CTX_WARN) {
         let level = if ctx >= CTX_HIGH { CTX_HIGH } else { CTX_WARN };
@@ -267,14 +326,12 @@ pub fn evaluate(
 }
 
 /// Plan usage is account-wide: one alert for the fleet, not one per pane.
+/// Weekly only: no 5-hour alert (Bob 2026-10-31, df-T7i P1b).
 ///
 /// Test: `test_plan_limit_text_and_status_line`, `plan_alerts_match_python_goldens`.
 pub fn fleet_plan_alerts(infos: &[(String, PaneInfo)], now: f64) -> Vec<Alert> {
     type PlanField = (&'static str, &'static str, fn(&PaneInfo) -> Option<u64>);
-    let keys: [PlanField; 2] = [
-        ("plan5h", "5-hour", |i| i.plan5h),
-        ("planwk", "weekly", |i| i.planwk),
-    ];
+    let keys: [PlanField; 1] = [("planwk", "weekly", |i| i.planwk)];
     keys.into_iter()
         .filter_map(|(key, label, get)| {
             let (v, s) = infos

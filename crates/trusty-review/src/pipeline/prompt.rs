@@ -122,7 +122,13 @@ pub fn review_response_schema() -> ResponseSchema {
                     "type": "object",
                     "properties": {
                         "title": {"type": "string"},
-                        "body": {"type": "string"},
+                        // #10964: a backtick span in `body` reads as a quote of
+                        // the file; an unlabelled one that is not there
+                        // withholds the finding.
+                        "body": {
+                            "type": "string",
+                            "description": "Detailed description. Text in backticks means code copied verbatim from `file`. Put a proposed fix in `suggested_replacement`. Label an exploit payload, example input or fix you quote in backticks, right before it: \"a payload such as\", \"an input such as\", \"e.g.\", \"replace with\", \"should be\", \"Fix:\"."
+                        },
                         "severity": {
                             "type": "string",
                             "enum": ["low", "medium", "high", "critical"]
@@ -167,7 +173,7 @@ pub fn review_response_schema() -> ResponseSchema {
                         // `#[serde(default)]` → "". Empty is fine (renderer skips it).
                         "consequence": {
                             "type": "string",
-                            "description": "Brief failure mechanism: what goes wrong in practice if this is NOT addressed (e.g. \"panics on empty input\", \"leaks the connection under load\"). One short phrase. Empty string if there is no concrete consequence."
+                            "description": "Brief failure mechanism: what goes wrong in practice if this is NOT addressed (e.g. \"panics on empty input\", \"leaks the connection under load\"). One short phrase. Empty string if there is no concrete consequence. Backticks follow the `body` rule."
                         },
                         // `suggested_replacement` (#1415) is nullable (like `line`)
                         // so it can be `null` while still satisfying OpenAI strict

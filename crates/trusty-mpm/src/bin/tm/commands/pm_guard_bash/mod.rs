@@ -149,7 +149,7 @@ pub(crate) use main_checkout::{
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
-pub(crate) use process_env_dump::evaluate_process_env_dump_command;
+pub(crate) use process_env_dump::{evaluate_process_env_dump_command, evaluate_quoted_ps_argv};
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 // #8454 S3: the egress Bash arm walks the same segments and nested bodies
 // (`shell_segments_map`). #10033: one line, for the 500-SLOC cap.
@@ -167,14 +167,16 @@ pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
-pub(crate) use bash_tokens::{
-    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, tokenize,
-    without_glob_metacharacters,
-};
+// #10685: and whether a printer-only command can run anything nested.
+// #10974: and whether a nested-command marker sits outside single quotes.
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.
 // #8869: and by the secret-read key-consumer rule, with the input-side parser.
-pub(crate) use bash_tokens::{RedirectRole, redirect_role};
+pub(crate) use bash_tokens::{
+    RedirectRole, TEXT_PRINTERS, TokenizeError, has_live_nested_marker, has_regex_quantifier,
+    program_text_indices, prose_write_indices, redirect_role, runs_a_nested_command, tokenize,
+    without_glob_metacharacters,
+};
 pub(crate) use credential_print::input_redirect_operand;
 // #7266: everything after the first export is shared with
 // `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
@@ -486,7 +488,9 @@ fn expand_shell_segments(command: &str, depth: usize, out: &mut Vec<String>) {
 /// `continuation_tests::split_shell_segments_keep_a_continued_command_whole_9180`,
 /// `split_shell_segments_still_splits_an_unterminated_heredoc`,
 /// `split_shell_segments_still_splits_a_shell_heredoc_body`.
-fn split_shell_segments_raw(command: &str) -> Vec<&str> {
+// #10672: crate-visible so the script rule reads the separators between
+// segments as written, with no wrapper descent.
+pub(crate) fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let scan = QuoteScan::new(command);
     let quoted = |i: usize| scan.balanced && !scan.is_unquoted(i);
     let bodies = heredoc::HeredocBodies::scan(command);

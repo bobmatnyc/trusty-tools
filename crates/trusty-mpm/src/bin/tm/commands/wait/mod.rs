@@ -30,6 +30,8 @@
 pub(crate) mod budget;
 pub(crate) mod condition;
 pub(crate) mod rate_limit;
+// #11673: `--required-only` and `--watch` for `--for check`.
+pub(crate) mod required;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -490,6 +492,15 @@ pub(crate) fn rerun_command(args: &WaitArgs, plan: &Plan) -> String {
     if args.allow_empty_checks {
         parts.push("--allow-empty-checks".to_string());
     }
+    if args.required_only {
+        parts.push("--required-only".to_string());
+    }
+    if args.watch {
+        parts.push("--watch".to_string());
+    }
+    if let Some(o) = &args.owner {
+        parts.push(format!("--owner {o}"));
+    }
     parts.push(format!("--timeout {}", plan.timeout_s));
     if args.interval.is_some() {
         parts.push(format!("--interval {}", plan.interval_s));
@@ -543,6 +554,7 @@ pub(crate) fn run(args: WaitArgs) -> ! {
 /// The fallible body of [`run`], split out so every error leaves one way.
 fn run_inner(args: &WaitArgs) -> anyhow::Result<i32> {
     let plan = resolve_plan(args)?;
+    required::validate(args)?;
     let cond = condition::build(args)?;
 
     let spec = condition::spec(args);
@@ -559,6 +571,10 @@ fn run_inner(args: &WaitArgs) -> anyhow::Result<i32> {
     let now = clock.now_unix();
     let abandon_after = ABANDON_AFTER_SECS.max(plan.interval_s.saturating_mul(10));
     let mut budget = budget::load_or_start(&state_path, &spec, plan.timeout_s, now, abandon_after);
+    // #11673: `--watch` registers once, on the wait's first invocation.
+    if args.watch && budget.polls == 0 {
+        eprintln!("{}", required::register_watch(args)?);
+    }
 
     let outcome = poll_until(cond.as_ref(), &plan, &mut budget, &clock)?;
     let end = clock.now_unix();

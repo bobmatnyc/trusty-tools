@@ -20,11 +20,15 @@ pub mod core_kg;
 // #8246: ranked recall, split from `core.rs` at the SLOC cap.
 pub mod core_recall;
 pub mod helpers;
+// #11255: per-instance operation limits and their `AppState` builders.
+pub mod op_limits;
 // #7125: the bounded batch fan-out the recall-all family runs on.
 pub mod recall_stream;
 // #9544: `palace_rename`, kept out of `core.rs` for the SLOC cap.
 pub mod rename;
 pub mod types;
+// #10989: `memory.palace_unload` — close a palace, keep its data.
+pub mod unload;
 pub mod user_config;
 
 // #6286: the assertions the retired `web::tests` suite carried, ported to
@@ -55,6 +59,10 @@ mod recall_scope_tests;
 #[cfg(test)]
 #[path = "rename_tests.rs"]
 mod rename_tests;
+// #10989: the daemon half of `memory.palace_unload`.
+#[cfg(test)]
+#[path = "unload_tests.rs"]
+mod unload_tests;
 
 // Re-export the full public surface so external call sites
 // (`crate::service::X`) keep resolving exactly as they did against the former

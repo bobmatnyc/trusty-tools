@@ -48,7 +48,9 @@ def test_delete_logs_full_doc(env):
     assert cli(root, "--actor", "tester", "delete", "items", "D01", env=e)[0] == 0
     (rec,) = lines(root)
     assert (rec["collection"], rec["id"], rec["version"], rec["actor"]) == ("items", "D01", 1, "tester")
-    assert rec["data"] == DOC
+    stamps = ("created", "updated")   # #10678: the store stamps these itself
+    assert {k: v for k, v in rec["data"].items() if k not in stamps} == {k: v for k, v in DOC.items() if k not in stamps}
+    assert rec["data"]["created"] == rec["data"]["updated"] and rec["data"]["updated"].endswith("Z")
     assert rec["pruned_at"].endswith("Z")
     assert cli(root, "get", "items", "D01", env=e)[0] == 1
 
@@ -56,12 +58,12 @@ def test_delete_logs_full_doc(env):
 def test_batch_delete_logs_each(env, tmp_path):
     root, e = env
     for i in ("D01", "D02"):
-        cli(root, "set", "items", i, "--json", json.dumps({**DOC, "n": i}), env=e)
+        cli(root, "set", "items", i, "--json", json.dumps({**DOC, "detail": i}), env=e)   # #10766: a schema field
     ops = tmp_path / "ops.json"
     ops.write_text(json.dumps([{"op": "delete", "collection": "items", "id": "D01"},
                                {"op": "delete", "collection": "items", "id": "D02"}]))
     assert cli(root, "batch", str(ops), env=e)[0] == 0
-    assert [(r["id"], r["data"]["n"]) for r in lines(root)] == [("D01", "D01"), ("D02", "D02")]
+    assert [(r["id"], r["data"]["detail"]) for r in lines(root)] == [("D01", "D01"), ("D02", "D02")]
 
 
 def test_missing_doc_delete_logs_nothing(env):

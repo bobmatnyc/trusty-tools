@@ -57,7 +57,7 @@ describe('the eight install audiences', () => {
 			'trusty-review',
 			'trusty-mpm',
 			'trusty-code',
-			'trusty-agents'
+			'trusty-assistants'
 		]);
 	});
 
@@ -101,8 +101,8 @@ describe('every command is one the repository can actually run', () => {
 	 * and neither is among them, so a `tctl install` line on either audience is
 	 * a command that fails with `unknown member(s)`.
 	 */
-	it('offers no tctl install line to trusty-code or trusty-agents', () => {
-		for (const id of ['trusty-code', 'trusty-agents']) {
+	it('offers no tctl install line to trusty-code or trusty-assistants', () => {
+		for (const id of ['trusty-code', 'trusty-assistants']) {
 			const audience = AUDIENCES.find((a) => a.id === id)!;
 			for (const step of audience.steps) {
 				for (const block of step.commands) {
@@ -119,9 +119,21 @@ describe('every command is one the repository can actually run', () => {
 			.map((line) => line.match(/^cargo install --path (\S+) --locked$/))
 			.filter((match): match is RegExpMatchArray => match !== null)
 			.map((match) => match[1]);
-		expect(paths).toEqual(['crates/trusty-agents']);
+		// #11632: installs of trusty-assistants are paused, so no line remains.
+		expect(paths).toEqual([]);
 		for (const dir of paths) {
 			expect(existsSync(path.join(REPO_ROOT, dir, 'Cargo.toml')), dir).toBe(true);
+		}
+	});
+
+	it('offers no install command for trusty-assistants and says installs are paused', () => {
+		const audience = AUDIENCES.find((a) => a.id === 'trusty-assistants')!;
+		expect(audience.binary).toBe('ta');
+		expect(audience.lede).toContain('paused');
+		for (const step of audience.steps) {
+			for (const block of step.commands) {
+				expect(block.command).not.toMatch(/cargo install|git clone|crates\/trusty-agents/);
+			}
 		}
 	});
 
@@ -162,7 +174,7 @@ describe('macOS permission categories are per product and never widened', () => 
 	});
 
 	/**
-	 * The invariant this whole page was gated on. `tm` and `tagent` read other
+	 * The invariant this whole page was gated on. `tm` and `ta` read other
 	 * apps' `$HOME` containers, which raises the SEPARATE "access data from
 	 * other apps" prompt; the disk-wide category is a different, wider grant
 	 * that neither should ever be offered. The doc is explicit that it "should
@@ -172,7 +184,7 @@ describe('macOS permission categories are per product and never widened', () => 
 	 */
 	it('never prints the wider category anywhere in an App Data audience', () => {
 		const appData = AUDIENCES.filter((a) => a.tcc.category === 'app-data').map((a) => a.id);
-		expect(appData).toEqual(['trusty-mpm', 'trusty-agents']);
+		expect(appData).toEqual(['trusty-mpm', 'trusty-assistants']);
 		for (const id of appData) {
 			const audience = AUDIENCES.find((a) => a.id === id)!;
 			expect(audienceText(audience), id).not.toContain('Full Disk Access');
@@ -207,7 +219,7 @@ describe('the MCP registration each audience publishes', () => {
 		'trusty-search': '"args": ["serve"]',
 		'trusty-analyze': '"args": ["serve","--mcp"]',
 		'trusty-review': '"args": ["mcp"]',
-		'trusty-agents': '"args": ["mcp-serve"]'
+		'trusty-assistants': '"args": ["mcp-serve"]'
 	};
 
 	it('prints the argument vector the crate actually parses', () => {

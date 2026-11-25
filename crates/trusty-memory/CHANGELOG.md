@@ -6,7 +6,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.2] — 2026-11-23
+
+### Fixed
+
+- A palace open can no longer hang while it rebuilds the vector index. The workspace now builds a patched `hnsw_rs` 0.3.4 that releases a lock before it updates neighbouring points, so parallel replay stays fast and cannot deadlock (#10682).
+- The idle-evict sweep keeps a palace whose last open took 1 s or more, so the first call after an idle period no longer re-opens it past the client's 5 s exchange and fails with a broken pipe (#11613).
+- Every per-palace tool (`memory_remember`, `memory_note`, `memory_recall`, `memory_list`, `memory_forget`, the `kg_*` and `task_*` tools) now waits at most 3 s for a palace that is not resident, then answers `-32007` (`palace_opening`) while the open continues in the background. The handler has not run, so a refused write is safe to re-send (#11613).
+
+### Documentation
+
+- Comments and examples use neutral `acme` org names.
+- Comments and the README name `trusty-assistants`, the new name of the `trusty-agents` consumer; the workspace discovery test pins `ta` to the trusty-assistants binary (#11632).
+
+## [1.0.1] — 2026-11-16
+
+### Fixed
+
+- Linux: `start` and `restart` pass `RUST_LOG_BUFFER` to the daemon they spawn, so its in-memory log buffer keeps the filter a shell-started daemon would use (#11085).
+
+### Changed
+
+- The Linux lifecycle restart tests scan an injected process table of their own processes, so a host trusty-memory daemon no longer changes their result (#11085). `restart` behaviour is unchanged.
+
+## [1.0.0] — 2026-11-15
+
+### Fixed
+
+- `memory_recall` and `memory_recall_deep` open a cold palace on the blocking pool and wait at most `TRUSTY_RECALL_OPEN_WAIT_SECS` (15 s); past that they answer a retryable `palace_opening` error (JSON-RPC code `-32007`, `error.data` with `kind`, `retryable`, `palace`, `waited_ms`) while the open goes on, so a retry finds the palace (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- a `memory_recall_all` `scope: "all"` walk stops at `TRUSTY_RECALL_ALL_DEADLINE_SECS` (20 s) and returns the results gathered so far; every response carries `deadline_exceeded` and `palaces_not_reached`, unreached palaces count under the `deadline` reason, and no detached reopen runs after a deadline hit (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- the chat `recall_memories` tool and the per-message chat context use the same bounded open: the tool answers `{error, kind: "palace_opening", retryable: true, palace, waited_ms}`, and the context says the palace is still opening (or that the recall failed) instead of reading as "no relevant memories" (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- recalls of one palace that miss the cache together share one open, so callers and retries no longer each park a blocking thread on it; a failed open reaches every caller waiting on it and the next call tries again, and a caller whose shared open hit the open-queue bound waits out its own open wait and answers `palace_opening` instead of an internal error (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- a zero, negative or non-numeric `TRUSTY_RECALL_OPEN_WAIT_SECS` / `TRUSTY_RECALL_ALL_DEADLINE_SECS` falls back to its default; the open wait is capped at three quarters of `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS` and the deadline at 3600 s, so no value can panic the daemon (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+
+### Changed
+
+- trusty-memory 1.0.0: stability release; the public API surface, wire formats and on-disk formats are now covered by Semantic Versioning, so a breaking change needs a major version from here on (owner ruling Dnx)
+
+## [0.36.8] — 2026-11-14
+
+### Added
+
+- `memory.palace_unload {palace_id}`, a socket method (not an MCP tool) that releases one palace's open handles and caches and keeps its data on disk (#10989). It waits up to 10 s for an in-flight write, flushes the palace's BM25 index, drops its session store and registry handle, and answers `{palace_id, canonical_id, exists, was_resident, unloaded, data_kept}`. A busy palace is refused (`-32006`) and nothing is released; a palace not on disk answers `exists: false`. The next use reopens the palace from disk. tm's project decommission calls it.
+- `memory.palace_unload` answers unloaded only after the palace's redb files are closed, waiting up to the same 10 s (#10989). The next use then reopens the palace writable, never on a read-only snapshot. A file still open after the wait is refused (`-32006`).
+- On Linux, `trusty-memory start`, `stop` and a new `restart` run on the shared Linux lifecycle (#11085): `stop` stops only the daemon serving this data dir's socket and fails while a process survives SIGKILL; `restart` stops, confirms the stop, then starts the installed binary, and starts a daemon that is not running. The daemon they start gets a cleared environment that keeps every non-credential setting it reads (multi-tenant mode, embedder model and caches, BM25, timeouts) and leaves API keys out. A non-UTF-8 or blank `TRUSTY_DATA_DIR_OVERRIDE` is refused. macOS is unchanged.
+
+### Fixed
+
+- the room-counts console metrics test waits for the evicted palace's KgWriter task before it reads the disk, which removes a flaky failure (Refs [#11080](https://github.com/bobmatnyc/trusty-tools/issues/11080))
+
 ## [0.36.7] — 2026-11-10
+
+### Changed
+
+- Requires trusty-common 0.69; no library source change (Refs #10735).
 
 ### Fixed
 

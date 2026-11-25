@@ -35,7 +35,7 @@ RC_FAIL_WAKE = 3           # rc_failed alerts in a row on one session
 
 WAKE_KINDS = {"permission_prompt", "dialog", "question", "exited", "session_exited", "self_ctx",
               "band", "status_request", "user_state", "effort", "pm_message",
-              "il_cron", "ctxwatch", "ctxcycle"}
+              "il_cron", "ctxwatch", "ctxcycle", "dep_degraded"}
 TOKEN_LOG = {"hit_low", "miss_idle", "miss_unexpected", "ctx_sub"}  # also feed the token optimizer
 
 
@@ -86,7 +86,8 @@ def hold_covers(hold, kind):
 
 # Alert kinds that wake the Architect even while it is held. The poller (fleet_alert_dedupe.py) reads this one set.
 URGENT_KINDS = {"permission_prompt", "agent_needs_input", "dialog", "question", "exited", "session_exited",
-                "self_ctx", "architect_dead", "architect_silent", "architect_frozen"}
+                "self_ctx", "architect_dead", "architect_silent", "architect_frozen",
+                "dep_degraded"}  # PR-B2: memory or search down
 URGENT_SEVERITY_KINDS = {"swap", "disk"}   # urgent only at severity "critical"
 PM_WAKE_KINDS = {"decision", "blocker", "head", "done"}   # pm_intake.WAKE_MSG_KINDS
 HOLD_FILE = "hold.json"
@@ -308,13 +309,21 @@ def parse_haiku(out):
     return res
 
 
+def haiku_argv():
+    """The `claude -p` argv for one triage call; the prompt goes on stdin, never argv."""
+    # #11026: `--tools ""` turns off ToolSearch deferral, so every user-scope MCP schema
+    # would go inline (~383k tokens); the explicit empty config loads no server. The `=`
+    # form keeps variadic `--mcp-config` from taking a later argument as a config.
+    return ["claude", "-p", "--model", MODEL, "--tools", "", "--disable-slash-commands",
+            "--strict-mcp-config", '--mcp-config={"mcpServers":{}}']
+
+
 def run_haiku(prompt):
     """One `claude -p` call on the plan login (no API key). Raises on timeout or non-zero exit."""
     env = dict(os.environ)
     env.setdefault("CLAUDE_CONFIG_DIR", CLAUDE_CONFIG_DIR)
     r = subprocess.run(
-        ["claude", "-p", "--model", MODEL, "--tools", "", "--disable-slash-commands",
-         "--strict-mcp-config"],
+        haiku_argv(),
         input=prompt, capture_output=True, text=True, timeout=HAIKU_TIMEOUT,
         cwd=tempfile.gettempdir(), env=env)
     if r.returncode != 0:

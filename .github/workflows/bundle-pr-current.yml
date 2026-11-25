@@ -1,0 +1,78 @@
+# Architect-bundle PRs must be current with main (issue #11120; owner ruling
+# 2026-11-14, "Narrow gate: bundle PRs must be current with main").
+#
+# Two PRs that each regenerate the bundle's provenance.json and seed_history.tsv
+# are each green on their own base; merged one after the other, main goes red
+# (#11236 + #11191, repaired by #11246). This job fails a PR that changes an
+# Architect bundle file while main has a commit, absent from the PR head, that
+# changes a bundle file. Lacking only non-bundle commits from main passes. The
+# bundle path list, the rule and the remedy text live in
+# scripts/check_bundle_pr_current.sh.
+#
+# Required-context safe: no `paths:` filter and no job-level `if:` (#5311), so
+# the job reports a conclusion on every PR; the script decides from the diff
+# and passes a PR that changes no bundle file. No push trigger, so no
+# red-main-notify entry (scripts/check-red-main-coverage.sh).
+#
+# It runs when the PR changes, not when main moves. bundle-pr-rerun.yml re-runs
+# it on every open PR when a bundle change lands on main (#11342), so a bundle
+# PR overtaken by another bundle PR turns red.
+#
+# merge_group (#11342): a queue commit already contains main, so head-vs-main
+# means nothing there; the job reports success with a message and leaves the
+# merge result to `Architect bundle history/provenance check`
+# (architect-bundle-meta.yml), which runs on the queue commit.
+name: Architect bundle PR is current
+
+on:
+  pull_request:
+    # Explicit activity types (#4179). `edited` is the event a base-branch
+    # RETARGET fires; `ready_for_review` covers a draft being marked ready.
+    # Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-pr-current-${{ github.ref }}
+  cancel-in-progress: ${{ github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
+
+jobs:
+  bundle-pr-current:
+    name: Architect bundle PR is current with main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Merge queue commit (nothing to compare)
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "merge_group: the queue commit already contains main, so head-vs-main has nothing to compare."
+          echo "The merge result is judged by 'Architect bundle history/provenance check' (architect-bundle-meta.yml)."
+
+      # fetch-depth: 0 — the gate needs the merge base of main and the PR head
+      # and the ancestry between them, which a shallow checkout cannot answer.
+      - uses: actions/checkout@v5
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gate selftest (must refuse a bundle PR that lacks a bundle change on main)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check_bundle_pr_current_selftest.sh
+
+      # Judge the PR HEAD, never the refs/pull/N/merge commit checkout made
+      # (that commit always contains main), against main's tip as it is now,
+      # not the base.sha frozen at the event (#4688). --fetch refreshes
+      # origin/<base>, fetches the head SHA when absent, and verifies each
+      # revision on its own; the selftest above covers that mode.
+      - name: A PR that changes the Architect bundle lacks no bundle change on main
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check_bundle_pr_current.sh --fetch origin --head "${HEAD_SHA}" --base "${BASE_REF}"

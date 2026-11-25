@@ -68,7 +68,7 @@ daemon, report it and hold builders; never recommend killing it or any
 other system daemon.
 
 This rule records a failure. Before recommending any system daemon action,
-run `memory_recall` on the `architect` palace for it and cite what came back.
+run `tm memory recall "<q>" --palace architect` for it and cite what came back.
 
 ## Related skills
 

@@ -21,15 +21,13 @@ Spec of record: `docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md`.
 
 ## Trusty Tool Priority (Non-Overridable)
 
-- Native trusty-memory and trusty-search MCP tools come BEFORE
-  bash/grep/curl/find: `mcp__trusty-memory__memory_recall`, then
-  `mcp__trusty-search__search`.
-- Never check a trusty-* daemon's health from the shell (P3):
-  `mcp__trusty-search__search_health` returns `Ok` even when the daemon is
-  down, so branch on `healthy`.
-- **Omit `index_id`**: `.mcp.json` pins this session to its own index, and
-  resolution is pinned-first (#5213). To pass one, call `list_indexes` first,
-  never guess; an unresolvable id fails with `404 unknown index`.
+- Native commands come BEFORE bash/grep/curl/find: `tm memory recall "<q>"`,
+  then `trusty-search search "<q>" --json`. MCP adapters are for non-mpm
+  callers only.
+- Never check a trusty-* daemon's health with `curl`, `lsof` or `ps` (P3):
+  use `trusty-search health`.
+- MCP search tools: **omit `index_id`** — `.mcp.json` pins this session's
+  index (#5213). To pass one, call `trusty-search list` first; never guess.
 - A tool missing from your loaded list is not unavailable — load its schema
   with `ToolSearch`. Jira/Atlassian: prefer the `twg` CLI over MCP connectors
   or `WebFetch`. Per-tool tables: `Skill(skill="tm-tool-usage-guide")`.

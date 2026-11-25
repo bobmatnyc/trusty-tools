@@ -26,11 +26,11 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot};
 ///
 /// Why: HR-3 / DOC-17 requires the daemon to SURFACE catalog staleness so the
 /// TUI can show an indicator and the operator can decide to rebuild. The probe
-/// stays a liveness check (`status: "ok"`) and additionally carries the
+/// carries liveness in `alive`, overall health in `status`, and the
 /// cheap, offline catalog-staleness signal computed from the already-synced
 /// catalog checkout vs the deployed checksum manifests — it never blocks on a
 /// network pull.
-/// What: `status` is the liveness word; `catalog_stale` is true when deployed
+/// What: `status` is the overall health word; `catalog_stale` is true when deployed
 /// content drifts from the synced catalog; `catalog_unknown` is true when the
 /// catalog has never been synced (distinct from "fresh"); `catalog_changes` is a
 /// small human summary of WHAT changed (empty unless stale); `supervised`
@@ -39,8 +39,21 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot};
 /// `health_reports_ok_status`, `health_response_serializes_supervised_field`.
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HealthResponse {
-    /// Liveness word — `"ok"` while the daemon is up.
+    /// Overall health word: `"ok"`, or `"degraded"` when [`Self::degraded`]
+    /// is non-empty (a parked subsystem, or trusty-memory / trusty-search not
+    /// answering). Not a liveness signal — read [`Self::alive`] for that.
     pub status: String,
+    /// Whether the daemon process answered — the liveness signal.
+    ///
+    /// Why: `status` turns `"degraded"` when a dependency is down, and a
+    /// restart wait or supervisor that read `status == "ok"` as "the process is
+    /// up" would then bounce a live daemon for another daemon's outage.
+    /// What: always `true` in a response (an answer is liveness). The serde
+    /// default is `true` too, so a client reading an older daemon that omits
+    /// the field still sees it as alive.
+    /// Test: `both_up_reports_ok`, `health_snapshot_alive_defaults_true`.
+    #[serde(default = "default_alive")]
+    pub alive: bool,
     /// True when deployed agents/skills drift from the synced catalog (HR-3).
     pub catalog_stale: bool,
     /// True when the catalog has never been synced (nothing to compare).
@@ -171,6 +184,15 @@ pub struct HealthResponse {
     /// Test: `health_publishes_no_degraded_subsystem_when_idle`.
     #[serde(default)]
     pub degraded: Vec<String>,
+    /// trusty-memory / trusty-search with no current probe answer (PR-B2).
+    ///
+    /// Why: a refresh still in flight is not an outage; a reader must tell it
+    /// from down or timeout, so it is kept out of [`Self::degraded`].
+    /// What: `"<service>: pending"` entries; never changes `status`. Empty
+    /// for a daemon predating the field.
+    /// Test: `no_finished_probe_reads_pending_not_ok`.
+    #[serde(default)]
+    pub pending: Vec<String>,
     /// Live delegation records of unbound sessions still waiting for the 6 h
     /// stale (#9007).
     ///
@@ -196,6 +218,12 @@ pub struct HealthResponse {
 /// "safe" default so an older daemon response missing the field never reads
 /// as hazardous.
 fn default_supervised() -> bool {
+    true
+}
+
+/// Default for [`HealthResponse::alive`]: a response that parsed came from a
+/// live daemon.
+fn default_alive() -> bool {
     true
 }
 
@@ -392,6 +420,10 @@ pub struct BreakersResponse {
 pub struct HookAcceptedResponse {
     /// The hook event that was accepted.
     pub accepted: HookEvent,
+    /// #11674: on `SubagentStop`, the delegation's bound ledger task, for the
+    /// hook's round-trip check. Absent on every other event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_binding: Option<crate::core::subagent_task_roundtrip::StopBinding>,
 }
 
 /// The overseer status block in [`OverseerResponse`].

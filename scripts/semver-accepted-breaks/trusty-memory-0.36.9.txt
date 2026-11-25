@@ -1,0 +1,5 @@
+crate   trusty-memory
+version 0.36.9
+reason  Bob VERSIONING ruling 2026-09-26 18:57Z: trusty-tools (all crates) use internal numbering; API breaks never force a major or minor bump; semver gates report only. #11255 (PR #11272) adds RecallCoverage.deadline_exceeded and RecallCoverage.deadline_not_reached so a scope "all" recall that hits its deadline reports a partial answer; it ships as bug-fix patch 0.36.9. semver-checks vs baseline 0.36.8 computes this lint.
+accept  constructible_struct_adds_field field RecallCoverage.deadline_exceeded
+accept  constructible_struct_adds_field field RecallCoverage.deadline_not_reached

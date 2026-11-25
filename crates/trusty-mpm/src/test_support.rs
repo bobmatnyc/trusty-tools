@@ -59,6 +59,13 @@ pub(crate) mod tmux_session;
 #[path = "test_stale_socket.rs"]
 pub(crate) mod stale_socket;
 
+/// #11061: a named fake process that is not a symlink to `/bin/sleep`, which
+/// uutils `sleep` (Ubuntu 26.04) refuses under another argv[0]. The same file
+/// backs the `tm` binary's and the `integration` target's copies.
+#[path = "../tests/common/fake_claude.rs"]
+#[allow(dead_code)] // `sleeper` is the fleet tests' spelling; the lib uses `sleeper_named`.
+pub(crate) mod fake_claude;
+
 /// The spawn primitive [`tmux_session`] runs every tmux invocation through
 /// (#7060).
 ///
@@ -88,6 +95,19 @@ pub(crate) use crate::core::spawn_disclaim::disclaimed_output as tmux_spawn;
 /// compiles into both.
 /// Test: `tmux_session::tests::the_spawn_seam_takes_the_path_lock`.
 pub(crate) use crate::core::trusty_tools_config::env_test_lock as lock_path_env;
+
+/// A real `install.toml` parse error, read from a scratch home (#11821).
+///
+/// Why: the fail-closed arms take the resolver's error as a parameter, so a
+/// test hands them one without rewriting `$HOME`.
+pub(crate) fn broken_install_error() -> trusty_common::install_paths::InstallPathsError {
+    let home = tempfile::tempdir().expect("scratch home");
+    let tools = home.path().join(".trusty-tools");
+    std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
+    std::fs::write(tools.join("install.toml"), "bogus = 1\n").expect("write install.toml");
+    trusty_common::install_paths::read_install_file(home.path())
+        .expect_err("an unknown key is refused")
+}
 
 /// Arm `core::home_write_fence` for the lib test binary, before `main` (#8545).
 ///
@@ -279,9 +299,24 @@ static SWEEP_ONCE: Once = Once::new();
 /// Windows builds only; no test suite runs there) this falls back to
 /// `std::env::temp_dir()`, since Windows has no established TMPDIR-pollution
 /// pattern and no equivalent always-present hardcoded system path.
-/// What: returns `/tmp` on Unix, `std::env::temp_dir()` otherwise.
-/// Test: [`tests::real_system_tmp_ignores_tmpdir_env`].
+/// #10785: a dedicated `TM_TEST_TMP` (never `TMPDIR`) moves the root off a
+/// small `/tmp` tmpfs; [`guard_against_project_tree`] still checks it.
+/// What: returns `$TM_TEST_TMP` when set and non-empty, else `/tmp` on Unix,
+/// else `std::env::temp_dir()`.
+/// Test: [`tests::real_system_tmp_ignores_tmpdir_env`],
+/// [`tests::tm_test_tmp_override_sets_the_root_10785`].
 fn real_system_tmp() -> PathBuf {
+    resolve_test_tmp_root(std::env::var_os(TM_TEST_TMP_ENV))
+}
+
+/// The env var that overrides the hermetic test root (#10785).
+const TM_TEST_TMP_ENV: &str = "TM_TEST_TMP";
+
+/// Pure resolution behind [`real_system_tmp`], so tests need no env mutation.
+fn resolve_test_tmp_root(override_root: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(root) = override_root.filter(|r| !r.is_empty()) {
+        return PathBuf::from(root);
+    }
     #[cfg(unix)]
     {
         PathBuf::from("/tmp")
@@ -623,6 +658,35 @@ impl Drop for HangFifo {
     }
 }
 
+/// Move every spool file in `dir` onto a fresh inode, same name, bytes and
+/// mode (#10748).
+///
+/// Why: `spool::persist` writes under an exclusive `flock`. A child that a
+/// concurrent test forks in that window inherits the locked fd and holds the
+/// lock until its `exec`, so a replay right after the write counts the file
+/// held and takes nothing. `O_CLOEXEC` closes the fd at `exec`, not at `fork`.
+/// What: reads each `.ndjson` file, unlinks it and writes the bytes again
+/// under the same name. A lock belongs to the old inode, so the new file is
+/// unlocked whatever a forked child still holds; nothing is waited on.
+/// Test: `a_relinked_spool_file_is_taken_past_a_stale_lock_10748`,
+/// `hooks_that_evict_replayed_events_keep_their_file_10467`,
+/// `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub(crate) fn relink_spool_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.map(|e| e.expect("spool entry").path()) {
+        if path.extension().is_none_or(|x| x != "ndjson") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read spool file");
+        let mode = std::fs::metadata(&path).expect("spool meta").permissions();
+        std::fs::remove_file(&path).expect("unlink spool file");
+        std::fs::write(&path, bytes).expect("rewrite spool file");
+        std::fs::set_permissions(&path, mode).expect("spool mode");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// #9101: the identity the fake derives names the session the pane id
@@ -634,6 +698,32 @@ mod tests {
         assert_eq!(identity.pane_id, "%tmpm-test-9101");
         assert_eq!(identity.session_name, "tmpm-test-9101");
         assert_eq!(identity.server, super::FAKE_PANE_SERVER);
+    }
+
+    /// #10748: a lock still held on a spool file, as a forked sibling child
+    /// holds persist's, makes a take skip it; once relinked, the take claims
+    /// it with the same bytes and mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_relinked_spool_file_is_taken_past_a_stale_lock_10748() {
+        use crate::daemon::action_events::spool;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("0001-a.ndjson");
+        std::fs::write(&file, "{}\n").expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        let holder = std::fs::File::open(&file).expect("open");
+        holder.lock().expect("lock");
+        assert_eq!(spool::take_all(dir.path()).expect("take").held, 1);
+
+        super::relink_spool_files(dir.path());
+
+        let replay = spool::take_all(dir.path()).expect("take");
+        assert_eq!((replay.held, replay.claims.len()), (0, 1), "{replay:?}");
+        assert_eq!(std::fs::read(&file).expect("read"), b"{}\n");
+        let mode = std::fs::metadata(&file).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        drop(holder);
     }
 
     use super::*;
@@ -665,10 +755,24 @@ mod tests {
     fn real_system_tmp_ignores_tmpdir_env() {
         // Safety/portability note: this test only asserts the *return value*
         // is independent of TMPDIR; it does not mutate global env state.
-        let root = real_system_tmp();
+        let root = resolve_test_tmp_root(None);
         #[cfg(unix)]
         assert_eq!(root, PathBuf::from("/tmp"));
         assert!(root.exists(), "hermetic root must exist: {root:?}");
+    }
+
+    /// #10785: `TM_TEST_TMP` sets the root; an empty value falls back.
+    #[test]
+    fn tm_test_tmp_override_sets_the_root_10785() {
+        let chosen = std::ffi::OsString::from("/var/tmp/tm-tests");
+        assert_eq!(
+            resolve_test_tmp_root(Some(chosen)),
+            PathBuf::from("/var/tmp/tm-tests")
+        );
+        assert_eq!(
+            resolve_test_tmp_root(Some(std::ffi::OsString::new())),
+            resolve_test_tmp_root(None)
+        );
     }
 
     /// Why serial: reads `$HOME` (via `guard_against_project_tree`, indirectly

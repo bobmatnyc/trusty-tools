@@ -64,6 +64,18 @@ assert_eq "tmux: docs only"                     "false" "$(rel tmux-targets 'doc
 README.md')"
 assert_eq "tmux: node_modules is not scanned"   "false" "$(rel tmux-targets 'website/node_modules/x/y.js')"
 assert_eq "tmux: website content"               "false" "$(rel tmux-targets 'website/src/content/tools/x.md')"
+assert_eq "sled: its Dockerfile (#11156)"       "true"  "$(rel sled-static 'docker/sled/Dockerfile')"
+assert_eq "sled: its proxy config"              "true"  "$(rel sled-static 'docker/sled/proxy/squid.conf')"
+assert_eq "sled: the static check"              "true"  "$(rel sled-static 'scripts/check_sled_tailscale_isolation.sh')"
+assert_eq "sled: the launch test"               "true"  "$(rel sled-static 'scripts/check_sled_launch.sh')"
+assert_eq "sled: the launch test's stub docker" "true"  "$(rel sled-static 'scripts/test-data/sled-launch/docker')"
+assert_eq "sled: other test data"               "false" "$(rel sled-static 'scripts/test-data/doc-paths/x')"
+assert_eq "sled: the hosting workflow"          "true"  "$(rel sled-static '.github/workflows/ci.yml')"
+assert_eq "sled: B3 gateway test (#11156)"      "true"  "$(rel sled-static 'scripts/check_sled_v1_gateway.sh')"
+assert_eq "sled: B4 tarball test (#11156)"      "true"  "$(rel sled-static 'scripts/check_sled_pinned_tarballs.sh')"
+assert_eq "sled: cloudtest Dockerfile (B4 reads)" "true" "$(rel sled-static 'docker/cloudtest/Dockerfile')"
+assert_eq "sled: cloudtest entrypoint is not read" "false" "$(rel sled-static 'docker/cloudtest/entrypoint.sh')"
+assert_eq "sled: docs only"                     "false" "$(rel sled-static 'docs/a.md')"
 assert_eq "C-quoted path (fail closed)"         "true"  "$(rel teardown-guard '"crates/caf\303\251.rs"')"
 assert_eq "empty change set (fail closed)"      "true"  "$(rel tmux-targets '')"
 assert_eq "no usable base (fail closed)" "true" \
@@ -132,6 +144,10 @@ assert_eq "test missing from needs"                     "1" "$(verdict_on push d
 assert_eq "test skipped on push"                        "1" "$(verdict_on push test=skipped)"
 assert_eq "test skipped on workflow_dispatch"           "1" "$(verdict_on workflow_dispatch test=skipped)"
 assert_eq "test skipped on pull_request (by design)"    "0" "$(verdict_on pull_request test=skipped)"
+assert_eq "test skipped on merge_group (by design)"     "0" "$(verdict_on merge_group test=skipped)"
+assert_eq "test failed on merge_group"                  "1" "$(verdict_on merge_group test=failure)"
+assert_eq "test skipped on an unknown event"            "1" "$(verdict_on schedule test=skipped)"
+assert_eq "clippy skipped on merge_group (not pr_skip)" "1" "$(verdict_on merge_group clippy=skipped)"
 assert_eq "test skipped, EVENT_NAME unset (fail closed)" "1" "$(verdict test=skipped)"
 assert_eq "test skipped, EVENT_NAME empty (fail closed)" "1" "$(verdict_on '' test=skipped)"
 assert_eq "NEEDS_JSON not an object"                    "2" \
@@ -178,8 +194,10 @@ assert_eq "teardown-guard skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.teardown_guard_relevant != 'false' }}" "$ci")"
 assert_eq "tmux-exact-targets skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}" "$ci")"
-assert_eq "changes exports both relevance outputs" "2" \
-  "$(grep -cE '^      (teardown_guard|tmux_targets)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
+assert_eq "sled-static skips only on an explicit false" "1" \
+  "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.sled_static_relevant != 'false' }}" "$ci")"
+assert_eq "changes exports all three relevance outputs" "3" \
+  "$(grep -cE '^      (teardown_guard|tmux_targets|sled_static)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
 # Owner ruling 2026-09-27: trusty-common is tested by its coverage lanes and
 # nowhere else, so no single `-p trusty-common` run can pass for the crate.
 lanes_job="$(sed -n '/^  trusty-common-lanes:$/,/^  # ----/p' "$ci")"
@@ -195,6 +213,8 @@ assert_eq "changelog-fragment row allows no skip" "1" \
 assert_eq "changelog-fragment unordered skip fails the gate" "1" \
   "$(verdict changelog-fragment=skipped out:docs_only=true)"
 assert_eq "changelog-fragment failed" "1" "$(verdict changelog-fragment=failure)"
+assert_eq "public-leaks failed" "1" "$(verdict public-leaks=failure)"
+assert_eq "public-leaks skipped (never allowed)" "1" "$(verdict public-leaks=skipped out:docs_only=true)"
 assert_eq "changelog-fragment cancelled" "1" "$(verdict changelog-fragment=cancelled)"
 cf_job="$(sed -n '/^  changelog-fragment:$/,/^  # ----/p' "$ci")"
 assert_eq "changelog-fragment has no job-level if or needs" "0" \
@@ -221,7 +241,7 @@ assert_eq "no other ci.yml job runs the fastembed selftest" "1" \
   "$(grep -c 'run: .*check_fastembed_cache_selftest\.sh$' "$ci")"
 assert_eq "ci.yml triggers carry no path filter" "0" \
   "$(sed -n '/^on:$/,/^[a-z]/p' "$ci" | grep -cE '^[[:space:]]+paths(-ignore)?:')"
-for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment; do
+for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment sled-static; do
   assert_eq "${moved}.yml is gone (one check run per name)" "0" \
     "$([ -e ".github/workflows/${moved}.yml" ] && echo 1 || echo 0)"
 done

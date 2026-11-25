@@ -48,6 +48,8 @@ pub const DEFAULT_PORT: u16 = 7788;
 pub mod bind;
 // #6285: the console's own SPA, split out of `server` at the 500-SLOC cap.
 pub mod connector;
+// #11074: the token gate on every TCP route (DOC-90 §4).
+pub mod console_token;
 pub mod console_ui;
 // #10902: console's own socket (`console.health`, `console.fleet_status`).
 #[cfg(unix)]
@@ -59,6 +61,9 @@ pub mod events_uds;
 // #6517: background whole-machine host-metrics sampler + cache feeding the
 // machine-status route.
 pub mod host_status;
+// #11085: Linux `start`, `stop` and `restart` on `trusty_common::linux_lifecycle`.
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_lifecycle;
 // #6641: the bounded 10-minute sample window, the per-service transition log,
 // and the SSE fan-out the Phase 3 graphs read.
 pub mod machine_history;
@@ -66,12 +71,16 @@ pub mod mcp_handle;
 pub mod metrics_poller;
 pub mod poller;
 pub mod proxy;
+// #10907: the console's own request counters behind `console.console_metrics`.
+pub mod request_metrics;
 pub mod routes;
 // #6285: the console's client to trusty-search, which no longer serves HTTP.
 // #6155: the trusty-memory and trusty-analyze bridges, siblings of
 // `search_uds`. Each maps one dashboard's REST-shaped paths onto that daemon's
 // own `<domain>.*` methods.
 pub mod analyze_uds;
+// #11747: the Trusty Assistants list and turn-history routes, and the ask wire.
+pub mod assistants_uds;
 pub mod memory_uds;
 pub mod search_uds;
 // #9066: the trusty-secrets bridge (`/api/secrets/*`), Unix only (Q8).
@@ -144,6 +153,16 @@ pub enum Commands {
         #[command(subcommand)]
         action: service::ServiceAction,
     },
+    /// Start `trusty-console serve` detached from the install dir and wait
+    /// until it serves (Linux only, #11085).
+    #[cfg(target_os = "linux")]
+    Start,
+    /// Stop the running console; exits 1 when none runs (Linux only, #11085).
+    #[cfg(target_os = "linux")]
+    Stop,
+    /// Stop the console, confirm it stopped, then start it (Linux only, #11085).
+    #[cfg(target_os = "linux")]
+    Restart,
 }
 
 /// Arguments for `trusty-console port`.
@@ -276,6 +295,13 @@ pub async fn run_from(argv: Vec<String>) -> Result<()> {
         Commands::Config(cmd) => cmd.run().await,
         // `service` drives macOS launchd synchronously; no async work needed.
         Commands::Service { action } => service::run_service_action(&action),
+        // #11085: D2 keeps macOS unchanged; these verbs exist on Linux only.
+        #[cfg(target_os = "linux")]
+        Commands::Start => linux_lifecycle::start().await,
+        #[cfg(target_os = "linux")]
+        Commands::Stop => linux_lifecycle::stop().await,
+        #[cfg(target_os = "linux")]
+        Commands::Restart => linux_lifecycle::restart().await,
     }
 }
 
@@ -336,11 +362,15 @@ pub fn run_port(args: PortArgs) -> Result<()> {
 /// Every address is served by `tailnet_peer::serve_listeners`, which gates
 /// each non-loopback listener behind the tailnet peer gate (#7524) and each
 /// loopback listener behind its own Host/Origin check (#9792); all run until
-/// the shared shutdown signal fires.
+/// the shared shutdown signal fires. #11074: with `TRUSTY_CONSOLE_TOKEN_FILE`
+/// set, the token file is validated first and every TCP route needs the token.
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests);
-/// the listener wiring is `explicit_non_loopback_listener_is_gated_7524`.
+/// the listener wiring is `explicit_non_loopback_listener_is_gated_7524`;
+/// `run_serve_refuses_a_bad_token_file_before_binding_11074`.
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
+    // #11074: a bad token file stops the console here, before anything binds.
+    let token_gate = console_token::TokenGate::from_env()?;
     // ── resolve bind mode ───────────────────────────────────────────────────
     let mode = bind::BindMode::from_env_and_flags(&args.http, DEFAULT_HTTP, args.tailscale);
     let port = bind::port_from_addr(&args.http, DEFAULT_PORT);
@@ -531,6 +561,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     );
     webhook::start_retry_sweep(ingress.clone(), WEBHOOK_RETRY_INTERVAL);
     let router = server::build_router_with_webhooks(state.clone(), self_origins, ingress);
+    // #11074: inside the listener guards, so Host/Origin and the peer gate run first.
+    let router = console_token::guard(router, token_gate);
 
     // #9075: console no longer binds an event-bus ingest socket; producers
     // push to the trusty-events daemon (ADR-0065). #9076: console subscribes
@@ -612,6 +644,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
+
+// #11074: the one global tracing capture tests share.
+#[cfg(all(test, unix))]
+mod test_log_capture;
 
 #[cfg(test)]
 mod tests {

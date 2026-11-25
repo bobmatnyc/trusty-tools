@@ -4,7 +4,7 @@
 //! 500-SLOC production cap.
 
 use super::*;
-use crate::core::child_repo_scan::{ScanIncomplete, WORKSPACE_SCAN_BUDGET};
+use crate::core::child_repo_scan::{PROJECT_SCAN_BUDGET, ScanIncomplete, WORKSPACE_SCAN_BUDGET};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -112,22 +112,37 @@ fn a_wide_node_modules_sibling_never_lets_a_workspace_parent_seed() {
 
 /// FAILS BEFORE THIS ROUND: a directory wider than the budget, holding no
 /// repository at all, exhausted the scan and was seeded as if clear.
+/// #10461: the budget is now [`PROJECT_SCAN_BUDGET`]; exhausting it still refuses.
 #[test]
 fn an_exhausted_scan_refuses_to_seed() {
     let tmp = TempDir::new().unwrap();
     let (parent, home) = workspace_and_home(&tmp);
-    for i in 0..(crate::core::child_repo_scan::WORKSPACE_SCAN_BUDGET + 44) {
-        std::fs::create_dir_all(parent.join(format!("d{i:03}"))).unwrap();
+    for i in 0..(PROJECT_SCAN_BUDGET + 44) {
+        std::fs::create_dir_all(parent.join(format!("d{i:05}"))).unwrap();
     }
 
     assert_eq!(
         offer_git_init(&parent, Some(&home), None),
         Err(SeedRefusal::ScanIncomplete(
             ScanIncomplete::BudgetExhausted {
-                budget: WORKSPACE_SCAN_BUDGET
+                budget: PROJECT_SCAN_BUDGET
             }
         ))
     );
+}
+
+/// #10461, FAILS BEFORE THE FIX: a project with more subdirectories than the
+/// shared 256 budget, and no child repository, was refused as a scan that
+/// could not finish. Under [`PROJECT_SCAN_BUDGET`] the scan finishes clear.
+#[test]
+fn a_project_wider_than_the_workspace_budget_may_seed() {
+    let tmp = TempDir::new().unwrap();
+    let (parent, home) = workspace_and_home(&tmp);
+    for i in 0..(WORKSPACE_SCAN_BUDGET + 44) {
+        std::fs::create_dir_all(parent.join(format!("d{i:03}"))).unwrap();
+    }
+
+    assert_eq!(offer_git_init(&parent, Some(&home), None), Ok(false));
 }
 
 /// FAILS BEFORE THIS ROUND: an unreadable child was skipped, so the directory

@@ -64,11 +64,32 @@ async fn get(path: &str) -> Got {
     .await
 }
 
-/// The local `src="./…"` and `href="./…"` references in a shell.
+/// `html` with every `<!-- … -->` span removed; an unclosed one runs to the end.
+///
+/// #11758: a shell comment holding a literal head-close tag swallowed Vite's
+/// module script and the injected base, and a substring check still found
+/// both. Copied from `assistants_ui_mount.rs`; every check below reads only
+/// live markup.
+fn strip_comments(html: &str) -> String {
+    let mut live = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open) = rest.find("<!--") {
+        live.push_str(&rest[..open]);
+        match rest[open + 4..].find("-->") {
+            Some(close) => rest = &rest[open + 4 + close + 3..],
+            None => return live,
+        }
+    }
+    live.push_str(rest);
+    live
+}
+
+/// The local `src="./…"` and `href="./…"` references in a shell's live markup.
 fn local_refs(shell: &str) -> Vec<String> {
+    let live = strip_comments(shell);
     let mut refs = Vec::new();
     for marker in ["src=\"./", "href=\"./"] {
-        let mut rest = shell;
+        let mut rest = live.as_str();
         while let Some(idx) = rest.find(marker) {
             let tail = &rest[idx + marker.len()..];
             let end = tail.find('"').expect("quoted attribute");
@@ -109,9 +130,35 @@ async fn secrets_ui_index_serves_the_page_with_the_bridge_base_injected() {
         "the API base must point at the secrets bridge; got:\n{}",
         got.body
     );
-    let injected = got.body.find("__SECRETS_BASE__").expect("global present");
-    let head_close = got.body.find("</head>").expect("head close present");
-    assert!(injected < head_close);
+    let live = strip_comments(&got.body);
+    let injected = live.find("__SECRETS_BASE__").expect("live global");
+    assert!(injected < live.find("</head>").expect("live head close"));
+}
+
+/// Why: #11758 — the shell shipped with Vite's module script, its stylesheet
+/// and the injected base all inside an HTML comment, so the page rendered
+/// blank while every substring check passed.
+/// What: in the served shell with comments removed, exactly one module
+/// script, a stylesheet link and the base global, all inside the live head.
+/// Test: this is the test.
+#[tokio::test]
+async fn secrets_ui_boot_tags_are_live_markup() {
+    let served = get("/tools/secrets/").await.body;
+    let live = strip_comments(&served);
+    let head = &live[..live.find("</head>").expect("live head close")];
+    assert_eq!(
+        head.matches("<script type=\"module\"").count(),
+        1,
+        "exactly one live module script in the head; served:\n{served}"
+    );
+    assert!(
+        head.contains("rel=\"stylesheet\""),
+        "a live stylesheet link in the head; served:\n{served}"
+    );
+    assert!(
+        head.contains("window.__SECRETS_BASE__ ="),
+        "the injected base is live markup; served:\n{served}"
+    );
 }
 
 /// Every asset the shell references is served from this mount, or the page

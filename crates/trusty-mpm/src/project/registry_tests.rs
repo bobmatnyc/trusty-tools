@@ -118,6 +118,8 @@ async fn registry_register_idempotent() {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     };
     registry.register(p.clone()).await.expect("register once");
     registry
@@ -148,6 +150,8 @@ async fn registry_get() {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     };
     registry.register(p.clone()).await.expect("register");
 
@@ -176,6 +180,8 @@ fn make_project(name: &str) -> Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -328,6 +334,8 @@ async fn registry_list() {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         };
         registry.register(p).await.expect("register");
     }
@@ -522,6 +530,8 @@ async fn registry_register_from_session_does_not_overwrite_existing() {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     };
     registry
         .register(manual.clone())
@@ -566,6 +576,8 @@ async fn registry_auto_register_skips_already_registered() {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     };
     registry.register(existing).await.expect("pre-register");
 
@@ -816,4 +828,206 @@ async fn implicit_registration_warns_and_registers_nothing_when_list_fails() {
         CORRUPT,
         "projects.json must be left unchanged"
     );
+}
+
+/// `register_unless_present` keys on `owner/repo`, not the URL string (#10586).
+///
+/// Why: `tm project init` read the origin as `git@github.com:o/r.git` while
+/// the record said `https://github.com/o/r`; the old string compare missed it
+/// and `upsert` then refused on the shared key. The name, the same string and
+/// the stored key must each count as "present", and nothing is written then.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_unless_present_matches_on_project_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(make_project("gizmo"))
+        .await
+        .expect("seed");
+
+    let mut ssh = make_project("checkout-dir");
+    ssh.repo_url = "git@github.com:O/gizmo.git".into();
+    let same_name = Project {
+        repo_url: "https://github.com/o/elsewhere".into(),
+        ..make_project("gizmo")
+    };
+    for candidate in [ssh, same_name, make_project("gizmo")] {
+        let kept = registry
+            .register_unless_present(candidate.clone())
+            .await
+            .expect("no store error");
+        // #10586: the kept record comes back, so the caller can name it.
+        let kept = kept.unwrap_or_else(|| panic!("{candidate:?} is already covered"));
+        assert_eq!(kept.name, "gizmo");
+    }
+    let all = registry.list().await.expect("list");
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].repo_url, "https://github.com/o/gizmo");
+
+    let fresh = registry
+        .register_unless_present(make_project("other"))
+        .await
+        .expect("insert");
+    assert!(fresh.is_none(), "a new repo under a new name is inserted");
+    let other = registry.get("other").await.expect("get");
+    assert_eq!(other.project_key.as_deref(), Some("o/other"));
+}
+
+/// `register_unless_present` keeps a legacy record that stores no key (#10586).
+///
+/// Why: a pre-key record for `acme/widget` must stop an https init of the same
+/// repo; matching only a stored key wrote a second record beside it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_unless_present_keeps_a_legacy_record_without_a_key() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = registry_with_raw_records(
+        &dir,
+        serde_json::json!({ "widget-checkout": {
+            "name": "widget-checkout",
+            "repo_url": "git@github.com:acme/widget.git",
+            "default_branch": "main"
+        }}),
+    )
+    .await;
+
+    let mut init = make_project("widget");
+    init.repo_url = "https://github.com/acme/widget".into();
+    let kept = registry
+        .register_unless_present(init)
+        .await
+        .expect("no store error");
+    assert_eq!(kept.map(|p| p.name).as_deref(), Some("widget-checkout"));
+    assert_eq!(registry.list().await.expect("list").len(), 1);
+}
+
+// ── #10988: a decommissioned project stays decommissioned until a new session ──
+
+fn widget_config() -> ProjectConfig {
+    ProjectConfig {
+        name: "widget".into(),
+        repo_url: "https://github.com/acme/widget".into(),
+        default_branch: None,
+        stack_hint: None,
+        tags: None,
+        description: None,
+        gh_user: None,
+        gh_account: None,
+        github: None,
+        commit_name: None,
+        commit_email: None,
+        untracked_sync: None,
+        worktree: None,
+    }
+}
+
+/// Register `widget` from config, then mark it decommissioned.
+async fn decommissioned_widget(dir: &TempDir) -> ProjectRegistry {
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry.seed_from_config(&[widget_config()]).await;
+    registry
+        .mark_decommissioned("widget", Utc::now())
+        .await
+        .expect("mark");
+    assert!(
+        registry
+            .get("widget")
+            .await
+            .expect("get")
+            .is_decommissioned()
+    );
+    registry
+}
+
+/// The boot pass replays OLD session records; it must not re-list the project
+/// as active, under its own name or as a second row for its origin.
+#[tokio::test]
+async fn auto_register_keeps_a_decommissioned_project_decommissioned() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = decommissioned_widget(&dir).await;
+    let old = [
+        make_session_with_repo("https://github.com/acme/widget", None),
+        make_session_with_repo("git@github.com:acme/widget.git", None),
+    ];
+    registry.auto_register_from_sessions(&old).await;
+    let all = registry.list().await.expect("list");
+    assert_eq!(all.len(), 1, "a second row re-listed the project: {all:?}");
+    assert!(
+        all[0].is_decommissioned(),
+        "auto-registration re-listed a decommissioned project as active"
+    );
+}
+
+/// The config seed runs every boot and upserts a whole record; it must not
+/// clear the state either.
+#[tokio::test]
+async fn seed_from_config_keeps_a_decommissioned_project_decommissioned() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = decommissioned_widget(&dir).await;
+    registry.seed_from_config(&[widget_config()]).await;
+    assert!(
+        registry
+            .get("widget")
+            .await
+            .expect("get")
+            .is_decommissioned(),
+        "a boot-time config seed re-listed a decommissioned project as active"
+    );
+}
+
+/// A NEW session for the project reactivates it; one for another repo does not.
+#[tokio::test]
+async fn reactivate_for_session_clears_a_decommissioned_project() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = decommissioned_widget(&dir).await;
+    let other = make_session_with_repo("https://github.com/acme/gadget", None);
+    let cleared = registry.reactivate_for_session(&other).await.expect("ok");
+    assert!(cleared.is_empty(), "{cleared:?}");
+    assert!(
+        registry
+            .get("widget")
+            .await
+            .expect("get")
+            .is_decommissioned(),
+        "a session for another repo reactivated the project"
+    );
+    let new = make_session_with_repo("https://github.com/acme/widget.git", None);
+    let cleared = registry.reactivate_for_session(&new).await.expect("ok");
+    assert_eq!(cleared, vec!["widget".to_string()]);
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("get")
+            .is_decommissioned(),
+        "a new session must clear the decommissioned state"
+    );
+}
+
+/// #10991: a new session for an archived project lifts the archived state, so
+/// the TUI stops dimming a project that runs again.
+#[tokio::test]
+async fn reactivate_for_session_clears_an_archived_project() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry.seed_from_config(&[widget_config()]).await;
+    registry
+        .mark_archived("widget", Utc::now())
+        .await
+        .expect("mark");
+    let new = make_session_with_repo("https://github.com/acme/widget.git", None);
+    let cleared = registry.reactivate_for_session(&new).await.expect("ok");
+    assert_eq!(cleared, vec!["widget".to_string()]);
+    assert!(!registry.get("widget").await.expect("get").is_archived());
+}
+
+/// #10988: an unreadable registry is returned to the caller, not only logged.
+#[tokio::test]
+async fn reactivate_for_session_returns_a_list_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let registry = decommissioned_widget(&dir).await;
+    std::fs::write(dir.path().join("projects.json"), "{ not json").expect("corrupt");
+    let new = make_session_with_repo("https://github.com/acme/widget.git", None);
+    assert!(registry.reactivate_for_session(&new).await.is_err());
 }

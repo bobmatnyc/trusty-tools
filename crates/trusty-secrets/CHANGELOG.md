@@ -6,6 +6,93 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.3] — 2026-11-24
+
+### Security
+
+- `secrets.unlock` no longer holds a vault-blob snapshot made stale by a `set`, `delete` or agent-deny write that lands while the blob read waits on a Keychain prompt. The grant reads the blob once more, and refuses to open if the snapshot is stale again, so a key the owner just denied is never served to an agent from memory (#11786).
+- `secrets.unlock` waits for a Keychain write already in flight before it reads the blob, up to the Keychain call deadline or the request deadline, whichever comes first. If the write is still waiting, for example on an access prompt, unlock fails with `keychain_access_prompt` and opens no grant. An unlock never opens a grant after its request deadline has passed (#11786).
+- The corrupt-vault-blob error now says that `tm secrets migrate --rollback` recovers only when a migration backup exists, and that it restores the backup's values (#11786).
+
+## [0.9.2] — 2026-11-24
+
+### Fixed
+
+- A server started outside the macOS GUI login session, for example from SSH, no longer fails `tm secrets set` with only "the secrets backend failed". The Keychain's no-session statuses now answer the new `keychain_no_session` kind, whose text names the cause and the remedy ([#10589](https://github.com/bobmatnyc/trusty-tools/issues/10589)).
+- `secrets.doctor` now writes and removes a probe item from the server's own process, so a Keychain the server cannot use reads as unavailable (`no_session`) instead of `READ | WRITE` ([#10589](https://github.com/bobmatnyc/trusty-tools/issues/10589)).
+- A vault blob that carries a SHA-256 `digest` of its items is checked on read, so a blob changed after it was written counts as corrupt; a blob without one still reads. This release verifies digests but writes none yet, so a blob, backup or `migrate` output it writes still reads on an older tm or daemon. The digest is an integrity check, not authentication ([#11738](https://github.com/bobmatnyc/trusty-tools/issues/11738)).
+
+### Security
+
+- A corrupt or tampered vault blob now fails every read with a fixed error that names the `tm secrets migrate --rollback` recovery. A read does not fall back to the migration backup or the per-item items, which could serve a key rotated or deleted after migration. Writes still refuse and the corrupt blob is left as it is ([#11738](https://github.com/bobmatnyc/trusty-tools/issues/11738), [#11786](https://github.com/bobmatnyc/trusty-tools/issues/11786)).
+
+### Changed
+
+- Patch release (0.9.2) to restore publish-version parity (#3366); no code change.
+
+## [0.9.1] — 2026-11-23
+
+### Fixed
+
+- A checkout with no `origin` remote now resolves its secrets scope from `git config --local trusty.secrets.repo <owner>/<repo>`. Only the checkout's own `.git/config` is read, and an `origin` remote still wins. With neither, the `project_unresolved` error names the command to run ([#11346](https://github.com/bobmatnyc/trusty-tools/issues/11346)).
+- A Keychain call that outlasts its time limit, as when a macOS access prompt is open or the item's access list names an older `trusty-secrets` binary, now fails with the distinct kind `keychain_access_prompt` (-32089) instead of the generic `backend_timeout`. The reply says the outcome is unknown, names the remedy (answer the prompt, then verify with `tm secrets list`), and never reads as "not stored", since the abandoned write may still land. A time-out of any other backend stays `backend_timeout` ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+- `KEYCHAIN_CALL_TIMEOUT` drops from 60 s to 20 s, so the reply arrives before a 30 s client gives up ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+
+## [0.9.0] — 2026-11-20
+
+### Added
+
+- `secrets.unlock` and `secrets.lock` socket methods: an 8 h unlock grant held in the server's memory. While it is live, Keychain and CLI-backed values are read once and then served from zeroed-on-drop, `mlock`'d memory (a refused lock caches nothing). The grant drops on expiry (wall clock and `Instant`), system sleep, server shutdown (`logout`), a dead power watcher, or `secrets.lock`, and never survives a restart. An agent-descended caller cannot unlock. Audit records: `secrets.unlock`, `secrets.lock`, `secrets.unlock.drop` with a typed `grant_drop` reason, and `served_from: grant` on reads under the grant. The grant takes its lock before it reads the clocks, and a stamp older than the last one seen does not read as a stepped-back clock, so a racing read cannot drop a live grant as a fault (#10524).
+- `TRUSTY_SECRETS_UNLOCK_TTL_SECS` shortens the grant for a sandbox check; it never lengthens it past 8 h (#10524).
+- The vault blob: once migrated, every trusty Keychain item (values and agent-control items) lives in one Keychain item, `trusty-secrets.vault-blob`. `secrets.unlock` reads it once and the grant holds it, so no later Keychain read prompts while the grant is live; a blob that cannot be read or held opens no grant. Writes are read-modify-write under one lock and land as one item write (#10524).
+- `secrets.migrate` with step `migrate` (verified backup item, then verified blob; old items kept), `finish` (deletes the old items), or `rollback` (writes every item back to its own item, verifies each, then deletes the blob), each with a dry run. A failure at any step leaves the old items readable. Refused under an agent; audited with counts and key names, never a value (#10524).
+
+### Fixed
+
+- The Linux build of `trusty-secrets` compiles under `-D warnings` again, and the blob-unlock tests run the blob path on non-macOS builds (#11538).
+
+## [0.8.0] — 2026-11-19
+
+### Added
+
+- `secrets.gate`, the one server method `remote-gate` uses, with two inner verbs, `resolve` and `doctor`. It answers only a `trusty-secrets` peer below a root `sshd` or `sshd-session` with no Claude Code ancestor; any other peer gets the new `gate_refused` error kind and one deny record. Its `resolve` is `secrets.resolve` with `agent_parent` forced true, so the grant token is still required and a key denied to agents is refused. Its records carry `host`, `remote_agent` (marked unverified) and `remote_project` (#11464).
+- `ProcessTable::comm`, a process's kernel short name and owner uid, readable across uids (#11464).
+- `trusty-secrets remote-gate --host <name>`, an ssh forced-command front: it reads one JSON frame on stdin (one line, at most 64 KiB, within 5 s), allows only `resolve` and `doctor`, and checks the host's entry in the account machine config (`secrets.remote_hosts`: a `projects` map of `<owner>/<repo>` to a checkout on this machine, and a required `keys` list). A `resolve` takes a one-shot grant for the gate's own pid, then resolves through `secrets.gate`. It never starts a server: no socket to dial exits 69 (`studio_server_absent`); every refusal and every timeout exits 13 (#11464).
+
+### Fixed
+
+- The granted client no longer fails a resolve with `EINVAL` on macOS when the server closes the socket while answer bytes are still buffered (#10396).
+
+## [0.7.0] — 2026-11-14
+
+### Fixed
+
+- A `backend_timeout` reply now says whether the call waited N s for the Keychain or was refused at once because an earlier call on the same item still hangs, and names the recovery step (answer the access prompt, or end the server so the next call starts a fresh one). The error data adds `waited_ms` and `abandoned_item`; the kind and code are unchanged (#11215).
+- A `backend_timeout` audit row now carries `backend_wait` (`backend`, `waited_ms`, `abandoned_item`). The field is additive and omitted on every other row (#11215).
+- The server's start and exit lines in `trusty-secrets.stderr.log` now begin with a UTC timestamp (#11215).
+
+### Changed
+
+- `secrets.copy` to a sync target (GitHub Actions, Vercel) now admits a caller with a Claude Code ancestor for keys not denied to agents, superseding D63 D3 for agents (#10999, owner ruling 2026-11-10). A key denied to agents fails with `agent_key_denied` before its value is read; an unreadable ancestry chain still refuses with `grant_refused`. Each key's audit record names the target, key, caller pid and `agent_parent`, never the value.
+- The Vercel "already existed" (D9) failure reason now says the new value may already be set and a retry reports the same failure (#10999).
+- An agent may push a key marked push-only for agents (#10998) to a sync target; a deny still refuses and wins over the mark, and a failed lookup of the deny or the mark fails the key (#10999).
+
+## [0.5.0] — 2026-11-13
+
+### Breaking
+
+- `store::ControlItem` gains the `PushOnly` variant and is now `#[non_exhaustive]`. A `match` on it outside trusty-secrets needs a wildcard arm. Later control items are no longer a semver break (#10998).
+
+### Added
+
+- `secrets.copy` accepts an optional `source` locator: any Keychain item by service and account (`keychain_item`, read with `from_backend: keychain`), or a key in any trusty vault, the owner vault included (`vault`, read on `from_backend`). The one value lands in the caller's project vault under the single key `keys` names, moved inside the server only; a request without `source` behaves as before. A Keychain item in trusty's own namespace is refused, so a trusty key keeps its agent deny; an agent caller is refused (`agent_key_denied`) for a denied source or destination key, and an agent's copy of a Keychain item lands push-only for agents — a new per-key mark (`ControlItem::PushOnly`, read with `store::is_push_only`, listed as `agents_push_only`) that refuses every agent read of the value until a person lifts it with `secrets.set_agents_may_use`; a retry of a Keychain item whose earlier read timed out fails at once instead of starting another read; a failure is the call's typed error. Each record carries the new `copy_source` field, never the value (#10998).
+
+## [0.4.1] — 2026-11-10
+
+### Changed
+
+- Requires trusty-common 0.69; no source change (Refs #10735).
+
 ## [0.4.0] — 2026-10-30
 
 ### Added

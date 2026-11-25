@@ -20,8 +20,10 @@
 //! Architect only. [`deploy`] writes each file when it is absent, and since
 //! #10571 replaces one whose bytes are an earlier shipped version
 //! (`seed_history.tsv`, see [`refresh`]). A file with any other bytes is
-//! someone's edit and is reported skipped, never overwritten. The skills' bytes are the ones every Architect launch also
-//! deploys (#9540).
+//! someone's edit and is reported skipped, never overwritten; since #11245 the
+//! shipped copy is written beside it as `<file>.shipped`. The skills' bytes are the ones every Architect launch also
+//! deploys (#9540). The agents are written by [`super::seed_agents`] under
+//! the skills' deploy rule (#10161 D3c).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
 //! `every_schema_asset_is_seeded`, `every_dashboard_asset_is_seeded`,
@@ -51,8 +53,7 @@ pub(crate) struct Seeded<'a> {
 
 /// The shipped bytes of the compiled-in row seeded at `dest`, if any.
 pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
-    EMBEDDED
-        .iter()
+    table::rows()
         .find(|(d, _, _)| *d == dest)
         .map(|&(_, c, _)| c)
 }
@@ -61,13 +62,14 @@ pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
 pub(crate) mod refresh;
 #[path = "seed_table.rs"]
 mod table;
-use table::EMBEDDED;
+#[path = "seed_wiring.rs"]
+pub(crate) mod wiring;
 
 /// Every file `tm fleet init` writes, in write order.
 ///
 /// Why: #9132 — the template and the skills are read from content, so the
 /// table is built from `seed` instead of being a compiled-in constant.
-/// What: `CLAUDE.md` from `seed`, then [`EMBEDDED`], then each seed skill at
+/// What: `CLAUDE.md` from `seed`, then [`table::rows`], then each seed skill at
 /// `.claude/skills/<stem>/SKILL.md`.
 /// Test: `a_first_run_seeds_the_architect_project`.
 pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
@@ -76,7 +78,8 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
         contents: &seed.claude_md,
         executable: false,
     };
-    let embedded = EMBEDDED.iter().map(|&(dest, contents, executable)| Seeded {
+    // #10571: the table spans seed_table.rs and seed_table_scripts.rs.
+    let embedded = table::rows().map(|&(dest, contents, executable)| Seeded {
         dest: dest.to_owned(),
         contents,
         executable,
@@ -97,11 +100,15 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
 // #9997: per-project records live in `local/projects/`; the skills write
 // other users' profiles to `local/users/` and briefs to `local/briefs/`.
 // #10161: `architect-improvements` keeps its ledger in `local/improvements/`.
+// #10161 D3c: the curator, improver and drift-guard agents write run files.
 pub(crate) const DIRS: &[&str] = &[
     "local/projects",
     "local/users",
     "local/briefs",
     "local/improvements",
+    "local/improvements/runs",
+    "local/improver/runs",
+    "local/drift-guard/runs",
 ];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`, then the
@@ -138,7 +145,7 @@ pub(crate) fn deploy_with(
         if records_era && file.dest.starts_with("local/") {
             continue;
         }
-        steps.push(deploy_file(dir, file, shipped_before)?);
+        steps.extend(deploy_file(dir, file, shipped_before)?);
     }
     // #10571: name the prototype commit and content this binary's bundle came from.
     if let Some(line) = files
@@ -200,32 +207,52 @@ fn records_era_steps(dir: &Path) -> Vec<Step> {
 /// What: equal bytes are unchanged; bytes `shipped_before` lists
 /// for this destination are replaced (mode kept for a script); any other
 /// bytes are an edit, reported skipped and left as is; absent is written.
+/// An instance-owned file ([`refresh::instance_owned`], #10608) that is
+/// present is never replaced, even when it is an earlier shipped copy.
+/// A kept core script lacking this release's wiring adds a `WARNING` step
+/// ([`wiring::kept_copy_warnings`], #11058).
 /// Test: `a_refresh_updates_an_unedited_earlier_copy`,
-/// `a_refresh_keeps_an_edited_copy_and_reports_it`,
-/// `an_edited_seed_or_script_is_never_overwritten`.
+/// `a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245`,
+/// `an_edited_seed_or_script_is_never_overwritten`,
+/// `an_edited_poller_without_owner_answer_wiring_is_warned_11058`,
+/// `an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608`.
 fn deploy_file(
     dir: &Path,
     file: &Seeded<'_>,
     shipped_before: ShippedBefore<'_>,
-) -> anyhow::Result<Step> {
+) -> anyhow::Result<Vec<Step>> {
     let path = dir.join(&file.dest);
     match std::fs::read(&path) {
-        Ok(bytes) if bytes == file.contents.as_bytes() => Ok(Step::Unchanged(file.dest.clone())),
+        Ok(bytes) if bytes == file.contents.as_bytes() => {
+            Ok(vec![Step::Unchanged(file.dest.clone())])
+        }
+        // #10608: an upgrade leaves instance-owned files byte-identical.
+        Ok(_) if refresh::instance_owned(&file.dest) => Ok(vec![Step::Skipped(format!(
+            "{}: instance-owned, kept as is on upgrade",
+            file.dest
+        ))]),
         Ok(bytes) if shipped_before(&file.dest, &bytes) => {
             write_seed(&path, file)?;
-            Ok(Step::Changed(format!(
+            Ok(vec![Step::Changed(format!(
                 "updated {} (an unedited earlier shipped copy)",
                 file.dest
-            )))
+            ))])
         }
-        Ok(_) => Ok(Step::Skipped(format!(
-            "{}: differs from the shipped copy (edited), so it is left as is; \
-             custom copy kept, not refreshed",
-            file.dest
-        ))),
+        Ok(bytes) => {
+            // #11245: keep the edit, and write the new shipped copy beside it.
+            let sibling = write_shipped_sibling(dir, file)?;
+            let mut steps = vec![Step::Skipped(format!(
+                "{}: differs from the shipped copy (edited), so it is left as is; \
+                 custom copy kept, not refreshed; the shipped copy is at {sibling}",
+                file.dest
+            ))];
+            // #11058: a kept core script can silently disable a refreshed sibling.
+            steps.extend(wiring::kept_copy_warnings(&file.dest, &bytes));
+            Ok(steps)
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             write_seed(&path, file)?;
-            Ok(Step::Changed(format!("wrote {}", file.dest)))
+            Ok(vec![Step::Changed(format!("wrote {}", file.dest))])
         }
         Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => {
             bail!(
@@ -235,6 +262,25 @@ fn deploy_file(
         }
         Err(err) => Err(err).with_context(|| format!("cannot read {}", path.display())),
     }
+}
+
+/// Suffix of the sibling that holds the shipped copy of a kept, edited file.
+pub(crate) const SHIPPED_SUFFIX: &str = ".shipped";
+
+/// Why: an edited Architect file is kept, so a release change to it would be
+/// lost silently (#11245).
+/// What: writes the current shipped bytes to `<dest>.shipped` beside the kept
+/// file (never executable, so it cannot run in place of the script) and
+/// returns that relative path. Rewrites it only when its bytes differ.
+/// Test: `a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245`.
+fn write_shipped_sibling(dir: &Path, file: &Seeded<'_>) -> anyhow::Result<String> {
+    let rel = format!("{}{SHIPPED_SUFFIX}", file.dest);
+    let path = dir.join(&rel);
+    if std::fs::read(&path).ok().as_deref() != Some(file.contents.as_bytes()) {
+        trusty_common::atomic_file::write_atomic(&path, file.contents.as_bytes())
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(rel)
 }
 
 /// Write `file`'s shipped bytes to `path` atomically; mode `0755` for a script.

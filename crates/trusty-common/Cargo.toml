@@ -166,7 +166,10 @@ name = "trusty-common"
 # 0.65.1 (Refs #6637): patch — doc-only edit in daemon_token.rs; no API change; 0.65.0 is live on crates.io.
 # 0.66.0 (Refs #10207): minor — breaking: RecycleTrigger::HardFootprint, RecycleSnapshot.hard_footprint_kills; subsumes the unpublished 0.65.1 (0.65.0 is live on crates.io).
 # 0.67.0 (Refs #9272): minor — breaking: the no-op `memory-core` feature is removed, so a manifest that names it no longer resolves.
-version = "0.69.0"
+# 0.69.1: patch — 0.69.0 is live on crates.io (release #11028); post-release bump so pending `src/**` PRs clear the #4421 check.
+# 0.70.5 (Refs #11519): patch — 0.70.4 is live on crates.io; this PR edits src/**.
+# 0.70.9 (Refs #11821): patch — additive `install_paths` module; `thiserror` and `toml` become unconditional; 0.70.8 is live on crates.io.
+version = "0.70.9"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -407,10 +410,12 @@ crossterm = { workspace = true, optional = true }
 
 # Optional: enabled by the `symgraph` / `symgraph-parser` features (formerly
 # the `trusty-symgraph` crate). The `symgraph` feature pulls in only the
-# pure-data contracts surface (`thiserror`, `sha2`) — no tree-sitter, no
+# pure-data contracts surface (`sha2`) — no tree-sitter, no
 # `links` conflict. The `symgraph-parser` feature additionally pulls in
 # tree-sitter and all grammar crates plus the emitter / editor stack.
-thiserror = { workspace = true, optional = true }
+# See #11821: unconditional since the feature-free `install_paths` module
+# needs it; every former `dep:thiserror` feature entry is dropped.
+thiserror = { workspace = true }
 sha2 = { workspace = true, optional = true }
 indexmap = { version = "2", features = ["serde"], optional = true }
 similar = { version = "2", features = ["text"], optional = true }
@@ -448,9 +453,9 @@ redb = { workspace = true, optional = true }
 # base64 is used by the JIRA backend for Basic-auth encoding.
 base64 = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
-# Optional: enabled by the `tickets` feature for config-file parsing. Also
-# reused by the `credentials` feature's `FileKeyStore` backend (issue #2401).
-toml = { version = "0.8", optional = true }
+# See #11821: unconditional since the feature-free `install_paths` module
+# parses `~/.trusty-tools/install.toml`.
+toml = { version = "0.8" }
 toml_edit = { workspace = true, optional = true }
 
 # Optional: enabled by the `credentials` feature (issue #2401). Shared
@@ -607,7 +612,7 @@ axum-server = ["dep:axum", "dep:tower-http"]
 # `mint_token`'s CSPRNG is `uuid`, mandatory since #6847 so it needs no
 # `dep:` entry here; `url` the WHATWG parsing the loopback gate must not
 # hand-roll and `thiserror` the weak-credential error are still optional.
-daemon-token = ["dep:url", "dep:thiserror"]
+daemon-token = ["dep:url"]
 # Enables the `memory_rpc` module: the one JSON-RPC client for the
 # trusty-memory daemon's Unix socket. Implies `uds` (#6286) — the daemon retired
 # its HTTP listener, so the framing and the envelope now come from that module
@@ -652,7 +657,7 @@ blocking-http = ["reqwest/blocking"]
 # orphan a session created by the other manager (SPEC-ONESM-01 / DOC-33). Pulls
 # in `uuid` (UUID→name derivation, mandatory since #6847 so no `dep:` entry
 # is needed) and `thiserror` (`SessionNameError`), an optional workspace dep.
-session-naming = ["dep:thiserror"]
+session-naming = []
 # Enables the `rpc` module: general-purpose JSON-RPC client + stdio/HTTP
 # transports + pretty-print helpers (formerly the library half of the
 # `trusty-rpc` crate). Uses `uuid` (mandatory since #6847) for request id
@@ -672,7 +677,6 @@ embedder = [
     "dep:parking_lot",
     "dep:ort",
     "dep:fastembed-tokenizers",
-    "dep:thiserror",
 ]
 # Enables the `bm25` module: zero-dependency BM25 lexical index +
 # code-aware tokenizer (issue #156). Pure `std` + `tracing` — no new deps.
@@ -689,7 +693,7 @@ migrations = []
 # peer-uid enforcement every UDS bind site routes through (issue #5099).
 # Pulls in `thiserror` (error enum) and uses the `libc` and `tokio` workspace
 # deps already required — adds no new dependencies to the lockfile.
-uds = ["dep:thiserror"]
+uds = []
 # #7215: `uds::test_support::bind_hardened_stub`, the hardened bind a
 # consumer's test stub uses so `connect_hardened` accepts it. Test-only: a
 # consumer names it under `[dev-dependencies]`, never `[dependencies]`.
@@ -758,9 +762,6 @@ embedder-candle = [
     "dep:candle-transformers",
     "dep:hf-hub",
     "dep:tokenizers",
-    # `thiserror` is otherwise gated on the `symgraph` feature; the candle
-    # embedder uses it for `CandleEmbedderError`, so we pull it in here.
-    "dep:thiserror",
 ]
 # Enables the `symgraph` module's contracts surface (formerly the
 # `trusty-symgraph` crate's default surface): pure data types
@@ -768,7 +769,7 @@ embedder-candle = [
 # Pulls in `thiserror` and `sha2` only — no tree-sitter, no `links`
 # conflict. Downstream crates that only need the knowledge-graph data
 # shapes (trusty-search, trusty-analyze) enable this feature and stop.
-symgraph = ["dep:thiserror", "dep:sha2"]
+symgraph = ["dep:sha2"]
 # Enables the full symgraph parser + emitter + graph stack: tree-sitter
 # grammars (Rust, Python, JavaScript, Go, Java, TypeScript, C, C++), the
 # `IndexMap`-based `SymbolRegistry`, the deterministic emitter, the
@@ -797,7 +798,7 @@ symgraph-parser = [
     "dep:quote",
     "dep:genco",
 ]
-chat-attachments = ["dep:base64", "dep:image", "dep:thiserror"]
+chat-attachments = ["dep:base64", "dep:image"]
 # #9272: the `memory-core` feature, a no-op since #9271 moved the Memory Palace
 # engine to trusty-memory (`trusty_memory::engine`), is removed. Depend on
 # trusty-memory for the engine; name `embedder`, `credentials`, `redb-open` or
@@ -826,7 +827,7 @@ monitor-tui = ["dep:ratatui", "dep:crossterm", "memory-rpc"]
 # both the in-process and remote paths.
 # Note: module name is `embedder_client` (with `er`) to distinguish from the
 # existing `embed_client` (UDS, PR #157). Issue #164 will reconcile them.
-embedder-client = ["dep:thiserror", "embedder", "uds"]
+embedder-client = ["embedder", "uds"]
 # Enables the `tickets` module: unified ticketing MCP server with GitHub,
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `base64`, `thiserror`, and `toml` as additional
@@ -835,11 +836,11 @@ embedder-client = ["dep:thiserror", "embedder", "uds"]
 # one, so the edge closed a cycle. The stdio loop the `tickets-mcp` binary
 # needs lives in `src/tickets/stdio.rs` instead, and
 # `tests/no_trusty_mcp_backedge.rs` fails if the dependency comes back.
-tickets = ["dep:base64", "dep:thiserror", "dep:toml", "gh-cli"]
+tickets = ["dep:base64", "gh-cli"]
 # Enables the `gh` module: the workspace's single entry point for invoking the
 # GitHub CLI (#5475). Pulls in `thiserror` only — `tokio/process`, `serde` and
 # `serde_json` are already unconditional here.
-gh-cli = ["dep:thiserror"]
+gh-cli = []
 # Enables the `redb_open` module: the workspace's single redb
 # corruption/obsolete-format classifier plus the quarantine-path helper (#5063).
 # Deliberately LIGHT — it gates only `dep:redb`, nothing else. The classifier
@@ -857,7 +858,7 @@ redb-open = ["dep:redb"]
 # lifts tga's PR→ticket regexes so neither gate pulls tga's git2/rusqlite stack.
 # Pulls in `regex` and `thiserror`. The non-consumer trusty-common dependents
 # pay nothing (feature off by default).
-intent-source = ["tickets", "sld", "dep:regex", "dep:thiserror"]
+intent-source = ["tickets", "sld", "dep:regex"]
 # Enables the `sld` module: the language-agnostic Spec-Linked Documentation
 # (DOC-38) reference grammar — the generalized, implementation-neutral form of
 # the SLD linkage the `intent_source` resolver already reads for Rust. Provides
@@ -869,20 +870,20 @@ intent-source = ["tickets", "sld", "dep:regex", "dep:thiserror"]
 # serde_yaml + thiserror only) so a documentation linter (`trusty-sld-lint`,
 # DOC-38 §10 F1) can reuse the grammar WITHOUT pulling the heavy `tickets`
 # (git2/rusqlite) stack that `intent-source` drags in. Off by default.
-sld = ["dep:regex", "dep:serde_yaml", "dep:thiserror"]
+sld = ["dep:regex", "dep:serde_yaml"]
 # Enables the `help` module: declarative CLI help loader (`HelpConfig` parsed
 # from a per-binary `help.yaml` bundled via `include_str!`), the canonical
 # `render_help` formatter, and a Jaro-Winkler-based `suggest("did you mean?")`
 # helper consumed by each binary's unknown-subcommand error path. Pulls in
 # `serde_yaml`, `strsim`, `indexmap`, and `thiserror` (all otherwise optional).
 # Issue #216.
-cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
+cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap"]
 # Enables the `crate_config` module: the `~/.trusty-tools/<crate>/config.yaml`
 # cross-crate configuration convention (#1220). Provides a generic typed YAML
 # loader/saver so every trusty-* crate resolves its config from one canonical,
 # per-crate location. Pulls in `serde_yaml` (pinned 0.9 — see the workspace
 # manifest's pin note and #1250) and `dirs` (already an unconditional dep).
-crate-config = ["dep:serde_yaml", "dep:serde_path_to_error", "dep:thiserror"]
+crate-config = ["dep:serde_yaml", "dep:serde_path_to_error"]
 # Enables the `palace_resolve` module: the single entry point every crate routes
 # through to answer "which trusty-memory palace does this project use?" (#5811).
 # Owns all four precedence levels — env override, committed
@@ -890,7 +891,7 @@ crate-config = ["dep:serde_yaml", "dep:serde_path_to_error", "dep:thiserror"]
 # MAIN worktree root — plus the shared `git` probes. The pure three-level core
 # (`palace_id`) stays unconditional; only the pin-file I/O needs `serde_yaml`,
 # and the fail-closed error enum needs `thiserror`.
-palace-resolve = ["dep:serde_yaml", "dep:thiserror"]
+palace-resolve = ["dep:serde_yaml"]
 # Enables the `update` module: throttled crates.io update-notification helper.
 # Checks once per 24 h via a JSON cache file in the OS cache directory. Opt-out
 # via `TRUSTY_NO_UPDATE_CHECK` or `CI` environment variables. Reuses the
@@ -961,14 +962,14 @@ host-metrics = ["sysinfo/disk", "sysinfo/network", "sysinfo/linux-tmpfs"]
 # read; the only reason this is a feature at all is that `thiserror` is optional
 # in this crate, and the module's error enum uses it per the workspace's
 # libraries-use-thiserror rule.
-load-average = ["dep:thiserror"]
+load-average = []
 # #8261: `memory_pressure::read_memory_pressure` — the kernel's own memory
 # pressure verdict (macOS `kern.memorystatus_*`, Linux PSI / cgroup PSI /
 # `/proc/meminfo`) that builder admission reads instead of a free-MB floor.
 # Adds no crate to the lockfile: `libc` is already a `cfg(unix)` dependency and
 # the Linux path is plain file reads; a feature only because `thiserror` is
 # optional here.
-memory-pressure = ["dep:thiserror"]
+memory-pressure = []
 # #6820: machine-tier detection + proportional memory budget, hoisted out of
 # trusty-search so trusty-memory reads the same numbers. Zero new dependencies —
 # the RAM read is `sysctl`/`/proc` + the cgroup files, deliberately NOT sysinfo
@@ -978,13 +979,13 @@ machine-tier = []
 # parse/hash/verify implementation, shared by trusty-installer's pinned
 # downloads and the content resolver. Turns on the optional `sha2` and
 # `thiserror` deps; adds no crate to the lockfile.
-integrity = ["dep:sha2", "dep:thiserror"]
+integrity = ["dep:sha2"]
 # #8378 (ADR-0064 PR-B): the `content` module — the runtime resolver for
 # instructional content: `content-lock.toml`, tag + sha256 verification of the
 # installed bundle, and the trusty-tools checkout override. `tar` is new to
 # this crate but already in the lockfile; `toml` and `flate2` are optional deps
 # other features already use.
-content-resolver = ["integrity", "dep:thiserror", "dep:toml", "dep:flate2", "dep:tar"]
+content-resolver = ["integrity", "dep:flate2", "dep:tar"]
 
 # Enables the `log_drain` module (#6533, epic phase 1+2): the `LogDestination`
 # trait, its `s3://` and `file://` adapters, the `DestinationUri` parser, the
@@ -1028,7 +1029,7 @@ log-drain = [
 # `toml` (`FileKeyStore`'s on-disk format), and `dotenvy` (the `.env.local`
 # loader) — all already optional workspace deps. Does NOT pull in the OS
 # keychain backend; see `keyring-store` for that.
-credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
+credentials = ["dep:dotenvy"]
 # #9123: `credentials::test_sandbox` — the shared test-only credential sandbox
 # (empty credential env, temp HOME/config dirs, latched `.env.local` loader)
 # and the redacting `assert_secret_eq`. It mutates the process environment, so
@@ -1077,6 +1078,8 @@ bedrock-client = [
     "dep:aws-sdk-bedrockruntime",
     "dep:aws-types",
     "dep:aws-smithy-types",
+    # #10892: `CredentialsError`, to type a missing-credential send failure.
+    "dep:aws-credential-types",
 ]
 # Enables the `inference::config` module (issue #2404, epic #2400 Wave 1): the
 # universal `config` clap command (`ConfigCommand`) that any binary mounts with

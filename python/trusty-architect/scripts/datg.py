@@ -47,6 +47,9 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   separate sections, and FLAGs an owner claim with no `owner turn:` cite in the session record or in the
   file named by session ref `handoff`. `provenance FILE..` prints the same flags for any handoff file
   (exit 1 when one is found).
+- Supersession (#10960, DOC-87 G-4): `update NEW --answer A --source owner ... --supersedes OLD` (batch key
+  "supersedes") stores `superseded_by: NEW` on the owner ruling OLD; an explicit link only, never inferred. The
+  relay check refuses a cite of OLD and names NEW; a superseded item takes no new answer.
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
 intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
 but at least one notification was not confirmed; stderr lists each queue outcome. Do not
@@ -57,15 +60,22 @@ inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes 
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
-("warn"|"block") overrides the date. No network, no secrets (locations only in items).
-#10800 (DOC-87 D0c, datg_guards.py): a dispatch that passes the goal check must also name its work card
-'Card: <code>-Txx' (G2), and a task closed done must cite evidence in its outcome; both warn and record to
+("warn"|"block") overrides the date. No network, no secrets (locations only in items; owner-declared throwaway credentials excepted, see tm-secrets).
+#11101 (datg_task.py): a dispatch carries 'Task: <id>@MMDD' for an open task; a missing or unusable one warns
+and is logged to inbox/task-compliance.jsonl (config.task_mode refuse follows the dispatch mode). 'add T'
+stamps 'created' and warns past config.wip_cap active tasks (default 8, and refuse mode raises), and a
+pulse write records a task's pulse note. --state-dir / $DATG_STATE_DIR pin the exact state directory.
+#10800 (DOC-87 D0c, datg_guards.py): a dispatch that passes the goal and Task checks must also name its work
+card 'Task: <code>-Txx' under the named goal (G2, 'Card:' before #11101), and a task closed done must cite evidence in its outcome; both warn and record to
 guards.jsonl until config.guard_mode is "enforce". The digest and `guards` (exit 1 on a flag) report policy-file
 conflicts with owner rulings (G1) and idle ready work or repair displacing delivery (G3).
+#10960 G-5: `add T --needs S`, `update --needs S|none`, `close/update --state S` (S: prepared < sent < delivered
+< acknowledged). A close records the claim capped by its outcome evidence; shortfalls are FLAG lines, never a refusal.
 Layout (#10161, 500-SLOC cap): this file is the CLI, the hook entry and a facade. The logic
-lives in datg_store.py (state files, commit, lock; `_SESSION`), datg_ops.py (write ops),
-datg_log.py (prune, archive, rotate, notices) and datg_read.py (digest, freshness, stamp);
-every name they define stays importable as datg.<name>. Ship all five side by side.
+lives in datg_store.py (state files, commit, lock; _SESSION, _STATE_DIR), datg_ops.py (write ops),
+datg_log.py (prune, archive, rotate, notices), datg_read.py (digest, freshness, stamp) and datg_task.py
+(Task check, WIP cap; it imports task_tag.py); every name they define stays importable as datg.<name>.
+Ship them side by side.
 Test: scripts/test_datg.py
 """
 import argparse
@@ -77,6 +87,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:  # #10161: -P / PYTHONSAFEPATH drop the script dir; the datg_* modules live beside this file
     sys.path.insert(0, HERE)
 import datg_store  # noqa: E402  (#10161: main() sets datg_store._SESSION, which per_pm_session reads)
+import task_tag  # noqa: E402  (#11101: a dispatch's Task miss is logged)
 from datg_store import VERB_KEY  # noqa: E402  (#10571: a batch entry's verb key)
 from datg_ready import op_ready  # noqa: E402  (#10579: datg.py ready)
 from datg_guards import (  # noqa: E402  (#10800: G2 card, G1/G3 flags, an enforced hook failure denies)
@@ -86,20 +97,23 @@ from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers an
     CODE_RE, DEFAULT_BLOCK_AFTER, DatgError, EVENTS, ID_RE, Locked, PREFIXES, RULES, SESSION_MAX, SESSION_RE,
     SIZE_REFUSE, SIZE_WARN, STATUS, TITLE_MAX, VAGUE, WHO, _atomic_write, _dump, _jl, _largest, _size,
     _tmux_session, answered_times, commit, datg_dir, load_state, log_rec, now_iso, parse_iso, parse_ts, paths,
-    per_pm_session, prune_state, read_log, reconcile_archive,
+    per_pm_session, prune_state, read_log, reconcile_archive, size_report,
 )
 from datg_ops import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
-    REFS_MAX, REF_KEY, _all_ids, _bad, _check_goal, _check_opts, _find, _int, _lim, _merge_refs, _next_id,
-    _opts, _rows, _title, apply_add, apply_op, apply_session, apply_update, collect_closed, op_init,
-    write_ops_ev,
+    OWED_MAX, REFS_MAX, REF_KEY, _all_ids, _bad, _check_goal, _check_opts, _find, _int, _lim, _merge_refs,
+    _next_id, _opts, _rows, _title, apply_add, apply_op, apply_pulse, apply_session, apply_update,
+    collect_closed, op_init, supersede, write_ops_ev,
+)
+from datg_task import (  # noqa: E402,F401  (#11101: re-exported for task_pulse.py and tests)
+    ACTIVE, WARNINGS, WIP_CAP_DEFAULT, task_mmdd, task_mode, task_problem, wip_cap, wip_check, wip_count,
 )
 from datg_log import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     append_log, archive_lookup, notify_escalations, op_prune, op_rotate, pm_session, write_ops,
 )
 from datg_read import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     MUTATING_BASH, MUTATING_TOOLS, _digest_sections, _read_json, _short, _stamp_path, _to_epoch, build_digest,
-    check_dispatch, dispatch_mode, log_hook_warning, op_fresh, provenance_flags, stamp_turn, summary, turn_tools,
-    unsourced_claim,
+    check_dispatch, dispatch_mode, goal_named, log_hook_warning, op_fresh, provenance_flags, stamp_turn, summary, turn_tools,
+    reconcile_failed, reconcile_lines, unsourced_claim,
 )
 
 
@@ -126,11 +140,27 @@ def session_start_context(st, project):
         dig = "\n" + build_digest(project, max(50, room // 4))
     except Exception as e:  # #10109: fail open, but visibly
         print(f"datg hook: SessionStart digest failed ({e})", file=sys.stderr)
-        dig = ""
+        dig = "\n" + "\n".join(reconcile_failed(e))   # #10960 G-3: never a silent "reconciled"
     ctx = head + dig
     if "\nTRUNCATED:" in dig or len(ctx) > HOOK_CONTEXT_MAX:
         ctx = ctx[:HOOK_CONTEXT_MAX - len(ptr) - 1] + "\n" + ptr
     return ctx
+
+
+def dispatch_decision(project, st, prompt, now=None):
+    """(decision, message) for an Agent/Task dispatch: check_dispatch, then the #10800 G2 card check.
+
+    Why: #11101 put the Task check inside check_dispatch, so a missing Task token warns there; G2 must still
+    run (and deny under guard_mode enforce) whenever the goal check passed.
+    What: a block from check_dispatch stands. Otherwise, with an active goal named, G2's block wins, an allow
+    takes G2's answer, and a Task warning stands (G2's shadow record is written either way).
+    Test: tests/test_datg_guards.py CardCase, tests/test_datg.py TaskTagCase
+    """
+    dec, msg = check_dispatch(st, prompt, now)
+    if dec == "block" or not goal_named(st, prompt):
+        return dec, msg
+    cdec, cmsg = dispatch_card(project, st, prompt)
+    return (cdec, cmsg) if cdec == "block" or dec == "allow" else (dec, msg)
 
 
 def hook_output(event, st, payload, project, now=None):
@@ -143,9 +173,10 @@ def hook_output(event, st, payload, project, now=None):
         return None
     if event == "PreToolUse" and payload.get("tool_name") in ("Agent", "Task"):
         ti = payload.get("tool_input") or {}
-        dec, msg = check_dispatch(st, ti.get("prompt") or "", now)
-        if dec == "allow":   # #10800 G2: a goal alone is not enough; the dispatch names its work card
-            dec, msg = dispatch_card(project, st, ti.get("prompt") or "")
+        dec, msg = dispatch_decision(project, st, ti.get("prompt") or "", now)   # #10800 G2 runs inside
+        tp = task_problem(st, ti.get("prompt") or "") if dec != "allow" else None
+        if tp:   # #11101: every Task miss is counted toward the D09 refuse bar
+            task_tag.log_miss("dispatch", tp, os.environ.get("DATG_SESSION", ""))
         if dec == "block":
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                            "permissionDecision": "deny",
@@ -192,6 +223,9 @@ def hook_failure(payload, project, err):
         return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                   "permissionDecisionReason": reason}}, separators=(",", ":"))
     print(f"datg hook: failed open ({err})", file=sys.stderr)
+    if isinstance(payload, dict) and payload.get("hook_event_name") == "SessionStart":   # #10960 G-3: say it
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(
+            reconcile_failed(err))}}, separators=(",", ":"))
     if dispatch and project:
         record_guard(project, "hook_error", f"dispatch check failed open ({type(err).__name__}: {err})"[:300])
     return ""
@@ -208,6 +242,8 @@ def build_parser():
     p = argparse.ArgumentParser(prog="datg.py", description=__doc__.split("\n")[0])
     p.add_argument("--project", default=os.getcwd(), help="project root (default: cwd)")
     p.add_argument("--session", help="per-PM directory datg/<session>/ (shared project dirs)")
+    p.add_argument("--state-dir", help="exact state directory (overrides --session and every resolution; "
+                   "also $DATG_STATE_DIR); the scheduler passes the il-schedule.json entry's directory")
     sub = p.add_subparsers(dest="verb", required=True)
     s = sub.add_parser("init")
     s.add_argument("--code", required=True)
@@ -221,18 +257,21 @@ def build_parser():
     s.add_argument("--opts", help="comma list, trailing * marks the recommendation")
     s.add_argument("--to")
     s.add_argument("--id")
+    s.add_argument("--needs", help="#10960: delivery state the task's request needs (sent|delivered|acknowledged)")
     s = sub.add_parser("update")
     s.add_argument("id")
-    for f in ("title", "status", "answer", "outcome", "esc", "to", "note"):
+    for f in ("title", "status", "answer", "outcome", "esc", "to", "note", "state", "needs"):
         s.add_argument(f"--{f}")
     s.add_argument("--rank", type=int)
     # #10780: who the answer came from; owner needs --cite and --quote, architect needs --basis.
     s.add_argument("--source", choices=("owner", "architect"))
     for f in ("cite", "quote", "until", "basis"):
         s.add_argument(f"--{f}")
+    s.add_argument("--supersedes", metavar="ID", help="the owner ruling this owner-sourced answer replaces (#10960)")
     s = sub.add_parser("close")
     s.add_argument("id")
     s.add_argument("--outcome", required=True)
+    s.add_argument("--state", help="#10960: delivery state the outcome claims; capped by its evidence, flag-only")
     s = sub.add_parser("batch", help="JSON list of ops on stdin: one write per turn")
     s = sub.add_parser("show")
     s.add_argument("--brief", action="store_true")
@@ -345,6 +384,7 @@ def sync_ledger_hold(project, ops):
 def main(argv=None):
     a = build_parser().parse_args(argv)
     datg_store._SESSION = a.session  # #10161: _SESSION lives in datg_store, which reads it
+    datg_store._STATE_DIR = a.state_dir  # #11101: likewise the exact state directory
     try:
         if a.verb == "hook":
             out = run_hook(sys.stdin.read())
@@ -382,10 +422,11 @@ def main(argv=None):
             print(op_init(a.project, a.code))
         elif a.verb == "add":
             entry = {VERB_KEY: "add", "kind": a.kind, "title": a.title, "goal": a.goal, "rank": a.rank,
-                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id}
+                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id, "needs": a.needs}
             print(write_ops(a.project, [entry]))
         elif a.verb == "update":
-            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
+            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank",
+                                                "state", "needs", "supersedes")}
             entry.update({VERB_KEY: "update", "id": a.id})
             if a.source:   # #10780: only the flags given, so the shape check names a stray one
                 entry["source"] = {"by": a.source, **{k: getattr(a, k) for k in ("cite", "quote", "until", "basis")
@@ -396,7 +437,7 @@ def main(argv=None):
             print(", ".join(e["id"] for e in evs))
             return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
-            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
+            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome, "state": a.state}]))
         elif a.verb == "batch":
             try:
                 ops = json.loads(sys.stdin.read())
@@ -419,7 +460,11 @@ def main(argv=None):
         elif a.verb == "archive-show":
             print(archive_lookup(a.project, a.id))
         elif a.verb == "digest":
-            print(build_digest(a.project, a.max_tokens))
+            try:
+                print(build_digest(a.project, a.max_tokens))
+            except DatgError as e:   # #10960 G-3: the unreadable ledger is said on stdout too; exit code unchanged
+                print("\n".join(reconcile_failed(e)))
+                raise
             if not a.no_log:
                 try:
                     append_log(a.project, {"ts": now_iso(), "session": os.environ.get("DATG_SESSION", ""), "kind": "digest"})
@@ -435,15 +480,16 @@ def main(argv=None):
             print(cmd_show(a.project, a.brief))
         elif a.verb == "check-dispatch":
             prompt = a.prompt if a.prompt is not None else sys.stdin.read()
-            st = load_state(a.project)
-            dec, msg = check_dispatch(st, prompt)
-            if dec == "allow":   # #10800 G2
-                dec, msg = dispatch_card(a.project, st, prompt)
+            dec, msg = dispatch_decision(a.project, load_state(a.project), prompt)   # #10800 G2, #11101 Task
             print(dec + (": " + msg if msg else ""))
             return 2 if dec == "block" else 0
     except DatgError as e:
         print(f"datg: {e}", file=sys.stderr)
         return 2
+    finally:   # #11101: WIP-cap warnings from 'add T', on every exit path (batch returns early)
+        for w in WARNINGS:
+            print(f"datg: {w}", file=sys.stderr)
+        del WARNINGS[:]
     return 0
 
 

@@ -260,7 +260,7 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
 
 - **Schema 1.** `[[projects]] {key, index_id, root_path, pinned_by =
   migration|create|operator, pinned_unix}` and `[[parked]] {index_id, key,
-  root_path, reason = worktree|orphaned|operator, parked_unix}`. `key` is the
+  root_path, reason = worktree|orphaned|operator|decommissioned, parked_unix}`. `key` is the
   resolver's group key: the repo identity, or `root:<path>` for a
   subdirectory index.
 - **Migration.** The first boot with no map pins every group to the index
@@ -289,9 +289,17 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   `data.error = "park_refused"`. A parked index keeps its corpus and its
   `indexes.toml` row; it is unloaded and is not warm-loaded, watched,
   reindexed, or searched by `search.query.all`.
-- `search.project.unpark {index_id}` → `{index_id, unparked, reindex_queued,
-  reindex | reindex_error}`: clears the row, reloads the index, queues a
-  reindex.
+- `search.project.park {index_id, decommission: true}` (#10989) is tm's
+  project decommission. Any registered index parks, a main checkout and the
+  group's live index included, with `reason = decommissioned`. If the unload
+  is refused (a reindex runs), the park is rolled back (row removed, dropped
+  pins restored) and the call fails `-32009` with
+  `data.error = "park_unload_refused"` and `data.rolled_back`. Unpark
+  reloads it as for any park.
+- `search.project.unpark {index_id}` → `{index_id, unparked, watching,
+  reindex_queued, reindex | reindex_error}`: clears the row, reloads the
+  index, restarts its watcher (#10989), queues a reindex. tm unparks a
+  `decommissioned` park when a new session starts for the project.
 - `search.project.pin {index_id}` → `{index_id, key, pinned_by, previous}`.
   A worktree, orphaned or parked index is refused.
 - A request naming a parked index (`search.query`, reindex, file reads and
@@ -1390,7 +1398,7 @@ this table is generated from it, not maintained by hand.
 - **HTTP**: axum 0.8 types for the transport-neutral cores (no listener since #9214)
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
-- **Lexical**: BM25 (zero-dep port from `crates/trusty-agents/src/context/bm25.rs`)
+- **Lexical**: BM25 (zero-dep port from trusty-agents' `context/bm25.rs`, since cut in #11632)
 - **KV store**: redb 2.6 (chunk metadata, file→chunks mapping, `_meta` schema version)
 - **File watching**: notify 6 + notify-debouncer-mini 0.4 (500ms debounce, fsevent)
 - **Code parsing**: tree-sitter 0.24 (rust, python, js, ts, go, java, c, cpp)
@@ -1718,6 +1726,13 @@ trusty-search index [path] [--name <id>] [--force]  # register + index (primary 
                                                      # (see docs/trusty-search/examples/trusty-search.yaml)
 trusty-search query <text> [--index <id>] [--top-k N] [--json]
 trusty-search status                                 # daemon + index overview (alias: health)
+trusty-search similar <file> [--function F] [-k N]   # MCP search_similar (#11625)
+trusty-search call-chain <entry> [--direction D] [--max-depth N] [--no-source]  # get_call_chain
+trusty-search grep <pattern> [--all] [-F -w -l -A/-B/-C N --glob G ...]  # MCP grep
+trusty-search typeahead <prefix> [--limit N] [--mode lexical|blended]   # MCP typeahead
+trusty-search lexical|semantic|kg <query> [-k N] [--path-prefix P] [--mode M]  # MCP search_lexical/_semantic/_kg
+                                                     # kg: [--refine-query R]; semantic/kg refuse until their stage is ready
+trusty-search list [--details]                       # --details --json = MCP list_indexes
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search

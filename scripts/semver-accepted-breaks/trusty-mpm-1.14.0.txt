@@ -1,0 +1,28 @@
+crate   trusty-mpm
+version 1.14.0
+reason  Bob VERSIONING ruling 2026-09-26 18:57Z: trusty-tools (all crates) and TGA use internal numbering; API breaks never force a major; majors only on Bob's word; semver gates report only. semver-checks vs baseline 1.13.0 computes 8 major lints.
+accept  constructible_struct_adds_field field FleetProjectGroupWire.decommissioned
+accept  constructible_struct_adds_field field ConsoleModel.history_note
+accept  constructible_struct_adds_field field Card.max
+accept  constructible_struct_adds_field field Card.graph_note
+accept  constructible_struct_adds_field field PresenceConfig.rp_id
+accept  constructible_struct_adds_field field PresenceConfig.rp_origin
+accept  constructible_struct_adds_field field Project.decommissioned_at
+accept  constructible_struct_adds_field field Project.archived_at
+accept  constructible_struct_adds_field field HomeState.machine
+accept  constructible_struct_adds_field field FleetProjectGroup.decommissioned
+accept  constructible_struct_adds_field field SweepOutcome.unverifiable
+accept  enum_missing enum trusty_mpm::tui::home::services::ProbeKind
+accept  enum_missing enum trusty_mpm::tui::architect::Tab
+accept  enum_variant_added variant ProtectedVerb:Archive
+accept  enum_variant_added variant PidDecision:Unverifiable
+accept  enum_variant_added variant TicketRefusal:Spent
+accept  function_parameter_count_changed trusty_mpm::daemon::rpc::architect_dashboard::register
+accept  inherent_method_missing DashSnapshot::rows
+accept  inherent_method_missing ArchitectState::open
+accept  inherent_method_missing ServiceId::probe
+accept  struct_pub_field_missing field tab of struct ArchitectState
+accept  struct_pub_field_now_doc_hidden field ArchitectState.tab
+accept  trait_method_added trait method trusty_mpm::mcp::OrchestratorBackend::session_archive
+accept  trait_method_added trait method trusty_mpm::mcp::OrchestratorBackend::project_decommission
+accept  trait_method_added trait method trusty_mpm::core::pid_registry::ProcessProbe::host_evidence

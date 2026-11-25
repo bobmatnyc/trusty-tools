@@ -23,9 +23,12 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::savings::{SavingsRow, write_row_line};
+pub use crate::core::savings_opportunity_reason::{
+    OpportunityTally, SkipReason, fold_real_opportunities,
+};
 
 /// `tool_type` of a Bash call, on both `compress` and opportunity rows.
 pub const TOOL_TYPE_BASH: &str = "bash";
@@ -53,8 +56,10 @@ pub const OPPORTUNITY_KEEP_DAYS: usize = 14;
 /// understate the opportunity. `event` is the hook event that observed it:
 /// a subagent's result is seen both as the `Agent` call's `PostToolUse` and as
 /// its own `SubagentStop`, so an aggregate picks one event per question.
-/// Test: `an_opportunity_row_lands_in_its_day_file`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `skip_reason` says why the result was not compressed (#10973).
+/// Test: `an_opportunity_row_lands_in_its_day_file`,
+/// `a_legacy_row_without_a_skip_reason_parses_as_unknown`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpportunityRow {
     /// RFC 3339 UTC timestamp; its date names the day file.
     pub ts: String,
@@ -73,10 +78,30 @@ pub struct OpportunityRow {
     pub bytes_scanned: u64,
     /// Size the result would have had after compression.
     pub would_compress_bytes: u64,
+    /// #10973: why the result was not compressed; additive, so a row written
+    /// before the field existed reads as [`SkipReason::Unknown`].
+    #[serde(default)]
+    pub skip_reason: SkipReason,
+    /// #11507: a chained Bash call's sanitised shape — separators and program
+    /// names only, no arguments or paths; additive, omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_shape: Option<String>,
 }
 
 impl OpportunityRow {
-    /// Build a row from a measurement, stamped now.
+    /// This row with its [`SkipReason`] set.
+    pub fn with_skip_reason(mut self, skip_reason: SkipReason) -> Self {
+        self.skip_reason = skip_reason;
+        self
+    }
+
+    /// This row with its #11507 command shape set.
+    pub fn with_command_shape(mut self, command_shape: Option<String>) -> Self {
+        self.command_shape = command_shape;
+        self
+    }
+
+    /// Build a row from a measurement, stamped now; its reason is `Unknown`.
     pub fn new(
         event: &str,
         session_id: &str,
@@ -91,10 +116,13 @@ impl OpportunityRow {
             session_id: session_id.to_string(),
             event: event.to_string(),
             tool_type: tool_type.to_string(),
-            tool_name: tool_name.to_string(),
+            // #11563: never a path or pattern from the command line.
+            tool_name: ledger_tool_name(tool_name),
             bytes_returned,
             bytes_scanned,
             would_compress_bytes,
+            skip_reason: SkipReason::Unknown,
+            command_shape: None,
         }
     }
 }
@@ -181,11 +209,37 @@ fn append_opportunity_bounded_with(
     keep_days: usize,
     remove: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<OpportunityAppend> {
-    let day = row
-        .ts
-        .get(..10)
-        .filter(|d| is_day(d))
-        .unwrap_or("unknown-day");
+    append_day_line_with(dir, &row.ts, row, day_cap, keep_days, remove)
+}
+
+/// Append any serializable `row` to its day file under `dir`, day-capped.
+///
+/// Why (#11560): the compress-decline file needs the same bound as the
+/// opportunity ledger; one helper keeps the two from drifting.
+/// What: [`append_opportunity_bounded`]'s rules, with the day taken from `ts`.
+/// Test: `the_opportunity_ledger_is_bounded_by_day_cap_and_retention`,
+/// `a_full_decline_day_drops_silently`.
+pub fn append_day_line<T: Serialize>(
+    dir: &Path,
+    ts: &str,
+    row: &T,
+    day_cap: u64,
+    keep_days: usize,
+) -> std::io::Result<OpportunityAppend> {
+    append_day_line_with(dir, ts, row, day_cap, keep_days, &|p| {
+        std::fs::remove_file(p)
+    })
+}
+
+fn append_day_line_with<T: Serialize>(
+    dir: &Path,
+    ts: &str,
+    row: &T,
+    day_cap: u64,
+    keep_days: usize,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<OpportunityAppend> {
+    let day = ts.get(..10).filter(|d| is_day(d)).unwrap_or("unknown-day");
     let path = dir.join(format!("{day}.jsonl"));
     crate::core::home_write_fence::check(&path); // #8545
     match std::fs::metadata(&path) {
@@ -325,6 +379,48 @@ pub struct TaggedSavingsRow<'a> {
     pub tool_type: &'a str,
     /// The `tm compress --tool` value, e.g. `git diff`.
     pub tool_name: &'a str,
+    /// #11507: the chain's sanitised shape (`cd ; git diff && cargo test`),
+    /// for a row one step of a chained call wrote; additive, omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_shape: Option<&'a str>,
+    /// #11507: how many steps that chain has; omitted outside a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<usize>,
+}
+
+/// Programs whose second word is a subcommand verb, never an argument (#11563).
+const VERB_PROGRAMS: &[&str] = &[
+    "git", "cargo", "gh", "npm", "pnpm", "yarn", "go", "docker", "kubectl", "uv", "tm",
+];
+
+/// The `tool_name` a savings or opportunity ledger row may store (#11563).
+///
+/// Why: the dispatch key is `<program> <second token>`, so `ls <path>` or
+/// `grep -n <pattern>` put a path or a search pattern in local ledgers that
+/// `tm savings status`, doctor and bug reports read.
+/// What: the first word's basename, plus the second word only when the program
+/// is in [`VERB_PROGRAMS`] and the word is verb-shaped (lowercase ASCII letter
+/// first, then letters, digits or `-`). A one-word name (`Read`, `mcp__a__b`)
+/// is returned unchanged. Applied at write time only; old rows stay as written.
+/// Test: `ledger_tool_name_keeps_verbs_and_drops_paths_and_patterns`,
+/// `a_compress_row_never_stores_a_path_or_pattern`.
+pub fn ledger_tool_name(tool_name: &str) -> String {
+    let mut words = tool_name.split_whitespace();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    let program = first.rsplit('/').next().unwrap_or(first);
+    let verb_shaped = |w: &str| {
+        w.starts_with(|c: char| c.is_ascii_lowercase())
+            && w.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    match words.next() {
+        Some(verb) if VERB_PROGRAMS.contains(&program) && verb_shaped(verb) => {
+            format!("{program} {verb}")
+        }
+        _ => program.to_string(),
+    }
 }
 
 /// The category a Claude Code tool name belongs to.

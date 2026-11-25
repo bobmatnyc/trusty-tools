@@ -112,7 +112,7 @@ pub(crate) fn wrap_command_reporting_exit(command: &str) -> String {
 /// Test: `split_exit_sentinel_reads_and_strips_a_trailing_status`,
 /// `split_exit_sentinel_leaves_unwrapped_input_untouched`,
 /// `wrap_command_reporting_exit_round_trips_through_split`.
-fn split_exit_sentinel(stdin_text: &str) -> (&str, Option<i32>) {
+pub(crate) fn split_exit_sentinel(stdin_text: &str) -> (&str, Option<i32>) {
     let body = stdin_text.strip_suffix('\n').unwrap_or(stdin_text);
     let (head, last) = match body.rfind('\n') {
         Some(newline) => (&body[..newline], &body[newline + 1..]),
@@ -155,10 +155,10 @@ fn parse_exit_sentinel(line: &str) -> Option<i32> {
 /// tm compress --tool "cargo test" < /tmp/gate.txt   # only when non-zero
 /// ```
 ///
-/// The exit-0 contract itself is deliberate and unchanged — callers rely on
-/// this filter never failing them. #4837: the comment previously justified it
-/// as never breaking a pipeline's exit-code semantics, which is backwards. See
-/// `assets/agents/BASE-AGENT.md`, "Never end a gate chain in a pipe".
+/// #11572: a stdin that ends in the #7384 exit sentinel (the hook rewrite's
+/// shape) is the exception — this returns that status, so the rewritten
+/// pipeline exits as the original command did. Without a sentinel it returns
+/// 0. See `assets/agents/BASE-AGENT.md`, "Never end a gate chain in a pipe".
 /// What: Blocks until stdin reaches EOF (this is intentional — the whole
 /// point is to wait for the wrapped command to finish producing output), via
 /// [`tokio::io::AsyncReadExt::read_to_string`] rather than a synchronous
@@ -176,12 +176,13 @@ fn parse_exit_sentinel(line: &str) -> Option<i32> {
 /// accepts the full buffer (a trusty-review-flagged robustness gap, PR
 /// #1968 — `print!`'s panic-on-write-failure behavior is unrecoverable in a
 /// pipe filter, whereas `?` degrades to a clean non-zero exit).
-/// Test: See module tests; `tm compress` has no daemon-only tracing
+/// Test: `tm_compress_rewrite_exits_with_the_wrapped_commands_status` (#11572).
+/// See module tests; `tm compress` has no daemon-only tracing
 /// subscriber from `main()` (that only inits for `Daemon`/`Supervisor`), so
 /// this function installs its own stderr-writing subscriber via
 /// `try_init()` — idempotent, safe to call from every invocation including
 /// under `cargo test`.
-pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
+pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<i32> {
     init_stats_log_subscriber();
 
     let mut stdin_text = String::new();
@@ -189,7 +190,9 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     // #7384: the wrapped command's status rides in on a trailing sentinel line;
     // strip it here so it never reaches the caller's output.
     let (input, exit) = split_exit_sentinel(&stdin_text);
-    compress_and_emit(tool, input, exit).await
+    compress_and_emit(tool, input, exit).await?;
+    // #11572: the wrapped command's status, so a failure stays a failure.
+    Ok(exit.unwrap_or(0))
 }
 
 /// Compress `input`, record the run in both ledgers, and write it to stdout.
@@ -256,7 +259,7 @@ pub(crate) async fn compress_and_emit(
 /// reported [`CompressionPath`] stays the path that actually ran.
 /// Test: `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`,
 /// `a_real_compression_is_not_treated_as_an_empty_result`.
-async fn compress_with_raw_fallback(
+pub(crate) async fn compress_with_raw_fallback(
     resolve: RtkResolver,
     tool: &str,
     input: &str,
@@ -357,6 +360,13 @@ fn record_compress_savings_with(
     let Some(root) = root else {
         return;
     };
+    // #11560: the observer reads this to write `compressed_no_gain`.
+    trusty_mpm::core::savings_compress_outcome::record_outcome(
+        root,
+        session_id,
+        tool,
+        trusty_mpm::core::savings_compress::compress_gains(bytes_before, bytes_after),
+    );
     trusty_mpm::core::savings_compress::record_compress(
         root,
         session_id,
@@ -382,11 +392,10 @@ fn record_compress_savings_with(
 /// Test: Exercised indirectly by every `run_compress_*` test capturing
 /// `tracing_test`-free stderr is out of scope for this spike; the log
 /// *content* is verified directly via [`log_compression_stats`]'s own test.
-fn init_stats_log_subscriber() {
+pub(crate) fn init_stats_log_subscriber() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        // #8948: same AWS hold-down as the daemon subscriber.
+        .with_env_filter(crate::tracing_setup::env_filter("info"))
         .with_writer(std::io::stderr)
         .try_init();
 }
@@ -432,7 +441,7 @@ fn init_stats_log_subscriber() {
 /// `a_passthrough_run_emits_no_stats_line`,
 /// exercised end-to-end via `run_compress_*` tests below and, for the exit
 /// field, by `tm_compress_reports_the_wrapped_commands_exit_status`.
-fn log_compression_stats(
+pub(crate) fn log_compression_stats(
     tool_name: &str,
     bytes_before: usize,
     bytes_after: usize,
@@ -558,7 +567,7 @@ fn estimate_tokens_from_bytes(bytes: usize) -> u32 {
 /// degrade-gracefully behavior.
 /// Test: Indirectly via `append_compression_record_*` tests, which pass an
 /// explicit path rather than calling this resolver.
-fn compression_log_path() -> PathBuf {
+pub(crate) fn compression_log_path() -> PathBuf {
     match dirs::home_dir() {
         Some(home) => home.join(".trusty-mpm").join("compression.jsonl"),
         None => PathBuf::from(".trusty-mpm").join("compression.jsonl"),
@@ -587,7 +596,7 @@ fn compression_log_path() -> PathBuf {
 /// `serde_json::to_string(&record)` line + `\n`, flush.
 /// Test: `append_compression_record_creates_file`,
 /// `append_compression_record_appends`.
-async fn append_compression_record(
+pub(crate) async fn append_compression_record(
     path: &Path,
     session_id: Option<&str>,
     tool_name: &str,
@@ -849,6 +858,67 @@ mod tests {
         );
         // #10973: the compress row names the tool category it came from.
         assert!(written.contains("\"tool_type\":\"bash\""), "{written}");
+    }
+
+    /// The opportunity rows `observe_in` writes for one rewritten Bash call
+    /// after a filter run of `before -> after` bytes (#11560).
+    fn row_after_compress(before: usize, after: usize) -> (serde_json::Value, String) {
+        let root = tempfile::tempdir().expect("temp root");
+        record_compress_savings_with(
+            Some(root.path()),
+            Some("s-11560"),
+            "git diff",
+            before,
+            after,
+            "native",
+        );
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "{ git diff; printf '\\n[exit %s]\\n' \"$?\"; } | tm compress --tool \"git diff\""},
+            "tool_response": {"stdout": "x".repeat(after), "stderr": ""},
+        });
+        super::super::hook_observer::observe_in(
+            root.path(),
+            "PostToolUse",
+            Some(&payload),
+            "s-11560",
+        );
+        let dir = trusty_mpm::core::savings_opportunity::opportunity_dir_in(root.path());
+        let mut rows = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("opportunity dir").flatten() {
+            if entry.path().extension().is_some_and(|e| e == "jsonl") {
+                rows.extend(
+                    std::fs::read_to_string(entry.path())
+                        .expect("read")
+                        .lines()
+                        .map(str::to_string),
+                );
+            }
+        }
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("row");
+        let ledger =
+            std::fs::read_to_string(trusty_mpm::core::savings::savings_log_in(root.path()))
+                .unwrap_or_default();
+        (row, ledger)
+    }
+
+    /// Why (#11560): a rewritten call whose filter saved nothing read
+    /// `compressed`, so 173 zero-saving runs counted as compressions.
+    /// Test: itself.
+    #[test]
+    fn a_zero_saving_compress_row_reads_compressed_no_gain() {
+        let (row, ledger) = row_after_compress(668, 668);
+        assert_eq!(row["skip_reason"], "compressed_no_gain", "{row}");
+        assert!(ledger.is_empty(), "no savings row: {ledger}");
+    }
+
+    /// #11560: a saving run keeps `compressed` and writes exactly one savings row.
+    #[test]
+    fn a_saving_compress_row_reads_compressed_with_one_savings_row() {
+        let (row, ledger) = row_after_compress(10_000, 1_000);
+        assert_eq!(row["skip_reason"], "compressed", "{row}");
+        assert_eq!(ledger.lines().count(), 1, "{ledger}");
     }
 
     #[tokio::test]

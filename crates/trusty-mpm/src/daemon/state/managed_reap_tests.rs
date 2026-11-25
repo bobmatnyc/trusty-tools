@@ -209,3 +209,86 @@ async fn a_pm_whose_server_socket_is_gone_is_still_stopped_deliberate() {
     assert_eq!(ended.state, ManagedSessionState::Stopped);
     assert_eq!(ended.stop_cause, Some(StopCause::Deliberate));
 }
+
+/// Seed three default-server records read on tmux server `1:1`, and the
+/// live default set holding only the first one's name (#10700).
+async fn three_on_server_one() -> (
+    tempfile::TempDir,
+    Arc<SessionManager>,
+    DaemonState,
+    Vec<ManagedSessionId>,
+    HashSet<String>,
+) {
+    let (tmp, mgr, state, ids) =
+        seeded(&[("first", None), ("second", None), ("third", None)]).await;
+    for id in &ids {
+        let mut record = mgr.get(id).await.expect("record");
+        record.tmux_server = Some(crate::test_support::FAKE_PANE_SERVER.to_owned());
+        mgr.store
+            .write()
+            .await
+            .upsert(record)
+            .await
+            .expect("seed server");
+    }
+    let first = mgr.get(&ids[0]).await.expect("first").tmux_name;
+    (tmp, mgr, state, ids, HashSet::from([first]))
+}
+
+/// #10700: the first resume after a tmux server loss starts a NEW default
+/// server. The sessions still missing were lost with the old one, so they
+/// stay auto-resumable. Red on a200d64eed, which stamped them Deliberate
+/// because the recreated server listed a session.
+#[tokio::test]
+async fn reap_keeps_sessions_lost_to_a_restarted_default_server_auto_resumable() {
+    let (_tmp, mgr, state, ids, default) = three_on_server_one().await;
+    let live = LiveSessions {
+        default,
+        default_server: Some("2:2".to_owned()),
+        ..LiveSessions::default()
+    };
+
+    state.reap_managed_against(&live).await;
+
+    assert_eq!(
+        mgr.get(&ids[0]).await.expect("first").state,
+        ManagedSessionState::Active
+    );
+    for id in &ids[1..] {
+        let after = mgr.get(id).await.expect("after");
+        assert_eq!(after.state, ManagedSessionState::Stopped);
+        assert_eq!(after.stop_cause, Some(StopCause::Unexpected));
+        assert!(
+            after.is_auto_resumable(),
+            "a session lost with the old tmux server must stay auto-resumable"
+        );
+    }
+}
+
+/// #10700 counterpart: the default server stayed up (its live identity, read
+/// through `default_server_identity`, matches the records'), so a missing
+/// session was killed on purpose and is stamped Deliberate.
+#[tokio::test]
+async fn reap_marks_a_targeted_kill_on_the_same_default_server_deliberate() {
+    let (_tmp, mgr, state, ids, default) = three_on_server_one().await;
+    let identity =
+        crate::session_manager::tmux_route::default_server_identity(&RoutingNoop(None), &default);
+    assert_eq!(
+        identity.as_deref(),
+        Some(crate::test_support::FAKE_PANE_SERVER)
+    );
+    let live = LiveSessions {
+        default,
+        default_server: identity,
+        ..LiveSessions::default()
+    };
+
+    state.reap_managed_against(&live).await;
+
+    for id in &ids[1..] {
+        let after = mgr.get(id).await.expect("after");
+        assert_eq!(after.state, ManagedSessionState::Stopped);
+        assert_eq!(after.stop_cause, Some(StopCause::Deliberate));
+        assert!(!after.is_auto_resumable());
+    }
+}

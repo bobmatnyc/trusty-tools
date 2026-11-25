@@ -178,7 +178,9 @@ impl DaemonClient {
     ///
     /// Why: drive a harness with a prompt without attaching to tmux.
     /// What: POSTs `{ text }` and returns the [`ManagedSendInputResponse`].
-    /// Test: live HTTP via `tests/session_manager_mvp.rs`.
+    /// #11796: a refusal (409 `sent: false`) keeps the daemon's reason, so
+    /// `tm sessions send` exits non-zero and prints why nothing was sent.
+    /// Test: `rest_send_refuses_a_typed_draft` (the route half).
     pub async fn send_to_managed_session(
         &self,
         id: &str,
@@ -191,11 +193,8 @@ impl DaemonClient {
                 text: text.to_string(),
             })
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
-        Ok(resp)
+        response_or_body_error(resp).await?.json().await
     }
 
     /// Answer a pending decision via `POST .../{id}/answer`.
@@ -417,5 +416,27 @@ impl DaemonClient {
             .await
             .context("decoding record-only decommission response body")?;
         Ok(outcome)
+    }
+
+    /// Archive a session's project directory via
+    /// `POST /api/v1/sessions/managed/{id}/archive` (#10991).
+    ///
+    /// Why: backs `tm session archive`. What: POSTs `{dry_run, force}` and
+    /// returns the report; a refusal (running session, Architect, unknown id,
+    /// failed move) is an `Err` carrying the daemon's message.
+    /// Test: `cli_parses_session_archive`; the route body in
+    /// `daemon::session_archive`'s tests.
+    pub async fn archive_managed_session(
+        &self,
+        id: &str,
+        opts: crate::session_manager::session_archive::ArchiveOptions,
+    ) -> anyhow::Result<crate::session_manager::session_archive::SessionArchiveReport> {
+        let url = format!("/api/v1/sessions/managed/{id}/archive");
+        let resp = self.post(&url).json(&opts).send().await?;
+        response_or_body_error(resp)
+            .await?
+            .json()
+            .await
+            .context("decoding archive report")
     }
 }

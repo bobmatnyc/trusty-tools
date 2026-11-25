@@ -29,6 +29,8 @@ fn proj(name: &str, repo_url: &str) -> Project {
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -47,6 +49,8 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         commit_email: None,
         worktree: None,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -458,6 +462,120 @@ fn resolver_session_no_repo_returns_none() {
     );
 }
 
+/// A no-repo session running in `dir` (#11552).
+fn session_in(dir: &std::path::Path) -> SessionRecord {
+    let mut session = session_no_repo();
+    session.cwd = dir.to_path_buf();
+    session
+}
+
+/// #11552: a local-only spawn binds to the path-form project it runs in.
+#[test]
+fn resolver_session_without_repo_url_binds_by_checkout_path() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let checkout = root.path().join("proj");
+    std::fs::create_dir_all(&checkout).expect("mkdir");
+    let projects = vec![
+        proj("parent", &root.path().to_string_lossy()),
+        proj("proj", &checkout.to_string_lossy()),
+    ];
+    let bound = resolve_session_project(&session_in(&checkout), &projects).expect("bound");
+    assert_eq!(bound.name, "proj", "the parent project must not claim it");
+    let fleet = fleet_by_project(&[session_in(&checkout)], &projects);
+    let proj_group = fleet
+        .iter()
+        .find(|f| f.project.name == "proj")
+        .expect("group");
+    assert_eq!(proj_group.sessions.len(), 1);
+}
+
+/// #11552: a session in `<checkout>/.worktrees/<name>` binds to the checkout.
+#[test]
+fn resolver_session_without_repo_url_binds_from_a_worktree() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let tree = root.path().join(".worktrees").join("x");
+    std::fs::create_dir_all(&tree).expect("mkdir");
+    let projects = vec![proj("proj", &root.path().to_string_lossy())];
+    let mut session = session_no_repo();
+    session.workspace_path = Some(tree);
+    let bound = resolve_session_project(&session, &projects).expect("bound");
+    assert_eq!(bound.name, "proj");
+}
+
+/// #11552: a sibling directory sharing a name prefix never matches.
+#[test]
+fn resolver_session_without_repo_url_ignores_a_sibling_path() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let checkout = root.path().join("proj");
+    let sibling = root.path().join("proj-other");
+    std::fs::create_dir_all(&checkout).expect("mkdir");
+    std::fs::create_dir_all(&sibling).expect("mkdir");
+    let projects = vec![proj("proj", &checkout.to_string_lossy())];
+    assert!(resolve_session_project(&session_in(&sibling), &projects).is_none());
+    assert!(resolve_session_project(&session_in(&sibling.join("sub")), &projects).is_none());
+}
+
+/// #11828: a no-repo session (a boot-adopted `tm-*` pane) in a canonical clone
+/// binds to that clone's URL-form row, from the clone and from a worktree of
+/// it; a clone of another repo does not. Before the fix only path-form rows
+/// were compared, so the row showed 0 sessions once registered by URL.
+#[test]
+fn resolver_session_without_repo_url_binds_a_canonical_clone_to_its_url_row_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repos_root = tmp.path().join("repos");
+    let clone = repos_root.join("acme").join("widget");
+    let tree = clone.join(".worktrees").join("x");
+    let other = repos_root.join("acme").join("other");
+    std::fs::create_dir_all(&tree).expect("mkdir");
+    std::fs::create_dir_all(&other).expect("mkdir");
+    let projects = vec![proj("widget", "https://github.com/Acme/Widget")];
+    let bind = |dir: &std::path::Path| {
+        resolve_by_checkout_path_in(&session_in(dir), &projects, None, || repos_root.clone())
+            .map(|p| p.name.clone())
+    };
+
+    assert_eq!(bind(&clone).as_deref(), Some("widget"));
+    assert_eq!(bind(&tree).as_deref(), Some("widget"));
+    assert_eq!(bind(&other), None);
+}
+
+/// #11828: a clone on disk as `Acme/Widget` (pre-#10604) registers by URL
+/// through inode identity, so a no-repo session there binds the
+/// `https://github.com/acme/widget` row on a case-insensitive filesystem; a
+/// directory elsewhere that only shares the tail never binds. A
+/// case-sensitive filesystem has two directories, and only the exact-case one
+/// binds. Before the fix the tail compare was case-sensitive.
+#[test]
+fn resolver_binds_a_canonical_clone_spelled_in_another_case_11828() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repos_root = tmp.path().join("repos");
+    let mixed = repos_root.join("Acme").join("Widget");
+    let elsewhere = tmp.path().join("elsewhere").join("Acme").join("Widget");
+    std::fs::create_dir_all(&mixed).expect("mkdir");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+    // Detected at runtime: the tempdir's volume, not the target OS, decides.
+    let case_insensitive = repos_root.join("acme").join("widget").is_dir();
+    let projects = vec![proj("widget", "https://github.com/acme/widget")];
+    let bind = |dir: &std::path::Path| {
+        resolve_by_checkout_path_in(&session_in(dir), &projects, None, || repos_root.clone())
+            .map(|p| p.name.clone())
+    };
+
+    if case_insensitive {
+        assert_eq!(bind(&mixed).as_deref(), Some("widget"));
+    } else {
+        let exact = repos_root.join("acme").join("widget");
+        std::fs::create_dir_all(&exact).expect("mkdir");
+        assert_eq!(bind(&exact).as_deref(), Some("widget"));
+        assert_eq!(
+            bind(&mixed),
+            None,
+            "a different directory on this filesystem"
+        );
+    }
+    assert_eq!(bind(&elsewhere), None);
+}
+
 #[test]
 fn resolver_session_unregistered_url_returns_none() {
     let projects = vec![proj("trusty-tools", "https://github.com/org/trusty-tools")];
@@ -607,22 +725,22 @@ fn resolver_reason_label() {
 
 /// A row holding only a GitHub URL resolves to its managed clone directory.
 ///
-/// #7887's core claim: `bob-duetto/cto` IS `<repos_root>/bob-duetto/cto`, and
+/// #7887's core claim: `acme-admin/cto` IS `<repos_root>/acme-admin/cto`, and
 /// never the URL the registry stores.
 #[test]
 fn local_checkout_for_derives_the_managed_clone_path() {
-    let project = proj("cto", "https://github.com/bob-duetto/cto");
+    let project = proj("cto", "https://github.com/acme-admin/cto");
     assert_eq!(
         local_checkout_for(&project),
         Some(
             crate::daemon::managed_routes::inproject::repos_root()
-                .join("bob-duetto")
+                .join("acme-admin")
                 .join("cto")
         )
     );
     // An `ssh` remote names the same checkout as its `https` spelling.
     assert_eq!(
-        local_checkout_for(&proj("cto", "git@github.com:bob-duetto/cto.git")),
+        local_checkout_for(&proj("cto", "git@github.com:acme-admin/cto.git")),
         local_checkout_for(&project)
     );
 }
@@ -632,6 +750,48 @@ fn local_checkout_for_keeps_an_absolute_repo_url() {
     assert_eq!(
         local_checkout_for(&proj("tools", "/Users/me/work/trusty-tools")),
         Some(PathBuf::from("/Users/me/work/trusty-tools"))
+    );
+}
+
+/// #10604: a `~` path names the flat checkout under the home directory, never
+/// `<repos_root>/trusty-mpm-projects/trusty-tools` (host `~` dropped).
+#[test]
+fn local_checkout_for_expands_a_tilde_repo_url_10604() {
+    let home = std::path::Path::new("/home/u");
+    assert_eq!(
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", Some(home)),
+        Some(PathBuf::from("/home/u/trusty-mpm-projects/trusty-tools"))
+    );
+    assert_eq!(
+        local_checkout_for_url_in("~", Some(home)),
+        Some(PathBuf::from("/home/u"))
+    );
+    // No home to expand against: no answer, not a guessed managed clone.
+    assert_eq!(
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", None),
+        None
+    );
+}
+
+/// #10604: `repo_key` expands a `~` spelling the way key minting does, so a
+/// `~` and an absolute registration of one checkout fold; an unexpandable `~`
+/// stays as spelled rather than becoming a guessed path.
+#[test]
+fn repo_key_folds_a_tilde_and_an_absolute_spelling_10604() {
+    let home = std::path::Path::new("/home/u");
+    assert_eq!(
+        repo_key_in("~/code/Widget/", Some(home)),
+        repo_key_in("/home/u/code/widget.git", Some(home))
+    );
+    assert_eq!(repo_key_in("~/code/widget", None), "~/code/widget");
+    assert_eq!(
+        repo_key_in("~/code/widget", Some(std::path::Path::new("rel"))),
+        "~/code/widget"
+    );
+    // URLs keep #10720's rule.
+    assert_eq!(
+        repo_key_in("https://github.com/Acme/Widget.git/", Some(home)),
+        "https://github.com/acme/widget"
     );
 }
 

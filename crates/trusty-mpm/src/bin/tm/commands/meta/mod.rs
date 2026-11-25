@@ -291,10 +291,9 @@ pub(crate) fn resolve_project(project: Option<PathBuf>) -> anyhow::Result<PathBu
 /// `info`); ignores the error when a subscriber already exists.
 /// Test: side-effect-only; exercised indirectly by the handler tests.
 fn init_meta_tracing() {
-    let filter =
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        // #8948: same AWS hold-down as the daemon subscriber.
+        .with_env_filter(crate::tracing_setup::env_filter("info"))
         .with_writer(std::io::stderr)
         .try_init();
 }

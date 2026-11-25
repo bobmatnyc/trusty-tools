@@ -13,11 +13,12 @@
 //! Soft thresholds, not hard contracts: changes that drop MRR@5 below 0.3 mean
 //! warrant scrutiny but the harness itself stays advisory.
 
-// Live benchmarks require an isolated daemon and disposable source copy.
-// See support/isolated_benchmark.rs for the three required environment variables.
+// Live benchmarks require a sandbox daemon socket and a disposable source copy.
+// #10677: socket-only since #9214 — see support/socket_benchmark.rs.
 #[path = "support/isolated_benchmark.rs"]
 mod isolated_benchmark;
-use isolated_benchmark::daemon_url;
+#[path = "support/socket_benchmark.rs"]
+mod socket_benchmark;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -637,27 +638,16 @@ const GREP_ENDPOINT_PATTERNS: &[(&str, &str)] = &[
 #[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[tokio::test]
 async fn bench_grep_endpoint_vs_ripgrep() {
-    let daemon = daemon_url();
     const INDEX: &str = "trusty-search";
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("reqwest client");
+    let client = socket_benchmark::sandbox_client().await;
+    let daemon = client.socket().display().to_string();
 
     // Resolve the indexed root by asking the daemon — the test should still
     // work if the index was registered against a different on-disk path.
-    let status = client
-        .get(format!("{daemon}/indexes/{INDEX}/status"))
-        .send()
+    let status_json = socket_benchmark::index_status(&client, INDEX)
         .await
-        .expect("isolated benchmark daemon must have the trusty-search index registered");
-    assert!(
-        status.status().is_success(),
-        "GET /indexes/{INDEX}/status returned {}: register the index first",
-        status.status()
-    );
-    let status_json: serde_json::Value = status.json().await.expect("JSON status");
+        .unwrap_or_else(|| panic!("index {INDEX} is not registered: register the index first"));
     let root_path = status_json["root_path"]
         .as_str()
         .expect("status.root_path must be a string");
@@ -684,19 +674,13 @@ async fn bench_grep_endpoint_vs_ripgrep() {
             "max_results": 500,
         });
         let t0 = Instant::now();
-        let resp = client
-            .post(format!("{daemon}/indexes/{INDEX}/grep"))
-            .json(&body)
-            .send()
-            .await
-            .expect("POST /grep transport");
+        let ep_body = socket_benchmark::call(
+            &client,
+            "search.grep",
+            serde_json::json!({ "index_id": INDEX, "body": body }),
+        )
+        .await;
         let ep_ms = t0.elapsed().as_millis();
-        assert!(
-            resp.status().is_success(),
-            "POST /indexes/{INDEX}/grep returned {} for pattern {pattern}",
-            resp.status()
-        );
-        let ep_body: serde_json::Value = resp.json().await.expect("grep response JSON");
         let ep_hits = ep_body["matches"]
             .as_array()
             .map(Vec::len)

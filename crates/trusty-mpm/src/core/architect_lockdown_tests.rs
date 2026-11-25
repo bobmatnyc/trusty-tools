@@ -70,20 +70,14 @@ fn deny_of(payload: &str) -> Vec<String> {
         .collect()
 }
 
-/// #10127 D24 = B: the deny list is the plan's full list as written
-/// (`s5-p3-plan.md` §1a), the gworkspace braces expanded to four globs.
+/// #10127 D24 = B: the plan's gworkspace braces expanded to four globs.
+/// #10735 (owner ruling D6d): the Slack, Gmail, Notion and Google Chat
+/// globs are gone, so the claude.ai connectors load.
 #[test]
-fn the_production_deny_list_is_the_plans_full_list() {
+fn the_production_deny_list_is_the_gworkspace_messaging_globs() {
     assert_eq!(
         ARCHITECT_DENY_GLOBS,
         [
-            "mcp__*slack*",
-            "mcp__*gmail*",
-            "mcp__*googlemail*",
-            "mcp__*notion*",
-            "mcp__*googlechat*",
-            "mcp__*google-chat*",
-            "mcp__*gchat*",
             "mcp__*gworkspace*__*mail*",
             "mcp__*gworkspace*__*chat*",
             "mcp__*gworkspace*__*message*",
@@ -152,7 +146,7 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 
 /// #10127 C2: `ask_owner` is the Architect's only outbound path, so no rule
 /// (glob or capitalised variant) matches it or any other trusty-mpm tool; the
-/// families' own tools are matched.
+/// gworkspace messaging tools are matched. #10735: no connector-family tool is.
 #[test]
 fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
     let rules = Lockdown::PRODUCTION.deny_rules().expect("rules");
@@ -170,21 +164,20 @@ fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
         }
     }
     for denied in [
-        "mcp__slack-mcp__send_message",
-        "mcp__claude_ai_Slack__slack_send_message",
-        "mcp__gmail__send",
-        "mcp__claude_ai_Notion__search",
-        "mcp__google-chat__post",
         "mcp__gworkspace-mcp__send_gmail_message",
         "mcp__gworkspace-mcp__create_draft",
     ] {
         assert!(rules.iter().any(|r| glob_matches(r, denied)), "{denied}");
     }
-    assert!(
-        !rules
-            .iter()
-            .any(|r| glob_matches(r, "mcp__gworkspace-mcp__list_files"))
-    );
+    for allowed in [
+        "mcp__gworkspace-mcp__list_files",
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__claude_ai_Notion__search",
+        "mcp__claude_ai_Gmail__create_draft",
+        "mcp__claude_ai_Google_Chat__send_message",
+    ] {
+        assert!(!rules.iter().any(|r| glob_matches(r, allowed)), "{allowed}");
+    }
 }
 
 /// #10127 Q5: each word after the `mcp__` prefix gains a capital, so a
@@ -360,5 +353,79 @@ fn architect_isolated_spec_carries_the_production_lockdown() {
             .expect("spec");
         assert_production_deny(&spec.args);
         assert_chat_tokens_unset(&spec.env_unset);
+    }
+}
+
+/// MB159a: an Architect launch carries a deny rule for each of the 22
+/// never-dispatched agents, and none for an agent it needs.
+/// Before the fix the payload held only the gworkspace globs.
+#[test]
+fn an_architect_launch_hides_the_unused_agents_and_keeps_the_needed_ones() {
+    use crate::core::architect_agent_scope::ARCHITECT_UNUSED_AGENTS;
+    let spec = spec(SessionProfile::Architect, None, &[], &Lockdown::PRODUCTION).expect("spec");
+    let values = settings_values(&spec);
+    assert_eq!(values.len(), 1, "one --settings: {:?}", spec.args);
+    let deny = deny_of(&values[0]);
+    assert_eq!(ARCHITECT_UNUSED_AGENTS.len(), 22);
+    for name in ARCHITECT_UNUSED_AGENTS {
+        assert!(deny.contains(&format!("Agent({name})")), "{name}: {deny:?}");
+        assert!(deny.contains(&format!("Task({name})")), "{name}: {deny:?}");
+    }
+    for needed in [
+        "research",
+        "python-engineer",
+        "web-ui-engineer",
+        "engineer",
+        "code-critic",
+        "web-qa",
+        "local-ops",
+        "documentation",
+        "code-analyzer",
+        "qa",
+        "rust-engineer",
+        "version-control",
+        "ticketing",
+    ] {
+        assert!(
+            !deny.iter().any(|r| r.contains(&format!("({needed})"))),
+            "{needed} stays available: {deny:?}"
+        );
+    }
+    // The tool-glob rules are still there.
+    assert!(
+        deny.contains(&"mcp__*gworkspace*__*mail*".to_owned()),
+        "{deny:?}"
+    );
+}
+
+/// MB159a: a PM launch is unchanged: no `--settings` payload, no agent rule.
+#[test]
+fn a_pm_launch_hides_no_agent() {
+    let spec = spec(SessionProfile::Pm, None, &[], &Lockdown::PRODUCTION).expect("spec");
+    assert!(settings_values(&spec).is_empty(), "{:?}", spec.args);
+    assert!(
+        !spec.args.iter().any(|a| a.contains("Agent(")),
+        "{:?}",
+        spec.args
+    );
+}
+
+/// MB159a: the rules cover both Claude Code spellings, and the shipped list
+/// names real bundled agents (the legacy `ops` file is the one exception).
+#[test]
+fn the_unused_agent_list_names_bundled_agents_and_both_spellings() {
+    use crate::core::architect_agent_scope::{ARCHITECT_UNUSED_AGENTS, deny_rules};
+    assert_eq!(
+        deny_rules(&["x-engineer"]),
+        ["Agent(x-engineer)", "Task(x-engineer)"]
+    );
+    let agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/agents");
+    let mut seen = std::collections::BTreeSet::new();
+    for name in ARCHITECT_UNUSED_AGENTS {
+        assert!(seen.insert(name), "{name} listed twice");
+        assert!(
+            name == "ops" || agents.join(format!("{name}.md")).is_file(),
+            "{name} is not a bundled agent"
+        );
     }
 }

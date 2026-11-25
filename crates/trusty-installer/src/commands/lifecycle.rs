@@ -11,7 +11,8 @@
 //! handler drive both correctly.
 //!
 //! What: resolves members via `stable_set::select_members`, filters to daemons,
-//! confirms the blast radius (mirroring `install::run`), then applies the verb in
+//! drops the members not installed on this host (#10975), confirms the blast
+//! radius (mirroring `install::run`), then applies the verb in
 //! topological order (start = forward, stop = reverse, restart = bootout, wait
 //! for launchd to finish the unload, then bootstrap per member). launchd members
 //! use the shared `trusty_common::launchd::LaunchdConfig` `bootout`/`bootstrap`
@@ -19,14 +20,43 @@
 //! never issued back to back (#6618); `OwnVerb` members shell out to their own
 //! subcommand.
 //!
-//! Test: `tests` covers ordering, the report shaping/exit code, the blast-radius
-//! gate, and the `Action` verb-name mapping; the actual launchctl/subprocess
-//! calls are side-effecting and gated behind helpers (never invoked in tests).
+//! #11086: on Linux, `restart` runs each member's own `<install dir>/<binary>
+//! restart` and then compares the running version with the installed one; see
+//! [`restart_on_linux`] and the `lifecycle_linux` child module.
+//!
+//! Test: `lifecycle_tests.rs` covers ordering, the report shaping/exit code, the
+//! `Action` verb-name mapping, and (#10975) the not-installed filter driven
+//! through a `ServiceEnv` fake; the actual launchctl/subprocess calls are
+//! side-effecting and never invoked in tests. `lifecycle_linux_tests.rs` drives
+//! the Linux restart (#11086) against stub binaries in a temp install dir.
+
+use std::path::Path;
 
 use serde::Serialize;
 
+use super::service_bootstrap::{RealServiceEnv, ServiceEnv};
 use super::stable_set::{select_members, ManageStrategy, StableMember};
 use crate::output::render_json;
+use linux::RestartHost;
+
+#[path = "lifecycle_linux.rs"]
+mod linux;
+
+/// The manual-lifecycle note for a launchd member on a host without launchd.
+///
+/// Why (#11086): `tctl start|stop|restart` printed "only supported on macOS"
+/// where `tctl upgrade` printed what the operator has to do; one text serves
+/// both.
+/// What: `"<verb> the <binary> daemon manually (launchd is macOS-only)"`.
+/// Test: `linux_lifecycle_output_never_says_macos_only`,
+/// `super::upgrade::tests::restart_plan_launchd_member_off_macos_is_manual`.
+pub(super) fn manual_lifecycle_note(verb: &str, binary: &str) -> String {
+    format!("{verb} the {binary} daemon manually (launchd is macOS-only)")
+}
+
+/// #10975: the outcome detail for a member a bare verb skips because it is not
+/// on this host. Info, not a failure: the outcome is `ok`.
+const NOT_INSTALLED_NOTE: &str = "skipped (not installed)";
 
 /// The lifecycle verb being applied.
 ///
@@ -178,16 +208,88 @@ pub fn run_restart(members: &[String], yes: bool, json: bool) -> i32 {
     run_lifecycle(Verb::Restart, members, yes, json)
 }
 
-/// Shared orchestration for all three lifecycle verbs.
+/// Shared orchestration for all three lifecycle verbs, on the real host.
 ///
 /// Why: the three verbs share resolve → confirm → ordered-apply; one helper
 /// avoids triplication (DRY).
-/// What: resolves members (unknown → exit 3), orders them per verb, confirms the
-/// blast radius unless `--yes`/non-interactive/`--json`, applies the verb to each
-/// member via [`apply_to_member`], then renders the report and returns its exit
-/// code.
-/// Test: the pure ordering + report are tested; the apply step is side-effecting.
+/// What: [`run_lifecycle_on`] over [`RealServiceEnv`] and the real restart host.
+/// Test: `tests::bare_verbs_skip_members_that_are_not_installed` drives the
+/// shared body through a fake.
 fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
+    run_lifecycle_on(
+        &RealServiceEnv,
+        &linux::RealRestartHost,
+        verb,
+        members,
+        yes,
+        json,
+    )
+    .0
+}
+
+/// Is any trace of `binary` on this host — the binary, its plist, or its
+/// loaded launchd label (#10975)?
+///
+/// Why: the stable set lists members this host may never have installed (an
+/// internal trusty-events, an uninstalled trusty-search). Acting on one ran
+/// `launchctl` for a unit that does not exist. Plist presence alone is the
+/// wrong test: a binary without its plist still needs `start` to install the
+/// service (#2556), and a loaded label whose plist is gone must reach
+/// [`launchd_preflight`] so it errors instead of being skipped.
+/// What: `Ok(true)` when any of the three [`ServiceEnv`] signals holds. A plist
+/// or launchd probe that could not run is `Err` naming it, never "absent".
+/// Test: `tests::presence_reads_all_three_signals`,
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`.
+fn member_installed(env: &dyn ServiceEnv, binary: &str) -> Result<bool, String> {
+    if env.binary_resolves(binary) {
+        return Ok(true);
+    }
+    Ok(env.probe_plist(binary)? || env.probe_loaded(binary)?)
+}
+
+/// The outcome for a member whose presence probe failed (#10975 review): a
+/// failure naming the probe, never the ok not-installed skip.
+fn probe_failed(verb: Verb, m: &StableMember, err: &str) -> LifecycleOutcome {
+    let detail = format!("cannot tell whether it is installed: {err}");
+    eprintln!("tctl {}: {}: {detail}", verb.name(), m.crate_name);
+    LifecycleOutcome {
+        member: m.crate_name.clone(),
+        ok: false,
+        detail,
+    }
+}
+
+/// Shared orchestration for all three lifecycle verbs, over a [`ServiceEnv`]
+/// and a [`RestartHost`].
+///
+/// Why: the presence filter (#10975) reads the host, so a test needs to inject
+/// a fake host to drive the whole verb path without touching launchd. #11086:
+/// the Linux restart reads the install dir and the health probe, so those are
+/// injected too.
+/// What: resolves members (unknown → exit 3), orders them per verb, then splits
+/// off the members [`member_installed`] says are absent. A NAMED absent member
+/// exits 2 with `<name>: not installed` before any action; with no member named,
+/// each absent one gets an ok [`NOT_INSTALLED_NOTE`] outcome and is left out of
+/// the prompt. A member whose presence probe failed gets a failed outcome and
+/// no action. Confirms the blast radius unless `--yes`/non-interactive/`--json`,
+/// applies the verb to each present member via [`apply_to_member`] (on Linux,
+/// `restart` goes through [`restart_on_linux`] instead, #11086), then renders
+/// the report. Returns the exit code and the outcomes (empty on an early exit).
+/// Test: `tests::bare_verbs_skip_members_that_are_not_installed`,
+/// `tests::bare_verb_acts_on_present_and_skips_absent_members`,
+/// `tests::named_member_not_installed_exits_2_with_no_action`,
+/// `tests::start_installs_a_member_whose_plist_is_absent`,
+/// `tests::loaded_label_without_plist_errors_before_bootout`,
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`,
+/// `rejected_restart_is_failed_and_later_members_still_restart`.
+fn run_lifecycle_on(
+    env: &dyn ServiceEnv,
+    host: &dyn RestartHost,
+    verb: Verb,
+    members: &[String],
+    yes: bool,
+    json: bool,
+) -> (i32, Vec<LifecycleOutcome>) {
     let (selected, unknown) = select_members(members);
     if !unknown.is_empty() {
         let msg = format!("unknown member(s): {}", unknown.join(", "));
@@ -196,32 +298,68 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
         } else {
             eprintln!("tctl {}: {msg}", verb.name());
         }
-        return 3;
+        return (3, Vec::new());
     }
 
     let ordered = order_for(verb, &selected);
     if ordered.is_empty() {
         eprintln!("tctl {}: no daemon members selected", verb.name());
-        return 0;
+        return (0, Vec::new());
     }
 
-    if !yes && !json && super::progress_ui::is_tty() {
-        let names: Vec<&str> = ordered.iter().map(|m| m.crate_name.as_str()).collect();
+    // #10975: act only on members present on this host. Sits before the
+    // prompt so the prompt lists only what will be acted on.
+    let (mut present, mut absent, mut unprobed) = (Vec::new(), Vec::new(), Vec::new());
+    for m in ordered {
+        match member_installed(env, &m.binary) {
+            Ok(true) => present.push(m),
+            Ok(false) => absent.push(m),
+            Err(e) => unprobed.push(probe_failed(verb, &m, &e)),
+        }
+    }
+    if !members.is_empty() && !absent.is_empty() {
+        let msg = absent
+            .iter()
+            .map(|m| format!("{}: not installed", m.crate_name))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if json {
+            let _ = render_json(&serde_json::json!({ "command": verb.name(), "error": msg }));
+        } else {
+            eprintln!("tctl {}: {msg}", verb.name());
+        }
+        return (2, Vec::new());
+    }
+
+    if !present.is_empty() && !yes && !json && super::progress_ui::is_tty() {
+        let names: Vec<&str> = present.iter().map(|m| m.crate_name.as_str()).collect();
         let q = format!(
             "{} {} daemon(s): {}? ",
             verb.name(),
-            ordered.len(),
+            present.len(),
             names.join(", ")
         );
         if !super::progress_ui::prompt_yes_no(&q) {
             eprintln!("tctl {}: aborted (no confirmation).", verb.name());
-            return 3;
+            return (3, Vec::new());
         }
     }
 
-    let outcomes: Vec<LifecycleOutcome> = ordered
-        .iter()
-        .map(|m| match apply_to_member(verb, m) {
+    let skipped = absent.iter().map(|m| LifecycleOutcome {
+        member: m.crate_name.clone(),
+        ok: true,
+        detail: NOT_INSTALLED_NOTE.to_owned(),
+    });
+    // #11086: on Linux, restart runs the install-dir binary and checks the
+    // running version; macOS and start/stop keep the strategy dispatch.
+    let linux_restart = verb == Verb::Restart && !cfg!(target_os = "macos");
+    let applied = present.iter().map(|m| {
+        let result = if linux_restart {
+            restart_on_linux(env, host, m)
+        } else {
+            apply_to_member(env, verb, m)
+        };
+        match result {
             Ok(detail) => LifecycleOutcome {
                 member: m.crate_name.clone(),
                 ok: true,
@@ -235,14 +373,16 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
                     detail: e.to_string(),
                 }
             }
-        })
-        .collect();
+        }
+    });
+    let outcomes: Vec<LifecycleOutcome> =
+        unprobed.into_iter().chain(skipped).chain(applied).collect();
 
     let report = LifecycleReport::build(verb, outcomes);
     if json {
         if render_json(&report).is_err() {
             eprintln!("tctl {}: failed to write JSON output", verb.name());
-            return 1;
+            return (1, report.members);
         }
     } else {
         for m in &report.members {
@@ -250,7 +390,7 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
             println!("  {:<18} {:<8} {}", m.member, mark, m.detail);
         }
     }
-    report.exit_code()
+    (report.exit_code(), report.members)
 }
 
 /// Bounce ONE member, connection-safely, by its lifecycle strategy (#4964).
@@ -265,8 +405,10 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
 /// the #4470 port guard, the bootout-before-bootstrap ordering, and the
 /// `ExitTimeOut` drain window applying to upgrades too.
 ///
-/// What: [`apply_to_member`] with [`Verb::Restart`], over a member synthesised
-/// from `binary` + `manage` (the only two fields the restart path reads).
+/// What: [`apply_to_member`] with [`Verb::Restart`] over [`RealServiceEnv`], for
+/// a member synthesised from `binary` + `manage` (the only two fields the
+/// restart path reads). #10975: [`launchd_preflight`] runs here too, so a
+/// member installed with no plist gets a clear note, never launchd's error 5.
 ///
 /// Test: `super::upgrade::tests::restart_plan_daemons_restart`,
 /// `super::upgrade::tests::restart_plan_non_daemon_is_a_noop`,
@@ -284,22 +426,100 @@ pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<St
         soft: false,
         internal: false,
     };
-    apply_to_member(Verb::Restart, &m)
+    apply_to_member(&RealServiceEnv, Verb::Restart, &m)
+}
+
+/// Restart ONE member on Linux and check that it runs the installed version
+/// (#11086).
+///
+/// Why: a `restart` that exits 0 does not prove the daemon now runs the binary
+/// `tctl upgrade` placed, and a PATH lookup can restart a different copy.
+/// What: a launchd member without Linux verbs goes to [`apply_to_member_in`],
+/// which prints the manual note. Otherwise the member restarts through
+/// [`apply_to_member_in`] with the install dir: the `Launchd` arm runs
+/// `<install dir>/<binary> restart`, and trusty-mpm's `OwnVerb` arm is handed
+/// the absolute `<install dir>/tm`. A failed restart is `Err`, and no version
+/// is read. Then the installed version comes from `<install dir>/<binary>
+/// --version` (`tm` for trusty-mpm), and [`linux::verdict`] compares it with
+/// the health probe's running version.
+/// Test: `linux_restart_runs_the_install_dir_binary_not_the_path_decoy`,
+/// `installed_version_comes_from_the_binary_not_crates_toml`,
+/// `mpm_installed_version_comes_from_tm_not_the_shim`,
+/// `running_version_mismatch_is_failed_with_both_versions`,
+/// `refused_health_probe_after_restart_is_failed`,
+/// `rejected_restart_is_failed_and_later_members_still_restart`.
+fn restart_on_linux(
+    env: &dyn ServiceEnv,
+    host: &dyn RestartHost,
+    m: &StableMember,
+) -> anyhow::Result<String> {
+    let dir = host.install_dir();
+    if m.manage == ManageStrategy::Launchd && !linux::has_linux_verbs(&m.binary) {
+        return apply_to_member_in(env, &dir, Verb::Restart, m);
+    }
+    let exe = dir.join(linux::daemon_binary(&m.binary));
+    let mut target = m.clone();
+    if m.manage == ManageStrategy::OwnVerb {
+        // #11086: `own_verb_control` runs `binary` as given, so an absolute
+        // path keeps the PATH lookup out of trusty-mpm's restart.
+        target.binary = exe
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("install path {} is not UTF-8", exe.display()))?
+            .to_owned();
+    }
+    let restarted = apply_to_member_in(env, &dir, Verb::Restart, &target)?;
+    let installed = linux::installed_version(&exe)?;
+    let health = host.probe_health(&m.binary, m.manage);
+    linux::verdict(&restarted, &installed, &health).map_err(anyhow::Error::msg)
+}
+
+/// Apply a lifecycle verb to a single member, with the default install dir.
+///
+/// Why: `tctl upgrade`'s [`restart_member`] and the non-Linux-restart verbs
+/// need no injected install dir.
+/// What: [`apply_to_member_in`] with [`crate::download::install_dir_or_fallback`].
+/// Test: `tests::own_verb_path_for_absent_binary_errors`,
+/// `tests::loaded_label_without_plist_errors_before_bootout`.
+fn apply_to_member(env: &dyn ServiceEnv, verb: Verb, m: &StableMember) -> anyhow::Result<String> {
+    apply_to_member_in(env, &crate::download::install_dir_or_fallback(), verb, m)
 }
 
 /// Apply a lifecycle verb to a single member, dispatching on its strategy.
 ///
 /// Why: launchd and process-managed members need different mechanisms; this is
 /// the one place that branches on [`ManageStrategy`].
-/// What: `Launchd` → [`launchd_control`] (macOS `launchctl`); `OwnVerb` →
-/// `<binary> <verb>` subprocess; `None` → a no-op note, worded per whether the
-/// member is a non-daemon or one whose service is retired (#6290, #6350).
-/// Returns a human detail string on success.
-/// Test: side-effecting; the verb-name + ordering logic it relies on is tested.
-fn apply_to_member(verb: Verb, m: &StableMember) -> anyhow::Result<String> {
+/// What: `Launchd` → [`launchd_preflight`], then [`launchd_control`] (macOS
+/// `launchctl`) unless the preflight answered; off macOS, a `Restart` of a
+/// member with Linux verbs runs `<install_dir>/<binary> restart` instead
+/// (#11086); `OwnVerb` → `<binary> <verb>` subprocess; `None` → a no-op note,
+/// worded per whether the member is a non-daemon or one whose service is
+/// retired (#6290, #6350). Returns a human detail string on success.
+/// Test: `tests::own_verb_path_for_absent_binary_errors`,
+/// `tests::loaded_label_without_plist_errors_before_bootout`,
+/// `linux_restart_runs_the_install_dir_binary_not_the_path_decoy`; the
+/// launchctl calls themselves are side-effecting.
+fn apply_to_member_in(
+    env: &dyn ServiceEnv,
+    install_dir: &Path,
+    verb: Verb,
+    m: &StableMember,
+) -> anyhow::Result<String> {
     match m.manage {
-        ManageStrategy::Launchd => launchd_control(verb, &m.binary),
-        ManageStrategy::OwnVerb => own_verb_control(verb, &m.binary),
+        ManageStrategy::Launchd => {
+            // #11086: a Linux restart runs the daemon's own verb by absolute
+            // path; macOS keeps the launchd path unchanged.
+            if !cfg!(target_os = "macos")
+                && verb == Verb::Restart
+                && linux::has_linux_verbs(&m.binary)
+            {
+                return linux::run_restart_verb(&install_dir.join(&m.binary));
+            }
+            match launchd_preflight(env, verb, &m.binary, cfg!(target_os = "macos"))? {
+                Some(note) => Ok(note),
+                None => launchd_control(env, verb, &m.binary),
+            }
+        }
+        ManageStrategy::OwnVerb => own_verb_control(env, verb, &m.binary),
         // #6290, #6350: a member whose service is RETIRED lands here too, and
         // that is the point — reaching `launchd_control` would bootstrap the
         // very unit the retirement evicts. It is not a non-daemon, though, so
@@ -309,6 +529,50 @@ fn apply_to_member(verb: Verb, m: &StableMember) -> anyhow::Result<String> {
         }
         ManageStrategy::None => Ok("skipped (not a daemon)".to_owned()),
     }
+}
+
+/// Decide, before any `launchctl` call, whether a stop or restart can proceed
+/// for a launchd member whose plist is absent (#10975).
+///
+/// Why: with no plist, `restart_gracefully` boots the label out and then fails
+/// to bootstrap it (`Bootstrap failed: 5: Input/output error`). If the label
+/// was loaded, that bootout killed a running daemon that nothing can bring
+/// back. `tctl upgrade` reaches the same path through [`restart_member`].
+/// What: `Ok(None)` (proceed) off macOS, where `launchd_control`'s stub answers
+/// as before; for `Start`, whose plist-absent case is the #2556 `service
+/// install`; and whenever the plist is present. With the plist absent: a loaded
+/// label is an `Err` naming the missing plist; an unloaded one is
+/// `Ok(Some(note))`, a skip with no `launchctl` call. A probe that could not
+/// run is an `Err` naming it. `macos` is a parameter, as in `upgrade.rs`'s
+/// `restart_plan`, so both arms are testable on every host.
+/// Test: `tests::loaded_label_without_plist_errors_before_bootout`,
+/// `tests::preflight_skips_an_unloaded_member_without_plist`,
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`.
+fn launchd_preflight(
+    env: &dyn ServiceEnv,
+    verb: Verb,
+    binary: &str,
+    macos: bool,
+) -> anyhow::Result<Option<String>> {
+    // #10975 review: a probe error must never fall through to the skip below.
+    let probe = |r: Result<bool, String>| {
+        r.map_err(|e| anyhow::anyhow!("cannot tell whether {binary} is installed: {e}"))
+    };
+    if !macos || verb == Verb::Start || probe(env.probe_plist(binary))? {
+        return Ok(None);
+    }
+    let label = super::plist_label::plist_label_for(binary);
+    if probe(env.probe_loaded(binary))? {
+        anyhow::bail!(
+            "{label} is loaded but its launchd plist is gone; refusing to boot it out, \
+             because launchd could not bootstrap it again (`tctl start {binary}` \
+             reinstalls the plist)"
+        );
+    }
+    Ok(Some(format!(
+        "skipped (no launchd plist for {label} and it is not loaded; \
+         `tctl start {binary}` installs the service)"
+    )))
 }
 
 /// Drive a launchd-managed member via `launchctl bootstrap`/`bootout`.
@@ -339,8 +603,8 @@ fn apply_to_member(verb: Verb, m: &StableMember) -> anyhow::Result<String> {
 /// policy by `super::port_guard::tests`; the actual `launchctl`/subprocess
 /// calls are side-effecting and never run in unit tests.
 #[cfg(target_os = "macos")]
-fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
-    use super::service_bootstrap::{start_plan, RealServiceEnv, ServiceEnv, StartPlan};
+fn launchd_control(env: &dyn ServiceEnv, verb: Verb, binary: &str) -> anyhow::Result<String> {
+    use super::service_bootstrap::{start_plan, StartPlan};
     use trusty_common::launchd::{KeepAlive, LaunchdConfig};
 
     // Only `label` matters for bootout/bootstrap; the rest are inert because we
@@ -366,10 +630,8 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
             // #2556: relax the "plist must already exist" assumption. If the
             // plist is present, bootstrap it (existing behaviour); if absent,
             // run the daemon's own `service install` to write + bootstrap it.
-            let present = super::plist_label::plist_path_for(binary)
-                .map(|p| p.exists())
-                .unwrap_or(false);
-            match start_plan(present) {
+            // #10975: read through the seam, so a fake host drives this branch.
+            match start_plan(env.plist_present(binary)) {
                 StartPlan::Bootstrap => {
                     // #2566 review (item 4): `bootstrap()` boots the agent OUT
                     // before reloading it — a redundant restart when `tctl
@@ -390,23 +652,21 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
                     }
                     // #4470: refuse rather than issue a bootstrap that would
                     // report success while a foreign process keeps the port.
-                    super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
+                    env.port_guard(binary).map_err(anyhow::Error::msg)?;
                     cfg.bootstrap()?;
                     Ok(format!("bootstrapped {}", cfg.label))
                 }
                 StartPlan::ServiceInstall => {
                     // #4470: `service install` writes the plist AND bootstraps
                     // it — gate it before it can leave a half-installed member.
-                    super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
+                    env.port_guard(binary).map_err(anyhow::Error::msg)?;
                     // #4964: `None` — `tctl start` installs no binary, so it has
                     // no concrete path to offer and keeps the `PATH` lookup.
-                    RealServiceEnv
-                        .run_service_install(binary, None)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "no launchd plist for {binary} and `service install` failed: {e}"
-                            )
-                        })?;
+                    env.run_service_install(binary, None).map_err(|e| {
+                        anyhow::anyhow!(
+                            "no launchd plist for {binary} and `service install` failed: {e}"
+                        )
+                    })?;
                     Ok(format!("installed + bootstrapped {}", cfg.label))
                 }
             }
@@ -417,7 +677,7 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
             // start it — a guard that makes things worse when it fires. A
             // correctly supervised daemon holds its own port here, so this
             // check passes for the ordinary restart.
-            super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
+            env.port_guard(binary).map_err(anyhow::Error::msg)?;
             // #6618: this used to be `bootout()` then `bootstrap()` back to
             // back. `launchctl bootout` returns when the unload is ACCEPTED,
             // not when the job is gone, so the bootstrap reached launchd while
@@ -442,11 +702,13 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
 /// Non-macOS stub: launchd is unavailable, so launchd control is unsupported.
 ///
 /// Why: the crate must compile on Linux/CI; launchd lifecycle is macOS-only.
-/// What: always returns an error explaining the platform limitation.
-/// Test: compile-only on non-macOS targets.
+/// What: always returns an error naming the manual step
+/// ([`manual_lifecycle_note`]).
+/// Test: `linux_lifecycle_output_never_says_macos_only`.
 #[cfg(not(target_os = "macos"))]
-fn launchd_control(_verb: Verb, binary: &str) -> anyhow::Result<String> {
-    anyhow::bail!("launchd control of `{binary}` is only supported on macOS")
+fn launchd_control(_env: &dyn ServiceEnv, verb: Verb, binary: &str) -> anyhow::Result<String> {
+    // #11086: say what the operator must do, not the platform limit.
+    anyhow::bail!("{}", manual_lifecycle_note(verb.name(), binary))
 }
 
 /// Drive a process-managed member via its own `<binary> <verb>` subcommand.
@@ -465,8 +727,9 @@ fn launchd_control(_verb: Verb, binary: &str) -> anyhow::Result<String> {
 /// path-threading change here.
 ///
 /// Test: side-effecting subprocess; never exercised in unit tests.
-fn own_verb_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
-    if which::which(binary).is_err() {
+fn own_verb_control(env: &dyn ServiceEnv, verb: Verb, binary: &str) -> anyhow::Result<String> {
+    // #10975: presence through the seam, so a fake host never spawns the binary.
+    if !env.binary_resolves(binary) {
         anyhow::bail!("{binary} is not installed (not on PATH)");
     }
     let status = std::process::Command::new(binary)
@@ -481,114 +744,10 @@ fn own_verb_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "lifecycle_tests.rs"]
+mod tests;
 
-    fn member(binary: &str, manage: ManageStrategy) -> StableMember {
-        StableMember {
-            crate_name: binary.to_owned(),
-            binary: binary.to_owned(),
-            daemon: manage != ManageStrategy::None,
-            manage,
-            required: true,
-            soft: false,
-            internal: false,
-        }
-    }
-
-    /// Why: start must be forward order, stop/restart reverse, and non-daemons
-    /// must be filtered out.
-    /// What: orders a 3-member list for each verb; asserts direction + filtering.
-    /// Test: This is the test.
-    #[test]
-    fn ordering_is_directional() {
-        let sel = vec![
-            member("trusty-search", ManageStrategy::Launchd),
-            member("tga", ManageStrategy::None),
-            member("trusty-mpm", ManageStrategy::OwnVerb),
-        ];
-        let start: Vec<String> = order_for(Verb::Start, &sel)
-            .into_iter()
-            .map(|m| m.binary)
-            .collect();
-        assert_eq!(start, vec!["trusty-search", "trusty-mpm"]);
-
-        let stop: Vec<String> = order_for(Verb::Stop, &sel)
-            .into_iter()
-            .map(|m| m.binary)
-            .collect();
-        assert_eq!(stop, vec!["trusty-mpm", "trusty-search"]);
-
-        let restart: Vec<String> = order_for(Verb::Restart, &sel)
-            .into_iter()
-            .map(|m| m.binary)
-            .collect();
-        assert_eq!(restart, vec!["trusty-mpm", "trusty-search"]);
-    }
-
-    /// Why: the verb name is used as both a label and a subcommand; pin it.
-    /// What: asserts each verb's name.
-    /// Test: This is the test.
-    #[test]
-    fn verb_name() {
-        assert_eq!(Verb::Start.name(), "start");
-        assert_eq!(Verb::Stop.name(), "stop");
-        assert_eq!(Verb::Restart.name(), "restart");
-    }
-
-    /// Why: the JSON envelope is a public contract; pin its shape.
-    /// What: builds a report and asserts keys.
-    /// Test: This is the test.
-    #[test]
-    fn report_serialises() {
-        let report = LifecycleReport::build(
-            Verb::Start,
-            vec![LifecycleOutcome {
-                member: "trusty-search".to_owned(),
-                ok: true,
-                detail: "bootstrapped com.trusty.trusty-search".to_owned(),
-            }],
-        );
-        let v = serde_json::to_value(&report).expect("serialises");
-        assert_eq!(v["verb"], "start");
-        assert_eq!(v["all_ok"], true);
-        assert_eq!(v["members"][0]["member"], "trusty-search");
-    }
-
-    /// Why: the exit code must track the verdict for automation.
-    /// What: asserts 0 for all-ok, 2 for any failure.
-    /// Test: This is the test.
-    #[test]
-    fn exit_code_reflects_all_ok() {
-        let ok = LifecycleReport::build(
-            Verb::Stop,
-            vec![LifecycleOutcome {
-                member: "a".to_owned(),
-                ok: true,
-                detail: String::new(),
-            }],
-        );
-        assert_eq!(ok.exit_code(), 0);
-        let bad = LifecycleReport::build(
-            Verb::Stop,
-            vec![LifecycleOutcome {
-                member: "a".to_owned(),
-                ok: false,
-                detail: "boom".to_owned(),
-            }],
-        );
-        assert_eq!(bad.exit_code(), 2);
-    }
-
-    /// Why: a process-managed member (mpm) must route through its own verb, not
-    /// launchd. `apply_to_member` for an absent OwnVerb binary must error with a
-    /// "not installed" message (proving it took the OwnVerb path, not launchd).
-    /// What: applies Start to an absent OwnVerb member; asserts the error text.
-    /// Test: This is the test.
-    #[test]
-    fn own_verb_path_for_absent_binary_errors() {
-        let m = member("definitely-not-a-real-binary-xyz", ManageStrategy::OwnVerb);
-        let err = apply_to_member(Verb::Start, &m).expect_err("absent binary errors");
-        assert!(err.to_string().contains("not installed"));
-    }
-}
+// #11086: the Linux restart path; stub binaries are `#!/bin/sh` scripts.
+#[cfg(all(test, unix, not(target_os = "macos")))]
+#[path = "lifecycle_linux_tests.rs"]
+mod linux_tests;

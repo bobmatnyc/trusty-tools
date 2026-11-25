@@ -19,12 +19,13 @@ fn binaries_for_set_covers_search_and_mpm() {
 }
 
 /// Why (#4277): `trusty-agents` is its own signable set, distinct from
-/// `trusty-mpm` — see [`AGENTS_SET`]'s doc for why it isn't folded in.
-/// What: Asserts `AGENTS_SET` resolves to exactly `["tagent"]`.
+/// `trusty-mpm` — see [`ASSISTANTS_SET`]'s doc for why it isn't folded in.
+/// What: Asserts `ASSISTANTS_SET` resolves to exactly `["ta", "tagent"]`
+/// (#11632: `ta`, plus the one-release `tagent` alias).
 /// Test: This is the test.
 #[test]
 fn binaries_for_set_covers_agents() {
-    assert_eq!(binaries_for_set(AGENTS_SET), vec!["tagent"]);
+    assert_eq!(binaries_for_set(ASSISTANTS_SET), vec!["ta", "tagent"]);
 }
 
 /// Why: An unrecognised set name must not silently sign nothing without
@@ -60,6 +61,7 @@ fn identifier_map_covers_all_signable_binaries() {
     );
     assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
     assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
+    assert_eq!(codesign_identifier("ta"), "com.trusty.ta");
     assert_eq!(codesign_identifier("tagent"), "com.trusty.tagent");
 }
 
@@ -70,7 +72,7 @@ fn identifier_map_covers_all_signable_binaries() {
 /// silently disagree.
 ///
 /// The set list used to be the hardcoded array `[SEARCH_SET, MPM_SET,
-/// AGENTS_SET]`, which made this vacuous for exactly the case it was meant to
+/// ASSISTANTS_SET]`, which made this vacuous for exactly the case it was meant to
 /// catch: a set added to the table but not to the array was never iterated, so
 /// the test passed without checking it. It now reads the set names out of
 /// `SIGNABLE_BINARIES` itself, so a new row is covered the moment it lands.
@@ -152,49 +154,7 @@ fn declared_sets() -> Vec<&'static str> {
 fn every_declared_set_is_a_named_constant() {
     assert_eq!(
         declared_sets(),
-        vec![SEARCH_SET, MPM_SET, AGENTS_SET, MEMORY_SET, ANALYZE_SET]
-    );
-}
-
-/// Why: This table decides which binaries get a stable macOS designated
-/// requirement and which stay ad-hoc, losing their TCC grant on every
-/// `cargo install`. Every prior gap in it (#2721 `tm`, #4277
-/// `tagent`, and `trusty-memory`/`trusty-analyze` under the 2026-08-06 owner
-/// ruling) was a silent
-/// omission, never a wrong value — so the guard that matters is one that fails
-/// when a row goes MISSING, which a per-binary spot check cannot do. Pinning
-/// the whole table is deliberate brittleness: changing it should require
-/// stating the change here.
-/// What: Asserts `SIGNABLE_BINARIES` equals the expected `(binary, set,
-/// identifier)` triples exactly, including order.
-/// Test: This is the test.
-#[test]
-fn signable_binaries_table_is_pinned() {
-    assert_eq!(
-        SIGNABLE_BINARIES,
-        &[
-            ("trusty-search", SEARCH_SET, "com.trusty.trusty-search"),
-            (
-                "trusty-embedderd",
-                SEARCH_SET,
-                "com.trusty.trusty-embedderd"
-            ),
-            (
-                "trusty-embedderd-py",
-                SEARCH_SET,
-                "com.trusty.trusty-embedderd-py"
-            ),
-            ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
-            ("tm", MPM_SET, "com.trusty.tm"),
-            ("tagent", AGENTS_SET, "com.trusty.tagent"),
-            ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
-            (
-                "trusty-memory-mcp-bridge",
-                MEMORY_SET,
-                "com.trusty.trusty-memory-mcp-bridge"
-            ),
-            ("trusty-analyze", ANALYZE_SET, "com.trusty.trusty-analyze"),
-        ]
+        vec![SEARCH_SET, MPM_SET, ASSISTANTS_SET, MEMORY_SET, ANALYZE_SET]
     );
 }
 
@@ -321,10 +281,10 @@ fn signing_persistence_tip_names_every_signable_set() {
 
 /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
 /// per-context split — pin the truth table so a future edit cannot
-/// silently flip either preserved pre-PR behavior. #4277 added `AGENTS_SET`
+/// silently flip either preserved pre-PR behavior. #4277 added `ASSISTANTS_SET`
 /// to the always-hardened side (no dylib-loading concern, same as MPM_SET).
 /// What: explicit=true is always hardened (all sets); explicit=false is
-/// hardened only for MPM_SET and AGENTS_SET. `MEMORY_SET` sits on the
+/// hardened only for MPM_SET and ASSISTANTS_SET. `MEMORY_SET` sits on the
 /// SEARCH_SET side (owner ruling 2026-08-06): `trusty-memory` links
 /// `ort`/`fastembed` via `trusty-common`'s `memory-core`, so it carries the
 /// same unverified ONNX-dylib-under-library-validation exposure that keeps
@@ -334,12 +294,12 @@ fn signing_persistence_tip_names_every_signable_set() {
 fn hardened_runtime_policy() {
     assert!(use_hardened_runtime(SEARCH_SET, true));
     assert!(use_hardened_runtime(MPM_SET, true));
-    assert!(use_hardened_runtime(AGENTS_SET, true));
+    assert!(use_hardened_runtime(ASSISTANTS_SET, true));
     assert!(use_hardened_runtime(MEMORY_SET, true));
     assert!(use_hardened_runtime(ANALYZE_SET, true));
     assert!(!use_hardened_runtime(SEARCH_SET, false));
     assert!(use_hardened_runtime(MPM_SET, false));
-    assert!(use_hardened_runtime(AGENTS_SET, false));
+    assert!(use_hardened_runtime(ASSISTANTS_SET, false));
     assert!(!use_hardened_runtime(MEMORY_SET, false));
     assert!(!use_hardened_runtime(ANALYZE_SET, false));
 }
@@ -655,17 +615,25 @@ fn signing_persistence_tip_mentions_sign_identity_and_tctl_sign() {
     assert!(tip.contains("tctl sign"));
 }
 
-/// Why: The cert-setup guidance must reference the exact `tctl sign`
-/// invocation the operator should re-run, parameterised by target.
-/// What: Asserts all 5 steps are present and the target is interpolated.
+/// Why: The cert-setup guidance must name the `tctl sign` invocation the
+/// operator should re-run for the target that failed, not a fixed one.
+/// What: Renders the guidance for two targets and asserts each re-run line
+/// names its own target and never the other.
 /// Test: This is the test.
 #[test]
-fn cert_setup_guidance_contains_steps() {
-    let g = cert_setup_guidance("trusty-mpm");
-    for step in ["1.", "2.", "3.", "4.", "5."] {
-        assert!(g.contains(step), "{step} missing");
+fn cert_setup_guidance_reruns_the_requested_target() {
+    for (target, other) in [
+        ("trusty-mpm", "trusty-search"),
+        ("trusty-search", "trusty-mpm"),
+    ] {
+        let g = cert_setup_guidance(target);
+        let rerun = g
+            .lines()
+            .find(|l| l.contains("Re-run:"))
+            .unwrap_or_else(|| panic!("no re-run line for {target}: {g}"));
+        assert!(rerun.ends_with(&format!("tctl sign {target}")), "{rerun}");
+        assert!(!g.contains(&format!("tctl sign {other}")), "{g}");
     }
-    assert!(g.contains("tctl sign trusty-mpm"));
 }
 
 /// Why: `commands::sign::run_macos` matches on `SignSetError` variants

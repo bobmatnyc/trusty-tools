@@ -2899,6 +2899,10 @@ mod verdict_status;
 #[path = "runner_quote_admission_tests.rs"]
 mod quote_admission;
 
+// #10758: author intent withholds as-is carry-over, keeps introduced bugs.
+#[path = "runner_author_intent_tests.rs"]
+mod author_intent;
+
 // #9310 ruling 50: a D or F grade is a hard verdict floor.
 #[path = "runner_grade_floor_tests.rs"]
 mod grade_floor;

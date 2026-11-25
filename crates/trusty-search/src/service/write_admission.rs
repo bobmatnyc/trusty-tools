@@ -89,7 +89,12 @@ pub(crate) fn admits_pushed(handle: &IndexHandle, path: &str, content_len: usize
     if !index_admission::configured_file(handle, &abs) {
         return Admission::Excluded;
     }
-    let admitted = index_admission::configured_roots(handle)
+    // #10739: an unresolvable include root makes the answer undetermined (503),
+    // never an exclusion that removes chunks.
+    let Ok(roots) = index_admission::configured_roots(handle) else {
+        return Admission::Undetermined;
+    };
+    let admitted = roots
         .iter()
         .flat_map(|root| [root.clone(), canonical_or_raw(root)])
         .any(|root| abs.starts_with(&root) && walker::path_admitted(&root, &abs, &opts));

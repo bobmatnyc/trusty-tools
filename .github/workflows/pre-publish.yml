@@ -225,8 +225,15 @@ jobs:
   #
   # IT FAILS CLOSED IN BOTH DIRECTIONS. No CI run found for the SHA is a
   # FAILURE, not a pass — "never ran" and "ran and passed" are different facts,
-  # and conflating them is the #5620 shape. A run that exists but concluded
-  # anything other than `success` is a failure. There is no override.
+  # and conflating them is the #5620 shape. A pending, missing, skipped or
+  # cancelled required job ("Rust tests (pre-publish gate)", "Clippy",
+  # "MSRV check", "Format check"), any red job, or an API read that fails is a
+  # failure. There is no override.
+  #
+  # #11486: it reads those required jobs, not the whole run's status, so a
+  # dispatch made once they settle passes while slower CI jobs finish;
+  # and it never counts this workflow's own run. Logic and fixtures:
+  # scripts/check-ci-parity.sh, scripts/check-ci-parity-selftest.sh.
   # ==========================================================================
   ci-parity:
     name: CI shards already green for this commit
@@ -242,49 +249,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.resolve-sha.outputs.sha }}
-        run: |
-          set -euo pipefail
-          echo "Looking for a CI workflow run against ${SHA}"
-
-          # The CI workflow's own runs for this head SHA, every page. The
-          # shard aggregate row is "Rust tests (pre-publish gate)" inside that
-          # run, so the run's own conclusion is what we read (it is `failure`
-          # if any shard failed).
-          # #9626: scoped to ci.yml, not the repo-wide runs list. A release
-          # commit carries 100+ tag-triggered runs, and the repo-wide first
-          # page missed the CI run. A failed read exits nonzero under `set -e`.
-          runs="$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
-            --jq '.workflow_runs[] | select(.name == "CI") | {id, status, conclusion, event}' \
-            | jq -s '.')"
-
-          echo "CI runs for this SHA: ${runs}"
-
-          count="$(printf '%s' "${runs}" | jq 'length')"
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::No CI workflow run exists for ${SHA}. The four nextest shards have never executed against this tree, so nothing here can claim they passed. Push this commit to main (or dispatch CI against it) and re-run."
-            exit 1
-          fi
-
-          # Any completed run that succeeded is enough; a re-run after a flake
-          # is a legitimate green.
-          green="$(printf '%s' "${runs}" | jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')"
-          if [ "${green}" -eq 0 ]; then
-            # STILL RUNNING and CONCLUDED RED are different facts and get
-            # different messages. On the gate's first real run the only CI run
-            # for the SHA was `queued` — the gate was dispatched ~20 s after the
-            # merge landed — and a message about a "red CI" would have sent
-            # someone hunting a failure that did not exist. Both still FAIL:
-            # an unfinished CI has not proved anything yet.
-            pending="$(printf '%s' "${runs}" | jq '[.[] | select(.status != "completed")] | length')"
-            if [ "${pending}" -gt 0 ]; then
-              echo "::error::CI for ${SHA} has not finished — ${pending} run(s) still queued or in progress. This gate is dispatched too early; wait for CI to settle, then re-run. Nothing here is red, but nothing has been proved either."
-            else
-              echo "::error::CI has run to completion for ${SHA} and no run concluded 'success'. A release gate cannot pass over a red CI. Conclusions above."
-            fi
-            exit 1
-          fi
-          echo "OK — ${green} green CI run(s) for ${SHA}"
+          SELF_RUN_ID: ${{ github.run_id }}
+        run: ./scripts/check-ci-parity.sh
 
   # ==========================================================================
   # rustdoc-links — GATE 1. Broken intra-doc links.
@@ -310,7 +276,7 @@ jobs:
         run: bash scripts/ci-free-disk-space.sh
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # `libdbus-1-dev` for the same reason ci.yml's `rustdoc-links` job carries
       # it (#7466): the script's `features` lane enables
@@ -321,8 +287,7 @@ jobs:
       # the exact timing #7466 exists to stop.
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev libdbus-1-dev
 
       - name: Cache cargo artifacts
@@ -387,6 +352,15 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+      # #11094: the OKF extraction worker's own lock; the root run above
+      # never reads it. `.cargo/audit.toml` applies to both runs.
+      - name: cargo audit (workers/okf-extract/Cargo.lock)
+        run: cargo audit --file workers/okf-extract/Cargo.lock
+
+      # The summarizer converter worker's own lock, under the same audit.toml.
+      - name: cargo audit (workers/summarizer-convert/Cargo.lock)
+        run: cargo audit --file workers/summarizer-convert/Cargo.lock
+
   # ==========================================================================
   # deny — GATE 3. Licences, provenance, duplicate versions.
   #
@@ -430,6 +404,17 @@ jobs:
       # section for why 105 duplicates are baselined rather than skipped.
       - name: cargo deny check bans + duplicate ratchet
         run: bash scripts/check_deny_duplicates.sh
+
+      # #11094: the OKF extraction worker's own graph and lock. cargo-deny
+      # finds the root deny.toml by walking up from the manifest, so the same
+      # policy applies. The duplicate ratchet is baselined on the root graph
+      # only; here duplicates stay warnings and every other check fails the step.
+      - name: cargo deny check (workers/okf-extract)
+        run: cargo deny --manifest-path workers/okf-extract/Cargo.toml check licenses sources advisories bans
+
+      # The summarizer converter worker's own graph, under the same deny.toml.
+      - name: cargo deny check (workers/summarizer-convert)
+        run: cargo deny --manifest-path workers/summarizer-convert/Cargo.toml check licenses sources advisories bans
 
   # ==========================================================================
   # ignored-tests — GATE 4. The `#[ignore]`d ONNX/embedder tests.
@@ -497,12 +482,11 @@ jobs:
         run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev
 
       - name: Install cargo-nextest
@@ -684,12 +668,11 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev
 
       # libdbus-1-dev is REQUIRED here and nowhere else in this workflow. The
@@ -700,7 +683,7 @@ jobs:
       # correctly NOT reported as a contract verdict. The other jobs build
       # narrower graphs and do not need it.
       - name: Install libdbus (contract extraction only)
-        run: sudo apt-get install -y --no-install-recommends libdbus-1-dev
+        run: bash scripts/ci-apt-install.sh libdbus-1-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -826,6 +809,54 @@ jobs:
           echo "  step must be made to fail instead."
 
   # ==========================================================================
+  # published-content — GATE 7 (#11470). trusty-mpm only.
+  #
+  # trusty-mpm 1.14.8 shipped needing `output-styles/owner-plain.md`, which no
+  # published content release carried. Every earlier gate read the repository's
+  # own content/ tree, or checked versions and tags. This gate runs
+  # scripts/check-content-release-coverage.sh: the newest PUBLISHED content-v*
+  # release must be at or above MIN_CONTENT_TAG and carry every file tm
+  # requires. The candidate binary's clean-HOME run
+  # (scripts/release-smoke-clean-home.sh) is preflight-publish.sh CHECK 11 on
+  # the Mac, which also reruns this coverage check. Any other crate's run passes this job with a SKIP line, so the summary's
+  # "every job is success" rule still holds.
+  # ==========================================================================
+  published-content:
+    name: "Gate 7 — candidate tm against published content"
+    needs: resolve-sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
+
+      - name: Is this a trusty-mpm release?
+        id: target
+        env:
+          INPUT_CRATE: ${{ inputs.crate }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          crate="${INPUT_CRATE:-}"
+          if [ -z "${crate}" ] && [ "${REF_TYPE}" = tag ]; then
+            crate="$(sed -E 's/-v[0-9]+\.[0-9]+\.[0-9]+.*$//' <<<"${REF_NAME}")"
+          fi
+          if [ "${crate}" = trusty-mpm ]; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "SKIP: Gate 7 checks trusty-mpm releases only; this run is for '${crate:-<none>}'."
+          fi
+
+      - name: Content release coverage
+        if: steps.target.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/check-content-release-coverage.sh
+
+  # ==========================================================================
   # summary — the aggregate verdict.
   #
   # Written as "every job must equal success" rather than "no job failed".
@@ -836,7 +867,7 @@ jobs:
   # ==========================================================================
   summary:
     name: Pre-publish gate
-    needs: [resolve-sha, ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts]
+    needs: [resolve-sha, ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts, published-content]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -850,6 +881,7 @@ jobs:
           R_DENY: ${{ needs.deny.result }}
           R_IGNORED: ${{ needs.ignored-tests.result }}
           R_CONTRACTS: ${{ needs.contracts.result }}
+          R_CONTENT: ${{ needs.published-content.result }}
           RESOLVED_SHA: ${{ needs.resolve-sha.outputs.sha }}
         run: |
           set -euo pipefail
@@ -862,7 +894,8 @@ jobs:
             "audit:${R_AUDIT}" \
             "deny:${R_DENY}" \
             "ignored-tests:${R_IGNORED}" \
-            "contracts:${R_CONTRACTS}"; do
+            "contracts:${R_CONTRACTS}" \
+            "published-content:${R_CONTENT}"; do
             name="${pair%%:*}"; result="${pair##*:}"
             if [ "${result}" = "success" ]; then
               echo "  [PASS] ${name}"

@@ -3,7 +3,7 @@
 //! Why: extracted from `cli.rs` (issue #2603) to keep the top-level file
 //! under the 500-SLOC production cap. Distinct from the plural
 //! `tm projects` registry-B surface in `actions::projects`.
-//! What: [`ProjectAction`] — `init`/`list`/`info`/`trust`.
+//! What: [`ProjectAction`] — `init`/`list`/`info`/`unadopt`/`trust`.
 //! Test: exercised via `cli::Command::Project` parse coverage in `tests.rs`.
 
 use clap::Subcommand;
@@ -11,19 +11,52 @@ use clap::Subcommand;
 /// Actions for the `project` subcommand.
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProjectAction {
-    /// Register a working directory as a trusty-mpm project.
+    // #10586 (owner ruling 2026-10-31): deprecated; it writes the same
+    // registry-B record `tm projects register` writes.
+    /// Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`).
+    ///
+    /// #10592: init also changes the checkout's git metadata and the adoption
+    /// ledger. Each change and its reversal:
+    ///
+    /// - `git config --local maintenance.auto false` and `gc.auto 0` (#7171).
+    ///   Reverse: `git config --local --unset maintenance.auto` and
+    ///   `git config --local --unset gc.auto`.
+    /// - `/.trusty-mpm-worktree` and `/.trusty-mpm/` appended to
+    ///   `$(git rev-parse --git-common-dir)/info/exclude` (#8511). Reverse:
+    ///   delete those two lines from that file.
+    /// - each tree's in-tree `.trusty-mpm-worktree` marker moved to
+    ///   `<common-dir>/worktrees/<name>/trusty-mpm-worktree` (main checkout:
+    ///   `.git/trusty-mpm-worktree`) (#8511). Reverse: move each file back to
+    ///   `<tree>/.trusty-mpm-worktree`.
+    /// - every pre-existing worktree recorded in
+    ///   `~/.trusty-mpm/project-registry/worktrees.json` (#7588). Reverse:
+    ///   `tm project unadopt <path>...` (ledger only; `--dry-run` previews).
     Init {
         /// Directory to register (defaults to the cwd).
         #[arg(long)]
         dir: Option<String>,
     },
-    /// List all registered projects with their status.
+    /// List all registered projects with their status (deprecated: use `tm projects list`).
     List,
     /// Show the current project's registered info and config.
     Info {
         /// Project directory (defaults to the cwd).
         #[arg(long)]
         dir: Option<String>,
+    },
+    /// Remove worktrees from the adoption ledger by path, ledger only (#10592).
+    ///
+    /// Edits `~/.trusty-mpm/project-registry/worktrees.json` and nothing else:
+    /// it never edits or deletes a worktree folder and never touches git
+    /// metadata. A later `tm project init` on the same checkout adopts the
+    /// worktrees again.
+    Unadopt {
+        /// Worktree paths to remove from the ledger.
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+        /// Report what would be removed and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Grant (or revoke) consent for a project's `[session] plugins` opt-ins.
     ///

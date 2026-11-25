@@ -20,6 +20,7 @@
 //! | `search.index.status` | `GET /indexes/{id}/status` |
 //! | `search.index.config.get` | `GET /indexes/{id}/config` |
 //! | `search.config.get` | `GET /config` |
+//! | `search.index.path.admits` | none — socket-only (#10739) |
 //! | `search.chunks.list` | `GET /indexes/{id}/chunks` |
 //! | `search.graph.get` | `GET /indexes/{id}/graph` |
 //! | `search.graph.stats` | `GET /indexes/{id}/graph/stats` |
@@ -58,7 +59,7 @@ use trusty_common::uds::server::RpcRouter;
 
 use crate::service::server::{
     CallChainParams, ChunksParams, ConfigResponse, GraphQueryParams, IndexConfigView,
-    ListIndexesParams, NeighborsParams, SearchAppState,
+    ListIndexesParams, NeighborsParams, PathAdmission, PathAdmitsParams, SearchAppState,
 };
 use crate::service::socket::NoParams;
 
@@ -76,6 +77,8 @@ pub const METHOD_INDEX_STATUS: &str = "search.index.status";
 pub const METHOD_INDEX_CONFIG_GET: &str = "search.index.config.get";
 /// `GET /config` — the daemon's resolved memory limits.
 pub const METHOD_CONFIG_GET: &str = "search.config.get";
+/// #10739: socket-only — does an index's live admission policy admit one path?
+pub const METHOD_INDEX_PATH_ADMITS: &str = "search.index.path.admits";
 /// `GET /indexes/{id}/chunks` — a page of one index's chunk corpus.
 pub const METHOD_CHUNKS_LIST: &str = "search.chunks.list";
 /// `GET /indexes/{id}/graph` — the whole symbol graph as D3/Cytoscape JSON.
@@ -103,6 +106,7 @@ pub const METHODS: &[&str] = &[
     METHOD_INDEX_STATUS,
     METHOD_INDEX_CONFIG_GET,
     METHOD_CONFIG_GET,
+    METHOD_INDEX_PATH_ADMITS,
     METHOD_CHUNKS_LIST,
     METHOD_GRAPH_GET,
     METHOD_GRAPH_STATS,
@@ -221,6 +225,14 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     let r = ok!(r, METHOD_CONFIG_GET, NoParams, ConfigResponse, |_s, _p| {
         config_report()
     });
+    // #10739: the per-path admission query (SPEC-OKF-01 D2).
+    let r = fallible!(
+        r,
+        METHOD_INDEX_PATH_ADMITS,
+        IndexScoped<PathAdmitsParams>,
+        PathAdmission,
+        |s, p| crate::service::server::path_admits_report(&s, &p.index_id, &p.params.path)
+    );
 
     // ---- chunks ------------------------------------------------------------
     let r = fallible!(

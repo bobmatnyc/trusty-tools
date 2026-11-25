@@ -97,6 +97,22 @@ cold rather than holding the build
 `tm build-lease status` lists the lease holders, each slot's seed state, and
 every seed in progress with its slot, owner pid and age.
 
+For a lease running in its slot directory, compile capacity is released at
+the end of compilation; the slot directory stays owned until the command exits
+([#8692](https://github.com/bobmatnyc/trusty-tools/issues/8692)). Once cargo
+drops its build lock — before `cargo test` runs test binaries, or when
+`cargo run` starts the program — the holder record reads `run`, and that
+holder no longer counts against `builders.max_concurrent`. It keeps its flock,
+so no other lease builds in its directory while its tests or server run. The
+flip is one-way: a later rebuild inside the same command (`cargo watch`) is
+counted by the census as a foreign build. `builders.max_run_slots` (default:
+the ceiling) caps the run-phase slots, since each keeps a full target
+directory. `cargo watch -s ./script` runs the script's own builds without a
+lease. A lease that keeps a private `CARGO_TARGET_DIR`, or leaves it unset,
+keeps its capacity until it exits, because another build can share that
+directory; [#9223](https://github.com/bobmatnyc/trusty-tools/issues/9223)
+adds the lock that lifts this.
+
 `.envrc` is the operator's local mechanism. The declarative one that tm itself
 ships is the `build:` section of `~/.trusty-tools/trusty-mpm/config.yaml`,
 reported by the `rust_build_env` `tm doctor` row
@@ -136,3 +152,42 @@ dead owner's tree.
 The structural fix — making the check mechanical rather than a remembered step
 — is tracked in
 [#8250](https://github.com/bobmatnyc/trusty-tools/issues/8250).
+
+## 4. Deployed subagents start without CLAUDE.md (#7684)
+
+Every agent tm deploys carries `omitClaudeMd: true` as its first frontmatter
+key, stamped by `compose_agent_for_deploy` in
+`crates/trusty-agents-common/src/agents/skill_root.rs`. A subagent then loads
+no user, project or local CLAUDE.md; it takes its rules from its own prompt,
+the delegation brief, and the project rules block below. The PM keeps its CLAUDE.md: Claude Code ignores the key
+for a main-session `--agent`, and tm sets no session-wide exclude.
+
+The key needs Claude Code v2.1.271 or later. Older versions ignore it, so a
+subagent there still loads the full CLAUDE.md hierarchy. Check with
+`claude --version`.
+
+A user-authored agent file is never rewritten. An untracked file deployed
+before the stamp existed is still adopted, then refreshed on the next deploy.
+
+The project's build and test rules still reach the subagent. On every `Agent`
+or `Task` dispatch, `tm hook --pm-guard` appends a `## Project rules (from
+CLAUDE.md)` block to the prompt (`crates/trusty-mpm/src/core/project_rules.rs`).
+Under `TRUSTY_MPM_DISABLE_HOOKS` or `TRUSTY_MPM_PM_UNRESTRICTED` the hook is
+off and appends nothing; divert workers set the first and so run without the
+block. With
+`[pm_guard] enabled = false` the pm-guard entry is gone, and
+`tm hook --egress-guard`, which every tm-written settings tier carries, appends
+the block instead. Exactly one hook appends it. A `CLAUDE.md` that cannot be
+read yields a one-line `project rules unavailable: <reason>` notice in the block. The block
+holds the regions of the nearest `CLAUDE.md` between `<!-- tm:agent-rules -->`
+and `<!-- /tm:agent-rules -->`; a file with no marker is carried whole. The
+block is capped at 16 KiB and a cut says so. The deployed agent files stay
+project-free, so their update-check hashes do not change. In this repository
+the marked regions are Build and Test Commands, the Rust Test Ladder, the doc,
+`unwrap()` and SLOC rules, changelog fragments, stage-by-name and the crate
+aliases.
+
+A plain Claude Code session that uses tm's machine-global agents without tm's
+hooks has no carrier. Its subagents get neither the project CLAUDE.md nor the
+rules block; they run on their own prompt and the delegation brief only. Run
+such sessions through `tm`, or let `tm install` write the project hooks first.

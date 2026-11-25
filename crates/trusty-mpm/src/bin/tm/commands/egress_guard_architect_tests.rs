@@ -73,7 +73,7 @@ fn architect_main_thread_may_send_slack_and_name_the_slack_host() {
     assert_eq!(run(&slack_send(&fx), &env, config, &log), Verdict::Allow);
     assert_eq!(run(&slack_bash(&fx), &env, config, &log), Verdict::Allow);
     for tool in [
-        "mcp__claude_ai_Gmail__send_message",
+        "mcp__gmail__send_message",
         "mcp__notion__notion-create-pages",
         "mcp__google_chat__send_message",
     ] {
@@ -346,6 +346,45 @@ fn architect_allow_needs_its_audit_line() {
         reason: "r".into(),
     };
     assert_eq!(audited(deny.clone(), Some(allowed), None, TIME), deny);
+}
+
+/// 🔴 #11521: an unbound Architect (stamp, no launch record) keeps the
+/// family and Bash deny here, with no `tm fleet bind` hint; the main-session
+/// pass after this lift passes its read and its send (#11521), never its
+/// subagent's read.
+#[test]
+fn unbound_architect_reads_and_sends_pass_after_this_lift_11521() {
+    use crate::commands::egress_guard_main_read::lift as main_read;
+    let fx = fixture();
+    let env = spoof_env(&fx);
+    let config = || allowlist(&fx);
+    let table = FamilyTable::builtin();
+    let read_call = payload(&fx, "mcp__slack-mcp__slack_read_channel", json!({}));
+    let mut sub_read = read_call.clone();
+    sub_read["agent_id"] = json!("agent-7");
+    for (call, want_allow) in [
+        (read_call, true),
+        (sub_read, false),
+        (slack_send(&fx), true),
+    ] {
+        let read: Result<Value, HookStdinError> = Ok(call.clone());
+        let first = verdict(&read, &table, |p| evaluate(p, &env, config));
+        let (first, allowed) = lift(first, &read, &table, &env, config);
+        assert!(allowed.is_none(), "the record-bound lift must not fire");
+        let (v, _) = main_read(first, &read, &table, &env);
+        assert_eq!(v == Verdict::Allow, want_allow, "{call}");
+    }
+    let read: Result<Value, HookStdinError> = Ok(slack_bash(&fx));
+    let first = verdict(&read, &table, |p| evaluate(p, &env, config));
+    let (first, _) = lift(first, &read, &table, &env, config);
+    match first {
+        Verdict::Deny { check, reason } => {
+            assert_eq!(check, BASH_CHECK);
+            // #11521: the deny no longer tells the user to bind.
+            assert!(!reason.contains("tm fleet bind"), "{reason}");
+        }
+        Verdict::Allow => panic!("an unbound Architect's Bash send must be denied"),
+    }
 }
 
 /// 🔴 #10447: payload fields are reduced to a safe alphabet, so a session id

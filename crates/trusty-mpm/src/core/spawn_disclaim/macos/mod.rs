@@ -12,7 +12,8 @@
 //! they live here once rather than being copy-pasted into each shape's own
 //! file.
 //! What: [`resolve_disclaim_fn`] (dlsym lookup for
-//! `responsibility_spawnattrs_setdisclaim`), [`pipe_cloexec`] (a pipe with
+//! `responsibility_spawnattrs_setdisclaim`), [`cloexec_default`] (the
+//! `POSIX_SPAWN_CLOEXEC_DEFAULT` setup), [`pipe_cloexec`] (a pipe with
 //! both ends `FD_CLOEXEC`), [`OwnedFd`] (an RAII raw-fd guard), and
 //! [`wait_for`] (blocking `waitpid` on a specific pid). `environ` is declared
 //! here since [`capture`] passes it straight through to `posix_spawnp`, and
@@ -143,33 +144,79 @@ pub(super) fn try_wait_for(pid: libc::pid_t) -> io::Result<Option<ExitStatus>> {
     }
 }
 
+// `posix_spawn_file_actions_addinherit_np` — public Darwin <spawn.h>
+// extension: under `POSIX_SPAWN_CLOEXEC_DEFAULT`, keeps `fd` open in the child.
+unsafe extern "C" {
+    fn posix_spawn_file_actions_addinherit_np(
+        file_actions: *mut libc::posix_spawn_file_actions_t,
+        fd: libc::c_int,
+    ) -> libc::c_int;
+}
+
+/// Close every descriptor in the child except those the spawn sets up.
+///
+/// Why: #10083 — a parent fd created without atomic CLOEXEC (mio sockets,
+/// std pipes) must not reach a disclaimed child.
+/// What: ORs `POSIX_SPAWN_CLOEXEC_DEFAULT` into `attr`'s flags, keeping any
+/// flag already set, and marks each fd in `inherit` (stdio the shape leaves
+/// untouched) inheritable. Fds produced by dup2/open file actions survive.
+/// Test: `a_disclaimed_capture_child_does_not_inherit_a_stray_fd`,
+/// `a_disclaimed_status_child_does_not_inherit_a_stray_fd_but_keeps_stdio`.
+///
+/// # Safety
+/// `attr` and `file_actions` must be initialized and not yet destroyed.
+pub(super) unsafe fn cloexec_default(
+    attr: &mut libc::posix_spawnattr_t,
+    file_actions: &mut libc::posix_spawn_file_actions_t,
+    inherit: &[libc::c_int],
+) -> io::Result<()> {
+    // SAFETY: the caller guarantees both structures are initialized.
+    unsafe {
+        let mut flags: libc::c_short = 0;
+        let rc = libc::posix_spawnattr_getflags(attr, &mut flags);
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        flags |= libc::POSIX_SPAWN_CLOEXEC_DEFAULT as libc::c_short;
+        let rc = libc::posix_spawnattr_setflags(attr, flags);
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        for &fd in inherit {
+            let rc = posix_spawn_file_actions_addinherit_np(file_actions, fd);
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Create a pipe whose BOTH ends are `FD_CLOEXEC`.
 ///
-/// Why: the read (or write) end kept by the parent must not leak into
-/// unrelated spawns; the end handed to the child is re-established onto a
-/// standard fd by dup2 (which clears CLOEXEC on the target), so marking the
-/// sources CLOEXEC means the child keeps only its dup2'd fds, no strays.
-/// What: `pipe()` then `fcntl(F_SETFD, FD_CLOEXEC)` on each end.
-/// Test: exercised by the capture and piped tests (correct EOF/no-leak
-/// behaviour).
+/// Why: the parent-held end must not leak into unrelated spawns; the end
+/// handed to the child is re-established onto a standard fd by dup2, so the
+/// child keeps only its dup2'd fds.
+/// What: `pipe()` then `fcntl(F_SETFD, FD_CLOEXEC)` on each end. Darwin has
+/// no `pipe2`, so a window remains between the two calls in which a fork in
+/// another thread inherits both ends. A disclaimed child cannot: every shape
+/// spawns with [`cloexec_default`]. A FIFO opened `O_CLOEXEC` would close the
+/// window but never reports EOF through tokio's kqueue reader (#10083).
+/// Test: `pipe_cloexec_ends_are_close_on_exec`; the capture and piped tests.
 pub(super) fn pipe_cloexec() -> io::Result<(libc::c_int, libc::c_int)> {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: `pipe` writes exactly two fds into the array.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    for fd in fds {
+    let (rd, wr) = (OwnedFd(fds[0]), OwnedFd(fds[1]));
+    for fd in [rd.0, wr.0] {
         // SAFETY: `fd` is a freshly created, open fd we own.
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-            let e = io::Error::last_os_error();
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
-            }
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
     }
-    Ok((fds[0], fds[1]))
+    Ok((rd.into_raw(), wr.into_raw()))
 }
 
 /// A raw fd that is closed on drop unless its value is `-1`.
@@ -196,6 +243,72 @@ impl Drop for OwnedFd {
         if self.0 >= 0 {
             // SAFETY: we own this fd and it is closed exactly once.
             unsafe { libc::close(self.0) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Open `/dev/null` with `FD_CLOEXEC` cleared: a descriptor nobody passed
+    /// to the child on purpose, but which a plain exec lets it inherit.
+    fn inheritable_stray_fd() -> OwnedFd {
+        // SAFETY: `open` on a NUL-terminated literal path; the guard owns it.
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert!(fd >= 0, "open /dev/null: {}", io::Error::last_os_error());
+        // SAFETY: `fd` is open and ours; F_SETFD 0 clears FD_CLOEXEC.
+        assert_ne!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, -1);
+        OwnedFd(fd)
+    }
+
+    /// #10083: a capture-shape child sees no stray parent descriptor.
+    #[test]
+    fn a_disclaimed_capture_child_does_not_inherit_a_stray_fd() {
+        let stray = inheritable_stray_fd();
+        let script = format!(
+            "if [ -e /dev/fd/{} ]; then echo leaked; else echo clean; fi",
+            stray.0
+        );
+        let out = spawn_capture_disclaimed("/bin/sh", &["-c".to_string(), script])
+            .expect("spawn /bin/sh");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "clean");
+    }
+
+    /// #10083: an inherited-stdio child sees no stray descriptor, yet still
+    /// holds its stdin, stdout and stderr.
+    #[test]
+    fn a_disclaimed_status_child_does_not_inherit_a_stray_fd_but_keeps_stdio() {
+        let stray = inheritable_stray_fd();
+        let script = format!(
+            "[ -e /dev/fd/0 ] && [ -e /dev/fd/1 ] && [ -e /dev/fd/2 ] && [ ! -e /dev/fd/{} ]",
+            stray.0
+        );
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(script);
+        let status = spawn_status_inherit_disclaimed(&mut cmd).expect("spawn /bin/sh");
+        assert!(
+            status.success(),
+            "child saw a stray fd or lost stdio: {status:?}"
+        );
+    }
+
+    /// #10083: both pipe ends are close-on-exec and form a blocking pipe.
+    #[test]
+    fn pipe_cloexec_ends_are_close_on_exec() {
+        let (rd, wr) = pipe_cloexec().expect("pipe_cloexec");
+        let (rd, wr) = (OwnedFd(rd), OwnedFd(wr));
+        for fd in [rd.0, wr.0] {
+            // SAFETY: F_GETFD on an fd we own.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+        }
+        // SAFETY: valid fds and a 1-byte buffer.
+        unsafe {
+            assert_eq!(libc::write(wr.0, b"x".as_ptr().cast(), 1), 1);
+            let mut b = [0u8; 1];
+            assert_eq!(libc::read(rd.0, b.as_mut_ptr().cast(), 1), 1);
+            assert_eq!(libc::fcntl(rd.0, libc::F_GETFL) & libc::O_NONBLOCK, 0);
         }
     }
 }

@@ -33,7 +33,7 @@
 
 use crate::commands::pm_guard_bash::{
     MAX_SUBSTITUTION_DEPTH, command_substitutions, evaluate_pod_env_dump_command,
-    evaluate_process_env_dump_command, without_inert_heredoc_bodies,
+    evaluate_process_env_dump_command, evaluate_quoted_ps_argv, without_inert_heredoc_bodies,
 };
 use crate::commands::pm_guard_secret_consumers::evaluate_gh_api_secret_delete;
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
@@ -78,8 +78,12 @@ fn argv_rules(command: &str, with_file_rule: bool, with_delete: bool) -> Option<
     let file = with_file_rule
         .then(|| evaluate_secret_file_read_command(command))
         .flatten();
-    let text = ungroup(&without_inert_heredoc_bodies(command));
-    file.or_else(|| evaluate_pod_env_dump_command(&text))
+    let live = without_inert_heredoc_bodies(command);
+    // #10688: `Popen(('ps','eww'))` loses its opener once ungrouped.
+    let quoted_ps = evaluate_quoted_ps_argv(&live);
+    let text = ungroup(&live);
+    file.or(quoted_ps)
+        .or_else(|| evaluate_pod_env_dump_command(&text))
         .or_else(|| evaluate_process_env_dump_command(&text))
         // #8875: a `gh api` DELETE of a secret names no secret-shaped word.
         .or_else(|| {

@@ -1,0 +1,8 @@
+{"case": "missing_file", "step": 0, "alerts": [], "state": {}}
+{"case": "two_lines_then_one_more", "step": 0, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-a", "pane": "", "kind": "ctxcycle", "fingerprint": "f1", "detail": "cycle failed", "display": "[tm-a]: ctxcycle: cycle failed"}, {"ts": "2025-10-09T08:53:20Z", "session": "", "pane": "", "kind": "ctxcycle", "fingerprint": "f2", "detail": "", "display": "ctxcycle: "}], "state": {"ctx_cycle_offset": 98}}
+{"case": "two_lines_then_one_more", "step": 1, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-b", "pane": "", "kind": "ctxcycle", "fingerprint": "f3", "detail": "x", "display": "[tm-b]: ctxcycle: x"}], "state": {"ctx_cycle_offset": 154}}
+{"case": "two_lines_then_one_more", "step": 2, "alerts": [], "state": {"ctx_cycle_offset": 154}}
+{"case": "dry_run_keeps_offset", "step": 0, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-a", "pane": "", "kind": "ctxcycle", "fingerprint": "f1", "detail": "d", "display": "[tm-a]: ctxcycle: d"}], "state": {}}
+{"case": "dry_run_keeps_offset", "step": 1, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-a", "pane": "", "kind": "ctxcycle", "fingerprint": "f1", "detail": "d", "display": "[tm-a]: ctxcycle: d"}], "state": {}}
+{"case": "partial_last_line", "step": 0, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-a", "pane": "", "kind": "ctxcycle", "fingerprint": "f1", "detail": "d", "display": "[tm-a]: ctxcycle: d"}], "state": {"ctx_cycle_offset": 74}}
+{"case": "partial_last_line", "step": 1, "alerts": [], "state": {"ctx_cycle_offset": 97}}

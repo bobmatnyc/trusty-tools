@@ -237,8 +237,9 @@ fn render_statusline_from(
 ///
 /// Why (#2011 follow-up, extended #2140, #6304 and #6958): separating ORDER +
 /// JOIN from the I/O-bound probes that produce each segment value is what makes
-/// the exact layout — `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> |
-/// <model> | ctx% | <cost> | <usage> | <savings>` — pinned by a deterministic
+/// the exact layout — `TM <ver> ● | <project> ⎇ <branch> | @<gh> |
+/// ✻<account> | <model> | ctx% | <cost> | <usage> | <savings>` (#11799:
+/// savings last; a narrow pane's cut may drop it) — pinned by a deterministic
 /// test using hand-supplied synthetic strings. Without this split, a future
 /// refactor could transpose or silently drop a middle segment and no test would
 /// catch it.
@@ -260,6 +261,7 @@ fn assemble_statusline(
     usage: Option<String>,
     savings: Option<String>,
 ) -> String {
+    // #11799: savings last per owner ruling Dm5
     [
         Some(version),
         project,
@@ -543,7 +545,8 @@ mod tests {
     /// model) produces a different, easily-diffed string rather than two
     /// plausible-looking segments that a reviewer might not notice swapped.
     /// What: asserts both the exact joined string AND the split-on-` | `
-    /// vector equal `[version, project, gh, account, model, ctx, cost, usage]`.
+    /// vector equal `[version, project, gh, account, model, ctx, cost, usage,
+    /// savings]`.
     /// Test: itself.
     #[test]
     fn assemble_statusline_pins_segment_order_with_markers() {
@@ -569,6 +572,45 @@ mod tests {
             ],
             "segment order must exactly match [version, project, gh, account, model, ctx, cost, usage, savings]"
         );
+    }
+
+    /// Why (#11799): owner ruling Dm5 puts savings last and accepts that a
+    /// narrow pane's cut drops it, reversing #11560's slot-2 placement.
+    /// What: the savings segment is the final ` | ` segment of a realistic full
+    /// line, and a cut to 80 display columns (an emoji or a CJK-range char
+    /// counts two) drops it while keeping the leading segments.
+    /// Test: itself.
+    #[test]
+    fn the_savings_segment_is_last_and_an_80_column_cut_may_drop_it() {
+        let out = assemble_statusline(
+            "TM 1.14.12 \u{25cf}".to_string(),
+            Some("bobmatnyc/trusty-tools \u{2387} fix/11560-savings-row".to_string()),
+            Some("@bobmatnyc".to_string()),
+            Some("\u{273b}someone@example.com".to_string()),
+            Some("Opus 4.5".to_string()),
+            Some("ctx 41%".to_string()),
+            Some("$12.34".to_string()),
+            Some("\u{23f3}24% \u{1f4c5}41%".to_string()),
+            Some("\u{1f4b8}62%/48%".to_string()),
+        );
+        let mut cols = 0;
+        let cut: String = out
+            .chars()
+            .take_while(|c| {
+                cols += if u32::from(*c) >= 0x1F000 { 2 } else { 1 };
+                cols <= 80
+            })
+            .collect();
+        assert_eq!(
+            out.rsplit(" | ").next(),
+            Some("\u{1f4b8}62%/48%"),
+            "savings must be the last segment: {out}"
+        );
+        assert!(
+            cut.starts_with("TM 1.14.12 \u{25cf} | "),
+            "cut at 80: {cut}"
+        );
+        assert!(!cut.contains('\u{1f4b8}'), "cut at 80: {cut}");
     }
 
     /// Why (#2011 follow-up): every segment except `version` must be omittable
@@ -807,8 +849,8 @@ mod tests {
     /// Test: itself.
     #[test]
     fn render_gh_account_segment_multi() {
-        let seg = render_gh_account_segment(Some("bob-duetto"), 2).expect("segment");
-        assert_eq!(seg, "@bob-duetto\u{26a0}");
+        let seg = render_gh_account_segment(Some("acme-admin"), 2).expect("segment");
+        assert_eq!(seg, "@acme-admin\u{26a0}");
         assert!(seg.contains('\u{26a0}'), "multi-account marker must appear");
     }
 

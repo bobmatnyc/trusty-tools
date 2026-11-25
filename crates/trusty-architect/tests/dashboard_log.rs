@@ -2,11 +2,14 @@
 //! `validate` and the secret refusal, in both formats (DOC-82 LDG-2.3.5,
 //! LDG-2.8.3, LDG-2.8.4).
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::{no_secret, snapshot};
 use serde_json::{Map, Value, json};
 use trusty_architect::dashboard::{
     DashError, DeleteArchive, Format, Op, PruneLog, Removed, SchemaSet, Store,
@@ -20,10 +23,6 @@ const FORMATS: [Format; 2] = [Format::Dir, Format::Jsonl];
 /// 2026-10-21T10:00:00Z.
 const NOW: f64 = 1_792_576_800.0;
 const NOW_ISO: &str = "2026-10-21T10:00:00Z";
-
-fn no_secret(_: &str) -> Option<String> {
-    None
-}
 
 /// A test scanner: a `ghp_` token with 16+ trailing characters.
 fn ghp(text: &str) -> Option<String> {
@@ -80,24 +79,6 @@ impl Fixture {
             Format::Jsonl => self.root.join(format!("{coll}.jsonl")),
         }
     }
-}
-
-/// Every file under `root` with its bytes, `.lock` excluded.
-fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.file_name().is_some_and(|n| n != ".lock") {
-                out.push((path.clone(), fs::read(&path).unwrap_or_default()));
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 /// A prune log that, once it has recorded a batch's deletes, puts a
@@ -787,6 +768,45 @@ fn write_without_secret_scan_refused() -> R {
             "{format}: {got:?}"
         );
         assert!(!root.exists(), "{format}: the store was touched");
+    }
+    Ok(())
+}
+
+/// #10678: the store stamps `created`/`updated` from its own clock and
+/// ignores a client value for either; an event field (`done_at`) stays the
+/// client's, and a field the body lacks is not added.
+#[test]
+fn store_stamps_created_and_updated_and_ignores_client_values() -> R {
+    let bogus = "1999-01-01T00:00:00Z";
+    let future = "2099-12-31T23:59:59Z";
+    for format in FORMATS {
+        let f = Fixture::new(format)?;
+        let s = f.store();
+        let body = json!({"title": "t", "created": bogus, "updated": future, "done_at": bogus});
+        s.set("docs", "a", body, None)?;
+        let first = s.get("docs", "a")?.data;
+        assert_eq!(first["created"], NOW_ISO, "{format}");
+        assert_eq!(first["updated"], NOW_ISO, "{format}");
+        assert_eq!(first["done_at"], bogus, "{format}");
+
+        f.clock.sleep(Duration::from_secs(300));
+        s.update(
+            "docs",
+            "a",
+            json!({"created": future, "updated": bogus}),
+            None,
+        )?;
+        let second = s.get("docs", "a")?.data;
+        assert_eq!(second["created"], NOW_ISO, "{format}");
+        assert_eq!(second["updated"], "2026-10-21T10:05:00Z", "{format}");
+
+        f.clock.sleep(Duration::from_secs(300));
+        s.update("docs", "a", json!({"title": "t2"}), None)?;
+        assert_eq!(s.get("docs", "a")?.data["updated"], "2026-10-21T10:10:00Z");
+
+        s.set("docs", "b", json!({"n": 1}), None)?;
+        let plain = s.get("docs", "b")?.data;
+        assert!(!plain.contains_key("created") && !plain.contains_key("updated"));
     }
     Ok(())
 }

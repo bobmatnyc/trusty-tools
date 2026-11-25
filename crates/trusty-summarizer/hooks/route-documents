@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Claude Code PreToolUse hook for Read: route documents to trusty-summarizer.
+
+Why: a pilot session read documents with the built-in Read tool because no
+instruction reached it (pilot finding). This hook puts the routing at the tool call.
+
+What: reads the hook input JSON on stdin and decides:
+
+- tool_name is not "Read", or no file_path          -> allow
+- trusty-summarizer is not on PATH                   -> allow, note on stderr
+- the file does not exist or is not a regular file  -> allow (Read reports it)
+- extension .pdf .docx .pptx .html .htm .eml         -> deny, with commands
+- extension .txt .text .md .markdown, and
+  ceil(characters / 4) >= 15000                      -> deny, with commands
+  (at 239,988 bytes or more, denied from the size alone; never reads more
+  than that. A symlink is judged by its own and its target's extension.)
+- anything else (XLSX, source code, small text)      -> allow
+
+Allow is exit 0 with no output, so the session's normal permission rules
+apply. Deny is exit 0 with
+{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+ "permissionDecision": "deny", "permissionDecisionReason": "..."}}; the
+reason is shown to the agent. Any unexpected failure allows the Read.
+
+The token estimate is the CLI's own rule (characters / 4, rounded up),
+computed here so the hook starts no process and adds no usage-log line.
+Test: crates/trusty-summarizer/tests/hook.rs
+"""
+
+import json
+import os
+import shlex
+import shutil
+import sys
+
+CLI = "trusty-summarizer"
+THRESHOLD_TOKENS = 15000
+CONVERTED = {".pdf", ".docx", ".pptx", ".html", ".htm", ".eml"}
+TEXT = {".txt", ".text", ".md", ".markdown"}
+
+
+def note(msg):
+    print(f"route-documents: {msg}", file=sys.stderr)
+
+
+# A file this long holds at least 59,997 characters (UTF-8 is at most 4 bytes
+# per character), so ceil(chars / 4) is at least THRESHOLD_TOKENS: deny
+# without reading. Anything shorter is read in full, so a read never
+# exceeds this many bytes.
+DENY_BYTES = 4 * (4 * THRESHOLD_TOKENS - 3)
+
+
+def tokens_est(path):
+    """(ceil(chars / 4), exact) of the file as UTF-8; None when unreadable.
+
+    At DENY_BYTES or more the file is not read: the estimate is a lower
+    bound (exact is False) that is already over the threshold.
+    """
+    try:
+        size = os.path.getsize(path)
+        if size >= DENY_BYTES:
+            return THRESHOLD_TOKENS, False
+        # Characters never exceed bytes: a small file needs no read.
+        if (size + 3) // 4 < THRESHOLD_TOKENS:
+            return (size + 3) // 4, True
+        with open(path, "rb") as f:
+            raw = f.read(DENY_BYTES)
+        return (len(raw.decode("utf-8", errors="replace")) + 3) // 4, True
+    except OSError:
+        return None
+
+
+def requested_range(tool_input):
+    """"A-B" for a Read with offset and/or limit (offset is the 1-based first
+    line, limit the line count); None when neither is a positive integer."""
+    def pos(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+    offset, limit = pos(tool_input.get("offset")), pos(tool_input.get("limit"))
+    if limit is None:
+        return None
+    start = offset or 1
+    return f"{start}-{start + limit - 1}"
+
+
+def reason(path, why, lines=None):
+    q = shlex.quote(path)
+    exact = (
+        f"For the range you asked for: {CLI} read {q} --lines {lines}\n"
+        if lines
+        else ""
+    )
+    return (
+        f"{why} Use the {CLI} CLI instead of Read (this also covers offset, "
+        f"limit and pages):\n{exact}"
+        f"  {CLI} size {q}            # tokens_est and lines\n"
+        f"  {CLI} summarize {q}       # outline with line ranges\n"
+        f"  {CLI} find {q} --query \"term or phrase\"\n"
+        f"  {CLI} read {q} --lines A-B   # 1-based, inclusive\n"
+        f"Under 15,000 tokens, read it whole: {CLI} read {q} --lines 1-N "
+        f"(N = lines from size)."
+    )
+
+
+def decide(data):
+    """None to allow, else the deny reason."""
+    if data.get("tool_name") != "Read":
+        return None
+    tool_input = data.get("tool_input") or {}
+    path = tool_input.get("file_path")
+    if not isinstance(path, str) or not path:
+        return None
+    if not os.path.isabs(path):
+        path = os.path.join(data.get("cwd") or os.getcwd(), path)
+    # Read opens the link's target, so the target's extension counts too.
+    target = os.path.realpath(path)
+    exts = {os.path.splitext(p)[1].lower() for p in (path, target)}
+    if exts & CONVERTED:
+        ext = sorted(exts & CONVERTED)[0]
+    elif exts & TEXT:
+        ext = sorted(exts & TEXT)[0]
+    else:
+        return None
+    if shutil.which(CLI) is None:
+        note(f"{CLI} is not on PATH; allowing Read of {path}")
+        return None
+    if not os.path.isfile(path):
+        return None
+    if ext in CONVERTED:
+        return reason(
+            path,
+            f"{os.path.basename(path)} is a {ext[1:].upper()} document.",
+            requested_range(tool_input),
+        )
+    got = tokens_est(target)
+    if got is not None and got[0] >= THRESHOLD_TOKENS:
+        est, exact = got
+        size = f"about {est}" if exact else "at least 15,000"
+        return reason(
+            path,
+            f"{os.path.basename(path)} is {size} tokens (15,000 or more).",
+            requested_range(tool_input),
+        )
+    return None
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+        why = decide(data) if isinstance(data, dict) else None
+    except Exception as e:  # fail open: never stop a session reading
+        note(f"allowing Read after an error: {e}")
+        return 0
+    if why is not None:
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": why,
+                }
+            },
+            sys.stdout,
+        )
+        sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

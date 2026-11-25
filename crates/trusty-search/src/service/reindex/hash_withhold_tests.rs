@@ -642,13 +642,63 @@ async fn remove_file_forgets_the_hash_so_a_reindex_restores_it_9236() {
     );
 }
 
-/// Why (#9236 review): `remove_file_report`'s hash step runs after the delete
-/// commits, so its failure arm leaves the chunks gone and the hash row in
-/// place — and the reindex would then skip the file.
-/// What: on a corpus-backed indexer, under the forget fault, the remove
-/// answers 500 `remove_file_failed` with `a.rs`'s chunks gone and its
-/// persisted hash row kept. A retry answers 200 with 0 chunks, clears the
-/// row, and the next reindex indexes `a.rs` again.
+/// Whether `file`'s hash row is in redb. A reindex swaps in a new corpus
+/// store, so each check re-reads it.
+async fn hash_row(handle: &IndexHandle, file: &str) -> bool {
+    let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
+    corpus
+        .load_file_hashes()
+        .expect("read hash rows")
+        .iter()
+        .any(|(f, _)| f == file)
+}
+
+/// How many of `file`'s chunk rows are in redb.
+async fn chunk_rows(handle: &IndexHandle, file: &str) -> usize {
+    let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
+    corpus
+        .load_all_chunks()
+        .expect("read chunk rows")
+        .iter()
+        .filter(|c| c.file == file)
+        .count()
+}
+
+/// A registered, corpus-backed index over `root` with `a.rs` and `b.rs`.
+fn corpus_backed(
+    id: &str,
+    root: &Path,
+    store: &Path,
+) -> (
+    Arc<IndexHandle>,
+    Arc<crate::service::server::SearchAppState>,
+) {
+    fs::write(root.join("a.rs"), ALPHA).expect("a.rs");
+    fs::write(root.join("b.rs"), BRAVO).expect("b.rs");
+    let mut indexer = CodeIndexer::new(id, root.to_path_buf());
+    indexer.set_corpus_store(Arc::new(
+        crate::core::corpus::CorpusStore::open(&store.join("index.redb")).expect("open corpus"),
+    ));
+    let registry = crate::core::registry::IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.to_path_buf(),
+    ));
+    let state = Arc::new(crate::service::server::SearchAppState::new(registry));
+    (handle, state)
+}
+
+/// Why (#11096): `remove_file_report` deleted a file's chunk rows and its
+/// hash row in two redb transactions. A failed second one left the chunks
+/// gone and the hash kept, so the next reindex skipped the unchanged file and
+/// it was lost.
+/// What: on a corpus-backed indexer, the forget fault fails the one
+/// transaction before its commit. The remove answers 500 `remove_file_failed`
+/// with `a.rs`'s chunks still searchable, its chunk rows and its hash row
+/// still in redb, and its cached hash kept. A retry answers 200, removes the
+/// chunks, clears the row, and the next reindex indexes `a.rs` again. Fails
+/// against 063d3cabba: the chunks are gone after the 500.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 // #9630: `reindex` takes the process-global memory limit, so a `#[serial]`
@@ -656,39 +706,20 @@ async fn remove_file_forgets_the_hash_so_a_reindex_restores_it_9236() {
 // rolled back); `parallel` keeps it out of that window, as this file's other
 // reindex tests already are.
 #[serial_test::parallel]
-async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
-    let id = "remove-file-forget-fail-9236";
+async fn remove_file_fault_in_the_hash_delete_keeps_chunks_and_hash_11096() {
+    let id = "remove-file-one-txn-fault-11096";
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = tempfile::tempdir().expect("store dir");
-    let root = tmp.path().to_path_buf();
-    fs::write(root.join("a.rs"), ALPHA).expect("a.rs");
-    fs::write(root.join("b.rs"), BRAVO).expect("b.rs");
-    let mut indexer = CodeIndexer::new(id, root.clone());
-    indexer.set_corpus_store(Arc::new(
-        crate::core::corpus::CorpusStore::open(&store.path().join("index.redb"))
-            .expect("open corpus"),
-    ));
-    let registry = crate::core::registry::IndexRegistry::new();
-    let handle = registry.register(IndexHandle::bare(
-        IndexId::new(id),
-        Arc::new(tokio::sync::RwLock::new(indexer)),
-        root.clone(),
-    ));
-    let state = Arc::new(crate::service::server::SearchAppState::new(registry));
-    // A reindex swaps in a new corpus store, so each check re-reads it.
-    async fn has_row(handle: &IndexHandle) -> bool {
-        let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
-        corpus
-            .load_file_hashes()
-            .expect("read hash rows")
-            .iter()
-            .any(|(file, _)| file == "a.rs")
-    }
+    let (handle, state) = corpus_backed(id, tmp.path(), store.path());
     reindex(&handle).await;
     assert!(landed_text(&handle, "a.rs").await.contains("alpha_8976"));
     assert!(
-        has_row(&handle).await,
+        hash_row(&handle, "a.rs").await,
         "setup: the reindex must persist a.rs's hash"
+    );
+    assert!(
+        chunk_rows(&handle, "a.rs").await > 0,
+        "setup: the reindex must persist a.rs's chunk rows"
     );
 
     let fault = id.to_string();
@@ -701,7 +732,7 @@ async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
         .lock()
         .expect("seam")
         .retain(|f| *f != fault);
-    let (status, body) = refused.expect_err("a failed hash forget must not answer 200");
+    let (status, body) = refused.expect_err("a failed hash delete must not answer 200");
     assert_eq!(
         status,
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -709,22 +740,73 @@ async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
     );
     assert_eq!(body["error"], "remove_file_failed", "{body}");
     assert!(
-        landed_text(&handle, "a.rs").await.is_empty(),
-        "the delete committed before the hash step failed"
+        landed_text(&handle, "a.rs").await.contains("alpha_8976"),
+        "a failed transaction must keep the chunks searchable"
     );
     assert!(
-        has_row(&handle).await,
-        "the failed hash step must leave the row"
+        chunk_rows(&handle, "a.rs").await > 0,
+        "a failed transaction must keep the chunk rows in redb"
+    );
+    assert!(
+        hash_row(&handle, "a.rs").await,
+        "a failed transaction must keep the hash row"
+    );
+    assert_eq!(
+        hashes_for(&handle.id)
+            .get(&PathBuf::from("a.rs"))
+            .map(|h| h.clone()),
+        Some(hash_content(ALPHA)),
+        "a failed transaction must keep the cached hash"
     );
 
     let reply = remove_over_report(&state, id, "a.rs")
         .await
         .expect("the retry must answer 200");
-    assert_eq!(reply["removed_chunks"], 0, "{reply}");
-    assert!(!has_row(&handle).await, "the retry must clear the hash row");
+    assert!(reply["removed_chunks"].as_u64() > Some(0), "{reply}");
+    assert!(landed_text(&handle, "a.rs").await.is_empty());
+    assert_eq!(
+        chunk_rows(&handle, "a.rs").await,
+        0,
+        "the retry drops the rows"
+    );
+    assert!(
+        !hash_row(&handle, "a.rs").await,
+        "the retry must clear the hash row"
+    );
     reindex(&handle).await;
     assert!(
         landed_text(&handle, "a.rs").await.contains("alpha_8976"),
         "the reindex after the retry must index a.rs again"
     );
+}
+
+/// Why (#11096): the happy path of the one-transaction delete.
+/// What: on a corpus-backed indexer, `remove-file a.rs` answers 200 and
+/// leaves no chunk row, no hash row and no cached hash for `a.rs`, while
+/// `b.rs` keeps all three.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+// #9630: as the sibling reindex tests, kept out of a `#[serial]` memory limit.
+#[serial_test::parallel]
+async fn remove_file_drops_chunk_rows_and_hash_row_together_11096() {
+    let id = "remove-file-one-txn-ok-11096";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = tempfile::tempdir().expect("store dir");
+    let (handle, state) = corpus_backed(id, tmp.path(), store.path());
+    reindex(&handle).await;
+    assert!(chunk_rows(&handle, "a.rs").await > 0, "setup: a.rs rows");
+    assert!(hash_row(&handle, "a.rs").await, "setup: a.rs hash row");
+
+    let reply = remove_over_report(&state, id, "a.rs")
+        .await
+        .expect("remove");
+    assert!(reply["removed_chunks"].as_u64() > Some(0), "{reply}");
+    assert_eq!(chunk_rows(&handle, "a.rs").await, 0, "a.rs rows gone");
+    assert!(!hash_row(&handle, "a.rs").await, "a.rs hash row gone");
+    assert!(
+        hashes_for(&handle.id).get(&PathBuf::from("a.rs")).is_none(),
+        "a.rs cached hash gone"
+    );
+    assert!(chunk_rows(&handle, "b.rs").await > 0, "b.rs rows kept");
+    assert!(hash_row(&handle, "b.rs").await, "b.rs hash row kept");
 }

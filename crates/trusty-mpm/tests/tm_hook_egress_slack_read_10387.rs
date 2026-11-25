@@ -2,7 +2,7 @@
 //! through the real binary (#10387).
 //!
 //! Why: the grant is only as narrow as the binary Claude Code runs: two exact
-//! read tools, on two exact servers, for the project the host `config.yaml`
+//! read tools, on one exact server (#10735), for the project the host `config.yaml`
 //! names, and nothing for any fault or any bypass variable.
 //! What: a canonical temp `HOME` holding `.trusty-tools/trusty-mpm/config.yaml`
 //! and two project dirs; each case pipes one `PreToolUse` payload with
@@ -14,13 +14,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
-use crate::tm_hook_egress_guard_8454::{assert_allowed, assert_denied, guard_command_in};
+use crate::tm_hook_egress_guard_8454::{
+    SESSION_PROFILE, assert_allowed, assert_denied, guard_command_in,
+};
 
 /// The two read tools the allowlist may grant.
 const READS: &[&str] = &["slack_read_channel", "slack_read_thread"];
 
-/// The two exact server segments.
-const SERVERS: &[&str] = &["slack-mcp", "claude_ai_Slack"];
+/// The exact server segment; #10735 left `claude_ai_Slack` undenied.
+const SERVERS: &[&str] = &["slack-mcp"];
 
 /// A canonical temp root with `home/`, `tm-apex/` and `other/`.
 struct Fx {
@@ -199,6 +201,27 @@ fn slack_read_allowlist_fault_arms_refuse() {
     );
 }
 
+/// 🔴 #11273: a PM main session reads Slack in a project with no allowlist
+/// entry, through the main-session pass; its subagent's read stays refused,
+/// the PM's own post passes (#11521), and the #10387 line is not printed.
+#[test]
+fn a_pm_main_session_reads_without_an_entry_and_its_subagent_does_not_11273() {
+    let fx = Fx::new();
+    fx.write(&fx.yaml());
+    let other = fx.root.join("other");
+    let pm = (SESSION_PROFILE, "pm");
+    let read = "mcp__slack-mcp__slack_read_channel";
+    let out = fx.run(read, Some(&other), &[pm]);
+    assert_allowed(&out, "PM main-session read");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("egress-slack-read-allowed"), "{stderr}");
+    let out = fx.run(read, Some(&other), &[pm, ("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_refused(&out, "subagent read", "no slack_read_allowlist entry");
+    // #11521: the PM's own post passes through the main-session lift.
+    let out = fx.run("mcp__slack-mcp__slack_send_message", Some(&other), &[pm]);
+    assert_allowed(&out, "PM post");
+}
+
 /// 🔴 #10387: the pm-guard bypass variables and the subagent marker widen
 /// nothing: another project and a post stay refused under each.
 #[test]
@@ -215,7 +238,7 @@ fn slack_read_allowlist_bypass_envs_do_not_widen() {
         let out = fx.run("mcp__slack-mcp__slack_read_channel", Some(&other), &[env]);
         assert_refused(&out, case, "no slack_read_allowlist entry");
         let out = fx.run(
-            "mcp__claude_ai_Slack__slack_send_message",
+            "mcp__slack-mcp__slack_send_message",
             Some(&fx.apex()),
             &[env],
         );

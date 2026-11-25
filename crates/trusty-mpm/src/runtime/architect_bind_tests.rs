@@ -111,6 +111,36 @@ fn an_architect_spec_with_no_claude_or_no_home_is_unbound() {
     assert!(!root.join("architect-launch").exists(), "no record written");
 }
 
+/// #11270 (Fail-Open Check): a fresh Architect left unbound is stopped and is
+/// an error naming the session and `tm fleet relaunch`; a failed stop says so.
+/// A bound or non-Architect launch is `Ok` and stops nothing.
+#[test]
+fn a_failed_fresh_bind_stops_the_session_and_errors_11270() {
+    for unbound in [
+        Binding::NoClaude("gone".to_owned()),
+        Binding::NotRecorded("disk".to_owned()),
+    ] {
+        let mut stopped = false;
+        let err = require_bound(unbound.clone(), "tm-a", || {
+            stopped = true;
+            Ok(())
+        })
+        .expect_err("an unbound Architect is an error");
+        assert!(stopped, "{unbound:?} was not stopped");
+        for part in ["tm-a", "NOT bound", "was killed", "tm fleet relaunch"] {
+            assert!(err.contains(part), "{part} missing: {err}");
+        }
+        let err = require_bound(unbound, "tm-a", || Err("no tmux".to_owned()))
+            .expect_err("still an error");
+        assert!(err.contains("could NOT be killed (no tmux)"), "{err}");
+    }
+    let never = || -> Result<(), String> { panic!("nothing to stop") };
+    assert_eq!(
+        require_bound(Binding::NotArchitect, "tm-a", never),
+        Ok(Binding::NotArchitect)
+    );
+}
+
 #[test]
 fn an_unbound_architect_names_the_relaunch() {
     let warn = Binding::NoClaude("gone".to_owned())
@@ -237,7 +267,7 @@ enum Site {
     Refuses(&'static str),
     /// Does not bind yet; named in [`DEFERRED`].
     Deferred,
-    /// Starts no `claude`: defines the stamp, or a doctor probe line.
+    /// Starts no `claude`: defines the stamp, reads it, or a doctor probe line.
     NoLaunch,
 }
 
@@ -255,6 +285,8 @@ const STAMP_NEEDLES: &[&str] = &[
 const SITES: &[(&str, Site)] = &[
     ("core/session_profile.rs", Site::NoLaunch),
     ("daemon/doctor_transcript_saving.rs", Site::NoLaunch),
+    // #11194: the egress hook compares a session's stamp to the PM value; it starts nothing.
+    ("bin/tm/commands/egress_guard_pm_dm.rs", Site::NoLaunch),
     (
         "core/session_launch/system_prompt.rs",
         Site::Builds("cli_launch("),
@@ -269,13 +301,10 @@ const SITES: &[(&str, Site)] = &[
         "daemon/services/tmux_service.rs",
         Site::Binds("bind_profile("),
     ),
-    (
-        "bin/tm/commands/launch.rs",
-        Site::Binds("send_spec_launch("),
-    ),
+    ("bin/tm/commands/launch.rs", Site::Binds("start_claude(")),
     (
         "bin/tm/commands/session/start.rs",
-        Site::Binds("send_spec_launch("),
+        Site::Binds("start_claude("),
     ),
     (
         "bin/tm/commands/fleet/launch.rs",
@@ -294,7 +323,7 @@ const SITES: &[(&str, Site)] = &[
 /// [`SITES`], so a new stamp site fails here until it is bound or deferred.
 /// The pane line typer is reached only through `send_spec_launch`, which
 /// binds, and the unbound form only from the fleet path (which binds through
-/// `bind_architect`) and a start into a session that was already running.
+/// `bind_architect`); a session already running refuses an Architect (#11270).
 #[test]
 fn every_architect_spawn_site_binds_8878() {
     let sources = production_sources();
@@ -349,11 +378,7 @@ fn every_architect_spawn_site_binds_8878() {
     only("send_spec_launch_with(", &["runtime/cli_launch.rs"]);
     only(
         "send_spec_launch_unbound(",
-        &[
-            "runtime/cli_launch.rs",
-            "bin/tm/commands/fleet/launch.rs",
-            "bin/tm/commands/session/start.rs",
-        ],
+        &["runtime/cli_launch.rs", "bin/tm/commands/fleet/launch.rs"],
     );
     only("deliver_in(", &["runtime/claude_code.rs"]);
     only("record_launch(", &["core/architect_session.rs"]);
@@ -369,47 +394,39 @@ fn every_architect_spawn_site_binds_8878() {
             .and_then(|rest| rest.split("\n}\n").next().map(str::to_owned))
             .unwrap_or_else(|| panic!("{head} in {rel}"))
     };
-    let typer = body("runtime/cli_launch.rs", "pub fn send_spec_launch(");
+    let typer = body("runtime/cli_launch.rs", "pub fn send_spec_launch_at(");
     assert!(
-        typer.contains("bind_live("),
+        typer.contains("bind_live_at("),
         "send_spec_launch does not bind"
     );
-    let deliver = body("runtime/managed_launch.rs", "fn deliver_in(");
+    let deliver = body("runtime/managed_launch.rs", "fn deliver_at(");
     assert!(
         deliver.contains("bind_delivered("),
         "deliver_in does not bind"
     );
+    // #11270: the CLI step that types the launch settles the bind fail-closed.
+    let start = body(
+        "bin/tm/commands/launch_host.rs",
+        "pub(crate) fn start_claude_at(",
+    );
+    assert!(
+        start.contains("require_bound("),
+        "start_claude does not settle"
+    );
 }
 
-/// #8878 critic: a start into a session that was already running sends the
-/// launch unbound and records nothing, as `tm connect` starts nothing there;
-/// the GUI spawn does the same for a session it attached to.
+/// #11270: an Architect launch into a session that was already running is
+/// refused with the remedy; every other launch passes the gate unchanged.
 #[test]
-fn a_reused_session_binds_nothing_8878() {
-    assert_eq!(bind_reused(false), Binding::NotArchitect);
-    let reused = bind_reused(true);
-    assert_eq!(reused, Binding::NotStarted);
-    let warn = reused.warning("tm-a").expect("warns");
-    assert!(warn.contains("already running"), "{warn}");
-    let sources = production_sources();
-    let start = &sources
-        .iter()
-        .find(|(rel, _)| rel == "bin/tm/commands/session/start.rs")
-        .expect("start.rs")
-        .1;
-    let reused_arm = start
-        .split("let sent = if already_running {")
-        .nth(1)
-        .and_then(|rest| rest.split("} else {").next())
-        .expect("start binds by already_running");
-    assert!(
-        reused_arm.contains("send_spec_launch_unbound(") && reused_arm.contains("bind_reused("),
-        "{reused_arm}"
-    );
-    let gui = &sources
-        .iter()
-        .find(|(rel, _)| rel == "daemon/services/tmux_service.rs")
-        .expect("tmux_service.rs")
-        .1;
-    assert!(gui.contains("if already_running {\n            bind_reused(architect)"));
+fn an_architect_launch_into_a_running_session_is_refused_11270() {
+    assert_eq!(refuse_reused(false, "tm-a"), Ok(()));
+    let refusal = refuse_reused(true, "tm-architect").expect_err("an Architect is refused");
+    for part in [
+        "tm-architect",
+        "already running",
+        "tm fleet relaunch",
+        "tm fleet bind",
+    ] {
+        assert!(refusal.contains(part), "{part} missing: {refusal}");
+    }
 }

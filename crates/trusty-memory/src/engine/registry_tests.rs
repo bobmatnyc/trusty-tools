@@ -122,7 +122,7 @@ fn registry_create_and_open() {
 /// Failing the whole `open` is the wrong surfacing — a multi-palace root would
 /// be bricked by one unrelated bad file, and the "one corrupt palace doesn't
 /// take the registry down" contract is what `SmMemory` / `PortfolioMemory` /
-/// trusty-agents construct against. So the palace is RETAINED as an observable
+/// trusty-assistants construct against. So the palace is RETAINED as an observable
 /// unopenable entry instead.
 ///
 /// What: persists a healthy palace, then hand-writes a SECOND palace this
@@ -1901,5 +1901,74 @@ fn a_writer_registry_never_hydrates_read_only() {
     assert!(
         registry.unopenable_reason(&palace_id).is_some(),
         "a palace a writer registry could not open must be recorded unopenable"
+    );
+}
+
+/// #11613: a disk palace, created through the registry and left idle and
+/// unreferenced, so `evict_idle` may consider it.
+fn idle_disk_palace(reg: &PalaceRegistry, root: &std::path::Path, name: &str) -> PalaceId {
+    use crate::engine::palace::Palace;
+    let id = PalaceId::new(name);
+    let palace = Palace {
+        id: id.clone(),
+        name: name.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: root.join(name),
+    };
+    let handle = reg.create_palace(root, palace).expect("create palace");
+    handle
+        .last_accessed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    id
+}
+
+/// Why (#11613): the pin keeps a palace whose re-open would outlast the
+/// client's exchange resident, so it rarely needs the `-32007` gate.
+/// What: a palace whose recorded open took 6 s survives the idle sweep. The
+/// first call after a real eviction is `tools::tests::palace_gate_tests`.
+/// Test: this test.
+#[test]
+fn a_slow_to_reopen_palace_survives_the_idle_sweep() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new().with_reopen_pin();
+    let id = idle_disk_palace(&reg, dir.path(), "slow-reopen");
+    reg.record_open_cost_for_test(&id, std::time::Duration::from_secs(6));
+
+    assert_eq!(reg.evict_idle(std::time::Duration::from_secs(1)), 0);
+    assert!(
+        reg.peek(&id).is_some(),
+        "a slow-to-reopen palace stays resident"
+    );
+}
+
+/// Why (#11613, Fail-Open Check): the exemption must not stop eviction of a
+/// palace that re-opens fast, and a re-open that stalls must surface as an
+/// error, never as a successful or empty answer.
+/// What: a palace with a recorded 0 s open is evicted; with its open
+/// lock held, `open_palace` fails with `OpenQueueTimeout` and registers nothing.
+/// Test: this test.
+#[test]
+fn a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new()
+        .with_reopen_pin()
+        .with_open_queue_timeout(std::time::Duration::from_millis(200));
+    let id = idle_disk_palace(&reg, dir.path(), "fast-reopen");
+    // #11613 review: a real open measured under load could reach the pin.
+    reg.record_open_cost_for_test(&id, std::time::Duration::ZERO);
+
+    assert_eq!(reg.evict_idle(std::time::Duration::from_secs(1)), 1);
+
+    let open_lock = reg.open_lock_for_test(&id);
+    let _stall = open_lock.lock();
+    let err = reg
+        .open_palace(dir.path(), &id)
+        .map(|_| ())
+        .expect_err("a stalled re-open must be an error");
+    assert!(err.downcast_ref::<OpenQueueTimeout>().is_some(), "{err:#}");
+    assert!(
+        reg.peek(&id).is_none(),
+        "a failed re-open registers nothing"
     );
 }

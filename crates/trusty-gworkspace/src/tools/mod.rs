@@ -76,4 +76,31 @@ mod tests {
             assert!(seen.insert(name.clone()), "duplicate tool: {name}");
         }
     }
+
+    // #10709: `manage_tasks` advertises the `list` paging and visibility params.
+    #[test]
+    fn manage_tasks_schema_lists_list_params_10709() {
+        let v = tool_list_response();
+        let tool = v["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|t| t["name"] == "manage_tasks")
+            .expect("manage_tasks is registered");
+        let props = &tool["inputSchema"]["properties"];
+        for (name, ty) in [
+            ("show_hidden", "boolean"),
+            ("show_deleted", "boolean"),
+            ("max_results", "integer"),
+            ("page_token", "string"),
+        ] {
+            assert_eq!(props[name]["type"], ty, "{name} type");
+            let desc = props[name]["description"].as_str().unwrap_or("");
+            assert!(desc.starts_with("list:"), "{name} is documented: {desc}");
+        }
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required");
+        assert_eq!(required, &vec![serde_json::json!("action")]);
+    }
 }

@@ -57,6 +57,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --pm-guard-shadow",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit"
       }
     ],
     "SessionEnd": [
@@ -103,6 +113,16 @@
           }
         ],
         "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --completion-evidence",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "SubagentStop": [
@@ -123,6 +143,16 @@
           {
             "command": "trusty-memory prompt-context",
             "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --turn-task",
+            "timeout": 5,
             "type": "command"
           }
         ],

@@ -681,7 +681,7 @@ A format-0 palace on 0.35.0 follows the two-step path above.
 |------|---------|-------------|
 | `server` | **enabled** | Compiles the daemon, the CLI and both binaries: the socket-serving surface (`transport::uds`, `serve` / `start`), the tool handlers and every server module. Implies `mcp-schema`. Added by [#9269](https://github.com/bobmatnyc/trusty-tools/issues/9269) ([ADR-0066](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0066-trusty-memory-1x-compatibility-contract.md) D1.4). |
 | `daemon` | via `server` | Alias of `server`, kept for all of 1.x. Named `axum-server` before [#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286) removed the HTTP listener the old name described. |
-| `mcp-schema` | via `server` | Compiles only the MCP tool schema (`tools::tool_definitions*`, `openrpc`) and `MemoryMcpService`, for a host that merges the schema into its own `rpc.discover` without linking the daemon (e.g. `trusty-agents`). |
+| `mcp-schema` | via `server` | Compiles only the MCP tool schema (`tools::tool_definitions*`, `openrpc`) and `MemoryMcpService`, for a host that merges the schema into its own `rpc.discover` without linking the daemon (e.g. `trusty-assistants`). |
 | `embedder-test-support` | off | Test-only. Exposes `engine::retrieval::seed_shared_embedder_with_mock` and the mock-embedder hooks. Never enable it in a production build. |
 | `memory-core-test-support` | off | Test-only. Exposes the format-0 and format-1 palace fixtures under `engine::store` (`format_v0_fixture`, `format_v1_fixture`) for migration tests. Moved here from trusty-common in #9271. |
 

@@ -22,6 +22,8 @@ pub mod core_ops;
 /// #7968: the bounded-age cache `core_ops::health` serves the catalog-staleness
 /// report from, so `/health` never walks the catalog inline per request.
 pub(crate) mod health_catalog;
+/// Bounded-age trusty-memory / trusty-search probe cache for `/health`.
+pub(crate) mod health_deps;
 
 /// Registration for the legacy session registry, hook ingestion, and the polled
 /// event feeds (#6288 slice 3). The SSE stream legs stay on HTTP until slice 6.
@@ -58,3 +60,7 @@ pub mod dbatg;
 
 /// #10063: the Architect dashboard store, `mpm.architect.dashboard.*`.
 pub mod architect_dashboard;
+
+/// #8878 PR2b-1b: presence-device requests, approvals and enrolment,
+/// `mpm.presence.*`.
+pub mod presence;

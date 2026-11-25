@@ -63,22 +63,32 @@ pub fn is_claude_command(command: &str) -> bool {
             .any(|c| lower.contains(c))
 }
 
-/// Parse one `tmux list-panes -a` line into `(session_name, pane_command)`.
+/// One `tmux list-panes -a` row: session name, pane command, pane cwd.
+type PaneRow = (String, String, Option<PathBuf>);
+
+/// Parse one `tmux list-panes -a` line into a [`PaneRow`].
 ///
-/// Why: the scan formats panes as `#{session_name} #{pane_current_command}`;
-/// isolating the split keeps [`discover_claude_sessions`] readable and lets the
-/// parser be tested without tmux.
-/// What: splits on the first whitespace run; returns `None` for an empty or
-/// single-field line.
+/// Why: the scan formats panes as
+/// `#{session_name} #{pane_current_command} #{pane_current_path}`; isolating
+/// the split keeps [`discover_claude_sessions`] readable and lets the parser be
+/// tested without tmux. #10368: the cwd is THIS pane's, so a session whose
+/// active pane is not the `claude` one still names the `claude` checkout.
+/// What: splits off the session and the command on whitespace runs; the rest
+/// of the line, which may hold spaces, is the cwd (`None` when absent). An
+/// empty or single-field line is `None`.
 /// Test: `parse_pane_line_splits_fields`.
-fn parse_pane_line(line: &str) -> Option<(String, String)> {
+fn parse_pane_line(line: &str) -> Option<PaneRow> {
     let trimmed = line.trim();
-    let (session, command) = trimmed.split_once(char::is_whitespace)?;
-    let command = command.trim();
+    let (session, rest) = trimmed.split_once(char::is_whitespace)?;
+    let rest = rest.trim_start();
+    let (command, path) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(c, p)| (c, p.trim_start()));
     if session.is_empty() || command.is_empty() {
         return None;
     }
-    Some((session.to_string(), command.to_string()))
+    let path = (!path.is_empty()).then(|| PathBuf::from(path));
+    Some((session.to_string(), command.to_string(), path))
 }
 
 /// Outcome of one auto-discovery scan.
@@ -146,7 +156,7 @@ pub fn discover_claude_sessions(state: &DaemonState) -> DiscoveryResult {
     let mut result = DiscoveryResult::default();
     let mut seen: HashSet<String> = HashSet::new();
     for line in raw.lines() {
-        let Some((session_name, command)) = parse_pane_line(line) else {
+        let Some((session_name, command, pane_path)) = parse_pane_line(line) else {
             continue;
         };
         if !is_claude_command(&command) {
@@ -162,6 +172,8 @@ pub fn discover_claude_sessions(state: &DaemonState) -> DiscoveryResult {
         session.tmux_name = session_name.clone();
         session.status = SessionStatus::Active;
         session.origin = SessionHost::Tmux;
+        // #10368: the `claude` pane's own cwd names the checkout to register.
+        session.project_path = pane_path;
         state.register_session(session);
         tracing::info!("auto-discovered Claude Code tmux session: {session_name}");
         result.adopted += 1;
@@ -483,7 +495,9 @@ pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 /// Why: startup and `POST /sessions/discover` must surface Claude Code wherever
 /// it runs; a single entry point keeps both scans in lockstep.
 /// What: runs [`discover_claude_sessions`] then [`discover_native_processes`]
-/// and merges their [`DiscoveryResult`]s.
+/// and merges their [`DiscoveryResult`]s, then registers the checkout of each
+/// adopted tm-launched tmux session as a project (#10368,
+/// [`super::session_project::register_adopted_sessions`]).
 ///
 /// Scratch-environment gate (#5784): both scans read state that `$HOME` does
 /// not isolate — the tmux server and the host process table — and adopting
@@ -512,6 +526,8 @@ pub async fn discover_all(state: &DaemonState) -> DiscoveryResult {
     let native = discover_native_processes(state).await;
     result.adopted += native.adopted;
     result.sessions.extend(native.sessions);
+    // #10368: a running session first seen here registers its checkout.
+    crate::daemon::session_project::register_adopted_sessions(state, &result.sessions).await;
     result
 }
 
@@ -569,12 +585,21 @@ mod tests {
     fn parse_pane_line_splits_fields() {
         assert_eq!(
             parse_pane_line("my-project claude"),
-            Some(("my-project".to_string(), "claude".to_string())),
+            Some(("my-project".to_string(), "claude".to_string(), None)),
         );
         // Extra whitespace between fields is tolerated.
         assert_eq!(
             parse_pane_line("  proj   claude-code  "),
-            Some(("proj".to_string(), "claude-code".to_string())),
+            Some(("proj".to_string(), "claude-code".to_string(), None)),
+        );
+        // #10368: the rest of the line is this pane's cwd, spaces included.
+        assert_eq!(
+            parse_pane_line("tm-proj claude /work/my proj"),
+            Some((
+                "tm-proj".to_string(),
+                "claude".to_string(),
+                Some(PathBuf::from("/work/my proj"))
+            )),
         );
         // A line with no command field is rejected.
         assert_eq!(parse_pane_line("lonely"), None);

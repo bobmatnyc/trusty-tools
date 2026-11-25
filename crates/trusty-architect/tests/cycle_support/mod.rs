@@ -62,6 +62,9 @@ pub fn config_at(root: &Path, vars: &[(&str, &str)]) -> TestResult<Config> {
             root.join(sub).to_string_lossy().into_owned(),
         )
     })
+    // An unreachable tm is a dep_health_error: keep a cycle off the machine's real tm socket
+    // unless a test turns the step on.
+    .chain([("TM_HEALTH".to_owned(), "off".to_owned())])
     .chain(vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
     .collect();
     let get = move |k: &str| {
@@ -135,6 +138,9 @@ impl Env {
             config: &self.config,
             usage_probe: &self.probe,
             notifier: &self.notifier,
+            relauncher: None,
+            steps: None,
+            pusher: None,
             dry_run: false,
             messages: &trusty_architect::poller::NoMessages,
         }
@@ -168,6 +174,9 @@ impl HostProbe for QuietHost {
     fn mem_free_pct(&self) -> Option<f64> {
         Some(60.0)
     }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(0)
+    }
 }
 
 /// A host whose load average cannot be read: the host check fails.
@@ -191,6 +200,9 @@ impl HostProbe for BrokenHost {
     }
     fn mem_free_pct(&self) -> Option<f64> {
         None
+    }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(0)
     }
 }
 

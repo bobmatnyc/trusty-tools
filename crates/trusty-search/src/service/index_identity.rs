@@ -285,30 +285,38 @@ fn attach_bump_reason(
 /// file, so its stamp still matches the pre-event identity file (§5.6 D1).
 /// What: writes `identity_bump_pending` when a corpus is wired, bumps, then
 /// writes the new stamp and clears the marker. With no corpus it only bumps.
-/// Failures are logged; a failed bump leaves the index poisoned.
-/// Test: `a_pending_bump_that_failed_is_retried_after_a_restart`.
+/// Failures are logged; a failed bump leaves the index poisoned. Returns
+/// whether the bump succeeded, for a caller that must not proceed without it
+/// (#10738: the reindex guard's rollback keeps refusing writes).
+/// Test: `a_pending_bump_that_failed_is_retried_after_a_restart`,
+/// `a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts`.
 pub(crate) fn bump_with_pending(
     index_id: &str,
     corpus: Option<&crate::core::corpus::CorpusStore>,
     reason: &str,
-) {
+) -> bool {
     if let Some(Err(e)) = corpus.map(|c| c.mark_identity_bump_pending_sync(reason)) {
         tracing::error!(index_id, reason, error = %format!("{e:#}"), "identity bump not marked pending (#10738)");
     }
-    bump_and_stamp(index_id, corpus, reason);
+    bump_and_stamp(index_id, corpus, reason)
 }
 
-/// Bump, then stamp `corpus` with the new identity on success.
-fn bump_and_stamp(index_id: &str, corpus: Option<&crate::core::corpus::CorpusStore>, reason: &str) {
+/// Bump, then stamp `corpus` with the new identity on success. Returns
+/// whether the bump succeeded; a failed stamp alone still returns `true`.
+fn bump_and_stamp(
+    index_id: &str,
+    corpus: Option<&crate::core::corpus::CorpusStore>,
+    reason: &str,
+) -> bool {
     let identity = match bump_generation(index_id, reason) {
         Ok(identity) => identity,
         Err(e) => {
             tracing::error!(index_id, reason, error = %format!("{e:#}"), "index generation bump failed (#10738)");
-            return;
+            return false;
         }
     };
     let Some(corpus) = corpus else {
-        return;
+        return true;
     };
     let stamped = serde_json::to_vec(&identity)
         .context("serialize index identity")
@@ -317,6 +325,7 @@ fn bump_and_stamp(index_id: &str, corpus: Option<&crate::core::corpus::CorpusSto
         // The next attach sees a stale stamp or a pending marker and bumps.
         tracing::warn!(index_id, reason, error = %format!("{e:#}"), "identity stamp not written (#10738)");
     }
+    true
 }
 
 /// Mark the corpora a staged run is about to swap, so every way the run can

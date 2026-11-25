@@ -342,8 +342,22 @@ async fn parity_health_agrees_across_transports() {
     // a slow host misses the bounded wait and the second the finished walk.
     crate::daemon::rpc::health_catalog::report_within(&state, std::time::Duration::from_secs(30))
         .await;
+    // Both dependencies down: the two transports must agree on the degraded
+    // answer, not only on the healthy one.
+    use crate::daemon::rpc::health_deps::{DependencyOutcome, StaticProbe};
+    state
+        .dependency_cache()
+        .set_probe(std::sync::Arc::new(StaticProbe(DependencyOutcome::Down(
+            "stopped".to_owned(),
+        ))));
+    state
+        .dependency_cache()
+        .get(std::time::Duration::from_secs(5))
+        .await;
     let (status, body) = http(&state, "GET", "/health", None).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "degraded", "{body}");
+    assert_eq!(body["alive"], true, "{body}");
     let result = rpc_ok(&rpc_router(&state), "mpm.health", Value::Null).await;
     assert_same("mpm.health", body, result, &[]);
 }

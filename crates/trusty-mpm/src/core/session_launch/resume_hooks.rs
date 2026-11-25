@@ -83,23 +83,37 @@ pub(crate) fn ensure_project_hooks_with(
 ) -> Result<(), PrepError> {
     // #7490: fail closed BEFORE the writer, which coerces an unparseable file
     // into an empty object and would then replace it with tm's hooks alone.
+    let config = crate::core::config::MpmConfig::load(&fw.root);
+    let profile = crate::core::session_profile::resolve(project_dir, &config);
+    // #10612: an Architect resume whose file cannot be merged fails closed.
     if !settings_is_writable_object(project_dir) {
-        return Ok(());
+        let skipped = Err(PrepError::Io {
+            path: project_dir.join(".claude").join("settings.json"),
+            source: std::io::Error::other("unreadable or not a JSON object"),
+        });
+        return super::architect_hooks::require_hooks_written(profile, project_dir, skipped)
+            .map(drop);
     }
     // #10459: an Architect's resume, relaunch or worker spawn refuses here,
     // before the exec-form guard is written, on a Claude Code below v2.1.295.
-    let config = crate::core::config::MpmConfig::load(&fw.root);
-    let profile = crate::core::session_profile::resolve(project_dir, &config);
     crate::core::architect_claude_version::require_for_profile(profile)?;
     // #7849: the toggles now resolve in ONE place, shared with the read-only
     // diff `tm validate --repair` and `tm doctor` report from. This call used
     // to hard-code the #7688 capture off, so every resume STRIPPED the two
     // `Stop`/`SubagentStop` groups the launch had just written — the strip
     // domain covers them whether or not the write does.
-    write_project_hooks_with(
+    let written = write_project_hooks_with(
         project_dir,
         super::hook_group_diff::project_hook_additions_for(fw, project_dir, exe_override),
-    )
+    );
+    // #10612: an Architect's write failure is the fatal, path-naming variant.
+    match written {
+        Err(source) if profile.is_architect() => Err(PrepError::ArchitectHooks {
+            path: project_dir.join(".claude").join("settings.json"),
+            source: Box::new(source),
+        }),
+        other => other,
+    }
 }
 
 /// May the hooks writer rewrite `<project_dir>/.claude/settings.json`?

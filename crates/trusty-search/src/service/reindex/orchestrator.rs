@@ -103,7 +103,11 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::wa
             missing.join(", "),
         );
     }
-    handle.walk_diagnostics.blocking_write().missing_index_roots = missing;
+    let mut diag = handle.walk_diagnostics.blocking_write();
+    diag.missing_index_roots = missing;
+    // #11651: name the files the size cap kept out of the index.
+    diag.record_size_skips(&walk.oversized);
+    drop(diag);
     walk
 }
 

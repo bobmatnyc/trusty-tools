@@ -43,7 +43,10 @@ use std::path::Path;
 
 use crate::core::savings::{BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_COMPRESS, append_row, now_ts};
 use crate::core::savings_divert::{MIN_COST_SAVED_USD, ParentModel, resolve_session_price};
-use crate::core::savings_opportunity::{TOOL_TYPE_BASH, TaggedSavingsRow};
+use crate::core::savings_opportunity::{
+    OPPORTUNITY_DAY_CAP_BYTES, OPPORTUNITY_KEEP_DAYS, TOOL_TYPE_BASH, TaggedSavingsRow,
+    append_day_line,
+};
 
 /// Append one `compress` row for a run that actually shrank its input.
 ///
@@ -95,8 +98,74 @@ fn record_compress_with(
     compression_path: &str,
     price: impl FnOnce() -> Option<ParentModel>,
 ) {
+    record_tagged_with(
+        root,
+        session_id,
+        (tool_name, None),
+        (bytes_before, bytes_after),
+        compression_path,
+        price,
+    );
+}
+
+/// One step of a chained Bash call, for the row that step writes (#11507).
+#[derive(Debug, Clone, Copy)]
+pub struct ChainTag<'a> {
+    /// The chain's sanitised shape, e.g. `cd ; git diff && cargo test`.
+    pub shape: &'a str,
+    /// How many steps the chain has.
+    pub steps: usize,
+}
+
+/// [`record_compress`] for one compressed step of a chain (#11507).
+///
+/// What: the same decline rules and row, with `tool_name` the step's own tool
+/// and the additive `chain_shape`/`steps` fields set from `chain`.
+/// Test: `a_chain_step_row_carries_its_tool_and_the_chain_fields`.
+pub fn record_compress_step(
+    root: &Path,
+    session_id: &str,
+    tool_name: &str,
+    (bytes_before, bytes_after): (usize, usize),
+    compression_path: &str,
+    chain: ChainTag<'_>,
+) {
+    record_tagged_with(
+        root,
+        session_id,
+        (tool_name, Some(chain)),
+        (bytes_before, bytes_after),
+        compression_path,
+        || resolve_session_price(root, session_id),
+    );
+}
+
+/// [`record_compress_with`] carrying the #11507 chain tag, when there is one.
+///
+/// Test: `a_chain_step_row_carries_its_tool_and_the_chain_fields`.
+pub(crate) fn record_tagged_with(
+    root: &Path,
+    session_id: &str,
+    (tool_name, chain): (&str, Option<ChainTag<'_>>),
+    (bytes_before, bytes_after): (usize, usize),
+    compression_path: &str,
+    price: impl FnOnce() -> Option<ParentModel>,
+) {
     if session_id.trim().is_empty() {
         tracing::debug!("no session id: writing no compress savings row");
+        return;
+    }
+    // #11563: both ledgers store the sanitised name, never a path or pattern.
+    let tool_name = &crate::core::savings_opportunity::ledger_tool_name(tool_name);
+    if !compress_gains(bytes_before, bytes_after) {
+        // #11560: a zero-gain decline goes to a file, never to stderr.
+        record_decline(
+            root,
+            session_id,
+            tool_name,
+            (bytes_before, bytes_after),
+            compression_path,
+        );
         return;
     }
     let Some(row) = compress_row(
@@ -116,6 +185,8 @@ fn record_compress_with(
         row: &row,
         tool_type: TOOL_TYPE_BASH,
         tool_name,
+        chain_shape: chain.map(|c| c.shape),
+        steps: chain.map(|c| c.steps),
     };
     if let Err(source) = append_row(&ledger, &tagged) {
         tracing::warn!(
@@ -140,6 +211,68 @@ fn record_compress_with(
 /// Test: `a_hand_computed_byte_delta_matches_the_row`,
 /// `passthrough_output_writes_no_row`, `an_expanded_output_writes_no_row`,
 /// `no_row_when_the_session_model_cannot_be_priced`.
+/// The directory of day files a zero-gain compress decline is appended to (#11560).
+///
+/// What: `<root>/usage/compress-declines/<YYYY-MM-DD>.jsonl`, bounded like the
+/// opportunity ledger.
+pub fn decline_dir_in(root: &Path) -> std::path::PathBuf {
+    root.join("usage").join("compress-declines")
+}
+
+/// Append one line naming why a run wrote no savings row (#11560).
+///
+/// Why: the decline was a `debug!` that the `info` filter hid, and stderr is
+/// the agent's tool result, so #7607 forbids printing it there. A file under
+/// the usage dir is where an operator can count it; `compression.jsonl`
+/// already counts the run itself.
+/// What: one JSON line `{ts, session_id, tool_name, reason: "no_gain",
+/// bytes_before, bytes_after, compression_path}` to today's file under
+/// [`decline_dir_in`].
+/// FAIL-OPEN and silent: a failed write is a `debug!`, never stderr at `info`.
+/// Test: `a_zero_saving_decline_is_recorded_in_the_decline_file`,
+/// `a_failed_decline_write_is_silent`.
+fn record_decline(
+    root: &Path,
+    session_id: &str,
+    tool_name: &str,
+    (bytes_before, bytes_after): (usize, usize),
+    compression_path: &str,
+) {
+    let ts = now_ts();
+    let line = serde_json::json!({
+        "ts": ts,
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "reason": "no_gain",
+        "bytes_before": bytes_before,
+        "bytes_after": bytes_after,
+        "compression_path": compression_path,
+    });
+    // #11560 review: day files under the opportunity ledger's own cap; a full
+    // day drops (and counts) the line, with nothing on stderr.
+    let dir = decline_dir_in(root);
+    if let Err(source) = append_day_line(
+        &dir,
+        &ts,
+        &line,
+        OPPORTUNITY_DAY_CAP_BYTES,
+        OPPORTUNITY_KEEP_DAYS,
+    ) {
+        tracing::debug!(dir = %dir.display(), %source, "could not record the compress decline");
+    }
+}
+
+/// Whether a run from `bytes_before` to `bytes_after` saved any tokens.
+///
+/// Why (#11560): the opportunity row's `compressed` / `compressed_no_gain`
+/// split must use the same rounding [`compress_row`] declines on.
+/// Test: `compress_gains_matches_the_row_decline`.
+pub fn compress_gains(bytes_before: usize, bytes_after: usize) -> bool {
+    let before_tokens = (bytes_before as f64 / BYTES_PER_TOKEN).floor() as i64;
+    let after_tokens = (bytes_after as f64 / BYTES_PER_TOKEN).ceil() as i64;
+    before_tokens > after_tokens
+}
+
 fn compress_row(
     session_id: &str,
     bytes_before: usize,
@@ -151,12 +284,15 @@ fn compress_row(
     let after_tokens = (bytes_after as f64 / BYTES_PER_TOKEN).ceil() as i64;
     let tokens_saved = before_tokens - after_tokens;
     if tokens_saved <= 0 {
+        // #11560: debug only — `tm compress` stderr is the agent's tool result
+        // (#7607). The operator-visible record is `record_decline`'s file.
         tracing::debug!(
             session_id,
             before_tokens,
             after_tokens,
             compression_path,
-            "the run returned no smaller than it read; writing no savings row"
+            reason = "no_gain",
+            "compress declined a savings row: the run returned no fewer tokens than it read"
         );
         return None;
     }
@@ -202,4 +338,4 @@ fn compress_row(
 
 #[cfg(test)]
 #[path = "savings_compress_tests.rs"]
-mod tests;
+pub(crate) mod tests;

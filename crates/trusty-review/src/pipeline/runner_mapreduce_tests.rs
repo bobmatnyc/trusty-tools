@@ -428,6 +428,7 @@ fn restore_caller_context_reports_and_restores_a_dropped_field() {
         referenced_code: Some("fn helper() {}".to_string()),
         pr_description: Some("why this change".to_string()),
         pr_discussion: None,
+        author_intent: None,
     };
     let mut context = crate::pipeline::prompt::ReviewContext::default();
 

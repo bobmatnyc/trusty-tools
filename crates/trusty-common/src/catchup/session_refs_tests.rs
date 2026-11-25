@@ -849,3 +849,45 @@ fn fetch_applies_the_supplied_git_env() {
     assert!(outcome.own_ref_found, "{outcome:?}");
     assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
 }
+
+/// Why (#10667): a failed git child with empty stderr produced
+/// `cat-file: git cat-file blob ... failed:` and nothing else, so a flake
+/// under load could not say whether git exited non-zero or was killed.
+/// What: two real failing git children — `config --get` on an unset key (exit
+/// 1, empty stderr) and `cat-file` on a missing object (exit 128, with
+/// stderr). Each error names the exit code; the second still carries stderr.
+/// Test: itself.
+#[test]
+fn a_failed_git_child_reports_its_exit_status() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_ok(&repo, &["init", "--initial-branch=main"]);
+
+    let unset = super::git_ok_with_env(&repo, &["config", "--get", "tm.unset"], "probe", &[])
+        .err()
+        .map(|e| e.to_string())
+        .expect("an unset key must fail");
+    assert!(unset.contains("exit code 1"), "{unset}");
+
+    let missing_sha = "0".repeat(40);
+    let missing =
+        super::git_ok_with_env(&repo, &["cat-file", "blob", &missing_sha], "cat-file", &[])
+            .err()
+            .map(|e| e.to_string())
+            .expect("a missing object must fail");
+    assert!(missing.contains("exit code 128"), "{missing}");
+    assert!(missing.contains("fatal"), "stderr must be kept: {missing}");
+}
+
+/// Why (#10667): a child killed under load has no exit code; the error must
+/// still say how it ended.
+/// What: a raw wait status of 9 is SIGKILL with no code.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn a_signalled_child_reports_its_signal() {
+    use std::os::unix::process::ExitStatusExt;
+    let killed = std::process::ExitStatus::from_raw(9);
+    assert_eq!(super::describe_exit(killed), "killed by signal 9");
+}

@@ -582,6 +582,10 @@ mod palace_index_tests;
 mod palace_missing_tests;
 // #9881: a served recall hit records an access, persisted per owning palace.
 mod recall_access_tests;
+// #11613: every per-palace tool's bounded open, ahead of its handler.
+mod palace_gate_tests;
+// #11255: the single-palace recall's bounded, off-worker palace open.
+mod recall_open_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
 // #9144: `memory_remember`'s optional drawer `type`.

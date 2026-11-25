@@ -123,10 +123,11 @@ pub const ARCHITECT_CORE: [ArchitectCoreMember; 31] = [
         "AGENTS.md is the only override",
         "`AGENTS.md` in this project's root is the owner's only override file.",
     ),
-    // #10911: the owner may order a specific AGENTS.md edit (ruling D9d).
+    // #11117: the Architect may edit AGENTS.md on its own initiative; only the
+    // local commit remains of the #10911 owner-ordered-edit rule.
     member(
-        "AGENTS.md only on the owner's instruction",
-        "Write `AGENTS.md` only when the owner tells you to make a specific edit.",
+        "AGENTS.md edits are committed",
+        "Commit each `AGENTS.md` edit locally.",
     ),
     member(
         "AGENTS.md cannot override the core",
@@ -138,11 +139,11 @@ pub const ARCHITECT_CORE: [ArchitectCoreMember; 31] = [
     ),
     member(
         "memory protocol",
-        "Call `mcp__trusty-memory__memory_recall` before you ask the user",
+        "Run `tm memory recall \"<q>\"` before you ask the user",
     ),
     member(
         "search protocol",
-        "Call `mcp__trusty-search__search` before you read code or docs.",
+        "Run `trusty-search search \"<q>\" --json` before you read code or docs,",
     ),
     // #10929: the simplest option comes first; an added surface needs an informed OK.
     member(

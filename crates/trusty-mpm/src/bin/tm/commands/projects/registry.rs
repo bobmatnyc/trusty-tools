@@ -578,12 +578,19 @@ fn normalize_bool_flag(value: &str) -> anyhow::Result<String> {
 /// Why: shared between `list`, `show`, and the singular `tm project list`
 /// (#5994), which appends its own `[plugin-trusted]` marker to this line rather
 /// than growing a second renderer that could drift from it.
-/// What: name, repo URL, and default branch on one line.
+/// What: name, repo URL, and default branch on one line, then
+/// `[decommissioned]` for a decommissioned project (#10988).
 /// Test: `render_project_line_basic`,
-/// `project_renderers_mask_a_quoted_stored_password_9259`.
+/// `project_renderers_mask_a_quoted_stored_password_9259`,
+/// `render_project_line_marks_a_decommissioned_project`.
 pub(crate) fn render_project_line(p: &Project) -> String {
+    let state = if p.is_decommissioned() {
+        "\t[decommissioned]"
+    } else {
+        ""
+    };
     format!(
-        "{}\t{}\t({})",
+        "{}\t{}\t({}){state}",
         p.name,
         redact_stored_url(&p.repo_url),
         p.default_branch
@@ -649,6 +656,8 @@ mod tests {
             commit_email: None,
             worktree: None,
             project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 
@@ -658,6 +667,14 @@ mod tests {
         assert!(line.contains("widget"));
         assert!(line.contains("https://github.com/acme/widget"));
         assert!(line.contains("main"));
+        assert!(!line.contains("decommissioned"), "{line}");
+    }
+
+    #[test]
+    fn render_project_line_marks_a_decommissioned_project() {
+        let mut p = project();
+        p.decommissioned_at = Some(chrono::Utc::now());
+        assert!(render_project_line(&p).ends_with("[decommissioned]"));
     }
 
     /// #9259: a stored `repo_url` keeps any `user:token@` it was registered
@@ -797,10 +814,10 @@ mod tests {
 
     #[test]
     fn account_change_log_line_logs_a_real_change() {
-        let line = account_change_log_line("widget", Some("bobmatnyc"), Some("bob-duetto"))
+        let line = account_change_log_line("widget", Some("bobmatnyc"), Some("acme-admin"))
             .expect("a real change must log");
         assert!(line.contains("widget"), "{line}");
-        assert!(line.contains("'bobmatnyc' -> 'bob-duetto'"), "{line}");
+        assert!(line.contains("'bobmatnyc' -> 'acme-admin'"), "{line}");
     }
 
     #[test]
@@ -836,7 +853,7 @@ mod tests {
 
     #[test]
     fn resolve_account_gh_config_dir_persists_a_built_dir() {
-        let dir = std::path::PathBuf::from("/home/bob/.trusty-mpm/gh-accounts/bob-duetto");
+        let dir = std::path::PathBuf::from("/home/bob/.trusty-mpm/gh-accounts/acme-admin");
         let (persisted, warning) = resolve_account_gh_config_dir(Ok(dir.clone()));
         assert_eq!(persisted, Some(dir));
         assert!(warning.is_none());

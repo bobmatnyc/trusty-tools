@@ -1,0 +1,15 @@
+# grantcheck/latency.py, n=3 per row, element-token click on the JXA fixture, 2026-11-18.
+# Standard daemon (plain `serve`, overlay on), fixture A (shell-launched osascript):
+{"variant": "socket_default", "n": 3, "landed": 3, "snapshot_ms_median": 50, "click_ms_median": 1224, "click_ms_max": 2656, "effects": ["unverifiable"]}
+{"variant": "socket_session", "n": 3, "landed": 3, "snapshot_ms_median": 45, "click_ms_median": 1225, "click_ms_max": 2666, "effects": ["unverifiable"]}
+{"variant": "socket_action_press", "n": 3, "landed": 3, "snapshot_ms_median": 56, "click_ms_median": 1204, "click_ms_max": 1229, "effects": ["unverifiable"]}
+{"variant": "socket_shallow", "n": 3, "landed": 3, "snapshot_ms_median": 27, "click_ms_median": 1202, "click_ms_max": 1203, "effects": ["unverifiable"]}
+{"variant": "cli_default", "n": 3, "landed": 3, "snapshot_ms_median": 1017, "click_ms_median": 3618, "click_ms_max": 3635, "effects": ["unverifiable"]}
+# private `_skip_window_change_detection: true` on click: 1204, 1209 ms (accepted, no effect).
+# `cua-driver call get_screen_size {}`: real 0.89 s twice; socket: 0 ms.
+# Same bundled fixture C, standard daemon vs broker's bounded daemon (--permission-mode bounded --no-overlay):
+{"variant": "socket_default", "n": 3, "landed": 3, "snapshot_ms_median": 60, "click_ms_median": 1228, "click_ms_max": 2670, "effects": ["unverifiable"]}
+{"variant": "socket_shallow", "n": 3, "landed": 3, "snapshot_ms_median": 43, "click_ms_median": 1219, "click_ms_max": 1222, "effects": ["unverifiable"]}
+{"variant": "socket_default", "n": 3, "landed": 3, "snapshot_ms_median": 1299, "click_ms_median": 2231, "click_ms_max": 2325, "effects": ["unverifiable"]}
+{"variant": "socket_session", "n": 3, "landed": 3, "snapshot_ms_median": 1115, "click_ms_median": 2232, "click_ms_max": 2311, "effects": ["unverifiable"]}
+{"variant": "socket_shallow", "n": 3, "landed": 3, "snapshot_ms_median": 994, "click_ms_median": 2152, "click_ms_max": 2191, "effects": ["unverifiable"]}

@@ -279,6 +279,20 @@ pub trait ManagedTmuxDriver: Send + Sync {
         ))
     }
 
+    /// Press one named tmux key (`Enter`, `C-u`) in a SPECIFIC pane (#10747).
+    ///
+    /// Why: `session_send` presses Enter only after the typed text echoes,
+    /// and clears the box when it does not.
+    /// What: the default fails closed, like [`Self::send_keys_literal_to_pane`];
+    /// [`super::real_tmux::RealTmuxDriver`] overrides it.
+    /// Test: `send_input_observed_presses_enter_after_a_full_echo`.
+    fn send_key_to_pane(&self, name: &str, pane_id: &str, key: &str) -> Result<(), ManagedError> {
+        let _ = (name, pane_id, key);
+        Err(ManagedError::TmuxUnavailable(
+            "send_key_to_pane not implemented for this driver".into(),
+        ))
+    }
+
     /// Report whether `pane_id` still exists as a live pane within `name`'s
     /// tmux session.
     ///
@@ -422,6 +436,25 @@ pub trait ManagedTmuxDriver: Send + Sync {
         let _ = (name, pane_id, lines);
         Err(ManagedError::TmuxUnavailable(
             "capture_pane not implemented for this driver".into(),
+        ))
+    }
+
+    /// Capture a specific pane WITH escape codes (#8407).
+    ///
+    /// Why: the input-box classifier needs SGR attributes a plain capture drops.
+    /// What: the escaped counterpart of [`Self::capture_pane`]. The default is
+    /// `TmuxUnavailable`, so a driver that does not override it reads as an
+    /// unknown box, never as an empty one.
+    /// Test: `managed_output_unreadable_pane_is_unknown_8407`.
+    fn capture_pane_escaped(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let _ = (name, pane_id, lines);
+        Err(ManagedError::TmuxUnavailable(
+            "capture_pane_escaped not implemented for this driver".into(),
         ))
     }
 

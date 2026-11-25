@@ -2,12 +2,13 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-71 top-level commands.
+72 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
   - `show` — Show one agent's metadata and per-skill resolution
 - `architect` — The Architect's deterministic commands: the poller and its readers
+  - `attach` — Attach to the Architect's tmux session (switch-client inside tmux)
   - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
   - `dashboard` — Read and write the Architect's dashboard store (`dashboard-db.py`)
     - `batch` — Apply a JSON list of ops (or `{"ops": [...]}`), all or none
@@ -25,7 +26,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
+  - `restart` — Restart the Architect behind the checkpoint gate (#11365)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
+  - `serve` — The poll cycle as a service, run on local events (#9779)
+  - `up` — Bring the Architect up from any state, then attach (#11364)
 - `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
   - `clear-token` — Remove the stored token, if present
@@ -101,6 +105,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `create` — File an epic tracker and its phase issues from a committed plan document
     - `defer` — Append one row to a tracker's `deferred` block (#8448)
     - `sync` — Regenerate a tracker's `phases` block from its live child issues
+  - `next` — List the ready issues to take next, ranked by goal, priority and age
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path
   - `seed-labels` — Create any missing labels (states + extra families) in the repo
@@ -124,14 +129,26 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `share` — Retired by #7892; prints why and does nothing
   - `test` — Verify MCP servers by running a real handshake against each
   - `unshare` — Retired by #7892; prints why and does nothing
-- `memory` — Palace access and maintenance without MCP (#4837, #8352)
-  - `forget` — Delete one drawer by id or by slot — the no-MCP `memory_forget` (#9340)
+- `memory` — Native palace access and maintenance (#4837, #8352)
+  - `forget` — Delete one drawer by id or by slot — the native `memory_forget` (#9340)
   - `import` — Bulk-import a directory of memory `.md` files into a palace
   - `import-auto-memory` — Migrate Claude Code's own auto-memory store into the project's palace
-  - `note` — Store a short curated fact — the no-MCP `memory_note` (#8352)
-  - `recall` — Recall memories from the palace — the no-MCP `memory_recall` (#8352)
-  - `remember` — Store a memory in the palace — the no-MCP `memory_remember` (#8352)
+  - `kg` — The knowledge graph — `kg_assert`, `kg_query`, `kg_gaps`
+    - `assert` — Assert a triple — the native `kg_assert`
+    - `gaps` — Knowledge gaps the dream cycle found — the native `kg_gaps`
+    - `query` — Active triples for one subject — the native `kg_query`
+  - `list` — List drawers in a palace — the native `memory_list`
+  - `note` — Store a short curated fact — the native `memory_note` (#8352)
+  - `prompt-context` — Print the hot prompt facts as Markdown — the native `get_prompt_context`
+  - `recall` — Recall memories from the palace — the native `memory_recall` (#8352)
+  - `recall-all` — Search across palaces — the native `memory_recall_all`
+  - `recall-deep` — Deep recall (L3 full HNSW search) — the native `memory_recall_deep`
+  - `remember` — Store a memory in the palace — the native `memory_remember` (#8352)
   - `rename` — Move a palace to a new id — trusty-memory's `palace_rename` (#9544)
+  - `task` — Task drawers — `task_add`, `task_list`, `task_complete`
+    - `add` — Create a Task drawer — the native `task_add`
+    - `complete` — Mark a Task drawer completed — the native `task_complete`
+    - `list` — List open Task drawers — the native `task_list`
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer
@@ -145,18 +162,30 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `merge` — Squash-merge a PR with its validated body as the commit message
   - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
+  - `watch` — Track a PR's required checks; the daemon wakes the owner on a CI change
+    - `add` — Track a PR: one wake per CI transition on its required checks
+    - `ls` — List the tracked PRs
+    - `rm` — Stop tracking a PR
 - `presence` — Prove you are at the Studio, so the Architect may write trust anchors
+  - `devices` — Enrolled presence devices (passkeys)
+    - `add` — Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no browser path finishes the ceremony yet)
+    - `list` — List enrolled devices
+    - `revoke` — Revoke a device: removes its record and every grant it approved. Needs Touch ID or the login password at the Studio first
   - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac
+  - `request` — Ask an enrolled device to approve this session's next trust-anchor write. Asks only; grants nothing. The action text is shown to the approver labelled "unverified origin". Approving needs the console page (#8878 PR2b-2)
+  - `wait` — Wait until this session holds a valid presence grant
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
-  - `init` — Register a working directory as a trusty-mpm project
-  - `list` — List all registered projects with their status
+  - `init` — Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`)
+  - `list` — List all registered projects with their status (deprecated: use `tm projects list`)
   - `trust` — Grant (or revoke) consent for a project's `[session] plugins` opt-ins
+  - `unadopt` — Remove worktrees from the adoption ledger by path, ledger only (#10592)
 - `projects` — Manage the project registry (registry B) and its Deliverable/Milestone ledger
   - `config` — View or edit a project's deterministic config (§3.1/§6, #2120)
     - `set` — Set a field to a new value
     - `tags` — Add and/or remove tags in one call (§6: "no free-text replace-whole-list footgun" — there is no plain tags-replace form)
     - `unset` — Clear (unset) a field back to absent
+  - `decommission` — Decommission a project: stop its running sessions and mark it decommissioned (#10988)
   - `deliverables` — Manage a project's Deliverables (§10.8)
     - `add` — Create a Deliverable (starts in `proposed`)
     - `list` — List a project's Deliverables (optionally filtered by status)
@@ -182,16 +211,22 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
-- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value
+- `savings` — Tool-output savings read side (#11033)
+  - `status` — Per-day tool-output tokens seen, compressed and saved, and why the rest was skipped
+- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`. No verb prints a value
   - `__exec-stub` — The helper `exec` runs as its child; never run by hand
-  - `copy` — Copy this project's keys from one backend to another
+  - `assign` — Copy one key of any trusty vault into a named project's scope
+  - `copy` — Copy keys into this project's scope from a backend
   - `doctor` — Report socket and backend reachability, never a value
   - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
   - `list` — Print the key names of the project and owner scopes, never a value
+  - `lock` — End the unlock grant now; the next read prompts again
+  - `migrate` — Move every trusty Keychain item into one Keychain item, so `tm secrets unlock` prompts once
   - `remove` — Remove one key of the project scope
   - `resolve` — Print one key's value inside a `tm secrets exec` grant
   - `set` — Add or replace one key of the project scope. The value comes from the clipboard
+  - `unlock` — Approve once, with Touch ID or the login password, so Keychain and 1Password reads raise no prompt for 8 h
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons
   - `health` — Probe the health endpoint and print OK or FAIL
@@ -212,6 +247,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
@@ -248,6 +284,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)

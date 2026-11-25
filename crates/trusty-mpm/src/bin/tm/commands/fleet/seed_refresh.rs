@@ -10,7 +10,7 @@
 //! pattern `architect_skills` uses for skills). [`provenance_line`] renders
 //! the seeded `docs/architect/bundle-provenance.json` as one report line.
 //! Test: `a_refresh_updates_an_unedited_earlier_copy`,
-//! `a_refresh_keeps_an_edited_copy_and_reports_it`,
+//! `a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245`,
 //! `every_embedded_seed_is_in_the_shipped_history`,
 //! `init_and_status_report_the_bundle_provenance`.
 
@@ -44,6 +44,18 @@ pub(crate) fn history() -> impl Iterator<Item = (&'static str, &'static str)> {
 pub(crate) fn shipped_before(dest: &str, bytes: &[u8]) -> bool {
     let hash = sha256_hex(bytes);
     history().any(|(d, h)| d == dest && h == hash)
+}
+
+/// Whether `dest` holds instance-owned content an upgrade must never replace.
+///
+/// Why: #10608. Files under `local/` hold this instance's guidance, owner
+/// profile, config, schedule and records. A template the instance left as
+/// shipped is still its own copy; refreshing it to a newer template changes
+/// its config and schedule. What: true for every `local/` destination; the
+/// scripts, schemas, dashboard templates and docs stay framework-owned.
+/// Test: `an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608`.
+pub(crate) fn instance_owned(dest: &str) -> bool {
+    dest.starts_with("local/")
 }
 
 /// One line naming the bundle's prototype commit, export manifest and file count.

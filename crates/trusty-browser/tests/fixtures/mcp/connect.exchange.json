@@ -1,0 +1,593 @@
+[
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"fixture-capture\", \"version\": \"0\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"experimental\":{},\"prompts\":{\"listChanged\":false},\"resources\":{\"subscribe\":false,\"listChanged\":false},\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"trusty-browser\",\"version\":\"1.30.0\"}}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+  "recv": null,
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"NotConnected\\\",\\\"message\\\":\\\"No session; call browser_connect first\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_profiles\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"profiles\\\": [\\n    {\\n      \\\"profile\\\": \\\"p1\\\",\\n      \\\"email\\\": \\\"a@example.com\\\"\\n    },\\n    {\\n      \\\"profile\\\": \\\"p2\\\",\\n      \\\"email\\\": \\\"b@example.com\\\"\\n    }\\n  ]\\n}\"}],\"structuredContent\":{\"ok\":true,\"profiles\":[{\"profile\":\"p1\",\"email\":\"a@example.com\"},{\"profile\":\"p2\",\"email\":\"b@example.com\"}]},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"profiles\"}",
+    "reply": "{\"ok\":true,\"profiles\":[{\"profile\":\"p1\",\"email\":\"a@example.com\"},{\"profile\":\"p2\",\"email\":\"b@example.com\"}]}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {\"profile\": \"\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_connect: {\\\"ok\\\":false,\\\"error\\\":\\\"InvalidRequest\\\",\\\"message\\\":\\\"profile must be a non-empty string\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_connect: {\\\"ok\\\":false,\\\"error\\\":\\\"ProfileChoiceRequired\\\",\\\"profiles\\\":[\\\"p1\\\",\\\"p2\\\"]}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\"}",
+    "reply": "{\"ok\":false,\"error\":\"ProfileChoiceRequired\",\"profiles\":[\"p1\",\"p2\"]}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 6, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\"}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"NotConnected\\\",\\\"message\\\":\\\"No session; call browser_connect first\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {\"profile\": \"p1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"grant\\\": \\\"g-0123456789ab\\\",\\n  \\\"profile\\\": \\\"p1\\\",\\n  \\\"email\\\": \\\"a@example.com\\\"\\n}\"}],\"structuredContent\":{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\", \"profile\": \"p1\"}",
+    "reply": "{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 8, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {\"profile\": \"p1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_connect: {\\\"ok\\\":false,\\\"error\\\":\\\"AlreadyConnected\\\",\\\"message\\\":\\\"A session is already held; call browser_disconnect first\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 9, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"tabs\\\": [\\n    {\\n      \\\"id\\\": 3,\\n      \\\"title\\\": \\\"Café \\\\\\\"q\\\\\\\"\\\",\\n      \\\"access\\\": \\\"full\\\",\\n      \\\"x\\\": 1.5,\\n      \\\"y\\\": 1e+20\\n    }\\n  ]\\n}\"}],\"structuredContent\":{\"ok\":true,\"tabs\":[{\"id\":3,\"title\":\"Café \\\"q\\\"\",\"access\":\"full\",\"x\":1.5,\"y\":1e+20}]},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"tabs\"}",
+    "reply": "{\"ok\":true,\"tabs\":[{\"id\":3,\"title\":\"Caf\\u00e9 \\\"q\\\"\",\"access\":\"full\",\"x\":1.5,\"y\":1e20}]}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 10, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_select\", \"arguments\": {\"tab\": \"3\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"lease\\\": \\\"L1\\\",\\n  \\\"tab\\\": 3\\n}\"}],\"structuredContent\":{\"ok\":true,\"lease\":\"L1\",\"tab\":3},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"select\", \"tab\": 3}",
+    "reply": "{\"ok\":true,\"lease\":\"L1\",\"tab\":3}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 11, \"method\": \"tools/call\", \"params\": {\"name\": \"page_read\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"elements\\\": [],\\n  \\\"truncated\\\": false\\n}\"}],\"structuredContent\":{\"ok\":true,\"elements\":[],\"truncated\":false},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_read\", \"lease\": \"L1\", \"scope_ref\": null, \"max_chars\": 50000, \"viewport_only\": false, \"include_text\": false}",
+    "reply": "{\"ok\":true,\"elements\":[],\"truncated\":false}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 12, \"method\": \"tools/call\", \"params\": {\"name\": \"page_read\", \"arguments\": {\"lease\": \"L1\", \"scope_ref\": \"e1\", \"max_chars\": 2000, \"viewport_only\": \"yes\", \"include_text\": 1}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_read\", \"lease\": \"L1\", \"scope_ref\": \"e1\", \"max_chars\": 2000, \"viewport_only\": true, \"include_text\": true}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 13, \"method\": \"tools/call\", \"params\": {\"name\": \"page_find\", \"arguments\": {\"lease\": \"L1\", \"name\": \"Go\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_find\", \"lease\": \"L1\", \"role\": null, \"name\": \"Go\", \"text\": null, \"within_ref\": null, \"limit\": 10}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 14, \"method\": \"tools/call\", \"params\": {\"name\": \"page_click\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"r1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":14,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_click\", \"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"r1\", \"dialog\": \"dismiss\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 15, \"method\": \"tools/call\", \"params\": {\"name\": \"page_click\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e1\", \"dialog\": \"accept\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":15,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_click\", \"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"<uuid4>\", \"dialog\": \"accept\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 16, \"method\": \"tools/call\", \"params\": {\"name\": \"page_click\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":16,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_click: {\\\"ok\\\":false,\\\"error\\\":\\\"InvalidRequest\\\",\\\"field\\\":\\\"request_id\\\"}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_click\", \"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"\", \"dialog\": \"dismiss\"}",
+    "reply": "{\"ok\":false,\"error\":\"InvalidRequest\",\"field\":\"request_id\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 17, \"method\": \"tools/call\", \"params\": {\"name\": \"page_hover\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e2\", \"request_id\": \"null\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":17,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_hover\", \"lease\": \"L1\", \"ref\": \"e2\", \"request_id\": \"<uuid4>\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 18, \"method\": \"tools/call\", \"params\": {\"name\": \"page_drag\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e2\", \"target\": \"e3\", \"request_id\": \"r2\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":18,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_drag\", \"lease\": \"L1\", \"ref\": \"e2\", \"target\": \"e3\", \"request_id\": \"r2\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 19, \"method\": \"tools/call\", \"params\": {\"name\": \"page_type\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e2\", \"text\": \"h\\u00e9llo\\n\", \"request_id\": \"r3\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":19,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_type\", \"lease\": \"L1\", \"ref\": \"e2\", \"text\": \"h\\u00e9llo\\n\", \"request_id\": \"r3\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 20, \"method\": \"tools/call\", \"params\": {\"name\": \"page_scroll\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":20,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_scroll\", \"lease\": \"L1\", \"to\": \"down\", \"ref\": null, \"wait_ms\": 1000, \"request_id\": \"<uuid4>\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 21, \"method\": \"tools/call\", \"params\": {\"name\": \"page_scroll\", \"arguments\": {\"lease\": \"L1\", \"to\": \"element\", \"ref\": \"e4\", \"wait_ms\": \"250\", \"request_id\": \"r4\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_scroll\", \"lease\": \"L1\", \"to\": \"element\", \"ref\": \"e4\", \"wait_ms\": 250, \"request_id\": \"r4\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 22, \"method\": \"tools/call\", \"params\": {\"name\": \"page_press\", \"arguments\": {\"lease\": \"L1\", \"key\": \"Enter\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_press\", \"lease\": \"L1\", \"ref\": null, \"key\": \"Enter\", \"modifiers\": [], \"request_id\": \"<uuid4>\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 23, \"method\": \"tools/call\", \"params\": {\"name\": \"page_press\", \"arguments\": {\"lease\": \"L1\", \"key\": \"a\", \"ref\": \"e5\", \"modifiers\": \"[\\\"Shift\\\",\\\"Meta\\\"]\", \"request_id\": \"r5\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":23,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_press\", \"lease\": \"L1\", \"ref\": \"e5\", \"key\": \"a\", \"modifiers\": [\"Shift\", \"Meta\"], \"request_id\": \"r5\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 24, \"method\": \"tools/call\", \"params\": {\"name\": \"page_select\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e6\", \"value\": \"two\", \"request_id\": \"r6\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":24,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_select\", \"lease\": \"L1\", \"ref\": \"e6\", \"value\": \"two\", \"request_id\": \"r6\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 25, \"method\": \"tools/call\", \"params\": {\"name\": \"page_navigate\", \"arguments\": {\"lease\": \"L1\", \"url\": \"https://example.com/\", \"request_id\": \"r7\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":25,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_navigate\", \"lease\": \"L1\", \"url\": \"https://example.com/\", \"request_id\": \"r7\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 26, \"method\": \"tools/call\", \"params\": {\"name\": \"page_back\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":26,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_back\", \"lease\": \"L1\", \"request_id\": \"<uuid4>\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 27, \"method\": \"tools/call\", \"params\": {\"name\": \"page_forward\", \"arguments\": {\"lease\": \"L1\", \"request_id\": \"r8\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":27,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_forward: {\\\"ok\\\":false,\\\"error\\\":\\\"NoHistory\\\",\\\"tab\\\":3}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_forward\", \"lease\": \"L1\", \"request_id\": \"r8\"}",
+    "reply": "{\"ok\":false,\"error\":\"NoHistory\",\"tab\":3}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 28, \"method\": \"tools/call\", \"params\": {\"name\": \"page_reload\", \"arguments\": {\"lease\": \"L1\", \"request_id\": \"r9\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":28,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_reload\", \"lease\": \"L1\", \"request_id\": \"r9\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 29, \"method\": \"tools/call\", \"params\": {\"name\": \"page_downloads\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":29,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"downloads\\\": []\\n}\"}],\"structuredContent\":{\"ok\":true,\"downloads\":[]},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_downloads\", \"lease\": \"L1\"}",
+    "reply": "{\"ok\":true,\"downloads\":[]}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 30, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_switch\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":30,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"switch\", \"lease\": \"L1\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 31, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a.txt\", \"d/b.png\", \"./X.JSON\", \"d//../noext\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":31,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"d//../noext: contains a '..' component\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 32, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a.txt\", \"d//b.png\", \"./X.JSON\", \"noext\", \"t.tar.gz\", \"<ROOT>/a.txt\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":32,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_upload\", \"lease\": \"L1\", \"ref\": \"e9\", \"files\": [{\"name\": \"a.txt\", \"type\": \"text/plain\", \"data\": \"aGVsbG8K\"}, {\"name\": \"b.png\", \"type\": \"image/png\", \"data\": \"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==\"}, {\"name\": \"X.JSON\", \"type\": \"application/json\", \"data\": \"e30=\"}, {\"name\": \"noext\", \"type\": \"application/octet-stream\", \"data\": \"bg==\"}, {\"name\": \"t.tar.gz\", \"type\": \"application/x-tar\", \"data\": \"dA==\"}, {\"name\": \"a.txt\", \"type\": \"text/plain\", \"data\": \"aGVsbG8K\"}], \"request_id\": \"u1\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 33, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a.txt\"], \"request_id\": null}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":33,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_upload\", \"lease\": \"L1\", \"ref\": \"e9\", \"files\": [{\"name\": \"a.txt\", \"type\": \"text/plain\", \"data\": \"aGVsbG8K\"}], \"request_id\": \"<uuid4>\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 34, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"../a.txt\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":34,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"../a.txt: contains a '..' component\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 35, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"/etc/hosts\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":35,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"/etc/hosts: is outside the upload root\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 36, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"link\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":36,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"link: is a symlink\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 37, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"dlink/b.png\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":37,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"dlink/b.png: is a symlink or not under a directory\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 38, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"nope.txt\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":38,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"nope.txt: does not exist\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 39, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"d\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":39,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"d: is not a regular file\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 40, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"big.bin\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":40,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"big.bin: is larger than 524288 bytes\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 41, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"h1.bin\", \"h2.bin\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":41,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"h2.bin: puts the upload over 524288 bytes in total\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 42, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"InvalidRequest\\\",\\\"message\\\":\\\"paths must list 1 to 10 files\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 43, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\", \"a.txt\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":43,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"InvalidRequest\\\",\\\"message\\\":\\\"paths must list 1 to 10 files\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 44, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":44,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"InvalidRequest\\\",\\\"message\\\":\\\"paths must be non-empty file path strings\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 45, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a\\u0000b\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":45,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"InvalidRequest\\\",\\\"message\\\":\\\"paths must be non-empty file path strings\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 46, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\".\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":46,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\".: is not a regular file\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 47, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"<ROOT>\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":47,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"<ROOT>: is not a regular file\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 48, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a.txt/x\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":48,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"a.txt/x: is a symlink or not under a directory\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 49, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"fifo\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":49,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"fifo: is not a regular file\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 50, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"locked\"], \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":50,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"FileRefused\\\",\\\"message\\\":\\\"locked: cannot be read\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 51, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": \"a.txt\", \"request_id\": \"u1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":51,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: 1 validation error for page_uploadArguments\\npaths\\n  Input should be a valid list [type=list_type, input_value='a.txt', input_type=str]\\n    For further information visit https://errors.pydantic.dev/2.14/v/list_type\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 52, \"method\": \"tools/call\", \"params\": {\"name\": \"page_click\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"r10\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":52,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_click: {\\\"ok\\\":false,\\\"error\\\":\\\"StaleElement\\\",\\\"ref\\\":\\\"e1\\\",\\\"message\\\":\\\"gone \\\\u2014 read again\\\"}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"page_click\", \"lease\": \"L1\", \"ref\": \"e1\", \"request_id\": \"r10\", \"dialog\": \"dismiss\"}",
+    "reply": "{\"ok\":false,\"error\":\"StaleElement\",\"ref\":\"e1\",\"message\":\"gone \\u2014 read again\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 53, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_select\", \"arguments\": {\"tab\": \"x\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":53,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_select: 1 validation error for browser_selectArguments\\ntab\\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='x', input_type=str]\\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 54, \"method\": \"tools/call\", \"params\": {\"name\": \"page_click\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":54,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_click: 1 validation error for page_clickArguments\\nref\\n  Field required [type=missing, input_value={'lease': 'L1'}, input_type=dict]\\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 55, \"method\": \"tools/call\", \"params\": {\"name\": \"nope\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":55,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Unknown tool: nope\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 56, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_release\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":56,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_release: {\\\"ok\\\":false,\\\"error\\\":\\\"GrantEnded\\\",\\\"reason\\\":\\\"revoked\\\"}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"release\", \"lease\": \"L1\"}",
+    "reply": "{\"ok\":false,\"error\":\"GrantEnded\",\"reason\":\"revoked\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 57, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":57,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"NotConnected\\\",\\\"message\\\":\\\"No session; call browser_connect first\\\",\\\"reason\\\":\\\"revoked\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 58, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {\"profile\": \"p1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":58,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"grant\\\": \\\"g-0123456789ab\\\",\\n  \\\"profile\\\": \\\"p1\\\",\\n  \\\"email\\\": \\\"a@example.com\\\"\\n}\"}],\"structuredContent\":{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\", \"profile\": \"p1\"}",
+    "reply": "{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 59, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":59,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"ServiceUnavailable\\\",\\\"message\\\":\\\"The Trusty Browser service is not reachable on agent.sock; start it, then call browser_connect again\\\"}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"tabs\"}",
+    "reply": null
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 60, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":60,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"NotConnected\\\",\\\"message\\\":\\\"No session; call browser_connect first\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 61, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":61,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"grant\\\": \\\"g-0123456789ab\\\",\\n  \\\"profile\\\": \\\"p1\\\",\\n  \\\"email\\\": \\\"a@example.com\\\"\\n}\"}],\"structuredContent\":{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\"}",
+    "reply": "{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 62, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":62,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"ServiceUnavailable\\\",\\\"message\\\":\\\"The Trusty Browser service is not reachable on agent.sock; start it, then call browser_connect again\\\"}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"tabs\"}",
+    "reply": "{\"ok\":true"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 63, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":63,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"grant\\\": \\\"g-0123456789ab\\\",\\n  \\\"profile\\\": \\\"p1\\\",\\n  \\\"email\\\": \\\"a@example.com\\\"\\n}\"}],\"structuredContent\":{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\"}",
+    "reply": "{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 64, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":64,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"ServiceUnavailable\\\",\\\"message\\\":\\\"The Trusty Browser service is not reachable on agent.sock; start it, then call browser_connect again\\\"}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"tabs\"}",
+    "reply": "[1]"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 65, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":65,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"grant\\\": \\\"g-0123456789ab\\\",\\n  \\\"profile\\\": \\\"p1\\\",\\n  \\\"email\\\": \\\"a@example.com\\\"\\n}\"}],\"structuredContent\":{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\"}",
+    "reply": "{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 66, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_release\", \"arguments\": {\"lease\": \"L1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":66,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_release: {\\\"ok\\\":false,\\\"error\\\":\\\"GrantEnded\\\",\\\"reason\\\":7}\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"release\", \"lease\": \"L1\"}",
+    "reply": "{\"ok\":false,\"error\":\"GrantEnded\",\"reason\":7}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 67, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":67,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_tabs: {\\\"ok\\\":false,\\\"error\\\":\\\"NotConnected\\\",\\\"message\\\":\\\"No session; call browser_connect first\\\",\\\"reason\\\":\\\"unknown\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 68, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_disconnect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":68,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"disconnected\\\": false\\n}\"}],\"structuredContent\":{\"ok\":true,\"disconnected\":false},\"isError\":false}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 69, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":69,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"grant\\\": \\\"g-0123456789ab\\\",\\n  \\\"profile\\\": \\\"p1\\\",\\n  \\\"email\\\": \\\"a@example.com\\\"\\n}\"}],\"structuredContent\":{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"attach\"}",
+    "reply": "{\"ok\":true,\"grant\":\"g-0123456789ab\",\"profile\":\"p1\",\"email\":\"a@example.com\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 70, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_disconnect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":70,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"disconnected\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true,\"disconnected\":true},\"isError\":false}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 71, \"method\": \"ping\"}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":71,\"result\":{}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": \"s\", \"method\": \"bogus\"}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"error\":{\"code\":-32602,\"message\":\"Invalid request parameters\",\"data\":\"\"}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 72, \"method\": \"tools/call\", \"params\": {}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":72,\"error\":{\"code\":-32602,\"message\":\"Invalid request parameters\",\"data\":\"\"}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 73, \"method\": \"resources/list\"}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":73,\"result\":{\"resources\":[]}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 74, \"method\": \"prompts/list\"}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":74,\"result\":{\"prompts\":[]}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 75, \"method\": \"resources/templates/list\"}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":75,\"result\":{\"resourceTemplates\":[]}}",
+  "frames": []
+ },
+ {
+  "send": "not json",
+  "recv": null,
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 76, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_profiles\", \"arguments\": {}}}",
+  "recv": "{\"method\":\"notifications/message\",\"params\":{\"level\":\"error\",\"logger\":\"mcp.server.exception_handler\",\"data\":\"Internal Server Error\"},\"jsonrpc\":\"2.0\"}",
+  "frames": [],
+  "action": "stop"
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 77, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_connect\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":76,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_profiles: {\\\"ok\\\":false,\\\"error\\\":\\\"ServiceUnavailable\\\",\\\"message\\\":\\\"The Trusty Browser service is not reachable on agent.sock; start it, then call browser_connect again\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ }
+]

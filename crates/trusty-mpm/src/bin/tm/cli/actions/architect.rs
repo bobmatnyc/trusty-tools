@@ -3,7 +3,7 @@
 //! Why: `start-fleet-poll.sh` and the Architect's skills ran five Python
 //! scripts; each verb here takes the same arguments as the script it
 //! replaces, so a caller swaps one for the other.
-//! What: [`ArchitectAction`] — `poll`, `classify`, `input-state`, `quiet`,
+//! What: [`ArchitectAction`] — `poll`, `serve` (#9779), `classify`, `input-state`, `quiet`,
 //! `self-ctx`. The work is `trusty_architect::verbs`. #10063 adds
 //! `dashboard`, the dashboard store's verbs ([`DashboardArgs`]).
 //! Test: `cli_parses_architect_verbs`, `cli_parses_architect_dashboard_verbs`.
@@ -28,13 +28,39 @@ pub(crate) enum ArchitectAction {
         /// Run one cycle and exit.
         #[arg(long)]
         once: bool,
-        /// Seconds between cycles (a positive whole number).
-        #[arg(long, default_value = "60", allow_hyphen_values = true)]
-        interval: String,
+        /// Seconds between cycles (a positive whole number). Default:
+        /// `poll_interval_s` in `local/architect.json`, else 60.
+        // #11369: no clap default, so every start path reads one cadence.
+        #[arg(long, allow_hyphen_values = true)]
+        interval: Option<String>,
         /// One cycle that captures and classifies only: prints to stdout,
         /// writes no file, sends no keys.
         #[arg(long)]
         dry_run: bool,
+        /// Shadow run beside the live poller: writes only `inbox/shadow/`,
+        /// takes no lock, sends no keys, relaunches nothing (#9779).
+        #[arg(long)]
+        shadow: bool,
+    },
+    /// The poll cycle as a service, run on local events (#9779).
+    ///
+    /// Runs the same cycle as `poll` soon after an inbox write, tmux pane
+    /// activity (polled; no tmux client is attached) or a transcript
+    /// append: 2 s debounce, at most one event cycle per 15 s
+    /// (`SERVE_MIN_EVENT_GAP`), and at least every 60 s. GitHub reads keep their own cadence; no port is
+    /// opened. Takes `inbox/poll.lock` for its life, so `poll` cannot run
+    /// beside it. A watcher that fails is logged and raised as a `serve`
+    /// alert while the 60 s tick keeps cycling. SIGTERM or SIGINT exits
+    /// after the running cycle.
+    Serve {
+        /// Shadow run beside the live poller: writes only `inbox/shadow/`,
+        /// takes no lock, sends no keys, relaunches, notifies and pushes
+        /// nothing.
+        #[arg(long)]
+        shadow: bool,
+        /// Run one cycle and exit (exit 1 when it fails).
+        #[arg(long)]
+        once: bool,
     },
     /// Print one pane capture's facts as JSON (`parse_pane`).
     ///
@@ -82,4 +108,50 @@ pub(crate) enum ArchitectAction {
     /// found a problem), 2 a refused request, 3 an unreadable or locked store.
     // #10063: owner ruling D34 fixes the conflict exit at 1.
     Dashboard(DashboardArgs),
+    /// Bring the Architect up from any state, then attach (#11364).
+    ///
+    /// Idempotent and locked: starts what is missing, never stops or
+    /// restarts a live `claude`. Inside Claude Code it only ensures a bound
+    /// Architect. Exit codes: 0 up, 1 a step failed, 2 refused.
+    Up(UpArgs),
+    /// Attach to the Architect's tmux session (switch-client inside tmux).
+    Attach,
+    /// Restart the Architect behind the checkpoint gate (#11365).
+    ///
+    /// Waits for an idle box (3 reads 5 s apart, exit 2), asks the Architect
+    /// for an Intent Ledger checkpoint and waits up to 90 s for the write
+    /// (exit 4), then stops and relaunches only the Architect's `claude`,
+    /// bound with resume, restores the poller and types one resume line.
+    /// Other sessions, the daemon and launchd are untouched. Refused inside
+    /// Claude Code and when no Architect is recorded (exit 2). No bypass
+    /// flag (ruling Dpg): the owner overrides with `tm fleet relaunch`.
+    // See G0b architect restart
+    Restart {
+        /// Keep waiting for idle up to this many seconds.
+        #[arg(long)]
+        wait: Option<u64>,
+        /// The Architect directory (default: the one `tm fleet init` recorded).
+        #[arg(long)]
+        dir: Option<String>,
+        /// Do not ask for a checkpoint; the existing one must still be fresh.
+        #[arg(long)]
+        no_checkpoint: bool,
+    },
+}
+
+/// `tm architect up` flags (#11364).
+#[derive(Debug, Default, Clone, clap::Args)]
+pub(crate) struct UpArgs {
+    /// Bring it up but do not attach.
+    #[arg(long)]
+    pub(crate) no_attach: bool,
+    /// Print the step plan and change nothing.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    /// Print the report as JSON (implies --no-attach).
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// The Architect directory (default: the one `tm fleet init` recorded).
+    #[arg(long)]
+    pub(crate) dir: Option<String>,
 }

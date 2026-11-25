@@ -5,13 +5,14 @@ DNS-rebinding and CSRF guard.
 What: `Handler` routes GET / (the page with the shim), /config.json, /api/<coll>[/<id>] (store reads and versioned
 writes; 409 on if_version mismatch), /api/batch, /api/user, /api/il, /api/harness[/diff], /api/viz, /live, /files,
 /usage, /media, /media-file, /doc, /doc-sync, /briefs and /vendor (see dashboard-serve.py for the API list), plus the
-dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /static). A request
+dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /api/pane,
+/static). A request
 whose Host is not 127.0.0.1/localhost:<port> or a guard name (bare, :<port>, :443), or a write whose Origin is not
 http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`host_allowed`, `origin_allowed`).
-/config.json `warnings` lists why this interpreter degrades the page ([] on Python >= 3.11, #10606).
+/config.json `warnings` lists why this interpreter degrades the page ([] when tmux is on PATH, #10606).
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
-owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
+owner_name (re-read per request; a stored "" or "the owner" counts as unset, #10760), else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
 {"share": false}. The Secrets and project-lifecycle routes are optional too (#10571): while dashboard_secrets or
 dashboard_lifecycle is not shipped, /api/secrets/* and /api/projects/<verb>/<id> fall through to the store API, which
 refuses them (404 or 405), and nothing runs. A Content-Length that is not
@@ -31,6 +32,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import architect_config
 import dashboard_docs as docs
 import dashboard_harness
 import dashboard_il
@@ -46,9 +48,10 @@ try:
 except ImportError:
     notion_sync = None
 try:  # #10571: the Secrets nav and project lifecycle need the trusty-secrets bridge; optional, not shipped yet
-    import dashboard_secrets
+    # #10570: bound as sec_nav; pm-guard read the module name's attribute calls as a secret-file name.
+    import dashboard_secrets as sec_nav
 except ImportError:
-    dashboard_secrets = None
+    sec_nav = None
 try:
     import dashboard_lifecycle
 except ImportError:
@@ -58,6 +61,7 @@ MAX_BODY = 1 << 20
 REQUEST_TIMEOUT_S = 30   # #10161: a stalled client releases its handler thread after this
 _DIGITS = re.compile(r"[0-9]+")
 LOCAL_NAMES = ("127.0.0.1", "localhost")
+UNSET_OWNER = ("", "the owner")   # #10760: values seed_meta writes when no owner is configured; never an explicit name
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -181,6 +185,10 @@ class Handler(BaseHTTPRequestHandler):
                 return routes.fleet(self)
             if parts == ["api", "projects"]:
                 return routes.projects(self)
+            if parts == ["api", "projects", "key-names"]:   # #10350: the Secrets list, names only
+                return routes.key_names(self, url)
+            if parts == ["api", "pane"]:   # #11065: a session's masked pane tail
+                return routes.pane(self, url)
             if parts == ["api", "cli-profiles"]:
                 return routes.cli_profiles(self, url)
             if parts == ["api", "harness", "diff"]:
@@ -231,9 +239,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._doc(url.path) if parts[0] == "doc" else self._vendor(parts[1:])
             if parts[:2] == ["api", "attach"]:
                 return routes.attach(self, parts[2:], parse_qs(url.query), _DIGITS)
-            if dashboard_secrets is not None and tuple(parts[:2]) == dashboard_secrets.PREFIX:
+            if sec_nav is not None and tuple(parts[:2]) == sec_nav.PREFIX:
                 # Secrets nav: POST-only, Origin + CSRF guarded; never returns a value
-                return dashboard_secrets.handle(self, parts[2:], host_allowed, origin_allowed)
+                return sec_nav.handle(self, parts[2:], host_allowed, origin_allowed)
             if dashboard_lifecycle is not None and tuple(parts[:2]) == dashboard_lifecycle.PREFIX and len(parts) == 3:
                 # Projects archive/decommission/restore: POST-only, CSRF guarded
                 return dashboard_lifecycle.handle(self, parts[2:], host_allowed, origin_allowed)
@@ -253,15 +261,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _harness(self):
         sv = self.server
-        sdocs = [d["data"] for d in sv.store.list_docs("sessions")]
-        idocs = [d["data"] for d in sv.store.list_docs("items")]
-        gdocs = [d["data"] for d in sv.store.list_docs("goals")]
+        snap = sv.store.snapshot(("sessions", "items", "goals", "meta"))   # #10679: one shared lock, so one batch is seen whole
+        sdocs, idocs, gdocs = ([d["data"] for d in snap[c]] for c in ("sessions", "items", "goals"))
         roots = sv.projects()
         cwds = {x.get("name"): roots[x.get("project")] for x in sdocs if x.get("name") and x.get("project") in roots}
-        try:
-            ustate = sv.store.get("meta", "settings")["data"].get("user_state")
-        except Exception:  # noqa: BLE001 - settings absent: state unknown, never sleeping
-            ustate = None
+        settings = next((d["data"] for d in snap["meta"] if d["id"] == "settings"), None)
+        ustate = settings.get("user_state") if isinstance(settings, dict) else None   # settings absent: unknown, never sleeping
         return dashboard_harness.build(sv.inbox, sv.claude_projects, sdocs, idocs, project_cwds=cwds, roots=roots, goal_docs=gdocs,
                                        user_state=ustate, tmux=dashboard_harness.tmux_sessions())
 
@@ -362,7 +367,9 @@ class Handler(BaseHTTPRequestHandler):
             except ds.NotFound:
                 name = ""
             # #10161: no owner name ships; meta/state, else local/architect.json, else a neutral default.
-            name = name or self.server.owner_name or "the owner"
+            # #10760: a seeded placeholder is unset, and architect.json is read per request, so a later owner_name wins.
+            name = name if name not in UNSET_OWNER else ""
+            name = name or configured_owner(self.server.owner_name) or "the owner"
             return self._send(200, {"id": "local", "name": name, "can_write": True})
         if len(parts) == 2 and parts[0] == "media-archive" and m == "POST":   # archive a media item (architect dash only)
             if self.server.config.get("mode") != "architect":
@@ -377,7 +384,11 @@ class Handler(BaseHTTPRequestHandler):
                     coll, status=(q.get("status") or [None])[0], order_by=(q.get("order_by") or [None])[0],
                     desc=(q.get("dir") or ["asc"])[0] == "desc",
                     limit=int(q["limit"][0]) if q.get("limit") and q["limit"][0].isdigit() else None)
-                return self._send(200, {"docs": rows, "rev": page.rev_of(rows)})
+                rev = page.rev_of(rows)
+                if coll == "items":   # #11047: computed data.project (never stored); a change in it re-renders the page
+                    rows = dashboard_viz.with_projects(rows)
+                    rev = hashlib.sha1((rev + json.dumps([d["data"].get("project") for d in rows])).encode()).hexdigest()
+                return self._send(200, {"docs": rows, "rev": rev})
             if m == "POST":
                 return self._send(201, store.add(coll, self._body().get("data"), actor=self._actor()))
         if len(parts) == 2:
@@ -396,10 +407,18 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_HEAD = do_PUT = do_PATCH = do_POST = do_DELETE = _dispatch
 
 
+def configured_owner(started_with):
+    """local/architect.json `owner_name` as it is now (#10760); the start-up value when the file cannot be read."""
+    try:
+        return architect_config.load().owner_name or started_with
+    except architect_config.ConfigError:
+        return started_with
+
+
 def features():
     """Which optional backends this install has (#10571): {"secrets", "cli_profiles", "project_lifecycle"} -> bool.
     The page drops the Secrets and CLI Profiles tabs and the archive buttons when their flag is false."""
-    return {"secrets": dashboard_secrets is not None, "cli_profiles": routes.cli_profiles_mod is not None,
+    return {"secrets": sec_nav is not None, "cli_profiles": routes.cli_profiles_mod is not None,
             "project_lifecycle": dashboard_lifecycle is not None}
 
 

@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn a_valid_table_is_ok_and_counts_the_orgs() {
-        let home = home_with("[accounts]\nduettoresearch = \"bob-duetto\"\nacme = \"octo\"\n");
+        let home = home_with("[accounts]\nacme-labs = \"acme-admin\"\nacme = \"octo\"\n");
         let check = check_org_accounts(home.path());
         assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
         assert!(check.message.contains("maps 2"), "{}", check.message);
@@ -103,7 +103,7 @@ mod tests {
     /// 🔴 #9091: a broken table is a `Fail` naming the file and the error.
     #[test]
     fn a_broken_table_fails_with_the_error() {
-        let home = home_with("[accounts]\nduettoresearch = bob-duetto\n");
+        let home = home_with("[accounts]\nacme = acme-admin\n");
         let check = check_org_accounts(home.path());
         assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
         assert!(check.message.contains("config.toml"), "{}", check.message);

@@ -276,6 +276,9 @@ pub async fn register_project_registry_op(
             .or_else(|| existing.as_ref().and_then(|p| p.worktree)),
         // #10530: carried forward; the store assigns it on first register.
         project_key: existing.as_ref().and_then(|p| p.project_key.clone()),
+        // #10988: an upsert never clears a decommissioned state.
+        decommissioned_at: existing.as_ref().and_then(|p| p.decommissioned_at),
+        archived_at: existing.as_ref().and_then(|p| p.archived_at),
     };
     if let Err(e) = registry.register(project.clone()).await {
         warn!(error = %e, project = %project.name, "register_project_registry_route: register failed");
@@ -811,8 +814,8 @@ mod tests {
     /// The two-account answer a real `gh auth status` gives on this machine.
     fn two_accounts() -> GhAuthProbe {
         GhAuthProbe::Answered(GhAccountStatus {
-            active: Some("bob-duetto".to_string()),
-            logged_in: vec!["bob-duetto".to_string(), "bobmatnyc".to_string()],
+            active: Some("acme-admin".to_string()),
+            logged_in: vec!["acme-admin".to_string(), "bobmatnyc".to_string()],
         })
     }
 
@@ -827,8 +830,8 @@ mod tests {
         );
         // A logged-in but non-active account is a legitimate choice.
         assert_eq!(
-            validate_gh_user_login(" bob-duetto ", Some(&two_accounts())).unwrap(),
-            "bob-duetto"
+            validate_gh_user_login(" acme-admin ", Some(&two_accounts())).unwrap(),
+            "acme-admin"
         );
     }
 
@@ -919,13 +922,15 @@ mod tests {
                 stack_hint: None,
                 tags: vec![],
                 description: None,
-                gh_user: Some("bob-duetto".into()),
+                gh_user: Some("acme-admin".into()),
                 gh_account: None,
                 github: None,
                 commit_name: None,
                 commit_email: None,
                 worktree: None,
                 project_key: None,
+                decommissioned_at: None,
+                archived_at: None,
             })
             .await
             .expect("seed register");

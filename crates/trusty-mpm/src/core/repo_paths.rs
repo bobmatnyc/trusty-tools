@@ -5,7 +5,8 @@
 //! the always-on `project::resolver` calls [`base_clone_path`] — so a plain
 //! `--no-default-features` build failed to compile (#9776). `inproject`
 //! re-exports every public item here, so each existing path still resolves.
-//! What: [`repos_root_from`], [`repos_root`], [`base_clone_path`], and the
+//! What: [`repos_root_from`], [`repos_root`], [`base_clone_path`], their
+//! fail-closed `try_` variants for writers (#11821), and the
 //! [`REPOS_ROOT_ENV`] / [`DEFAULT_REPOS_DIR`] constants they read.
 //! Test: `repos_root_default_ends_with_canonical_segment`,
 //! `base_clone_path_resolves_to_canonical_root` (in `inproject`'s tests).
@@ -39,34 +40,46 @@ pub const DEFAULT_REPOS_DIR: &str = "trusty-mpm-projects";
 /// when the home directory is unresolvable AND nothing absolute was supplied.
 /// Test: `repos_root_default_ends_with_canonical_segment`; `base_clone_path_respects_repos_root_override` (integration).
 pub fn repos_root_from(env_override: Option<&str>) -> PathBuf {
-    let home = dirs::home_dir();
-
-    // Direct in-process override (highest priority — used by tests to avoid env mutation).
-    if let Some(raw) = env_override {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            return match &home {
-                Some(h) => expand_tilde_repos(raw, h),
-                None => PathBuf::from(raw),
-            };
-        }
-    }
-
-    // TRUSTY_MPM_REPOS_ROOT env override (backward compat, wins over workspace_root).
-    if let Ok(raw) = std::env::var(REPOS_ROOT_ENV) {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            return match &home {
-                Some(h) => expand_tilde_repos(raw, h),
-                None => PathBuf::from(raw),
-            };
-        }
-    }
-
     // Delegate to the canonical workspace root resolver (TRUSTY_MPM_WORKSPACE_ROOT
     // > config template > ~/trusty-mpm-projects).
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    crate::core::trusty_tools_config::workspace_root(&config)
+    repos_root_override(env_override).unwrap_or_else(|| {
+        let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+        crate::core::trusty_tools_config::workspace_root(&config)
+    })
+}
+
+/// [`repos_root`] that fails closed on a broken `install.toml`.
+///
+/// Why: df-D1t (#11821): a base clone must not land under the default root
+/// because the operator's install file is broken.
+/// What: `TRUSTY_MPM_REPOS_ROOT` wins as before; otherwise
+/// [`crate::core::trusty_tools_config::try_workspace_root`], whose error is
+/// returned unchanged.
+/// Test: `broken_install_file_fails_the_workspace_root_closed` (env_serial).
+pub fn try_repos_root() -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    match repos_root_override(None) {
+        Some(root) => Ok(root),
+        None => crate::core::trusty_tools_config::try_workspace_root(
+            &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+        ),
+    }
+}
+
+/// The in-process override and `TRUSTY_MPM_REPOS_ROOT` rungs, `~`-expanded;
+/// `None` when neither is set.
+fn repos_root_override(env_override: Option<&str>) -> Option<PathBuf> {
+    // Direct in-process override (highest priority — used by tests to avoid env
+    // mutation), then TRUSTY_MPM_REPOS_ROOT (backward compat, wins over
+    // workspace_root).
+    let from_env = std::env::var(REPOS_ROOT_ENV).ok();
+    let raw = env_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| from_env.as_deref().map(str::trim).filter(|s| !s.is_empty()))?;
+    Some(match dirs::home_dir() {
+        Some(h) => expand_tilde_repos(raw, &h),
+        None => PathBuf::from(raw),
+    })
 }
 
 /// Resolve the absolute root for base clones.
@@ -102,9 +115,79 @@ fn expand_tilde_repos(template: &str, home: &Path) -> PathBuf {
 /// Compute the base clone path for a GitHub `owner/repo`.
 ///
 /// Why: the base clone directory must be stable and deterministic so multiple
-/// sessions against the same repo all share one protected clone.
-/// What: returns `<repos_root>/<owner>/<repo>`.
-/// Test: `base_clone_path_resolves_to_canonical_root` (unit); wiring via integration tests.
+/// sessions against the same repo all share one protected clone, whatever case
+/// or punctuation the caller spelled the identity with (#10604).
+/// What: returns `<repos_root>/<owner>/<repo>`, each segment slugified exactly
+/// as [`trusty_common::github_path::parse_github_path`] does (lowercase, other
+/// runs to `-`), so `BobMatNYC/Trusty_Tools` and `bobmatnyc/trusty-tools` name
+/// one directory.
+/// Readers only: a broken `install.toml` is logged and defaulted here; a
+/// caller that clones uses [`try_base_clone_path`] (#11821).
+/// Test: `base_clone_path_is_canonical_for_a_mixed_case_identity_10604`;
+/// `base_clone_path_resolves_to_canonical_root`; wiring via integration tests.
 pub fn base_clone_path(owner: &str, repo: &str) -> PathBuf {
-    repos_root().join(owner).join(repo)
+    base_clone_path_in(&repos_root(), owner, repo)
+}
+
+/// [`base_clone_path`] under an explicit `repos_root` (#11828).
+///
+/// Why: a test or a caller that already holds the root must not read the env
+/// or the config again.
+/// Test: `base_clone_path_is_canonical_for_a_mixed_case_identity_10604`.
+pub fn base_clone_path_in(repos_root: &Path, owner: &str, repo: &str) -> PathBuf {
+    // #10604: canonical here, not by caller convention.
+    repos_root
+        .join(canonical_segment(owner))
+        .join(canonical_segment(repo))
+}
+
+/// [`base_clone_path`] that fails closed on a broken `install.toml`.
+///
+/// Why: df-D1t (#11821): every path that clones into or reuses a base clone
+/// must refuse rather than clone under the default root.
+/// What: [`try_repos_root`] joined with the same canonical segments.
+/// Test: `broken_install_file_fails_the_workspace_root_closed`,
+/// `cold_start_refuses_on_a_broken_install_file` (env_serial).
+pub fn try_base_clone_path(
+    owner: &str,
+    repo: &str,
+) -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    Ok(base_clone_path_in(&try_repos_root()?, owner, repo))
+}
+
+/// One `owner` or `repo` path segment in the slug form tm names clones with.
+///
+/// What: the slug [`trusty_common::github_path::parse_owner_repo`] gives a
+/// single segment; ASCII-lowercase when that parse refuses (an `@` in it) or
+/// leaves nothing.
+fn canonical_segment(segment: &str) -> String {
+    trusty_common::github_path::parse_owner_repo(segment)
+        .map(|gh| gh.repo)
+        .unwrap_or_else(|| segment.trim().to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #10604: a mixed-case, underscored identity lands on the lowercase slug
+    /// path every slugified caller already uses.
+    #[test]
+    fn base_clone_path_is_canonical_for_a_mixed_case_identity_10604() {
+        // #10604: assert on the tail, not on three `repos_root()` reads, so a
+        // concurrent test that changes HOME or the root env cannot flake this.
+        for (owner, repo) in [
+            ("bobmatnyc", "trusty-tools"),
+            ("BobMatNYC", "Trusty_Tools"),
+            ("BOBMATNYC", "Trusty-Tools.git"),
+        ] {
+            let path = base_clone_path(owner, repo);
+            assert!(path.ends_with("bobmatnyc/trusty-tools"), "{path:?}");
+            let root = Path::new("/r");
+            assert_eq!(
+                base_clone_path_in(root, owner, repo),
+                root.join("bobmatnyc/trusty-tools")
+            );
+        }
+    }
 }

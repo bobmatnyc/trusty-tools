@@ -10,7 +10,7 @@
 use super::{GuardPolicy, Role, policy};
 
 const ALL: &[Role] = &[Role::Pm, Role::Architect, Role::Agent];
-const ARCHITECT: &[Role] = &[Role::Architect];
+const MAIN_THREADS: &[Role] = &[Role::Pm, Role::Architect];
 
 // The Architect core hard limits an entry cites (`content/instructions/architect/core.md`).
 const GUARD_STAYS_ON: Option<&str> = Some("the guard stays on");
@@ -57,21 +57,26 @@ pub static EGRESS_MALFORMED_MCP_NAME: GuardPolicy = policy(
     GUARD_STAYS_ON,
 );
 
+// #11521: a PM or Architect stamped main thread may read, send and write,
+// with no launch record (the #11273 record rule was never asked for).
+// GP-043 (owner ruling 2026-11-16): a PM's subagents may also read Gmail and
+// Google Workspace; every other subagent call is unchanged.
 pub static EGRESS_FAMILY: GuardPolicy = policy(
     "GP-043",
     "egress-family",
-    "No call to a messaging or mail family (Slack, Gmail, Notion, chat) outside its allowlist.",
-    "#8454, #10387",
+    "No messaging or mail family call (Slack, Gmail, Notion, chat) from a subagent, an unknown thread or an unstamped session. A main thread with a valid PM or Architect stamp may read, send and write with no launch record and no bind step (#11521); a PM's subagent may read Gmail and Google Workspace. Every allow writes one audit line or denies.",
+    "#8454, #10387, #10447, #11194, #11273, #11521",
     ALL,
     true,
     OUTWARD_ACTION,
 );
 
+// #11273: inert text naming a family host passes for every role.
 pub static EGRESS_BASH: GuardPolicy = policy(
     "GP-044",
     "egress-bash",
-    "No Bash command that reaches a messaging or mail endpoint.",
-    "#8454",
+    "No Bash command that reaches a messaging or mail endpoint or runs a sender, without the tm launch record.",
+    "#8454, #10447, #11273",
     ALL,
     true,
     OUTWARD_ACTION,
@@ -100,9 +105,9 @@ pub static EGRESS_POLICY_NOT_READY: GuardPolicy = policy(
 pub static EGRESS_ARCHITECT_AUDIT_UNWRITABLE: GuardPolicy = policy(
     "GP-047",
     "egress-architect-audit-unwritable",
-    "An Architect egress allow stands only once its audit line is written.",
-    "#10447",
-    ARCHITECT,
+    "A main-session egress allow (Architect send, PM owner-DM send, family read) stands only once its audit line is written.",
+    "#10447, #11194, #11273",
+    MAIN_THREADS,
     true,
     OUTWARD_ACTION,
 );

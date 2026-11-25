@@ -170,6 +170,9 @@ impl From<crate::service::ServiceError> for ApiError {
             crate::service::ServiceError::Conflict(m) => ApiError::conflict(m),
             crate::service::ServiceError::Internal(m) => ApiError::internal(m),
             crate::service::ServiceError::Forbidden(m) => ApiError::forbidden(m),
+            // #11255: no folded method recalls one palace; the message keeps
+            // the retry hint should one ever reach this mapping.
+            crate::service::ServiceError::PalaceOpening(o) => ApiError::internal(o.to_string()),
         }
     }
 }

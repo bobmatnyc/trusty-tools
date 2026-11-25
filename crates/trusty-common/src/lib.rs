@@ -454,7 +454,8 @@ pub mod memory_rpc;
 ///
 /// Why: the TUI in trusty-mpm decodes the console's `console.health` and
 /// `console.fleet_status` answers and has no Cargo edge on trusty-console.
-/// What: method names and serde types only, so it is ungated.
+/// What: method names and serde types only, so it is ungated; its `metrics`
+/// submodule (#10942) needs `console-metrics` + `host-metrics`.
 /// Test: `cargo test -p trusty-common --features uds console_rpc`.
 pub mod console_rpc;
 
@@ -1207,6 +1208,16 @@ pub mod url_userinfo;
 /// workspace_layout::tests`.
 pub mod workspace_layout;
 
+/// The install-level host paths resolver and `install.toml` (#11821).
+///
+/// Why: the projects root and the config dir had no install-level setting;
+/// every crate derived them from `$HOME`.
+/// What: [`install_paths::InstallPaths::resolve`] (flag > env > install file >
+/// default, with the winning source per key) and
+/// [`install_paths::write_install_file`]. Feature-free.
+/// Test: `cargo test -p trusty-common -- install_paths::tests`.
+pub mod install_paths;
+
 /// Canonical repository identity (DOC-37) — the path-independent join key that
 /// relates the live checkout, `.base` clone, and session worktrees of one repo.
 ///
@@ -1374,6 +1385,18 @@ pub mod local_probe;
 #[cfg(feature = "daemon-token")]
 pub mod daemon_token;
 
+/// The trusty-console token file loader the console and its TCP clients share
+/// (#11074, DOC-90 §4).
+///
+/// Why: the console enforces the token and its clients send it; both must
+/// agree on the file and its validity rules.
+/// What: `console_token::load_from_env` (`TRUSTY_CONSOLE_TOKEN_FILE`) and the
+/// redacted, constant-time `ConsoleToken`. Behind `daemon-token`, whose
+/// `credentials_match` it compares with.
+/// Test: `cargo test -p trusty-common --features daemon-token -- console_token`.
+#[cfg(feature = "daemon-token")]
+pub mod console_token;
+
 /// The single HTTP-client constructor for loopback/daemon targets (#4392).
 ///
 /// Why: reqwest 0.12 routes `127.0.0.1` through an exported `HTTP_PROXY` /
@@ -1411,6 +1434,11 @@ pub mod http_client;
 /// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
+
+/// Linux daemon start/stop/restart from a caller-built descriptor (#11084).
+/// Test: `tests/linux_lifecycle.rs` runs it against real processes.
+#[cfg(all(target_os = "linux", feature = "uds"))]
+pub mod linux_lifecycle;
 
 /// A stand-in trusty-* daemon on a Unix socket, for this crate's own tests
 /// (#7237). Never compiled outside `cargo test`.
@@ -1545,12 +1573,14 @@ pub use chat::{
 };
 
 // Data directory
-pub use data_dir::{DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, sanitize_data_root};
+pub use data_dir::{
+    DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, resolve_data_dir_no_create, sanitize_data_root,
+};
 
 // Daemon address
 pub use daemon_addr::{
-    check_already_running, daemon_socket_path, read_daemon_addr, remove_daemon_addr,
-    resolve_daemon_base_url, write_daemon_addr,
+    check_already_running, daemon_socket_path, daemon_socket_path_no_create, read_daemon_addr,
+    remove_daemon_addr, resolve_daemon_base_url, write_daemon_addr,
 };
 
 // Health probe

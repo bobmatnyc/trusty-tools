@@ -12,6 +12,8 @@
 //! - `store`  — [`ProjectStore`] on-disk JSON persistence.
 //! - `registry` — [`ProjectRegistry`] lifecycle manager.
 //! - `resolver` — NL→project resolver, session↔project binding, fleet grouping.
+//! - `session_registration` — a session start's own checkout row, and the
+//!   `owner/repo` → checkout lookup `tm secrets assign` uses (#10368).
 //! - `worktree_adoption` — adopting a project's PRE-EXISTING worktrees at
 //!   registration time (#7357), so a repo that had agent activity before it was
 //!   registered is still surveyed and reclaimable.
@@ -35,9 +37,13 @@ pub mod project_key;
 pub mod record;
 pub mod registry;
 pub mod resolver;
+// #10368: a session start registers its own checkout.
+pub mod session_registration;
 pub mod store;
 pub mod worktree_adoption;
 pub mod worktree_policy;
+// #10592: ledger-only removal of adopted worktrees.
+pub mod worktree_unadopt;
 
 pub use project_key::{
     accepted_index_ids_for, assign_project_key, index_id_for_registered_root, index_id_for_root_in,
@@ -50,6 +56,10 @@ pub use resolver::{
     ResolutionReason, ResolverError, fleet_by_project, local_checkout_for, local_checkout_for_url,
     one_project_per_repo, resolve_project, resolve_session_project,
 };
+pub use session_registration::{
+    CheckoutLookupError, SessionRegistration, SessionRegistrationError, register_session_checkout,
+    register_session_checkout_in, registered_checkout,
+};
 pub use store::ProjectStoreError;
 pub use worktree_adoption::{
     AdoptedWorktree, AdoptionStore, BackfillReport, RecordOutcome, SkipReason, UnrecordedWorktree,
@@ -61,3 +71,4 @@ pub use worktree_policy::{
     worktree_enabled_for_origin, worktree_enabled_for_origin_at, worktree_enabled_for_project,
     worktree_enabled_in, worktree_override_in_project,
 };
+pub use worktree_unadopt::{UnadoptReport, unadopt_paths};

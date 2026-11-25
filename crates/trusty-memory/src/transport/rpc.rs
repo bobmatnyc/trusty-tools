@@ -64,6 +64,9 @@ pub mod error_codes {
     pub const NOT_FOUND: i32 = -32004;
     /// Well formed and refused — [`crate::transport::CODE_REFUSED`] (#9544).
     pub const REFUSED: i32 = -32006;
+    /// The palace is still opening; retry shortly (#11255) —
+    /// [`crate::tools::recall_open::CODE_PALACE_OPENING`].
+    pub const PALACE_OPENING: i32 = crate::tools::recall_open::CODE_PALACE_OPENING;
 }
 
 /// JSON-RPC 2.0 request envelope.
@@ -190,6 +193,14 @@ impl JsonRpcResponse {
     /// `format_too_new_tool_error_is_refused_on_the_wire`,
     /// `from_anyhow_maps_every_format_refusal_to_refused`.
     pub fn from_anyhow(id: Value, e: anyhow::Error) -> Self {
+        // #11255: a palace still opening is retryable, with branchable data.
+        if let Some(opening) = crate::tools::recall_open::PalaceOpening::find(&e) {
+            let mut out = Self::err(id, error_codes::PALACE_OPENING, format!("{e:#}"));
+            if let Some(err) = out.error.as_mut() {
+                err.data = Some(opening.rpc_data());
+            }
+            return out;
+        }
         let code = if let Some(rename) = e.downcast_ref::<crate::service::rename::RenameError>() {
             rename.rpc_code()
         } else if e
@@ -617,7 +628,7 @@ mod tests {
         // `uds_consumer_contract.rs`'s
         // `shared_client_reaches_a_chat_tool_through_the_tools_call_envelope`
         // asserts a direct `chat_session_create` answers METHOD_NOT_FOUND, and
-        // both consumers send the envelope: trusty-agents' `persona_memory` and
+        // both consumers send the envelope: trusty-assistants' `persona_memory` and
         // trusty-code's `memory_sink`. Forwarding any of these fails that test.
         "chat_session_add_turn",
         "chat_session_create",

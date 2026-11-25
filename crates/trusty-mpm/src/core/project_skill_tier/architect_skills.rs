@@ -84,6 +84,8 @@ pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
         "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
         // #10896: the text before step 1 ran `scripts/watch-apply.py`.
         "b465a8a024783fa5bc33737b3efa3fc8f5bd9dc8e387b9781ab820de73220918",
+        // #11433: the text before the throwaway-credential exception.
+        "b9de2a3d6218fb68e8a99b0c632902d776505d46e4fc4756da45c8929fc9c425",
     ],
 };
 
@@ -105,6 +107,8 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "ea25ebe3f0fee74963bcf4ccb1452535c233c47eb844754392d05e17382242e7",
         // #10780: the text before the owner-rulings/inferences keep-list split.
         "6b0fdc7b311e3272b706a410ab9b6f0f5608623eda9778d8577e1e37452ff014",
+        // #11433: the text before the throwaway-credential exception.
+        "d23af312879f54dad651abffd290af10a7ff62bcdd5148fa2486ae2f1456b8e0",
     ],
 };
 
@@ -116,6 +120,15 @@ const OPERATING_RULES: ShippedSkill = ShippedSkill {
         "fa119b43da0dd7275659d652eea2448472743920f33e5d5da68a4e953d06b4c3",
         // #10780: the text before owner labels needed a cited quote.
         "821edcc7c292dc6263ddaa2538bee3e235155679d5f3282c9823b9de1ceb0109",
+        // #11064: the text before the technical-level rule.
+        "3e4c9ab8d8325d3a052c91e571533c7643508fda3f41a4449137d1eb3b86461e",
+        // #11433: the text before the throwaway-credential exception.
+        "14d0bae65aeda88741b2ea27e57afc82fa62a227dd8519a24fc3aacfda842342",
+        // MB159a: the text before the mandate, evidence labels, question ids
+        // and r-081's evidence clause moved in.
+        "630dd0dbd1927963fb7e1a54167a90c230930c967744c1b9678e808fc962ff1c",
+        // IN0055: the text that named the MCP `search` tool.
+        "5bf15512eb4244c6ab7f3199b6a4829a35b26675faa8fb9a10a229ca97f52427",
     ],
 };
 
@@ -131,6 +144,10 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
         "215f8e5b8f6d9bb04c75d2569c024d5068eab2c951a527229b353c4ff1643a0c",
         // #10895: the text that said `CLAUDE.md` holds the watch set.
         "b0645b7e2ea415922472d45f2936dc844dcf2412420a7b535627ba9c1bcb81fc",
+        // #11117: the text that limited AGENTS.md edits to an owner's order.
+        "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
+        // MB159a: the text before the monitoring and heartbeat rules moved in.
+        "cd623d5af69e54c57ddc4272db7a3325626bc01ab7457ebd869b720d4bec0e5f",
     ],
 };
 
@@ -140,10 +157,15 @@ const STRATEGY: ShippedSkill = ShippedSkill {
     // #10161: the U1b text, before the factory issue-tracking rule.
     // The text before the daily factory status-update rule.
     // #10886: the text before the factory-discussions sweep.
+    // #11064: the text before the technical level of briefs.
+    // MB159a: the text before "What you own", machine ownership and the
+    // morning brief moved in.
     previous: &[
         "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
         "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",
         "c09c629ca5e93fa6c540955caa7f399a28c905d9356e0366628d55feed62ecbf",
+        "a6b725c4a34f673741028e6ab772c4b5154aff845fb1e9db846d3e2d1dcb4aae",
+        "0328f1ec2d0ee9856c7bcace4d117f9d5ead4f28e13d1415463d711b1742f674",
     ],
 };
 
@@ -151,7 +173,11 @@ const STRATEGY: ShippedSkill = ShippedSkill {
 const COMPLETION_STANDARD: ShippedSkill = ShippedSkill {
     stem: "architect-completion-standard",
     // #10803: the U1b text, before the fix bar's acceptance-criterion class.
-    previous: &["5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374"],
+    // MB159a: the text before the reports rule moved in.
+    previous: &[
+        "5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374",
+        "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
+    ],
 };
 
 /// `architect-project-provision`, edited since its first release.
@@ -164,6 +190,25 @@ const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
         "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
         "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
         "954f6c37e6c800af8819e2153e803ad62d6e29e963139410dab21ee8f473cd1f",
+        // MB159a: the text before the Architect-duties rule (r-066) moved in.
+        "a4b3d792acb46789bf9d79a1ea7e3c2be455903af48a65bed0560fcca2a37edb",
+    ],
+};
+
+/// `architect-tmux-ops`, edited since its first release (MB159a: r-079).
+const TMUX_OPS: ShippedSkill = ShippedSkill {
+    stem: "architect-tmux-ops",
+    previous: &["e38c80da0581139ce727e1650cf6404594b2172de0e32077a7cea17956b02382"],
+};
+
+/// `architect-host-admin`, edited since its first release (MB159a: builder
+/// bands, r-191).
+const HOST_ADMIN: ShippedSkill = ShippedSkill {
+    stem: "architect-host-admin",
+    previous: &[
+        "e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e",
+        // #11625: the text that named `mcp__trusty-search__search_health`.
+        "cf0becdbacdcdc405f9c0f7b93bd8643973aecfa29bc04fdecd638003a0107fb",
     ],
 };
 
@@ -171,7 +216,13 @@ const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
 const IMPROVEMENTS: ShippedSkill = ShippedSkill {
     stem: "architect-improvements",
     // R-192/R-193: the D2 text, before the owner-asks rules.
-    previous: &["bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0"],
+    // MB159a: the text before the full r-192 rule moved in.
+    previous: &[
+        "bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0",
+        "b37627e2c31c3118884dd5a5e46cbbde5494d9b8206eb17a1c521a53883b5416",
+        // #10161 D3c: the text before consolidation named `improvement-curator`.
+        "5a0f6be29f925e8df9d3b40263f6ace8f0d72e269cee04b823b89a5dd7e7bf93",
+    ],
 };
 
 /// `architect-dashboard`, edited since its first release.
@@ -179,10 +230,44 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
     stem: "architect-dashboard",
     // R-192/R-193: the D3b text, before the owner-asks rules.
     // #10896: the text before the `watch_changes` queue kind.
+    // #11064: the text before the technical level of item text.
     previous: &[
         "c89631b1222af26c1a4c340412340de826e3005adf5f5b18b5bae2888e68815a",
         "e08b26d58e8e9c39a43fa71752ec8b191a795a786708f3ce002103b975956e82",
+        "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
+        // #11064: the text before items below senior-engineer always linked a brief.
+        "6a2f6fcf1f8f50523e110cb3216f496bc1b0d2c16905d6fca2b8ffe9dbba345f",
+        // #10711: the text before a close kept the owner's answer_note.
+        "1bd4e94597f1e17172f0a1ec8106f9ecc3983b2265a0eefe4cdf2eae020e5ffc",
+        // #10680: the text before the read-back step in r-183.
+        "d46d422b543fc97df9d7b05e3794713320a97302398a651729d8d70060a7d07d",
+        // MB159a: the text before the full r-193 rule moved in.
+        "dc478edef52c66eb4cd420504a639d2b45f99765784d26a25f37135666bff3e8",
+        // IN0055: the text that stored a ruling with MCP `memory_remember`.
+        "b5ecfccf1c8e988b05995d2b316282770d5c8570d69b21744022e8591f0c4388",
+        // #9457: the text before `fleet init` started the dashboard on macOS.
+        "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
+        // #9457: the text that said `fleet init` always started the dashboard on macOS.
+        "09b554985b017a035fd9b44b91f0102fd2fd0881f942f9fdb0d03d1d7d5efb50",
     ],
+};
+
+/// `architect-search-memory`, edited since its first release.
+const SEARCH_MEMORY: ShippedSkill = ShippedSkill {
+    stem: "architect-search-memory",
+    // IN0055: the text that kept the MCP tools for memory and search.
+    previous: &[
+        "dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303",
+        // #11625: the text that kept `list_indexes` and `index_status` on MCP.
+        "c2947716d1e2e238e41de5db982bfdda187adf0fb93d7274dda3631c8c40e733",
+    ],
+};
+
+/// `architect-macos`, edited since its first release.
+const MACOS: ShippedSkill = ShippedSkill {
+    stem: "architect-macos",
+    // IN0055: the text that ran MCP `memory_recall`.
+    previous: &["442541a32d8c81f2cdcc4d9e74f0fc3e993ae535f5d94ca9f3223af48487077b"],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.
@@ -199,10 +284,10 @@ pub const SHIPPED: &[ShippedSkill] = &[
     FLEET_CHECK,
     CONTEXT_REFRESH,
     // #9997 U1b: the skills the operating manual indexes, first shipped here.
-    first_release("architect-tmux-ops"),
+    TMUX_OPS,
     OPERATING_RULES,
     WORKFLOW,
-    first_release("architect-search-memory"),
+    SEARCH_MEMORY,
     first_release("architect-github"),
     STRATEGY,
     COMPLETION_STANDARD,
@@ -212,11 +297,14 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-drift-check"),
     first_release("architect-review"),
     PROJECT_PROVISION,
-    first_release("architect-macos"),
+    MACOS,
     IMPROVEMENTS,
-    first_release("architect-host-admin"),
+    HOST_ADMIN,
     // #10161 D3b: the dashboard skill, with the served page it describes.
     DASHBOARD,
+    // #10161 D3c: the skills that dispatch the drift-guard and improver agents.
+    first_release("architect-drift-guard"),
+    first_release("architect-improver"),
 ];
 
 /// The deploy record, beside the skills in the project tier.
@@ -234,6 +322,30 @@ pub fn project_tier(project_dir: &Path) -> PathBuf {
 pub fn skill_path(skills_dir: &Path, stem: &str) -> PathBuf {
     skills_dir.join(stem).join("SKILL.md")
 }
+
+/// How one kind of Architect file sits in its project tier.
+///
+/// Why: #10161 D3c — the Architect agents follow the skills' shipped-history
+/// and owner-edit rule, so both kinds share one deploy loop.
+/// What: the per-name file path, the deploy record's file name and the noun
+/// the log and error lines use.
+/// Test: `architect_agents_tests.rs`.
+#[derive(Debug, Clone, Copy)]
+pub struct Layout {
+    /// Where `name`'s file lives under the tier directory.
+    pub path: fn(&Path, &str) -> PathBuf,
+    /// The deploy record, beside the files in the tier.
+    pub record: &'static str,
+    /// `skill` or `agent`.
+    pub kind: &'static str,
+}
+
+/// The skills' layout: `<tier>/<stem>/SKILL.md`, recorded in [`RECORD_FILE`].
+pub const SKILL_LAYOUT: Layout = Layout {
+    path: skill_path,
+    record: RECORD_FILE,
+    kind: "skill",
+};
 
 /// One skill's state in the project tier, against the shipped bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,8 +390,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// An unreadable or malformed record is also empty, plus the error line it
 /// returns: with no record a differing copy counts as project-custom, so
 /// nothing is lost, and the caller must not trust the shipped history either.
-fn load_record(skills_dir: &Path) -> (Record, Option<String>) {
-    let path = skills_dir.join(RECORD_FILE);
+fn load_record(dir: &Path, record_file: &str) -> (Record, Option<String>) {
+    let path = dir.join(record_file);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -357,13 +469,14 @@ fn resolve_lenient(path: &Path) -> PathBuf {
 /// would send the write there.
 /// What: compares real paths, so a symlink anywhere in `tier` is followed.
 /// Test: `a_tier_resolving_onto_a_reserved_dir_is_refused`.
-fn reserved_conflict(tier: &Path, reserved: &[PathBuf]) -> Option<String> {
+pub(crate) fn reserved_conflict(tier: &Path, reserved: &[PathBuf], kind: &str) -> Option<String> {
     let real = resolve_lenient(tier);
     reserved.iter().find_map(|dir| {
         let real_reserved = resolve_lenient(dir);
         real.starts_with(&real_reserved).then(|| {
             format!(
-                "{} resolves onto {}, a tier shared skills deploy to; the Architect's                  skills are never written there",
+                "{} resolves onto {}, a tier shared {kind}s deploy to; the Architect's \
+                 {kind}s are never written there",
                 tier.display(),
                 real_reserved.display()
             )
@@ -389,7 +502,7 @@ pub fn deploy_architect_skills(
     skills: &[ArchitectSkill],
 ) -> DeployReport {
     let tier = project_tier(project_dir);
-    if let Some(why) = reserved_conflict(&tier, reserved) {
+    if let Some(why) = reserved_conflict(&tier, reserved, SKILL_LAYOUT.kind) {
         return DeployReport {
             errors: vec![why],
             ..DeployReport::default()
@@ -440,13 +553,21 @@ pub fn deploy_resolved(
 /// `a_byte_equal_seed_is_adopted_then_refreshed`,
 /// `a_second_run_writes_nothing`, `a_blocked_skill_dir_is_an_error_line`.
 pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> DeployReport {
+    deploy_into(skills_dir, skills, &SKILL_LAYOUT)
+}
+
+/// [`deploy_skills_into`] for any [`Layout`]: the one deploy loop the skills
+/// and, since #10161 D3c, the Architect agents share.
+///
+/// Test: `a_second_init_follows_the_shipped_history_and_keeps_an_edit`.
+pub fn deploy_into(dir: &Path, skills: &[ArchitectSkill], layout: &Layout) -> DeployReport {
     let mut report = DeployReport::default();
-    let (mut record, record_error) = load_record(skills_dir);
+    let (mut record, record_error) = load_record(dir, layout.record);
     let trust_history = record_error.is_none();
     report.errors.extend(record_error);
     let mut record_changed = false;
     for skill in skills {
-        let path = skill_path(skills_dir, skill.stem);
+        let path = (layout.path)(dir, skill.stem);
         let shipped = skill.contents.as_bytes();
         let shipped_hash = sha256_hex(shipped);
         match classify(&path, skill, record.deployed.get(skill.stem), trust_history) {
@@ -472,8 +593,9 @@ pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> Deplo
                 // #9540: df-D22 — the project's edit wins; never back up and replace.
                 tracing::warn!(
                     path = %path.display(),
-                    "architect skill {} differs from the last deployed copy: kept as \
+                    "architect {} {} differs from the last deployed copy: kept as \
                      project-custom, not refreshed",
+                    layout.kind,
                     skill.stem
                 );
                 report.kept_custom.push(skill.stem.to_owned());
@@ -482,7 +604,7 @@ pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> Deplo
         }
     }
     if record_changed {
-        let path = skills_dir.join(RECORD_FILE);
+        let path = dir.join(layout.record);
         let body = serde_json::to_vec_pretty(&record).unwrap_or_default();
         if let Err(err) = trusty_common::atomic_file::write_atomic(&path, &body) {
             report
@@ -502,7 +624,7 @@ pub fn inspect(
     skills_dir: &Path,
     skills: &[ArchitectSkill],
 ) -> (Vec<(&'static str, SkillState)>, Option<String>) {
-    let (record, record_error) = load_record(skills_dir);
+    let (record, record_error) = load_record(skills_dir, RECORD_FILE);
     let states = skills
         .iter()
         .map(|skill| {
@@ -539,13 +661,15 @@ pub fn health(project_dir: &Path) -> (bool, String) {
 }
 
 /// [`health`] against an explicit `reserved` list and shipped `skills`.
+///
+/// Test: `a_content_update_leaves_skills_stale_until_the_refresh_deploys`.
 pub fn health_with(
     project_dir: &Path,
     reserved: &[PathBuf],
     skills: &[ArchitectSkill],
 ) -> (bool, String) {
     let tier = project_tier(project_dir);
-    if let Some(why) = reserved_conflict(&tier, reserved) {
+    if let Some(why) = reserved_conflict(&tier, reserved, SKILL_LAYOUT.kind) {
         return (false, format!("deploy refused: {why}"));
     }
     let (states, record_error) = inspect(&tier, skills);

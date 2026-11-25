@@ -34,6 +34,29 @@ fn every_entry_binds_at_least_one_role() {
     }
 }
 
+/// #11273: the family and Bash rows still bind a subagent (and the PM and
+/// Architect's Bash sends), the family row names the #11521 main-thread rule, and
+/// GP-047 binds both main-session roles.
+#[test]
+fn egress_rows_state_the_split_rule_11273() {
+    for p in [&EGRESS_FAMILY, &EGRESS_BASH] {
+        for role in [Role::Agent, Role::Pm, Role::Architect] {
+            assert!(p.applies.contains(&role), "{} must bind {role:?}", p.id);
+        }
+        assert!(p.summary.contains("launch record"), "{}", p.summary);
+    }
+    // #11521: a stamped main thread may read, send and write.
+    assert!(
+        EGRESS_FAMILY.summary.contains("may read, send and write"),
+        "{}",
+        EGRESS_FAMILY.summary
+    );
+    assert_eq!(
+        EGRESS_ARCHITECT_AUDIT_UNWRITABLE.applies,
+        &[Role::Pm, Role::Architect][..]
+    );
+}
+
 #[test]
 fn no_entry_masks_output_yet() {
     // #10641: masking arrives in PR3; PR1 changes no verdict.

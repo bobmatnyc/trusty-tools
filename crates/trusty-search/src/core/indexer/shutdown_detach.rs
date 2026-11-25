@@ -14,6 +14,7 @@
 //! Test: `a_reconcile_delta_after_the_close_fails_and_does_not_stamp` in
 //! `service::shutdown_close::tests`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::CodeIndexer;
@@ -55,15 +56,28 @@ impl CodeIndexer {
     /// index is not quarantined (the #4122 refusal covers that state, and
     /// counts it). The state lasts until the re-attach or the quarantine; a
     /// run that dies inside the window leaves it until the next attach.
+    /// Also `Err` while [`Self::swap_abandoned_flag`] is set: a staged run
+    /// died mid-run with staging attached and its guard's rollback is running.
     /// Test: `a_put_during_the_abort_detach_window_is_refused_or_lands_in_live`,
     /// `a_put_during_the_promotion_detach_window_is_refused_or_raises_the_generation`,
     /// `an_abort_whose_live_reopen_fails_quarantines_and_raises_the_generation`,
-    /// `a_panicked_staged_run_is_covered_by_the_next_attach`, and for the
+    /// `a_panicked_staged_run_is_covered_by_the_next_attach`,
+    /// `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`, and for the
     /// delete paths `a_delete_during_the_abort_detach_window_is_refused_or_stays_deleted`
     /// and `a_watcher_delete_during_the_abort_detach_window_does_not_resurrect`,
     /// and for the rescan batch
     /// `a_rescan_batch_during_the_abort_detach_window_is_refused_or_lands_in_live`.
     pub(crate) fn refuse_if_corpus_detached(&self) -> anyhow::Result<()> {
+        // #10738: a staged run died mid-run and its rollback has not settled;
+        // the attached corpus is the staging one that rollback discards.
+        if self.swap_abandoned.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "index '{}' is rolling back a staged reindex that died mid-run: this \
+                 write would land in the staging corpus the rollback discards, so it \
+                 was refused; retry once the rollback settles (#10738)",
+                self.index_id
+            );
+        }
         // #10738: the #7920 snapshot-writer predicate, applied to puts.
         if self.corpus_ever_wired && self.corpus.is_none() && !self.corpus_open_failed {
             anyhow::bail!(
@@ -74,5 +88,18 @@ impl CodeIndexer {
             );
         }
         Ok(())
+    }
+
+    /// The flag that makes [`Self::refuse_if_corpus_detached`] refuse while a
+    /// dead staged run is rolled back (#10738).
+    ///
+    /// Why: the run's termination guard sets it from `Drop`, where it cannot
+    /// take the indexer lock, so it holds this shared handle instead.
+    /// What: a clone of the indexer's `swap_abandoned` flag. The guard sets it
+    /// before it spawns the rollback; the rollback clears it once live is
+    /// re-attached or the index is quarantined.
+    /// Test: `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`.
+    pub(crate) fn swap_abandoned_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.swap_abandoned)
     }
 }

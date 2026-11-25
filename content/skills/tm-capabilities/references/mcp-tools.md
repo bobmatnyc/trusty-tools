@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-40 tools.
+42 tools.
 
 ## `session_list`
 
@@ -137,6 +137,16 @@ Delete a caller-supplied set of session RECORDS, and nothing else (#6431). Each 
 |---|---|---|
 | `session_ids` | `array` | yes |
 
+## `session_archive`
+
+Move a managed session's project directory (its workspace, else its start directory) to the owner-only archive `~/.trusty-tools/archive` (mode 0700), with a manifest recording the origin path so it can be restored. A same-filesystem move is a rename; across filesystems the copy must verify before the source is removed. FAIL-CLOSED: a session still running in the directory is REFUSED unless `force` is true, which stops it first; an Architect session is always refused. `dry_run` runs the same checks and returns the plan without changing anything. Session records are kept; the project is marked archived until a new session runs. Returns `{ dry_run, plan, stopped, manifest }`.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `dry_run` | `boolean` | no |
+| `force` | `boolean` | no |
+| `session_id` | `string` | yes |
+
 ## `session_activity`
 
 Inspect a managed session's recent activity. ALWAYS returns the raw tmux pane content (last `lines` lines, default 60) plus structured lifecycle fields (`runtime_active`, `pending_decision`, `proposed_default`) so the caller can do its own inference WITHOUT an LLM key. When OPENROUTER_API_KEY is configured the daemon also returns an LLM `classification` of the session state.
@@ -148,7 +158,7 @@ Inspect a managed session's recent activity. ALWAYS returns the raw tmux pane co
 
 ## `session_send`
 
-Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness. Returns the target tmux session name plus `submit_state`: `submitted`, `unsubmitted_paste` (the harness collapsed a long message into a bracketed paste and the Enter did not commit it — resend in smaller parts), or `unverified` (the pane could not be read). `sent` is false only for `unsubmitted_paste`.
+Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness. Returns the target tmux session name plus `submit_state` and, when `sent` is false, a `reason`: `submitted`; `input_not_empty` (the input box already held a draft or a paste, or could not be read — nothing was typed and nothing was cleared); `not_echoed` (the box never showed the full text — Enter was not pressed and the box was cleared); `unsubmitted_paste` (the harness collapsed a long message into a bracketed paste and the Enter did not commit it — resend in smaller parts); or `unverified` (the pane could not be read, or a busy receiver still showed the paste after a few seconds of re-reads — do not resend; read the pane first). `sent` is false for `input_not_empty`, `not_echoed` and `unsubmitted_paste`.
 
 | Parameter | Type | Required |
 |---|---|---|
@@ -281,6 +291,14 @@ Resolve a natural-language query to the best-matching registered project. Accept
 | Parameter | Type | Required |
 |---|---|---|
 | `query` | `string` | yes |
+
+## `project_decommission`
+
+Decommission a registered project: stop each of its running sessions and mark the project decommissioned. Workspaces, session records, and the trusty-search index and its data are all kept; a new session for the project clears the state. Refuses when one of the project's sessions is the Architect's. When any session fails to stop the project is NOT marked and the error names each failure. Returns the project record plus `stopped` and `left_as_is` session ids.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
 
 ## `session_proxy_focus`
 

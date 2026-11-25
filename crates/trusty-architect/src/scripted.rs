@@ -13,6 +13,8 @@ type Answer = Result<String, String>;
 struct Script {
     queued: BTreeMap<String, VecDeque<Answer>>,
     fallback: BTreeMap<String, String>,
+    /// The answer for a verb with neither a queue nor a fallback ([`crate::FakeTmux`]).
+    any: Option<String>,
     calls: Vec<Vec<String>>,
 }
 
@@ -55,6 +57,13 @@ impl ScriptedTmux {
         self.lock()
             .fallback
             .insert(verb.to_owned(), stdout.to_owned());
+        self
+    }
+
+    /// Answers every verb with no queue and no fallback with `stdout`.
+    // #10571 item E: what makes [`crate::FakeTmux`] a `ScriptedTmux`.
+    pub(crate) fn fallback_any(self, stdout: &str) -> Self {
+        self.lock().any = Some(stdout.to_owned());
         self
     }
 
@@ -101,6 +110,7 @@ impl Tmux for ScriptedTmux {
             None => script
                 .fallback
                 .get(&verb)
+                .or(script.any.as_ref())
                 .cloned()
                 .ok_or_else(|| "unscripted".to_owned()),
         };

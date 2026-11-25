@@ -174,6 +174,27 @@ pub trait SecretBackend: Send + Sync + fmt::Debug {
             operation: item.operation(),
         })
     }
+    /// The vault blob store under this backend, if it has one (#10524).
+    ///
+    /// Why: the server's unlock reads the whole blob once (one prompt) and
+    /// `secrets.migrate` moves per-item Keychain items into it.
+    /// What: `None` by default; the Keychain backend answers its store.
+    /// Test: `blob_keychain_values_and_controls_share_the_blob`.
+    #[doc(hidden)]
+    fn blob_store(&self) -> Option<Arc<super::vault_blob::BlobStore>> {
+        None
+    }
+
+    /// Prove this process can use the backend now, for `secrets.doctor`.
+    ///
+    /// Why: #10589 — the capability flags alone said the Keychain was
+    /// available to a server that had no access to it.
+    /// What: `Ok(())` by default; the Keychain writes and removes a probe
+    /// item from the calling process.
+    /// Test: `doctor_keychain_row_reports_no_session_from_the_server_probe`.
+    fn probe(&self) -> Result<(), SecretsError> {
+        Ok(())
+    }
 }
 
 /// Whether this build links an OS Keychain backend (macOS only, #9064).

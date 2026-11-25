@@ -15,11 +15,13 @@
 //! events, host load, band, rc-restore runs) are A3 work and are not here; the
 //! wake tests' classifier halves are, against `input_state_for_send`.
 
+mod common;
+
 use std::path::Path;
 
+use common::kinds;
 use trusty_architect::classify::{
-    Alert, BoxReading, CTX_HIGH, CTX_WARN, DedupState, PaneState, alert, dedup, evaluate,
-    fleet_plan_alerts, parse_pane,
+    Alert, BoxReading, DedupState, PaneState, alert, dedup, evaluate, fleet_plan_alerts, parse_pane,
 };
 use trusty_architect::{InputState, classify_input, input_state_for_send};
 
@@ -121,12 +123,6 @@ fn ask_user() -> String {
     ]
     .join("\n")
         + "\n"
-}
-
-fn kinds(alerts: &[Alert]) -> Vec<&str> {
-    let mut k: Vec<&str> = alerts.iter().map(|a| a.kind.as_str()).collect();
-    k.sort_unstable();
-    k
 }
 
 fn run(
@@ -255,15 +251,13 @@ fn test_idle_prompt_alerts_after_ten_minutes_only() {
     let mut ps = PaneState::default();
     let (info, alerts) = run(&cap, &mut ps, 1000.0);
     assert!(!info.busy && !info.turn_active);
-    assert_eq!(kinds(&alerts), ["ctx"]);
+    // df-T7i P1b: the default screen's ctx 30% is under the live 31% bar.
+    assert!(kinds(&alerts).is_empty());
     assert_eq!(ps.idle_since, Some(1000.0));
     // Literal ten minutes (the prototype reads fp.IDLE_AFTER), so a mutated
     // IDLE_AFTER turns this test red.
-    assert_eq!(kinds(&run(&cap, &mut ps, 1000.0 + 599.0).1), ["ctx"]);
-    assert_eq!(
-        kinds(&run(&cap, &mut ps, 1000.0 + 600.0).1),
-        ["ctx", "idle"]
-    );
+    assert!(kinds(&run(&cap, &mut ps, 1000.0 + 599.0).1).is_empty());
+    assert_eq!(kinds(&run(&cap, &mut ps, 1000.0 + 600.0).1), ["idle"]);
 }
 
 // Python: test_suggestion_box_counts_as_idle
@@ -279,7 +273,7 @@ fn test_suggestion_box_counts_as_idle() {
     );
     let mut ps = PaneState::default();
     run(&cap, &mut ps, 0.0);
-    assert_eq!(kinds(&run(&cap, &mut ps, 600.0).1), ["ctx", "idle"]);
+    assert_eq!(kinds(&run(&cap, &mut ps, 600.0).1), ["idle"]);
 }
 
 // Python: test_busy_pane_is_neither_idle_nor_question
@@ -305,7 +299,7 @@ fn test_busy_pane_is_neither_idle_nor_question() {
         let mut ps = PaneState::default();
         let (info, alerts) = run(&cap, &mut ps, 0.0);
         assert!(info.busy && info.turn_active, "{status}");
-        assert_eq!(kinds(&alerts), ["ctx"], "{status}");
+        assert!(kinds(&alerts).is_empty(), "{status}");
         assert_eq!(ps.idle_since, None, "{status}");
     }
 }
@@ -336,7 +330,7 @@ fn test_question_is_last_pm_line_ending_in_question_mark() {
         &mut PaneState::default(),
         0.0,
     );
-    assert_eq!(kinds(&alerts), ["ctx", "question"]);
+    assert_eq!(kinds(&alerts), ["question"]);
     let question = alerts.iter().find(|a| a.kind == "question");
     assert_eq!(
         question.map(|a| a.detail.as_str()),
@@ -365,26 +359,19 @@ fn ctx_fingerprints(ctx: u32) -> Vec<String> {
     alerts.into_iter().map(|a| a.fingerprint).collect()
 }
 
-/// At fleet-poll.py's 22/25 bar. Literal percentages, so a mutated
-/// `CTX_WARN` or `CTX_HIGH` turns it red.
+/// At fleet-poll.py's live 31/35 bar (df-T7i P1b; was 22/25). Literal
+/// percentages, so a mutated `CTX_WARN` or `CTX_HIGH` turns it red.
 // Python: test_ctx_47_alerts_and_crossing_50_changes_fingerprint
 #[test]
 fn test_ctx_47_alerts_and_crossing_50_changes_fingerprint() {
-    assert!(ctx_fingerprints(21).is_empty());
-    assert_eq!(ctx_fingerprints(22), ["22"]);
-    assert_eq!(ctx_fingerprints(24), ["22"]);
-    assert_eq!(ctx_fingerprints(25), ["25"]);
+    assert!(ctx_fingerprints(30).is_empty());
+    assert_eq!(ctx_fingerprints(31), ["31"]);
+    assert_eq!(ctx_fingerprints(34), ["31"]);
+    assert_eq!(ctx_fingerprints(35), ["35"]);
     // The prototype test's own values: 47 and 52 both read as the high bar.
-    assert_eq!(ctx_fingerprints(47), ["25"]);
-    assert_eq!(ctx_fingerprints(52), ["25"]);
-    assert_eq!(ctx_fingerprints(44), ["25"]);
-}
-
-/// `scripts/test_fleet_poll_ctx.py`, both halves since #9171 A3a.
-#[test]
-fn test_ctx_thresholds_follow_ruling_b7() {
-    assert_eq!((CTX_WARN, CTX_HIGH), (22, 25));
-    assert_eq!(trusty_architect::poller::SELF_CTX_THRESHOLD_DEFAULT, 25);
+    assert_eq!(ctx_fingerprints(47), ["35"]);
+    assert_eq!(ctx_fingerprints(52), ["35"]);
+    assert_eq!(ctx_fingerprints(44), ["35"]);
 }
 
 // Python: test_plan_limit_text_and_status_line
@@ -396,17 +383,17 @@ fn test_plan_limit_text_and_status_line() {
     ]
     .concat();
     let (_, alerts) = run(&screen(&body, agents_x()), &mut PaneState::default(), 0.0);
-    assert_eq!(kinds(&alerts), ["ctx", "plan-limit"]);
+    assert_eq!(kinds(&alerts), ["plan-limit"]);
     let prose = ["⏺ Both agents died at the account's usage limit."];
     let (_, alerts) = run(&screen(&prose, agents_x()), &mut PaneState::default(), 0.0);
-    assert_eq!(kinds(&alerts), ["ctx"]);
+    assert!(kinds(&alerts).is_empty());
     let infos = [
         (
             "tm-a".to_owned(),
             parse_pane(&screen(
                 &PM_TURN,
                 Screen {
-                    plan: Some((91, 50)),
+                    plan: Some((50, 91)),
                     ..Screen::default()
                 },
             )),
@@ -416,14 +403,19 @@ fn test_plan_limit_text_and_status_line() {
             parse_pane(&screen(
                 &PM_TURN,
                 Screen {
-                    plan: Some((88, 50)),
+                    plan: Some((95, 88)),
                     ..Screen::default()
                 },
             )),
         ),
     ];
+    // df-T7i P1b: weekly only; the 5-hour 95% raises nothing (Bob 2026-10-31).
     let plan = fleet_plan_alerts(&infos, 0.0);
-    assert!(plan.len() == 1 && plan[0].session.is_empty() && plan[0].detail.contains("91%"));
+    assert!(
+        plan.len() == 1
+            && plan[0].session.is_empty()
+            && plan[0].detail.contains("weekly plan usage 91%")
+    );
     assert!(!plan[0].display.starts_with('['));
 }
 
@@ -432,20 +424,14 @@ fn test_plan_limit_text_and_status_line() {
 fn test_error_alerts_only_for_lines_new_since_last_cycle() {
     let old = [&PM_TURN[..], &["  ⎿  Error: Exit code 1"]].concat();
     let mut ps = PaneState::default();
-    // First sight seeds the error set: only the ctx alert.
-    assert_eq!(
-        kinds(&run(&screen(&old, agents_x()), &mut ps, 0.0).1),
-        ["ctx"]
-    );
+    // First sight seeds the error set: no alert (ctx 30% is under the 31% bar).
+    assert!(kinds(&run(&screen(&old, agents_x()), &mut ps, 0.0).1).is_empty());
     let new = [&old[..], &["⏺ API Error: 529 overloaded"]].concat();
     let alerts = run(&screen(&new, agents_x()), &mut ps, 0.0).1;
-    assert_eq!(kinds(&alerts), ["ctx", "error"]);
+    assert_eq!(kinds(&alerts), ["error"]);
     let error = alerts.iter().find(|a| a.kind == "error");
     assert!(error.is_some_and(|a| a.detail.contains("API Error")));
-    assert_eq!(
-        kinds(&run(&screen(&new, agents_x()), &mut ps, 0.0).1),
-        ["ctx"]
-    );
+    assert!(kinds(&run(&screen(&new, agents_x()), &mut ps, 0.0).1).is_empty());
 }
 
 // --- scripts/test_fleet_poll_idle.py: agents anywhere, current_waiting -------
@@ -571,15 +557,16 @@ fn test_dedup_suppresses_until_cleared_for_one_cycle() {
 }
 
 #[test]
-fn test_dedup_reemits_idle_every_30_minutes_but_not_dialog() {
+fn test_dedup_reemits_ctx_every_30_minutes_but_not_idle_or_dialog() {
+    // MB1595: the deployed REEMIT has no `idle`; an idle screen alerts once.
     let mut st = DedupState::default();
-    let both = [a("idle", "f1"), a("dialog", "f1")];
-    dedup(&mut st, &both, 0.0);
-    assert_eq!(dedup(&mut st, &both, 1799.0), (vec![], 2));
-    let (new, sup) = dedup(&mut st, &both, 1800.0);
-    assert_eq!((kinds(&new), sup), (vec!["idle"], 1));
+    let all = [a("idle", "f1"), a("dialog", "f1"), a("ctx", "35")];
+    dedup(&mut st, &all, 0.0);
+    assert_eq!(dedup(&mut st, &all, 1799.0), (vec![], 3));
+    let (new, sup) = dedup(&mut st, &all, 1800.0);
+    assert_eq!((kinds(&new), sup), (vec!["ctx"], 2));
     let seen = st.get("tm-x|%1|idle|f1").map(|s| (s.first, s.last));
-    assert_eq!(seen, Some((0.0, 1800.0)));
+    assert_eq!(seen, Some((0.0, 0.0)));
 }
 
 #[test]
@@ -644,13 +631,13 @@ fn test_wake_reports_input_typed_when_a_real_box_holds_a_draft() {
 #[test]
 fn test_wake_confirms_a_message_that_wraps_across_screen_rows() {
     // Classifier half: the pre-send box is empty and accepts input; the same
-    // box holding the just-typed text wrapped across rows reads typed.
+    // box holding the just-typed wake line wrapped across rows reads poll.
     let pre = screen(&PM_TURN, Screen::default());
     assert_eq!(input_state_for_send(&pre), InputState::Empty);
     let msg = "[poll 11:02Z] 3 new alerts -> /Users/x/inbox/alerts.jsonl";
     assert_eq!(
         input_state_for_send(&wrapped_box_screen(&PM_TURN, msg)),
-        InputState::Typed
+        InputState::Poll // See MB1595: a whole wake line reads `poll`
     );
 }
 
@@ -660,7 +647,7 @@ fn test_wake_detects_its_own_stale_pointer_and_does_not_send() {
     let cap = wrapped_box_screen(&PM_TURN, stale);
     assert_eq!(
         parse_pane(&cap).box_reading,
-        BoxReading::Input(InputState::Typed)
+        BoxReading::Input(InputState::Poll)
     );
     assert!(!input_state_for_send(&cap).accepts_input());
 }

@@ -16,7 +16,9 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | --- | --- |
 | `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
-| `skills/architect-*.md` | The fifteen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check, dashboard). Seeded the same way. |
+| `skills/architect-*.md` | The seventeen skills the operating manual indexes (tmux ops, operating rules, workflow, search and memory, GitHub, strategy, the completion standard, the owner model, host administration, macOS, improvements, project provisioning, architectural review, drift check, dashboard, drift guard, improver). Seeded the same way. |
+| `agents/*.md` | The Architect's five agents: `runner` (one read-only shell check), `event-extractor` (one PM message as an event line, checked by `scripts/verify-claim.py`), `improvement-curator`, `improver` and `drift-guard`. Architect only: `tm fleet init` writes them into the Architect project's `.claude/agents/`, never a PM agent tier. A re-run refreshes an agent nobody edited and keeps an edited one, as for the skills. |
+| `scripts/verify-claim.py`, `scripts/verify_claim_input.py` | Checks the claims in one PM-message event (PR head, base, merge commit, state, checks, issues, crates.io version, CI run) with read-only gh, git and crates.io calls; prints `MATCH`, `MISMATCH` or `UNCHECKED` per claim. The repo map and the gh config dir per GitHub owner come from `repos` in `local/architect.json`. Run by the `event-extractor` agent by path; nothing runs it by default. |
 | `docs/voice.md` | The voice guide, seeded as `docs/architect/voice.md`. |
 | `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `local/`: the record templates (state, actions, goals, user, instance facts, `projects/_template.md`, the owner model in `owner/` and the mandates schema in `mandates/`), the `architect.json` config seed with no owner values, and `il-schedule.json`: the Intent Ledger cadence jobs (prune, rotate, size check, hourly) and the clear thresholds, with no session listed. `tm fleet init` keeps an edited copy. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. Each cycle also runs the Architect watchdog, the Intent Ledger cadence jobs (`il-cron.py`) and the clear-signal check (`ctx-watch.py`), and adds what they find as alerts. Only one poller runs per inbox: a second one stops before it writes anything, because the first holds `inbox/poll.lock`. The poller types nothing into the Architect while `self-clear.sh` runs, so its wake can never land in the middle of a clear. `--once`, `--interval N`, `--dry-run` (its per-pane line shows `turn_active`). |
@@ -28,7 +30,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/input-state.py` | Classifies a pane's input box as `empty`, `suggestion` (Claude Code's dim auto-suggestion) or `typed`. The poller never types over a real draft. |
 | `scripts/self-ctx.py` | Measures the Architect's own context from its newest interactive Claude Code transcript. |
 | `scripts/alert_triage.py` | Sorts poller alerts into wake and log by fixed rules and the holds in `local/triage-rules.json`; the rest go to one batched Haiku call that fails open to wake. `--replay N` re-runs the gate over recent alerts. The shipped `fleet-poll.py` does not load it yet (#10161, P1b). |
-| `scripts/architect-watchdog.py` | Classifies the Architect session as dead, frozen, silent or ok and decides on a debounced relaunch. Pure logic, no I/O. The poller runs it every cycle. A relaunch needs `scripts/session-relaunch.sh`, which is not shipped yet, so a dead Architect is reported and not restarted. |
+| `scripts/architect-watchdog.py` | Classifies the Architect session as dead, frozen, silent or ok and decides on a debounced relaunch. Pure logic, no I/O. The poller runs it every cycle. A relaunch runs `tm architect up`, the bound launch path, so the new `claude` has a launch record (#11367); with no `tm` on `PATH` (or `TM_BIN`) a dead Architect is reported and not restarted. |
 | `scripts/pm_intake.py` | PM-message intake: `notify` appends one line to `inbox/pm-messages.jsonl`, and the pure classifier marks each message wake or hold (decision, blocker, head and done wake; ack, progress and fyi wait for the digest) and drops a repeat within 30 minutes. Its cursor verbs (`unread`, `ack`, `ack-through`, `push-due`) need `pm_cursor.py`, which lands in P4a; until then they fail with `ModuleNotFoundError`. The shipped `fleet-poll.py` does not load it yet (#10161, P1b). |
 | `scripts/pm-digest.py` | Prints what the PMs sent since the last wake in at most 20 lines, and builds the one-line wake digest. Loads `pm_intake.py` by path, so it ships beside it. |
 | `scripts/pm-notify.sh` | The command a PM runs to queue a message for the Architect: `pm-notify.sh --kind K --session S "text"`. Runs `pm_intake.py notify`. Exit codes (#10723): `0` with `queued-local <id>: ... delivery unconfirmed` means the line was appended and read back but the Architect has not acked it, so do not resend; `2` means nothing was appended (bad arguments or a failed write). `pm_intake.py receipt <id>` exits `0` with `acked <id>: <outcome>` once `inbox/pm-acks.jsonl` holds an ack, `3` while it does not, and `2` for an unknown id. No exit status reports delivery without that ack. |
@@ -43,7 +45,8 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | `scripts/ctx-watch.py` | Evaluates the clear signals S1 to S5 per session from `local/il-schedule.json`, the IL session record and the session transcript, and prints the clear candidates. Sends no keys. Loads `self-ctx.py` by path. The poller runs it every cycle; a dry run writes no state. |
 | `scripts/il-cron.py` | Runs the Intent Ledger cadence jobs in `local/il-schedule.json` when due, retries a failed job up to 3 times, then raises one alert. Loads `ctx-watch.py` by path. Its `prune` job runs `il-archive.py`. The poller runs it every cycle; the jobs run at most once an hour. |
 | `scripts/self-clear.sh` | The Architect's gated self-refresh (#10599). A dry run unless `--live`. It refuses unless `datg.py --project local/il ready` exits 0, checked before and again after the idle wait. Idle means `turn-active.py` exits 10 (any other code, 3 included, is busy), `architect-idle.py` passes and the box is empty or a suggestion, three checks in a row. `--socket PATH --target PANE` pins every tmux call to one server and pane; without them it uses `TMUX_SOCKET`, the server it runs inside, or tmux's default socket, and exits 5 when that is not a live socket. Before every key and each idle wait it checks the pane still belongs to `ARCHITECT_SESSION` (exit 6 if not). Then it sends `/clear` and a resume prompt. `--locked` means the poller holds an flock on `inbox/self-clear.pid` for the whole run; a run without it refuses (exit 7) while that lock is held. |
-| `scripts/datg_guards.py` | The #10800 guards (DOC-87): `datg.py` dispatches must name a work card `Card: <code>-Txx` and a closed card must cite evidence (G2; shadow warnings in `guards.jsonl` until `config.guard_mode` is `enforce`, which binds only the Python `datg.py` writer and hook: the Rust `tm dbatg` writer does not apply G2 yet); the digest and `datg.py guards` flag a CLAUDE.md-imported policy file whose threshold differs from a current owner ruling (G1), idle ready work, and checker/repair work displacing delivery (G3). |
+| `scripts/datg_guards.py` | The #10800 guards (DOC-87): `datg.py` dispatches must name a work card `Task: <code>-Txx` (`Card:` before #11101) and a closed card must cite evidence (G2; shadow warnings in `guards.jsonl` until `config.guard_mode` is `enforce`, which binds only the Python `datg.py` writer and hook: the Rust `tm dbatg` writer does not apply G2 yet); the digest and `datg.py guards` flag a CLAUDE.md-imported policy file whose threshold differs from a current owner ruling (G1), idle ready work, and checker/repair work displacing delivery (G3). |
+| `scripts/datg_task.py`, `scripts/task_tag.py`, `scripts/task_pulse.py`, `scripts/task_pulse_io.py` | The Task-ID tag (#11101, ported from the Architect prototype). A dispatch carries `Task: <id>@MMDD` for an open task; a missing, unknown or reused id warns and is logged to `inbox/task-compliance.jsonl` (`config.task_mode` or `$TASK_TAG_MODE` `refuse` follows the dispatch mode). `add T` stamps `created` and warns past `config.wip_cap` active tasks (default 8; parked tasks do not count). `task_tag.py` holds the grammar: `parse_pulse` for the hand-back's legacy last line, `parse_block` for the DOC-89 v1 fenced `il` block (#11133; rejects an unknown key, a repeated singleton, a missing required key, a bad id, pct outside 0-100 and a secret-shaped span), and `parse_handback`, which prefers the block; `task_pulse.py run` applies those tags as `reported` figures on dashboard tasks and the ledger `pulse` op, and is not wired into the poller. The Rust `tm dbatg` writer does not stamp `created`, accept `parked` or apply `pulse` yet. |
 | `scripts/datg_ready.py` | `datg.py ready [--json]`, the clear gate: exit 0 only when the session's task and next are set and not placeholders (`needs owner input:` counts as one), an active goal or open task item exists, `owed` and `crons` are recorded (`none` counts), and the last write is fresh (the `fresh` window); a HOLD alone never passes. 1 = not ready, one plain reason per line; 2 = the ledger is missing or unreadable. `--json` prints `{ready, reasons, written_at, hold}`. |
 | `scripts/state-archive.py` | Moves old handoff sections out of `local/state.md` into `local/state-archive.md`, keeping the newest 3 and the `NEXT IDS` line. `--dry-run` writes nothing. The shipped poller does not load it yet (#10161, P1b). |
 | `scripts/architect-idle.py` | Exits 0 when the Architect's newest transcript ends on a finished assistant turn: the transcript half of `self-clear.sh`'s idle test. Loads `self-ctx.py` by path. The shipped poller does not load it yet (#10161, P1b). |
@@ -98,6 +101,7 @@ an empty variable counts as unset.
 | `tailnet_url` | `""` or an `http://` / `https://` origin | `""`: the dashboard footer links localhost only | `DASHBOARD_TAILNET_URL` |
 | `projects_root` | string, a directory | `""`: `~/trusty-mpm-projects` | `ARCHITECT_PROJECTS_ROOT` |
 | `claude_config_dir` | string, a directory | `""`: `~/.trusty-tools/trusty-mpm/claude-config` | `CLAUDE_CONFIG_DIR` |
+| `poll_interval_s` | integer, at least 1 | `60`: seconds between poll cycles; `fleet-poll.py` and `tm architect poll` both read it, and `--interval N` overrides it for one run | none |
 | `repos` | `{name: {slug, gh_config_dir, checkout}}`, `slug` required | `{}` | none |
 | `caps` | `{name: number}`; `builder_slots` an integer of 1 or more, `load_factor` above 0 | `{}`: each script's own constant | `LOAD_FACTOR` sets `caps.load_factor` |
 
@@ -167,7 +171,7 @@ a start that fails fails the command.
 
 ## Not here yet
 
-The question collector, the token-optimizer skill, the usage feed (the
+The question collector, the token-optimizer skill and agent, the usage feed (the
 dashboard's Accounts rows and the Live view's feed file) and `fleet-restart`
 stay in the prototype for now (#8536).
 
@@ -216,7 +220,8 @@ Copy each file only if the target is absent. Never overwrite an edited one.
 ```sh
 src=<src>
 mkdir -p "$dir/scripts" "$dir/local/projects" "$dir/local/users" "$dir/local/briefs" \
-  "$dir/local/improvements" "$dir/docs/architect"
+  "$dir/local/improvements/runs" "$dir/local/improver/runs" "$dir/local/drift-guard/runs" \
+  "$dir/.claude/agents" "$dir/docs/architect"
 cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
 cp -n "$src/templates/gitignore"        "$dir/.gitignore"
 cp -Rn "$src/templates/local/."         "$dir/local/"
@@ -228,8 +233,10 @@ for f in "$src"/skills/tm-fleet-check.md "$src"/skills/tm-context-refresh.md "$s
   mkdir -p "$dir/.claude/skills/$stem"
   cp -n "$f" "$dir/.claude/skills/$stem/SKILL.md"
 done
+cp -n "$src"/agents/*.md "$dir/.claude/agents/"
 chmod 755 "$dir/scripts/fleet-poll.py" "$dir/scripts/input-state.py" \
-  "$dir/scripts/start-fleet-poll.sh" "$dir/scripts/relay.sh" "$dir/scripts/posted.sh"
+  "$dir/scripts/start-fleet-poll.sh" "$dir/scripts/relay.sh" "$dir/scripts/posted.sh" \
+  "$dir/scripts/verify-claim.py"
 ```
 
 This is the same set `tm fleet init` writes. The setup skill
@@ -322,7 +329,8 @@ the PM profile, return to step 5.
 
 The poller runs in tmux session `<ARCHITECT_SESSION>-poll`. With a custom
 name, run `ARCHITECT_SESSION=<name> "$dir/scripts/start-fleet-poll.sh"`.
-The script is idempotent. Pass `--interval N` to change the cycle length.
+The script is idempotent. The cycle length is `poll_interval_s` in
+`local/architect.json` (default 60 s); `--interval N` overrides it for one run.
 
 ### 9. Verify after launch
 

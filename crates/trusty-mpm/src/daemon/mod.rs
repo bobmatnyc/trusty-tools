@@ -109,6 +109,12 @@ pub(crate) mod verify_allowlist;
 // #8985: the last complete `disk_survey` pass, refreshed in the background.
 pub(crate) mod disk_survey_cache;
 pub mod mcp_project;
+// #10988: `project_decommission`, shared by the MCP tool and the socket method.
+pub mod mcp_project_decommission;
+// #10991: `tm session archive`, shared by the MCP tool, socket and HTTP.
+pub mod session_archive;
+// #10368: a session the daemon first sees registers its checkout.
+pub mod session_project;
 // #7357: the backfill both registration transports share.
 pub mod mcp_proxy;
 pub mod mcp_session;
@@ -139,6 +145,8 @@ pub mod sm_stdio;
 pub mod socket;
 pub(crate) mod spawn_command;
 pub mod state;
+// #10468: SIGTERM, SIGINT and SIGHUP share one settle path.
+pub mod stop_signal;
 pub mod tmux;
 pub mod watcher;
 
@@ -316,6 +324,7 @@ pub async fn serve_with_shutdown(
     services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
     // #8451: evict idle builder-slot dirs once their volume passes its budget.
     services::slot_pool_evict::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+    services::pr_watch_ports::spawn_if_enabled(Arc::clone(&state), cancel.child_token()); // #11673
     project_adoption::spawn_startup_marker_migration(&state); // #8511
     // #9923: the Socket Mode inbound source; it holds no socket until ready.
     #[cfg(feature = "channels")]
@@ -831,6 +840,8 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // session that is alive across a daemon restart (when `self.sessions`
                 // is always empty) gets one full GC interval to be re-learned before
                 // any SIGTERM is sent.
+                // #10753: and only when no live tmux pane hosts the PID; an
+                // unanswerable pane check sends no signal.
                 let live_ids = state.gather_live_session_ids().await;
                 let pid_outcome = state.pid_registry().sweep_orphans(
                     &live_ids,
@@ -840,11 +851,13 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 if pid_outcome.terminated > 0
                     || pid_outcome.removed_stale > 0
                     || pid_outcome.deferred > 0
+                    || pid_outcome.unverifiable > 0
                 {
                     info!(
                         terminated = pid_outcome.terminated,
                         removed_stale = pid_outcome.removed_stale,
                         deferred = pid_outcome.deferred,
+                        unverifiable = pid_outcome.unverifiable, // #10753
                         "orphan-GC PID-file sweep cleaned up orphaned claude process(es)"
                     );
                 }
@@ -886,13 +899,15 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // work. See `SessionManager::reap_orphaned_worktrees` for the
                 // authoritative list. Inherits the orphan-GC env gate
                 // (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
-                let repos_root = managed_routes::inproject::repos_root();
+                // #11821: a broken install.toml skips this pass, logged below
+                // as a failed sweep; it never reaps under the default root.
+                let repos_root = managed_routes::inproject::try_repos_root();
                 // #7357: this loop is the entry point for the unattended sweep,
                 // so it resolves the adopted anchors under the DAEMON's own
                 // framework root — the same root `project_register` writes them
                 // to.
                 let adopted = crate::project::adopted_anchors_under(state.framework_root());
-                match mgr.reap_orphaned_worktrees(&repos_root, &adopted).await {
+                match reap_orphans_under(&mgr, repos_root, &adopted).await {
                     Ok(outcome) => {
                         if !outcome.removed.is_empty() {
                             info!(
@@ -1295,6 +1310,49 @@ mod shutdown_reaper_tests {
         handle
             .await
             .expect("reap_loop task must not panic after cancellation");
+    }
+}
+
+/// One orphan-GC worktree pass under `repos_root`.
+///
+/// Why: df-D1t (#11821) — a broken `install.toml` must fail the pass, never
+/// reap under the default root. A parameter, so a test can hand it the error.
+/// What: the resolver's error as `Err`, with nothing reaped; otherwise
+/// [`crate::session_manager::SessionManager::reap_orphaned_worktrees`].
+/// Test: `orphan_gc_refuses_an_unresolved_repos_root`.
+async fn reap_orphans_under(
+    mgr: &crate::session_manager::SessionManager,
+    repos_root: Result<std::path::PathBuf, trusty_common::install_paths::InstallPathsError>,
+    adopted: &[std::path::PathBuf],
+) -> anyhow::Result<crate::session_manager::prune::OrphanSweepOutcome> {
+    // #11821: refuse before the reap, never under a guessed root.
+    let root = repos_root.map_err(|e| anyhow::anyhow!("repos root unresolved: {e}"))?;
+    mgr.reap_orphaned_worktrees(&root, adopted).await
+}
+
+#[cfg(test)]
+mod orphan_gc_root_tests {
+    use super::{DaemonState, reap_orphans_under};
+
+    /// #11821 df-D1t: a broken `install.toml` fails the pass and names the
+    /// file; a resolved root reaps as before.
+    #[tokio::test]
+    async fn orphan_gc_refuses_an_unresolved_repos_root() {
+        let dir = tempfile::tempdir().expect("scratch framework root");
+        let state = DaemonState::with_root(dir.path().to_path_buf());
+        let mgr = state.session_manager().await;
+        let broken = crate::test_support::broken_install_error();
+
+        let err = reap_orphans_under(&mgr, Err(broken), &[])
+            .await
+            .expect_err("an unresolved repos root must fail the pass");
+        assert!(err.to_string().contains("install.toml"), "got: {err}");
+
+        let empty_root = tempfile::tempdir().expect("empty repos root");
+        let outcome = reap_orphans_under(&mgr, Ok(empty_root.path().to_path_buf()), &[])
+            .await
+            .expect("a resolved root runs the pass");
+        assert!(outcome.removed.is_empty(), "outcome: {outcome:?}");
     }
 }
 

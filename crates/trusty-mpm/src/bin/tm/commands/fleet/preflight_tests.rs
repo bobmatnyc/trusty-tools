@@ -897,6 +897,115 @@ fn a_worktree_with_its_own_config_or_remote_refuses() {
     assert_workspace_parent(s.refused(&dir), &dir, &why);
 }
 
+/// An own worktree whose record holds `config.worktree` with `text`, as
+/// `(dir, worktree, record)`.
+fn worktree_with_config(s: &Scratch, name: &str, text: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let (dir, wt, record) = passing_worktree(s, name);
+    git(&dir, &["config", "extensions.worktreeConfig", "true"]);
+    write(&record.join("config.worktree"), text);
+    (dir, wt, record)
+}
+
+/// #10560, FAILS BEFORE THE FIX: tm itself writes `push.default` into an
+/// agent worktree's `config.worktree`, and any such file refused the dir.
+#[test]
+fn a_worktree_config_holding_only_push_default_passes() {
+    let s = Scratch::new();
+    // The exact commands tm runs (`inproject.rs`, `worktree_sync.rs`).
+    let (dir, wt, _) = passing_worktree(&s, "tm-written");
+    git(&dir, &["config", "extensions.worktreeConfig", "true"]);
+    git(&wt, &["config", "--worktree", "push.default", "current"]);
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+    init(&dir, &s.home(), false, NO_TMUX).unwrap_or_else(|e| panic!("{e:#}")); // #10560
+
+    // git's case rules: section and name are case-insensitive.
+    let text = "# comment\n[Push]\n\tDefault = simple\n[push]\n\tdefault = current\n";
+    let (dir, _, _) = worktree_with_config(&s, "mixed-case", text);
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+}
+
+/// #10560: any key other than `push.default` in `config.worktree` still
+/// refuses, alone or beside `push.default`, and so does an include, a
+/// subsection, or a key that only contains the text.
+#[test]
+fn a_worktree_config_with_any_other_key_refuses() {
+    let s = Scratch::new();
+    let push = "[push]\n\tdefault = current\n";
+    let cases = [
+        ("core", "[core]\n\tbare = false\n".to_owned()),
+        (
+            "remote",
+            format!("{push}[remote \"origin\"]\n\turl = https://example.invalid/f.git\n"),
+        ),
+        (
+            "core-worktree",
+            format!("{push}[core]\n\tworktree = /tmp\n"),
+        ),
+        ("include", format!("{push}[include]\n\tpath = /dev/null\n")),
+        (
+            "include-if",
+            format!("{push}[includeIf \"gitdir:/\"]\n\tpath = /dev/null\n"),
+        ),
+        (
+            "subsection",
+            "[push \"x\"]\n\tdefault = current\n".to_owned(),
+        ),
+        (
+            "old-subsection",
+            "[push.x]\n\tdefault = current\n".to_owned(),
+        ),
+        ("longer-name", "[push]\n\tdefaults = current\n".to_owned()),
+        (
+            "other-name",
+            "[push]\n\tautoSetupRemote = true\n".to_owned(),
+        ),
+        (
+            "longer-section",
+            "[pushx]\n\tdefault = current\n".to_owned(),
+        ),
+        (
+            "branch",
+            "[branch \"push\"]\n\tdefault = current\n".to_owned(),
+        ),
+    ];
+    for (name, text) in cases {
+        let (dir, wt, _) = worktree_with_config(&s, name, &text);
+        let why = format!("contains the repository {}", wt.display());
+        assert_workspace_parent(s.refused(&dir), &dir, &why);
+    }
+}
+
+/// #10560 Fail-Open Check: a `config.worktree` that is a symlink, not a
+/// regular file, unparsable, or unreadable refuses, even when what it leads
+/// to holds only `push.default`.
+#[test]
+fn an_unreadable_or_irregular_worktree_config_refuses() {
+    let s = Scratch::new();
+    let push = "[push]\n\tdefault = current\n";
+
+    let target = s.outer().join("push-only.config");
+    write(&target, push);
+    let (dir, wt, record) = passing_worktree(&s, "symlink");
+    git(&dir, &["config", "extensions.worktreeConfig", "true"]);
+    std::os::unix::fs::symlink(&target, record.join("config.worktree")).unwrap();
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, record) = passing_worktree(&s, "directory");
+    std::fs::create_dir(record.join("config.worktree")).unwrap();
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, _) = worktree_with_config(&s, "unparsable", "[push\n\tdefault = current\n");
+    assert_wt_scanned(&s, &dir, &wt);
+
+    let (dir, wt, record) = worktree_with_config(&s, "unreadable", push);
+    let file = record.join("config.worktree");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_err() {
+        assert_wt_scanned(&s, &dir, &wt);
+    }
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
 /// #10262 critic LOW: a record or pointer that leaves the directory, or holds
 /// `..`, and a worktree at `local/`, all refuse. The `..` cases FAIL BEFORE
 /// THE FIX; the others pin refusals the first round already made.

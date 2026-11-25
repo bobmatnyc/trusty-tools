@@ -79,6 +79,9 @@ LANE	features	trusty-common/test-support
 # verified locally: `cargo doc -p trusty-embedderd --features load-dynamic`
 # exits 0 with defaults still on, so this LANE's additive-only `--features`
 # reaches the module cleanly.
+# #10892: `types` is default-on and gates the crate's modules in lib.rs
+# (cfg sites, so not NO-CFG).
+LANE	features	trusty-delegation-guard/types
 LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
 LANE	features	trusty-memory/daemon,trusty-memory/mcp-schema,trusty-memory/server
@@ -88,6 +91,7 @@ LANE	features	trusty-memory/embedder-test-support,trusty-memory/memory-core-test
 LANE	features	trusty-mpm/bedrock,trusty-mpm/channels,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/memory-test-support,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
 LANE	features	trusty-okf/extract-worker,trusty-okf/search-feed
 LANE	features	trusty-connectors/loopback-seam,trusty-gworkspace/loopback-seam
+LANE	features	trusty-browser/test-seams
 LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
 LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support
 LANE	features	trusty-secrets/ancestry,trusty-secrets/api,trusty-secrets/cli-backends,trusty-secrets/server,trusty-secrets/store,trusty-secrets/test-support
@@ -121,3 +125,4 @@ SKIP	trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics with "`nv
 # panics on `nvcc --version` — which no CI runner here has. Matching row in
 # scripts/semver-checks-feature-exclusions.tsv.
 SKIP	trusty-embedderd	cuda	pass-through to trusty-common/embedder-cuda; cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has. Matching row in scripts/semver-checks-feature-exclusions.tsv.
+LANE	features	trusty-computer/test-seams

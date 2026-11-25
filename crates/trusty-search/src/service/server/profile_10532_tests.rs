@@ -52,7 +52,7 @@ fn tree() -> (tempfile::TempDir, std::path::PathBuf) {
 /// the index's permit to be free. The embed pass releases the permit after it
 /// settles the stage, and nothing queues another pass, so this order is final.
 /// Test: every test in this module that reindexes before a PATCH.
-async fn reindex(state: &Arc<SearchAppState>, id: &str) {
+pub(super) async fn reindex(state: &Arc<SearchAppState>, id: &str) {
     let handle = state.registry.get(&IndexId::new(id)).expect("registered");
     spawn_reindex_awaitable(Arc::clone(&handle), Arc::new(ReindexProgress::new()), false)
         .await
@@ -73,7 +73,7 @@ async fn reindex(state: &Arc<SearchAppState>, id: &str) {
     }
 }
 
-async fn chunks_of(state: &Arc<SearchAppState>, id: &str, rel: &str) -> usize {
+pub(super) async fn chunks_of(state: &Arc<SearchAppState>, id: &str, rel: &str) -> usize {
     let handle = state.registry.get(&IndexId::new(id)).expect("registered");
     let indexer = handle.indexer.read().await;
     indexer.chunk_ids_for_file(rel).await.len()

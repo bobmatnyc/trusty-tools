@@ -30,7 +30,7 @@ context reloaded by each). These are the specific splits to collapse:
 | Implement then commit (2) | Include "commit when done" in the task (1) |
 | Sequential fixes to the same agent (N) | One delegation with full scope (1) |
 | A separate docs agent for a per-task README | Include the README in the engineer delegation |
-| One PR per issue for same-module bugs | Group by crate: one dispatch/PR per crate cluster (≤~5 issues), one worktree, one gate run; each issue keeps its own regression test and `Refs #N` line |
+| One PR per issue for same-module bugs | Group by crate: one dispatch/PR per crate cluster (≤~5 issues), one worktree, one gate run, one critic round; one commit per issue, each with its own regression test and `Refs #N` line (issue-cluster rule, `tm-workflow`) |
 
 Bug fixes and small changes are grouped by crate into one engineer dispatch
 per crate cluster, up to about five issues per cluster, with one worktree and

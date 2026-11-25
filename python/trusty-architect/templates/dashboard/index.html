@@ -49,7 +49,7 @@ h1 { flex: 0 1 auto; min-width: min-content; overflow-wrap: normal; word-break: 
 .st-opt:hover, .st-opt:focus-visible { background: color-mix(in srgb, var(--accent) 14%, var(--surface-1)); }
 .st-opt[aria-checked="true"] .sp-name::after { content: " \2713"; }
 .sp-field { display: grid; gap: 4px; font-size: var(--fs-sm); }
-.sp-field input { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); min-width: 0; box-sizing: border-box; width: 100%; }
+.sp-field input, .sp-field select { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); min-width: 0; box-sizing: border-box; width: 100%; }
 .sp-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .sp-row .sp-field { flex: 1 1 8rem; min-width: 0; }
 .sp-field input[type="time"] { -webkit-appearance: none; appearance: none; display: block; max-width: 100%; min-height: 2.2rem; }   /* iOS gives time inputs an intrinsic width wider than a phone fieldset */
@@ -105,6 +105,19 @@ details[open] > summary > .chev::before { content: "▾"; }
 .status-briefs li { margin: 2px 0; }
 .status-briefs li:first-child { margin-top: 0; }
 .sb-link { font-family: var(--font-mono); }
+/* #11065: a session's last pane lines (Decision row "Last output", page "Show session") */
+.pane-last { margin: 8px 0 0; min-width: 0; }
+.pane-last > summary { display: flex; align-items: center; min-height: var(--h-touch); cursor: pointer; color: var(--accent); font-weight: 600; }
+.pane-out { min-width: 0; margin: 6px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-1); }
+.pane-head, .pane-pick { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; }
+.pane-name { font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600; }
+.pane-age, .pane-msg { color: var(--ink-2); font-size: var(--fs-sm); }
+.pane-msg { margin: 6px 0 0; }
+.pane-msg:empty, .pane-lines:empty { display: none; }
+.pane-msg[data-state="error"] { color: var(--st-stop-ink); }
+.pane-lines { margin: 6px 0 0; max-height: 50vh; overflow: auto; font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pane-out .btn, .pane-pick .btn, .pane-pick select { min-height: var(--h-touch); min-width: var(--h-touch); }
+.pane-pick select { flex: 1 1 160px; min-width: 0; font: inherit; font-size: 16px; }
 .pane-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 8px; min-width: 0; }
 .pane-filter input.pf-input { flex: 1 1 220px; min-width: 0; font: inherit; font-size: var(--fs-sm); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); }
 .pane-filter input.pf-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -112,6 +125,10 @@ details[open] > summary > .chev::before { content: "▾"; }
 .pane-filter .pf-clear[hidden] { display: none; }
 .pane-filter .pf-clear:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .pane-filter .pf-status { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-2); }
+.pane-filter select.pf-sort { flex: none; font-size: var(--fs-sm); }   /* the Decisions Sort select (issue 11047; a hex-like tag fails the token check) */
+.dg-head { display: flex; gap: 8px; align-items: baseline; padding: 10px 4px 4px; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ink-2); }
+.dg-head .n { font-weight: 400; }
+.chip.proj { color: var(--ink-2); }
 .cbar input[type=search] { flex: 1 1 180px; min-width: 0; font: inherit; font-size: var(--fs-sm); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); }
 .cbar input[type=search]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .cbar .pg-label { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-2); }
@@ -463,7 +480,7 @@ button, summary, .opt { touch-action: manipulation; }
   .item > summary, .sub > summary, .sec > summary { min-height: 44px; }
   .item.prio > summary { min-height: 44px; }
   .step-top { min-height: 44px; align-items: center; }
-  .pane-filter input.pf-input, .pane-filter .pf-clear, .cbar input[type=search], .attach input[type=file], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
+  .pane-filter input.pf-input, .pane-filter .pf-clear, .cbar input[type=search], .pane-filter select.pf-sort, .attach input[type=file], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
 }
 @media (max-width: 600px) {
   .brand { row-gap: 8px; }
@@ -766,6 +783,11 @@ html[data-mode="session"] [data-arch-only] { display: none !important; }
 .pj-owner { display: block; margin: 12px 0 6px; font-weight: 600; color: var(--ink-1); text-decoration: none; }
 .pj-owner:hover, .pj-owner:focus-visible { color: var(--accent); outline: none; text-decoration: underline; }
 .pj-owner .pj-sub { margin-left: 6px; font-weight: 400; }
+/* #10350: the Projects view's Secrets list, names only (design tokens only, per the Foundry UI rule) */
+.pj-keys { margin-top: 16px; }
+.pj-keys > summary { cursor: pointer; }
+.pj-keys .pj-row { cursor: default; }
+.pj-kn { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 1px 8px; border-radius: var(--r-pill); border: 1px solid var(--line); color: var(--ink-1); overflow-wrap: anywhere; }
 .pj-filter { margin: 4px 0 8px; font-size: var(--fs-sm); color: var(--ink-2); }
 .pj-filter a { color: var(--accent); display: inline-block; min-height: var(--h-compact); line-height: var(--h-compact); margin-left: 8px; }
 .pj-back { margin: 0 0 8px; font-size: var(--fs-sm); }
@@ -992,6 +1014,20 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <label class="sp-field">Sleep from<input type="time" id="set-sleep-start" step="900"></label>
       <p class="err" id="set-time-err" role="status"></p>
     </fieldset>
+    <!-- #11064: the owner's technical level (meta/settings.technical_level); a secondary user keeps their own level -->
+    <fieldset class="sp-group" data-arch-only id="set-level-group">
+      <legend>Technical level</legend>
+      <p class="sp-note">How technical the Architect's questions, briefs and messages to you are. Linked briefs keep the full detail; ask for more detail on any item. Secondary users keep their own level.</p>
+      <label class="sp-field">Write for<select id="set-level">
+        <option value="non-technical">Non-technical</option>
+        <option value="vibe-coder">Vibe-coder</option>
+        <option value="pm">PM (default)</option>
+        <option value="engineer">Engineer</option>
+        <option value="senior-engineer">Senior engineer</option>
+        <option value="cto">CTO</option>
+      </select></label>
+      <p class="err" id="set-level-err" role="status"></p>
+    </fieldset>
     <fieldset class="sp-group" data-arch-only id="set-brief-group">
       <legend>Morning brief</legend>
       <p class="sp-note">A short summary of the last 24 hours (the weekend, on Monday) and where to focus, delivered at this time in the time zone above. Standard: 07:30 on weekdays.</p>
@@ -1094,7 +1130,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <div class="rows" id="list-q" data-sub="open"><p class="empty">Loading…</p></div>
       <details class="sub" id="sub-qp" data-sub="parked">
         <summary><span class="chev" aria-hidden="true"></span><h3>Parked</h3><span class="n" id="n-qp">·</span></summary>
-        <div class="rows" id="list-qp"><p class="empty">Nothing parked.</p></div>
+        <div class="rows" id="list-qp"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-qa" data-sub="answered">
         <summary><span class="chev" aria-hidden="true"></span><h3>Answered</h3><span class="n" id="n-qa">·</span></summary>
@@ -1104,7 +1140,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
           <span class="pg-label" id="pg-label-qa" aria-live="polite"></span>
           <button type="button" class="ctl pg" id="pg-older-qa" aria-label="Older answered decisions waiting for the Architect">Older</button>
         </div>
-        <div class="rows" id="list-qa"><p class="empty">Nothing answered and waiting.</p></div>
+        <div class="rows" id="list-qa"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-qx" data-sub="done">
         <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-qx">·</span></summary>
@@ -1124,12 +1160,12 @@ html.lib-strip.rd-open body { padding-right: 0; }
     <div class="sec-body">
       <details class="sub" id="sub-qpd" data-sub="pending" open>
         <summary><span class="chev" aria-hidden="true"></span><h3>Pending</h3><span class="n" id="n-qpd">·</span></summary>
-        <div class="rows" id="list-qpd"><p class="empty">Nothing pending.</p></div>
+        <div class="rows" id="list-qpd"><p class="empty">Loading…</p></div>
       </details>
-      <div class="rows" id="list-ques" data-sub="answered"><p class="empty">No answered questions.</p></div>
+      <div class="rows" id="list-ques" data-sub="answered"><p class="empty">Loading…</p></div>
       <details class="sub" id="sub-quz" data-sub="cleared">
         <summary><span class="chev" aria-hidden="true"></span><h3>Read</h3><span class="n" id="n-quz">·</span></summary>
-        <div class="rows" id="list-quz"><p class="empty">Nothing read.</p></div>
+        <div class="rows" id="list-quz"><p class="empty">Loading…</p></div>
       </details>
     </div>
   </details>
@@ -1140,7 +1176,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <div class="rows" id="list-a" data-sub="open"><p class="empty">Loading…</p></div>
       <details class="sub" id="sub-ap" data-sub="parked">
         <summary><span class="chev" aria-hidden="true"></span><h3>Parked</h3><span class="n" id="n-ap">·</span></summary>
-        <div class="rows" id="list-ap"><p class="empty">Nothing parked.</p></div>
+        <div class="rows" id="list-ap"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-aa" data-sub="answered">
         <summary><span class="chev" aria-hidden="true"></span><h3>Answered</h3><span class="n" id="n-aa">·</span></summary>
@@ -1150,7 +1186,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
           <span class="pg-label" id="pg-label-aa" aria-live="polite"></span>
           <button type="button" class="ctl pg" id="pg-older-aa" aria-label="Older answered blockers waiting for the Architect">Older</button>
         </div>
-        <div class="rows" id="list-aa"><p class="empty">Nothing answered and waiting.</p></div>
+        <div class="rows" id="list-aa"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-ax" data-sub="done">
         <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-ax">·</span></summary>
@@ -1171,7 +1207,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <div class="rows" id="list-t" data-sub="open"><p class="empty">Loading…</p></div>
       <details class="sub" id="sub-tp" data-sub="parked">
         <summary><span class="chev" aria-hidden="true"></span><h3>Parked</h3><span class="n" id="n-tp">·</span></summary>
-        <div class="rows" id="list-tp"><p class="empty">Nothing parked.</p></div>
+        <div class="rows" id="list-tp"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-ta" data-sub="answered" hidden>
         <summary><span class="chev" aria-hidden="true"></span><h3>Answered</h3><span class="n" id="n-ta">·</span></summary>
@@ -1181,7 +1217,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
           <span class="pg-label" id="pg-label-ta" aria-live="polite"></span>
           <button type="button" class="ctl pg" id="pg-older-ta" aria-label="Older answered tasks waiting for the Architect">Older</button>
         </div>
-        <div class="rows" id="list-ta"><p class="empty">Nothing answered and waiting.</p></div>
+        <div class="rows" id="list-ta"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-tx" data-sub="done">
         <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-tx">·</span></summary>
@@ -1222,11 +1258,11 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <details class="sub" id="sub-gc" data-sub="completed" hidden>
         <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-gc">·</span></summary>
         <div class="err reorder-err" id="err-gc" role="status"></div>
-        <div class="rows" id="list-gc"><p class="empty">No completed goals.</p></div>
+        <div class="rows" id="list-gc"><p class="empty">Loading…</p></div>
       </details>
       <details class="sub" id="sub-gp" data-sub="parked" hidden>
         <summary><span class="chev" aria-hidden="true"></span><h3>Parked goals</h3><span class="n" id="n-gp">·</span></summary>
-        <div class="rows" id="list-gp"><p class="empty">No parked goals.</p></div>
+        <div class="rows" id="list-gp"><p class="empty">Loading…</p></div>
       </details>
     </div>
   </details>
@@ -1261,6 +1297,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
         <p class="sx-note" id="pj-note" role="status" aria-live="polite">Loading…</p>
         <p class="pj-filter" id="pj-ownerbar" hidden><span id="pj-ownertxt"></span> <a href="#view/projects/open" id="pj-ownerclear">All projects</a></p>
         <div id="pj-list"></div>
+        <details class="pj-keys" id="pj-keys"><summary class="pj-owner">Secrets <span class="pj-sub">key names by owner/project; values are never read or shown</span></summary><div class="pj-bar"><button type="button" id="pj-keys-refresh">Refresh</button></div><p class="sx-note" id="pj-keys-note" role="status" aria-live="polite">Open to list key names.</p><div id="pj-keys-list"></div></details>
       </div>
       <div data-sub="project" data-subp="project" id="pj-detail">
         <p class="pj-back"><a href="#view/projects/open" id="pj-back">Projects</a></p>
@@ -2171,7 +2208,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       }
       if (j) ["briefs_abs", "tailnet", "console"].forEach((k) => { if (typeof j[k] === "string") d[k] = j[k]; });
       if (j && j.features && typeof j.features === "object") d.features = j.features;   /* #10571: which optional backends this install has */
-      if (j && Array.isArray(j.warnings)) d.warnings = j.warnings.filter((w) => typeof w === "string" && w);   /* #10606: e.g. Python below 3.11 */
+      if (j && Array.isArray(j.warnings)) d.warnings = j.warnings.filter((w) => typeof w === "string" && w);   /* #10606: e.g. tmux not on PATH */
     } catch (_) { /* no config: architect mode */ }
     return d;
   })();
@@ -2222,7 +2259,23 @@ html.lib-strip.rd-open body { padding-right: 0; }
   const noteOpen = new Set(), noteDrafts = new Map();
   const confirmRm = new Set();        /* goal ids showing the inline "Confirm / Cancel" step */
   const optimisticRm = new Map();     /* goal id -> removal doc id written by this viewer, until the store echoes it */
-  let accounts = [], items = [], ghTrack = null, meta = null, settings = null, optimisticState = null, goals = [], sessions = [], fleet = null, priorities = [], reorders = [];
+  let accounts = [], items = [], meta = null, settings = null, optimisticState = null, goals = [], sessions = [], fleet = null, priorities = [], reorders = [];
+  /* BEGIN loadState */
+  /* #11588: a list shows no count and no empty text until its collection's first snapshot lands (the owner); a failed first load shows "!" and an error, never 0. */
+  const loaded = {}, loadFailed = {};
+  const srcMark = (name) => (!name || loaded[name] ? null : loadFailed[name] ? "!" : "·");
+  const isN = (n) => typeof n === "number";
+  const addN = (a, b) => (isN(a) && isN(b) ? a + b : isN(a) ? b : a);   /* a mark in a sum makes the sum a mark */
+  const nLabel = (n, word) => (isN(n) ? n + " " + word : n === "!" ? "not loaded" : "loading");
+  function notReady(name, lists, chips, sums) {   /* paints the loading or error state and answers its text; "" once loaded */
+    const m = srcMark(name); if (!m) return "";
+    const msg = m === "!" ? "Could not load the " + name + " (" + loadFailed[name] + "). Reload the page." : "Loading…";
+    lists.forEach((id) => { const b = $(id); if (b) b.replaceChildren(el("p", "empty", msg)); });
+    chips.forEach((id) => { const c = $(id); if (c) { c.textContent = m; c.classList.remove("hot"); c.setAttribute("aria-label", nLabel(m)); } });
+    sums.forEach((id) => { const s = $(id); if (s) { s.textContent = msg; s.title = msg; } });
+    return msg;
+  }
+  /* END loadState */
   const optimisticRank = new Map();   /* goal id -> rank written by this viewer, until the store echoes it */
   const localReorderAt = {};          /* kind -> ISO time of this viewer's last reorder */
   let savingOrder = false, drag = null, renderPending = false;
@@ -3723,6 +3776,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     return m;
   }
   function renderAccounts() {
+    if (notReady("accounts", ["accounts-body"], ["n-accounts"], ["accounts-sum"])) return;   // #11588: loading mark until the accounts load
     const box = $("accounts-body"), nowMs = Date.now();
     const rows = accountRows(accounts, nowMs);
     $("n-accounts").textContent = String(rows.length);
@@ -3848,6 +3902,12 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!sb) return null;
     const w = el("span", "sb-latest"); w.append("Status ", statusBriefLink(sb)); return w;
   }
+  /* #11047: a decision row's project chip, in every sort mode; data.project is computed by the server from the session (never stored). The session dashboard has one project and shows none. */
+  function projectChip(it) {
+    const p = txt(it.project).trim();
+    if (!p || askKind(it) !== "D" || (typeof SESSION !== "undefined" && SESSION)) return null;
+    const c = el("span", "chip proj", p); c.title = "Project"; return c;
+  }
   function shell(it, cls) {
     const card = el("details", "item" + (cls ? " " + cls : "") + (it.status === "open" ? " needs" : "") + (it.status === "answered" || it.status === "done" || it.status === "cancelled" || it.status === "wont_do" || it.status === "interactive" ? " faded" : ""));
     syncItemState(it);
@@ -3872,6 +3932,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     else if (it.status === "interactive") sum.appendChild(el("span", "chip", "interactive"));
     else if (it.due && !runWindow(it, Date.now())) sum.appendChild(el("span", "chip due", "by " + utc(it.due)));
     if (wasReopened(it)) sum.appendChild(el("span", "chip reopened", "reopened"));
+    { const pc = projectChip(it); if (pc) sum.appendChild(pc); }   /* #11047 */
     { const bs = briefDoc(it) ? briefSlot(it.brief) : null; if (bs) sum.appendChild(bs); }
     { const sb = statusBriefSlot(it); if (sb) sum.appendChild(sb); }
     if (isParked(it)) {
@@ -3913,6 +3974,109 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const tl = taskLink(it); if (tl) m.appendChild(tl);
     return m;
   }
+  /* BEGIN paneTail */
+  /* #11065: last pane lines from GET /api/pane, fetched only on open or Refresh; textContent only, kept in memory only. */
+  function paneAge(at, now) {
+    const t = Date.parse(txt(at)); if (!isFinite(t)) return "capture time unknown";
+    const s = Math.max(0, Math.round((now - t) / 1000));
+    return "captured " + (s < 5 ? "just now" : s < 60 ? s + " s ago" : s < 3600 ? Math.floor(s / 60) + " min ago" : Math.floor(s / 3600) + " h ago");
+  }
+  /* An item's `session` is a tmux name or a session doc id (see sessionTasks); resolve to the tmux name, "" when it is not a live managed session. */
+  function paneName(raw, fleetBody, docs) {
+    const r = txt(raw).trim(); if (!r) return "";
+    const ds = Array.isArray(docs) ? docs : [];
+    const f = fleetBody && fleetBody.sessions && typeof fleetBody.sessions === "object" ? fleetBody.sessions : null;
+    const isName = (f && f[r]) || ds.some((x) => x && txt(x.name) === r);   /* a name never maps to another doc's pane */
+    const d = isName ? null : ds.find((x) => x && txt(x.id) === r && txt(x.name));
+    const n = d ? txt(d.name) : r;
+    return !f || (f[n] && f[n].managed) ? n : "";
+  }
+  let paneTimeoutMs = 15000;   // #11065: a stalled phone or tailnet request ends in the error state, never a stuck "Loading…"
+  async function paneFetch(name, lines) {
+    let r, j, timer, late = false;
+    const ac = typeof AbortController === "function" ? new AbortController() : null;
+    const cap = new Promise((_, no) => { timer = setTimeout(() => { late = true; if (ac) ac.abort(); no(new Error("timeout")); }, paneTimeoutMs); });
+    const within = (p) => Promise.race([p, cap]);
+    try {
+      try { r = await within(fetch("/api/pane?session=" + encodeURIComponent(name) + "&lines=" + (lines || 40), { cache: "no-store", signal: ac ? ac.signal : undefined })); }
+      catch (_) { return { state: "error", why: late ? "timeout" : "network" }; }
+      if (r.status === 404) return { state: "none" };
+      if (!r.ok) return { state: "error", why: r.status === 503 ? "capture" : "http", status: r.status };
+      try { j = await within(r.json()); } catch (_) { if (late) return { state: "error", why: "timeout" }; j = null; }
+    } finally { clearTimeout(timer); }
+    if (!j || !Array.isArray(j.lines)) return { state: "error", why: "http", status: r.status };
+    return { state: "ok", lines: j.lines.map(txt), at: txt(j.captured_at), truncated: !!j.truncated };
+  }
+  const paneViews = new Set();
+  /* One output box; `gen` drops a response that arrives after the box moved on to another session (or a newer Refresh). */
+  function paneView() {
+    const box = el("div", "pane-out"), head = el("div", "pane-head");
+    const nameEl = el("span", "pane-name"), age = el("span", "pane-age"), trunc = el("span", "chip pane-trunc", "truncated");
+    const btn = el("button", "tap btn ghost pane-refresh", "Refresh"); btn.type = "button";
+    const msg = el("p", "pane-msg"); msg.setAttribute("role", "status"); msg.setAttribute("aria-live", "polite");
+    const pre = el("pre", "pane-lines"); pre.tabIndex = 0;
+    head.append(nameEl, age, trunc, btn); box.append(head, msg, pre);
+    const v = { box: box, name: "", gen: 0, at: "", loaded: false, msg: msg, pre: pre, age: age, trunc: trunc, btn: btn };
+    const paint = (state, text) => { msg.dataset.state = state; msg.textContent = text; };
+    v.tick = (now) => { age.textContent = v.at ? paneAge(v.at, now) : ""; };
+    v.show = (name) => {
+      const g = ++v.gen; v.name = name; v.at = ""; v.loaded = true;
+      nameEl.textContent = name; pre.textContent = ""; age.textContent = ""; trunc.hidden = true; btn.hidden = !name;
+      if (!name) { btn.disabled = false; paint("none", "No live pane for this session."); return Promise.resolve(); }
+      btn.disabled = true; paint("loading", "Loading…");
+      return paneFetch(name).then((res) => {
+        if (g !== v.gen) return;
+        btn.disabled = false;
+        if (res.state === "ok") {
+          v.at = res.at; pre.textContent = res.lines.join("\n"); trunc.hidden = !res.truncated; v.tick(Date.now());
+          paint("ok", res.lines.length ? "" : "The pane is empty.");
+        } else if (res.state === "none") paint("none", "No live pane: " + name + " is not running.");
+        else paint("error", res.why === "network" ? "Network error: the pane did not load." : res.why === "timeout" ? "The pane did not answer in time. Try Refresh." : res.why === "capture" ? "The pane could not be captured. Try Refresh." : "The pane did not load (HTTP " + res.status + ").");
+      });
+    };
+    v.refresh = () => v.show(v.name);
+    trunc.hidden = true; btn.hidden = true;
+    btn.addEventListener("click", () => { v.refresh(); });
+    paneViews.add(v);
+    return v;
+  }
+  const paneRows = new Map();   /* item id + resolved name -> {open, view}; survives re-render, memory only */
+  function lastOutput(it) {
+    if ((typeof SESSION !== "undefined" && SESSION) || !txt(it && it.session).trim()) return null;
+    const name = paneName(it.session, fleet, sessions), key = it.id + "\u0000" + name;
+    let st = paneRows.get(key); if (!st) { st = { open: false, view: null }; paneRows.set(key, st); }
+    const d = el("details", "pane-last");
+    d.appendChild(el("summary", null, "Last output"));
+    if (st.open && st.view) { d.appendChild(st.view.box); d.open = true; }
+    d.addEventListener("toggle", () => {
+      st.open = d.open;
+      if (!d.open) return;
+      if (!st.view) st.view = paneView();
+      if (st.view.box.parentNode !== d) d.appendChild(st.view.box);
+      if (!st.view.loaded || st.view.msg.dataset.state === "error") st.view.show(name);   // #11065: reopening retries a failed capture
+    });
+    return d;
+  }
+  /* The page control: pick a managed session, Show, then Refresh inside the box. */
+  function paneControl() {
+    const d = el("details", "sub pane-ctl"), s = el("summary");
+    const ch = el("span", "chev"); ch.setAttribute("aria-hidden", "true");
+    s.append(ch, el("h3", null, "Show session")); d.appendChild(s);
+    const row = el("div", "pane-pick"), sel = el("select", "ctl"), go = el("button", "tap btn", "Show"), v = paneView();
+    sel.id = "pane-pick"; sel.setAttribute("aria-label", "Session to show"); go.type = "button";
+    row.append(sel, go); d.append(row, v.box);
+    go.addEventListener("click", () => { if (sel.value) v.show(sel.value); });
+    d.sync = (fleetBody) => {
+      const f = fleetBody && fleetBody.sessions && typeof fleetBody.sessions === "object" ? fleetBody.sessions : {};
+      const names = Object.keys(f).filter((n) => f[n] && f[n].managed).sort(), cur = sel.value;
+      sel.replaceChildren(...names.map((n) => { const o = el("option", null, n); o.value = n; return o; }));
+      if (names.indexOf(cur) >= 0) sel.value = cur;
+      go.disabled = !names.length;
+    };
+    d.view = v;
+    return d;
+  }
+  /* END paneTail */
   /* BEGIN taskChain */
   /* Task -> session -> project (the owner 2026-10-28). Pure: chain text parts for an item's `task` field, given the item and session lists. */
   function taskChain(it, itemList, sessionList) {
@@ -4209,6 +4373,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function renderQuestion(it) {
     const [card, body] = shell(it, it.due ? "urgent" : "");
     body.appendChild(metaRow(it));
+    { const lo = lastOutput(it); if (lo) body.appendChild(lo); }   // #11065: the session's last pane lines, on open only
     if (it.detail) body.appendChild(longField(el("p", "detail"), it.detail, { title: txt(it.title) || it.id, doc: it.doc, arch: isArchItem(it) }));
     const tools = el("div", "act-tools"); tools.setAttribute("role", "group"); tools.setAttribute("aria-label", "More actions for " + it.id);
     briefControl(body, it, tools);
@@ -4493,7 +4658,51 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function oldestFirst(a, b) {
     return txt(a.created).localeCompare(txt(b.created)) || byRank(a, b);
   }
+  /* #11047: the Decisions Sort select (D80): oldest first (default), newest first, or project A–Z. */
+  const DECISION_SORTS = [["oldest", "Oldest first"], ["newest", "Newest first"], ["project", "Project (A–Z)"]];
+  function newestFirst(a, b) {
+    return txt(b.created).localeCompare(txt(a.created)) || byRank(a, b);
+  }
+  /* Project groups of a list already in display order: projects A–Z, then "" (No project) last; each group keeps the list's order. */
+  function decisionGroups(list) {
+    const by = new Map();
+    list.forEach((i) => { const p = txt(i && i.project).trim(); if (!by.has(p)) by.set(p, []); by.get(p).push(i); });
+    const keys = Array.from(by.keys()).sort((x, y) => (x === "") - (y === "") || x.localeCompare(y, undefined, { sensitivity: "base" }) || (x < y ? -1 : x > y ? 1 : 0));
+    return keys.map((k) => ({ project: k, items: by.get(k) }));
+  }
+  /* Open decisions in display order for a sort mode; an unknown mode is oldest first. */
+  function decisionList(list, mode) {
+    if (mode === "newest") return list.sort(newestFirst);
+    list.sort(oldestFirst);
+    return mode === "project" ? decisionGroups(list).reduce((a, g) => a.concat(g.items), []) : list;
+  }
   /* END decisionOrder */
+  /* BEGIN decisionGroupsDom */
+  /* #11047: Project mode puts a header (project name + count) before each group; the other modes render the rows flat. */
+  function decisionNodes(list, mode, render) {
+    if (mode !== "project") return list.map(render);
+    return decisionGroups(list).reduce((a, g) => {
+      const h = el("div", "dg-head"), name = g.project || "No project";
+      h.dataset.dgroup = g.project;
+      h.append(el("span", "dg-name", name), el("span", "n", String(g.items.length)));
+      h.setAttribute("role", "heading"); h.setAttribute("aria-level", "4");
+      return a.concat([h], g.items.map(render));
+    }, []);
+  }
+  /* After the pane and nav filters hide rows, each group header counts its visible rows and drops out at zero. */
+  function dgSync(box) {
+    let head = null, n = 0;
+    const done = () => { if (head) { head.querySelector(".n").textContent = String(n); head.classList.toggle("nv-off", !n); } };
+    Array.from(box.children).forEach((c) => {
+      if (c.classList.contains("dg-head")) { done(); head = c; n = 0; }
+      else if (c.matches("[data-pid]") && !c.classList.contains("nv-off")) n++;
+    });
+    done();
+  }
+  /* END decisionGroupsDom */
+  const DSORT_KEY = OPEN_KEY + "-decision-sort";
+  let decisionSort = "oldest";
+  try { const v = localStorage.getItem(DSORT_KEY); if (DECISION_SORTS.some((s) => s[0] === v)) decisionSort = v; } catch (_) {}
   function newest(field) { return (x, y) => txt(y[field]).localeCompare(txt(x[field])); }
 
   /* Parked items sit in one collapsed bucket per section, soonest wake date first; they use the normal rows so answers still work. */
@@ -4501,8 +4710,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const by = { D: [], A: [], T: [] };
     items.filter(isParked).forEach((i) => by[askKind(i)].push(i));
     [["D", "q", renderQuestion], ["A", "a", renderAction], ["T", "t", renderTask]].forEach((k) => {
-      const list = by[k[0]].sort((x, y) => txt(x.parked.until || "").localeCompare(txt(y.parked.until || "")));
-      fillList($("list-" + k[1] + "p"), list.map(k[2]), "Nothing parked.");
+      let list = by[k[0]].sort((x, y) => txt(x.parked.until || "").localeCompare(txt(y.parked.until || "")));
+      const grouped = k[0] === "D" && decisionSort === "project";   /* #11047: Parked decisions group by project too, wake order kept */
+      if (grouped) list = decisionGroups(list).reduce((a, g) => a.concat(g.items), []);
+      fillList($("list-" + k[1] + "p"), grouped ? decisionNodes(list, "project", k[2]) : list.map(k[2]), "Nothing parked.");
       $("n-" + k[1] + "p").textContent = String(list.length);
       nl({ D: "decisions", A: "asks", T: "tasks" }[k[0]]).parked = list;
     });
@@ -4602,6 +4813,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     return card;
   }
   function renderQuestions() {
+    if (notReady("questions", ["list-qpd", "list-ques", "list-quz"], ["n-questions", "n-quz", "n-qpd"], ["questions-sum"])) return;   // #11588: loading mark until the questions load
     const L = questionLists(questions);
     const F = txt(paneQ.questions).trim() ? questionLists(questions.filter(paneFilter("questions"))) : L;   /* rows follow the pane filter (Read beyond the last 20 included); counts stay whole */
     fillList($("list-qpd"), F.pending.map((q) => renderQuestionDoc(q, false)), "Nothing pending.");
@@ -4618,14 +4830,16 @@ html.lib-strip.rd-open body { padding-right: 0; }
     questionLists(questions).open.forEach((q) => { writeQuestion(q.id, clearPatch(new Date())); });
   });
   function renderAsks() {
+    if (notReady("items", ["list-q", "list-a", "list-t", "list-qa", "list-aa", "list-ta", "list-qx", "list-ax", "list-tx", "list-qp", "list-ap", "list-tp"],
+      ["n-decisions", "n-asks", "n-tasks", "n-qa", "n-aa", "n-qx", "n-ax", "n-tx", "n-qp", "n-ap", "n-tp"], ["decisions-sum", "asks-sum", "tasks-sum"])) return;   // #11588: no 0 and no "no open tasks" before the items load
     const { open, answered, done, briefing } = bucketItems(items);   /* cancelled items are closed, never open */
     const nBrief = (k) => briefing.filter((i) => askKind(i) === k).length;
     const P = partitionItems(open, answered, done);
     renderParked();
-    const q = P.q.sort(oldestFirst), qa = P.qa;
+    const q = decisionList(P.q, decisionSort), qa = P.qa;   /* #11047: the Sort select's order */
     const a = P.a.sort(sortKey), aa = P.aa;
     const t = P.t.concat(P.ta).sort(sortKey), ta = [];   /* Tasks have no Answered tab (the owner 2026-10-22 17:0xZ, ar-Tc2): an answered task counts as in progress */
-    fillList($("list-q"), q.map(renderQuestion), "Nothing to decide right now.");
+    fillList($("list-q"), decisionNodes(q, decisionSort, renderQuestion), "Nothing to decide right now.");
     fillList($("list-a"), a.map(renderAction), "No blockers right now.");
     fillList($("list-t"), t.map(renderTask), "The Architect has no open tasks.");
     /* Answered (waiting for the Architect) and Done are separate tabs, so the tab counts add up to the section summary (the owner 2026-10-21 14:34Z). */
@@ -5412,6 +5626,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   }
 
   function renderGoals() {
+    if (notReady("goals", ["list-gd", "list-gs", "list-gf", "list-gp", "list-gc"], ["n-goals", "n-gd", "n-gs", "n-gf", "n-gp", "n-gc"], ["goals-sum"])) return;   // #11588: loading mark until the goals load
     const dir = goalsOf("directed");
     const std = goalsOf("standing");
     const fac = goalsOf("factory");
@@ -5772,6 +5987,8 @@ html.lib-strip.rd-open body { padding-right: 0; }
   }
   /* END sessionStatus */
   function renderSessions() {
+    const pend = notReady("sessions", [], ["n-sessions"], ["sessions-sum"]);   // #11588: loading mark until the sessions load
+    if (pend) { $("sessions-empty").textContent = pend; $("sessions-empty").hidden = false; return; }
     sessionRows.clear();
         const list = managedRows(sessions, fleet);
     list.sort((a, b) => {
@@ -5798,19 +6015,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       });
       if (arr.length) sumParts.push(g.label() + " " + arr.length);
     });
-    const gl = $("sessions-gh");
-    const g = ghTrack && typeof ghTrack === "object" ? ghTrack : null;
-    gl.hidden = !g || num(g.prs_open) == null;
-    if (!gl.hidden) {
-      const bp = num(g.bugs_p1);
-      const gp = [txt(g.repo).split("/").pop() + ": " + num(g.prs_open) + " open PRs (cap " + (num(g.prs_cap) != null ? num(g.prs_cap) : 15) + ")",
-        (num(g.bugs) || 0) + " bugs" + (bp ? " (P1 " + bp + ")" : "")];
-      if (num(g.merged_7d) != null) gp.push("merged " + (num(g.merged_24h) || 0) + " (24h) · " + num(g.merged_7d) + (g.merged_7d_capped ? "+" : "") + " (7d)");
-      if (num(g.merged_open)) gp.push("merged-but-open " + num(g.merged_open));
-      if (g.at) gp.push("checked " + hm(g.at));
-      gl.textContent = gp.join(" · ");
-      gl.title = "Open PRs by state: " + Object.keys(g.prs_by_state || {}).map((k) => k + " " + g.prs_by_state[k]).join(", ");
-    }
+    $("sessions-gh").hidden = true;   // #10752: no repo-totals writer ships, so the page neither polls nor shows them
     $("sessions-empty").hidden = list.length > 0;
     $("sessions-empty").textContent = "No sessions recorded yet. The Architect writes one row per managed session on its next pass.";
     $("n-sessions").textContent = String(list.length);
@@ -5894,6 +6099,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
     return { payload: { morning_brief: Object.assign({}, existing && typeof existing === "object" ? existing : {}, { enabled: !!enabled, time: time, days: spec }) } };
   }
   /* END morningBrief */
+  /* BEGIN techLevel */
+  /* #11064: the six levels, in technical_level.py LEVELS order; unset or unknown reads as pm. The store refuses any other value. */
+  const TECH_LEVELS = ["non-technical", "vibe-coder", "pm", "engineer", "senior-engineer", "cto"];
+  function techLevelOf(s) { const v = s && typeof s === "object" ? s.technical_level : null; return TECH_LEVELS.indexOf(v) >= 0 ? v : "pm"; }
+  function techLevelPayload(level) {
+    if (TECH_LEVELS.indexOf(level) < 0) return { error: "Pick one of the six levels." };
+    return { payload: { technical_level: level } };
+  }
+  /* END techLevel */
   function browserTz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; } }
   function paintSettings() {
     const st = optimisticState || userStateOf(settings);
@@ -5914,6 +6128,9 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (document.activeElement !== bt) bt.value = b.time;
     bd.forEach((i) => { if (document.activeElement !== i) i.checked = b.days.indexOf(i.dataset.day) >= 0; });
     [be, bt].concat(bd).forEach((i) => { i.disabled = readOnly; });
+    const lv = $("set-level");   /* #11064 */
+    if (document.activeElement !== lv) lv.value = techLevelOf(settings);
+    lv.disabled = readOnly;
   }
   /* One write path for every setting: read meta/settings, merge the patch, set with if_version, retry once on a 409. */
   async function saveSettings(patch) {
@@ -5957,6 +6174,18 @@ html.lib-strip.rd-open body { padding-right: 0; }
     try { await saveSettings(r.payload); }
     catch (e) { err.textContent = "Could not save the settings: " + (e && e.message ? e.message : "unknown error") + "."; }
   }
+  /* BEGIN techLevelSave */
+  /* #11064: a refused or failed write puts the stored level back and names the error; never a silent success. */
+  async function saveLevelSettings() {
+    const err = $("set-level-err"), sel = $("set-level"); err.textContent = "";
+    const back = () => { sel.value = techLevelOf(settings); };
+    if (!db || readOnly) { err.textContent = "Read-only view: the settings cannot be saved."; back(); return; }
+    const r = techLevelPayload(sel.value);
+    if (r.error) { err.textContent = r.error; back(); return; }
+    try { await saveSettings(r.payload); }
+    catch (e) { back(); err.textContent = "Could not save the technical level: " + (e && e.message ? e.message : "unknown error") + "."; }
+  }
+  /* END techLevelSave */
   (function wireUserStateMenu() {
     const btn = $("user-state-badge"), menu = $("user-state-menu");
     const opts = () => Array.from(menu.querySelectorAll(".st-opt"));
@@ -5995,6 +6224,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     ["set-tz", "set-sleep-start"].forEach((id) => $(id).addEventListener("change", saveTimeSettings));
     ["set-brief-enabled", "set-brief-time"].forEach((id) => $(id).addEventListener("change", saveBriefSettings));
     document.querySelectorAll("#set-brief-days input").forEach((i) => i.addEventListener("change", saveBriefSettings));
+    $("set-level").addEventListener("change", saveLevelSettings);   /* #11064 */
     try {   /* the one theme control (the owner 2026-10-23): light, dark or system; stored under architect-theme, applied before first paint by the head script */
       let cur = "system"; try { const v = localStorage.getItem("architect-theme"); if (v === "light" || v === "dark") cur = v; } catch (_) {}
       dlg.querySelectorAll('input[name="set-theme"]').forEach((r) => {
@@ -6178,17 +6408,19 @@ html.lib-strip.rd-open body { padding-right: 0; }
       userCap = user || null;
       if (user) { const ok = await user.can("data.write"); if (ok === false) readOnly = true; }
     } catch (_) {}
-    const stopped = (what) => (e) => { offlineMsg = "The " + what + " stopped updating (" + (e && e.code ? e.code : "error") + "). Reload the page."; renderHeader(); };
+    const failed = (name) => (e) => { if (loaded[name]) return false; loadFailed[name] = e && e.code ? e.code : "error"; render(); return true; };   // #11588: a failed first load shows an error, never 0
+    const got = (name, fn) => (snap) => { loaded[name] = true; delete loadFailed[name]; return fn(snap); };
+    const stopped = (what, name) => (e) => { if (name) failed(name)(e); offlineMsg = "The " + what + " stopped updating (" + (e && e.code ? e.code : "error") + "). Reload the page."; renderHeader(); };
     const rows = (snap) => snap.docs.map((d) => Object.assign({}, bodyOf(d), { id: d.id }));
-    if (!SESSION) db.collection("accounts").onSnapshot(live((snap) => { accounts = rows(snap); acctBeepCheck(); renderHeader(); if (!usageSlug) refreshUsage(); }), () => {});
-    db.collection("items").onSnapshot(live((snap) => { items = rows(snap).map((r) => withPark(withFeedback(r, optimisticFeedback), optimisticPark)); gateAttention(items, trackDocs("items", items)); }), stopped("ask list"));
-    db.collection("questions").onSnapshot(live((snap) => { questions = rows(snap); trackDocs("questions", questions); }), () => {});
+    if (!SESSION) db.collection("accounts").onSnapshot(live(got("accounts", (snap) => { accounts = rows(snap); acctBeepCheck(); renderHeader(); if (!usageSlug) refreshUsage(); })), failed("accounts"));
+    db.collection("items").onSnapshot(live(got("items", (snap) => { items = rows(snap).map((r) => withPark(withFeedback(r, optimisticFeedback), optimisticPark)); gateAttention(items, trackDocs("items", items)); })), stopped("ask list", "items"));
+    db.collection("questions").onSnapshot(live(got("questions", (snap) => { questions = rows(snap); trackDocs("questions", questions); })), failed("questions"));
     if (SEEN_ENABLED) db.doc("meta/seen").onSnapshot(live((snap) => { const b = snap && snap.exists ? bodyOf(snap) : null; seenServer = b && b.map && typeof b.map === "object" ? b.map : {}; seenOpen(); }, true), () => seenOpen());
     if (SEEN_ENABLED) setTimeout(seenOpen, 4000);   /* a store that never answers must not hold the frame back */
-    db.collection("goals").onSnapshot(live((snap) => {
+    db.collection("goals").onSnapshot(live(got("goals", (snap) => {
       goals = rows(snap); trackDocs("goals", goals);
       goals.forEach((g) => { if (optimisticRank.has(g.id) && g.rank === optimisticRank.get(g.id)) optimisticRank.delete(g.id); if (optimisticKind.has(g.id) && g.kind === optimisticKind.get(g.id)) optimisticKind.delete(g.id); });
-    }), stopped("goal list"));
+    })), stopped("goal list", "goals"));
     db.collection("step_progress").onSnapshot(live((snap) => {
       progress.clear();
       const pr = rows(snap); trackDocs("step_progress", pr);
@@ -6204,14 +6436,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!SESSION) {
       /* Live tmux truth for the Sessions count and the four statuses; the server asks `tmux ls` (cached 4 s). */
       const pollFleet = () => fetch("/api/fleet", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => {
-        if (d && JSON.stringify(d) !== JSON.stringify(fleet)) { fleet = d; render(); }
+        if (d && JSON.stringify(d) !== JSON.stringify(fleet)) { fleet = d; paneCtl.sync(d); render(); }
       }).catch(() => {});
+      const paneCtl = paneControl(); $("list-q").before(paneCtl);   // #11065: page "Show session" control
+      setInterval(() => { const n = Date.now(); paneViews.forEach((v) => { if (v.box.isConnected) v.tick(n); }); }, 5000);
       pollFleet(); setInterval(pollFleet, 15000);
     }
-    if (!SESSION) db.collection("sessions").onSnapshot(live((snap) => { sessions = rows(snap).map((r) => withCommand(r, optimisticCmd)); trackDocs("sessions", sessions); }), stopped("session list"));
+    if (!SESSION) db.collection("sessions").onSnapshot(live(got("sessions", (snap) => { sessions = rows(snap).map((r) => withCommand(r, optimisticCmd)); trackDocs("sessions", sessions); })), stopped("session list", "sessions"));
     db.collection("priorities").onSnapshot(live((snap) => { priorities = rows(snap); trackDocs("priorities", priorities); }), stopped("priority list"));
     db.doc("meta/state").onSnapshot(live((snap) => { meta = snap.exists ? bodyOf(snap) : null; }), () => {});
-    if (!SESSION) db.doc("meta/gh_track").onSnapshot(live((snap) => { ghTrack = snap.exists ? bodyOf(snap) : null; }), () => {});
     if (!SESSION) db.doc("meta/settings").onSnapshot(live((snap) => { settings = snap.exists ? bodyOf(snap) : null; optimisticState = null; paintSettings(); }, true), () => {});
   }
 
@@ -6252,7 +6485,8 @@ html.lib-strip.rd-open body { padding-right: 0; }
   }
   const viewHash = (cat, sub) => "#view/" + cat + (sub ? "/" + encodeURIComponent(sub) : "");
   let view = parseView(location.hash) || parseView("#view/" + (navSaved.view || "")) || { cat: "decisions", sub: "open" };
-  const num0 = (id) => { const e = $(id); return e ? parseInt(e.textContent, 10) || 0 : 0; };
+  const num0 = (id) => { const e = $(id), t = e ? e.textContent.trim() : ""; return /^\d+$/.test(t) ? parseInt(t, 10) : t === "!" ? "!" : e ? "\u00b7" : 0; };   // #11588: a chip still loading reads as its mark, not 0
+  const CAT_SRC = { decisions: "items", asks: "items", tasks: "items", questions: "questions", goals: "goals", sessions: "sessions", accounts: "accounts" };
   function catItems(c) { return c.kind ? items.filter((i) => { try { return askKind(i) === c.kind; } catch (_) { return false; } }) : []; }
   /* [[sub, label, count]] for a category: its status blocks, then (Decisions, Actions, Tasks) the goals and sessions its items carry */
   /* The fourth field marks the derived Open tab of Goals and Sessions, which overlaps the tabs after it and is left out of the All total. Open means: not done, cancelled, parked or archived; for sessions live (not exited) and not parked. */
@@ -6286,7 +6520,9 @@ html.lib-strip.rd-open body { padding-right: 0; }
       r = GROUPS.filter((g) => !g.el.hidden).map((g) => [g.key, g.label(), qCount(c, g.key, parseInt(g.n.textContent, 10) || 0)]);
       r.push(["ledgers", "Ledgers", qCount(c, "ledgers", num0("n-il"))]);
     } else r = c.subs.map((s) => [s[0], s[1], qCount(c, s[0], num0(s[2]))]);
-    if (OPEN_SETS[c.key]) r.unshift(["open", c.key === "sessions" ? "Managed" : "Open", r.filter((t) => OPEN_SETS[c.key].indexOf(t[0]) >= 0).reduce((a, t) => a + t[2], 0), true]);
+    if (OPEN_SETS[c.key]) r.unshift(["open", c.key === "sessions" ? "Managed" : "Open", r.filter((t) => OPEN_SETS[c.key].indexOf(t[0]) >= 0).reduce((a, t) => addN(a, t[2]), 0), true]);
+    const m = srcMark(CAT_SRC[c.key]);   // #11588: every nav and tab count of a list still loading is its mark
+    if (m) { r = r.map((t) => [t[0], t[1], m, t[3]]); }
     return r;
   }
   const openN = (c) => { const o = navSubs(c).find((t) => t[0] === "open"); return o ? o[2] : 0; };
@@ -6375,11 +6611,11 @@ html.lib-strip.rd-open body { padding-right: 0; }
         if (qOn() && x.subs.filter((t) => !t[3]).every((t) => !t[2])) box.classList.add("dim");   /* no match in this category */
         {   /* the owner 2026-10-28: one nav item per category, its name and open/active count, linking to #view/<cat>/open; no second level, no accordion. Other statuses are tabs in the view. */
           const n = openN(c), a = el("a", "nv-link nv-flat"); a.href = viewHash(c.key, "open"); a.dataset.cat = c.key; a.dataset.sub = "open"; a.dataset.flat = "1";
-          const b = el("span", "nv-n" + (n ? " hot" : ""), String(n)); b.setAttribute("aria-label", n + (c.key === "sessions" ? " managed sessions" : " open"));
+          const b = el("span", "nv-n" + (isN(n) && n ? " hot" : ""), String(n)); b.setAttribute("aria-label", nLabel(n, c.key === "sessions" ? "managed sessions" : "open"));
           a.append(el("span", "nv-caret-sp"), el("span", null, c.label), b); box.appendChild(a); nav.appendChild(box); return;
         }
         const hd = el("button", "nv-hd"); hd.type = "button"; hd.id = "nvt-" + c.key; hd.setAttribute("aria-expanded", String(open)); hd.setAttribute("aria-controls", "nvs-" + c.key);
-        const n = openN(c), badge = el("span", "nv-n" + (n ? " hot" : ""), String(n)); badge.setAttribute("aria-label", n + (c.key === "sessions" ? " managed sessions" : " open"));
+        const n = openN(c), badge = el("span", "nv-n" + (isN(n) && n ? " hot" : ""), String(n)); badge.setAttribute("aria-label", nLabel(n, c.key === "sessions" ? "managed sessions" : "open"));
         hd.append(el("span", "nv-caret"), el("span", null, c.label), badge);
         /* the header both toggles its region and, on expanding, shows the whole category in the main pane */
         hd.addEventListener("click", () => {
@@ -6436,7 +6672,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
       inp.addEventListener("input", () => { clr.hidden = !inp.value; clearTimeout(t); t = setTimeout(() => paneSetQuery(p[0], inp.value), 120); });
       inp.addEventListener("keydown", (e) => { if (e.key === "Escape" && inp.value) { e.preventDefault(); e.stopPropagation(); clearTimeout(t); inp.value = ""; clr.hidden = true; paneSetQuery(p[0], ""); } });
       clr.addEventListener("click", () => { clearTimeout(t); inp.value = ""; clr.hidden = true; paneSetQuery(p[0], ""); inp.focus(); });
-      box.append(inp, clr, st);
+      box.append(inp, clr);
+      if (p[0] === "decisions") {   /* #11047: the Sort select; the pane filter still applies first */
+        const sel = el("select", "ctl pf-sort"); sel.id = "decision-sort"; sel.setAttribute("aria-label", "Sort decisions"); sel.title = "Sort the open and parked decisions";
+        DECISION_SORTS.forEach((o) => { const op = el("option", null, o[1]); op.value = o[0]; sel.appendChild(op); });
+        sel.value = decisionSort;
+        sel.addEventListener("change", () => { decisionSort = sel.value; try { localStorage.setItem(DSORT_KEY, decisionSort); } catch (_) {} render(); });
+        box.appendChild(sel);
+      }
+      box.appendChild(st);
       sec.insertBefore(box, body);
     });
   }
@@ -6480,23 +6724,31 @@ html.lib-strip.rd-open body { padding-right: 0; }
           if (!off && pq) { const rec = recFor(r); off = rec ? !paneHit(rec, pq) : r.textContent.toLowerCase().indexOf(pq) < 0; }
           r.classList.toggle("nv-off", off);
         });
+        dgSync(box);   /* #11047: group headers count what the filters left */
       });
-      if (pq) sec.querySelectorAll("details.sub").forEach((b) => {   /* a status block with no match drops out while the pane filter is on */
-        const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
-        if (!shown) { b.classList.add("nv-off"); solo(b, false); }
-      });
+      subHide(sec, pq, solo);
     });
     renderBar(c, raw, filt);
     renderTabs(c, filt ? "all" : raw);
     paneSync(c);
     navSave();
   }
+  /* BEGIN subHide */
+  /* A status block with no match drops out while the pane filter is on. */
+  function subHide(sec, pq, solo) {
+    if (pq) sec.querySelectorAll("details.sub").forEach((b) => {
+      if (b.classList.contains("pane-ctl")) return;   // #11065: the Show session control has no rows; nothing ever un-hides it
+      const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
+      if (!shown) { b.classList.add("nv-off"); solo(b, false); }
+    });
+  }
+  /* END subHide */
   /* The one header bar per content type (the owner 2026-10-21 14:29Z): title, open-count badge, one-line summary, tabs, then the filter and sort toolbar. The section's own header is hidden and the section never collapses. */
   const bar = { q: "" };
   function renderBar(c, sub, filt) {
     const n = openN(c), src = $(c.key + "-sum"), sum = src ? src.textContent : "";
     $("main-title").textContent = c.label; $("main-title").setAttribute("aria-label", c.label + ": restore the default view");
-    const cnt = $("main-count"); cnt.textContent = String(n); cnt.hidden = !!c.flat; cnt.className = "count" + (n && c.hot !== false && c.key !== "tasks" ? " hot" : ""); cnt.setAttribute("aria-label", n + " open");
+    const cnt = $("main-count"); cnt.textContent = String(n); cnt.hidden = !!c.flat; cnt.className = "count" + (isN(n) && n && c.hot !== false && c.key !== "tasks" ? " hot" : ""); cnt.setAttribute("aria-label", nLabel(n, "open"));
     const ms = $("main-sum"); ms.textContent = sum; ms.title = sum;
     $("main-tabs").hidden = false;
     const none = filt && !items.some((i) => { try { return askKind(i) === c.kind && txt(i[sub.split(":")[0]]).trim() === sub.slice(sub.indexOf(":") + 1); } catch (_) { return false; } });
@@ -6536,7 +6788,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function renderTabs(c, cur) {
     const bar = $("main-tabs"); if (!bar) return;
     const had = bar.contains(document.activeElement) ? document.activeElement.id : null;
-    const subs = navSubs(c), tabs = c.flat ? subs : c.key === "sessions" ? subs : [["all", "All", subs.filter((t) => !t[3]).reduce((a, t) => a + t[2], 0)]].concat(subs);   /* All is the true total */
+    const subs = navSubs(c), tabs = c.flat ? subs : c.key === "sessions" ? subs : [["all", "All", subs.filter((t) => !t[3]).reduce((a, t) => addN(a, t[2]), 0)]].concat(subs);   /* All is the true total */
     bar.replaceChildren();
     tabs.forEach((t) => {
       const on = cur === t[0], b = el("button"); b.type = "button"; b.id = "mt-" + c.key + "-" + t[0];
@@ -7130,8 +7382,8 @@ html.lib-strip.rd-open body { padding-right: 0; }
   }
   function poll() {
     var x = new XMLHttpRequest(); x.open("GET", "/api/il"); x.timeout = 8000;
-    x.onload = function () { if (x.status === 200) { try { show(x.responseText); } catch (_) {} } else document.getElementById("il-sum").textContent = "unavailable (" + x.status + ")"; };
-    x.onerror = x.ontimeout = function () { document.getElementById("il-sum").textContent = "unavailable"; };
+    x.onload = function () { if (x.status === 200) { try { show(x.responseText); } catch (_) {} } else { document.getElementById("il-sum").textContent = "unavailable (" + x.status + ")"; document.getElementById("n-il").textContent = "!"; } };
+    x.onerror = x.ontimeout = function () { document.getElementById("il-sum").textContent = "unavailable"; document.getElementById("n-il").textContent = "!"; };   // #11588: an error mark, never a stuck loading mark
     x.send();
   }
   sec.open = true;   /* heading row hidden (the owner 2026-10-21): the header session picker selects; the ledger rows always show */
@@ -7191,7 +7443,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (res.status === 403 && !retried && verb !== "session" && j && /CSRF/.test(j.error || "")) { await session(); return post(verb, body, true); }   /* the server restarted: new token, one retry */
     if (!res.ok) {
       if (!(j && j.error)) console.warn("secrets " + verb + ": HTTP " + res.status);   /* detail for whoever debugs; never shown */
-      const e = new Error((j && j.error) || NOT_SET_UP); e.status = res.status; e.code = j && j.code; throw e;
+      const e = new Error((j && j.error) || NOT_SET_UP); e.status = res.status; e.code = (j && (j.code || j.kind)) || undefined; throw e;
     }
     return j;
   }
@@ -7274,6 +7526,14 @@ html.lib-strip.rd-open body { padding-right: 0; }
     };
     st.pollT = setTimeout(tick, 3000);
   }
+  /* BEGIN saveFailure */
+  /* #11429: only a real refusal is "Not stored". A Keychain prompt, a time-out or no answer at all may still have committed. */
+  function saveFailureText(e) {
+    const unknown = !e.status || e.status === 408 || e.status === 504 || /timed out/i.test(e.message || "") ||
+      ["keychain_access_prompt", "backend_timeout", "deadline_exceeded"].indexOf(e.code) >= 0;
+    return unknown ? "Outcome unknown: the save may still complete. Verify with `tm secrets list`. (" + e.message + ")" : "Not stored: " + e.message;
+  }
+  /* END saveFailure */
   async function save(ev) {
     ev.preventDefault();
     const vi = valueIn(), body = Object.assign(target(), { description: $("sx-desc").value.trim(), key: $("sx-label").value.trim(),
@@ -7289,7 +7549,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       say("sx-status", (r.outcome === "updated" ? "Updated " : "Stored ") + r.key + " (" + r.length + " characters) in " + (body.scope === "owner" ? "the " + body.owner + " owner vault" : (r.entry && r.entry.backend || "the configured backend")) + ".", true);
       $("sx-desc").value = ""; $("sx-label").value = ""; $("sx-group").value = ""; st.edited = {}; st.pendingId = ""; clearTimeout(st.pollT);
       load();
-    } catch (e) { body.value = ""; say("sx-status", "Not stored: " + e.message); }
+    } catch (e) { body.value = ""; say("sx-status", saveFailureText(e)); }
     finally { $("sx-save").disabled = false; }
   }
   async function remove(row) {
@@ -7781,7 +8041,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
 </script>
 <script>
 /* BEGIN projectsNav */
-/* Projects nav (the owner 2026-10-27 13:3xZ; labelled owner/project and grouped by GitHub owner, 13:5xZ): GET /api/projects (scripts/dashboard_projects.py), read-only. Every string from disk is set with
+/* Projects nav (the owner 2026-10-27 13:3xZ; labelled owner/project and grouped by GitHub owner, 13:5xZ): GET /api/projects (scripts/dashboard_projects.py); its only write is a watch_changes request (watchState, #10896). Every string from disk is set with
    textContent, never markup; links are same-page hashes (#S<id> session row, #doc/<project>/<file> reader). The payload is checked for its
    shape: a server that predates the route answers /api/projects with the generic store reply {docs: []} and status 200, which must show an
    error, never "0 projects". Loads at page start (for the nav count) and again on each view of the category. */
@@ -7790,11 +8050,32 @@ html.lib-strip.rd-open body { padding-right: 0; }
   const $ = (id) => document.getElementById(id);
   const sec = $("sec-projects"); if (!sec) return;
   const main = $("main");
-  let data = null, busy = false, at = 0, status = "active";
+  let data = null, busy = false, again = false, at = 0, status = "active";
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
   function row(lab, val) { const l = el("div", "pj-lab", lab), v = el("div", "pj-val"); v.appendChild(val); return [l, v]; }
   const none = (t) => el("span", "pj-none", t);
   const when = (iso) => (iso ? iso.replace("T", " ").replace(/:\d\dZ$/, "Z") : "unknown");
+  /* BEGIN watchState */
+  /* #10896 (epic #10894 plan D6): Watch / Unwatch. The row's state comes from GET /api/projects (scripts/dashboard_watch.py: Watched,
+     Not watched, Watch pending, Watch failed, or "watch list not created yet"); a click only writes a watch_changes request, which
+     scripts/watch-apply.py applies with `tm fleet project add|remove`. The page never writes local/watch.json and has no Cancel for a
+     pending request (owner decision). Pure functions over the shim's db, so tests/test_dashboard_watch_page.py runs them in node. */
+  function watchLabel(p) { const w = p && p.watch; return w && typeof w.label === "string" ? w.label : "watch state unknown"; }
+  function watchRequestData(key, action, by, nowIso) { return { key: key, action: action, status: "new", created: nowIso, by: by }; }
+  /* Retry: failed -> new; the request keeps key, action, created and by, and drops the old outcome (message, done_at). */
+  function watchRetryData(req) { return { key: req.key, action: req.action, status: "new", created: req.created, by: req.by }; }
+  /* Dismiss: failed -> dismissed; the outcome stays on the doc for the record. */
+  function watchDismissData(req) {
+    const d = { key: req.key, action: req.action, status: "dismissed", created: req.created, by: req.by };
+    if (req.done_at) d.done_at = req.done_at;
+    if (typeof req.message === "string") d.message = req.message;
+    return d;
+  }
+  function watchQueue(db, key, action, by, nowIso) { return db.collection("watch_changes").add(watchRequestData(key, action, by, nowIso)); }
+  /* Retry and Dismiss replace the doc (PUT) pinned to the version the row was read at, so a doc the applier changed meanwhile is a 409. */
+  function watchRetry(db, req) { return db.collection("watch_changes").doc(req.id).set(watchRetryData(req), { if_version: req.version }); }
+  function watchDismiss(db, req) { return db.collection("watch_changes").doc(req.id).set(watchDismissData(req), { if_version: req.version }); }
+  /* END watchState */
   function sessions(p) {
     if (!p.sessions.length) return none("no live session");
     const ul = el("ul");
@@ -7854,6 +8135,66 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!p.scanned) box.appendChild(el("span", "pj-kv", p.root_note || (p.root ? "Root not found: this project's folder is missing, so its files and sessions are not shown." : "Root not found: no folder is known for this project.")));
     return box;
   }
+  /* #10896: the watch chip and the two row flags (path missing, registry key differs from the session alias). */
+  let unwatchAsk = "", watchBy = null;
+  const watchBusy = new Set(), watchErr = new Map();
+  function watchChip(p) {
+    const s = p.watch ? p.watch.state : "", c = el("span", "pj-chip" + (s === "watched" ? " live" : s === "failed" || s === "unreadable" ? " pj-err" : ""), watchLabel(p));
+    if (s === "failed" && p.watch.request && p.watch.request.message) c.title = p.watch.request.message;
+    return c;
+  }
+  function watchFlags(p, host) {
+    if (p.registered_path && p.path_exists === false) { const t = el("span", "pj-chip pj-err", "Path missing"); t.title = p.registered_path; host.appendChild(t); }
+    if (p.alias_mismatch) { const t = el("span", "pj-chip", "Alias differs"); t.title = "Registry key " + p.id + ", session alias " + p.session_alias; host.appendChild(t); }
+  }
+  function watchButton(label, aria, run, cls) {
+    const b = el("button", cls || "rm", label); b.type = "button"; b.setAttribute("aria-label", aria); b.addEventListener("click", run); return b;
+  }
+  function watchBox(p) {   /* detail view: state, why, and the one action that state allows */
+    const box = el("div"), w = p.watch || {}, req = w.request || null, busy = watchBusy.has(p.id), verb = req && req.action === "unwatch" ? "Unwatch" : "Watch";
+    box.appendChild(watchChip(p)); watchFlags(p, box);
+    if (w.state === "pending") box.appendChild(el("span", "pj-kv", verb + " requested. The Architect applies it on its next pass; a pending request cannot be cancelled."));
+    if (w.state === "failed") box.appendChild(el("span", "pj-kv", verb + " failed: " + ((req && req.message) || "no message recorded")));
+    if (w.state === "unknown") box.appendChild(el("span", "pj-kv", "The Architect's watch list (local/watch.json) does not exist yet; the first Watch creates it."));
+    if (w.state === "unreadable") box.appendChild(el("span", "pj-kv", "The watch list cannot be read: " + ((data && data.watch_list && data.watch_list.error) || "unknown error")));
+    if (p.registered_path && p.path_exists === false) { const x = el("span", "pj-kv", "Path missing: "); x.appendChild(el("code", null, p.registered_path)); box.appendChild(x); }
+    if (p.alias_mismatch) box.appendChild(el("span", "pj-kv", "The registry key " + p.id + " differs from its session alias " + p.session_alias + "."));
+    const bar = el("div", "row cmd");
+    if (w.state === "failed" && req) {
+      bar.append(watchButton("Retry", "Retry the " + verb.toLowerCase() + " request for " + name(p), () => watchAct(p, "retry")),
+        watchButton("Dismiss", "Dismiss the failed " + verb.toLowerCase() + " request for " + name(p), () => watchAct(p, "dismiss")));
+    } else if (w.state === "watched" && unwatchAsk === p.id) {
+      const c = el("div", "rm-confirm");
+      c.appendChild(el("span", null, "Unwatch " + name(p) + "? The Architect stops supervising it. Its project record (local/projects/" + p.id + ".md) is kept."));
+      c.append(watchButton("Unwatch", "Confirm: unwatch " + name(p), () => watchAct(p, "unwatch"), "rm destructive"),
+        watchButton("Cancel", "Keep watching " + name(p), () => { unwatchAsk = ""; detail(); }));
+      bar.appendChild(c);
+    } else if (w.state === "watched") {
+      bar.appendChild(watchButton("Unwatch…", "Unwatch " + name(p) + ": asks to confirm first", () => { unwatchAsk = p.id; detail(); }));
+    } else if (w.state === "not_watched" || w.state === "unknown") {
+      bar.appendChild(watchButton("Watch", "Ask the Architect to watch " + name(p), () => watchAct(p, "watch")));
+    }
+    bar.querySelectorAll("button").forEach((b) => { b.disabled = busy; });
+    if (bar.childNodes.length) box.appendChild(bar);
+    if (watchErr.get(p.id)) box.appendChild(el("p", "err", watchErr.get(p.id)));
+    return box;
+  }
+  async function watchAct(p, kind) {   /* one write (POST a new request, or PUT Retry / Dismiss with if_version), then a fresh list */
+    watchErr.delete(p.id); watchBusy.add(p.id); detail();
+    try {
+      if (!window.claude || !window.claude.use) throw new Error("this page has no store connection");
+      const db = await window.claude.use("db"), req = p.watch && p.watch.request;
+      if (kind === "retry") await watchRetry(db, req);
+      else if (kind === "dismiss") await watchDismiss(db, req);
+      else {
+        if (watchBy == null) { try { const u = await (await fetch("/api/user", { cache: "no-store" })).json(); watchBy = u && typeof u.name === "string" && u.name ? u.name : "the owner"; } catch (_) { watchBy = "the owner"; } }
+        await watchQueue(db, p.id, kind, watchBy, new Date().toISOString());
+      }
+    } catch (e) {
+      watchErr.set(p.id, e && e.status === 409 ? "This request changed since the page loaded; the list is reloaded." : "Could not save the request: " + ((e && e.message) || "unknown error") + ".");
+    }
+    watchBusy.delete(p.id); unwatchAsk = ""; at = 0; load();
+  }
   const name = (p) => p.label || p.id;   /* owner/project from the registered GitHub URL, else the alias */
   const NONE = "~none", ownerKey = (p) => (p.owner && !p.no_github_url ? p.owner : NONE), ownerName = (k) => (k === NONE ? "No owner" : k);
   function ownerGroups(ps) {   /* [{key, name, list}] by GitHub owner (case-insensitive order), "No owner" last, projects by label */
@@ -7877,6 +8218,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     a.append(el("span", "pj-id", name(p)), el("span", "pj-sub", p.no_github_url ? "" : (p.id !== p.repo ? "alias " + p.id : "")));
     if (p.no_github_url) a.appendChild(el("span", "pj-chip", "no GitHub URL"));
     if (!p.scanned) { const t = el("span", "pj-chip pj-err", "Root not found"); t.title = p.root_note || ""; a.appendChild(t); }   /* #10571: root status on every row */
+    a.appendChild(watchChip(p)); watchFlags(p, a);   /* #10896: watch state and flags on every row; the buttons sit in the detail view */
     if (kinds) a.appendChild(el("span", "pj-sub", kinds));
     chips(p, a);
     return a;
@@ -7890,7 +8232,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!data) { $("pj-d-sub").textContent = "Loading…"; return; }
     if (!p) { $("pj-d-sub").textContent = "Not in the tm project registry."; return; }
     $("pj-d-sub").textContent = p.no_github_url ? "Alias " + p.id + ". The tm registry has no GitHub URL for it, so no owner is shown." : (p.id !== p.repo ? "Alias " + p.id : "");
-    [["Root", paths(p)], ["Sessions", sessions(p)], ["Stack", stack(p)], ["Configuration", config(p)], ["Custom agents", agents(p)]].forEach((r) => row(r[0], r[1]).forEach((n) => body.appendChild(n)));
+    [["Root", paths(p)], ["Watch", watchBox(p)], ["Sessions", sessions(p)], ["Stack", stack(p)], ["Configuration", config(p)], ["Custom agents", agents(p)]].forEach((r) => row(r[0], r[1]).forEach((n) => body.appendChild(n)));
     const ac = window.projectsLc && window.projectsLc.acts(p); if (ac) body.appendChild(ac);   /* expanded view only (the owner 2026-10-27 14:5xZ) */
   }
   /* nav level 2: one collapsible group per owner (count = its projects); its first link filters the main pane to that owner */
@@ -7949,11 +8291,11 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const live = all.filter((p) => p.sessions.length).length;
     $("projects-sum").textContent = all.length + " projects, " + groups.length + (groups.length === 1 ? " owner, " : " owners, ") + live + " with live sessions" + (arch.length ? ", " + arch.length + " archived" : "");
     $("pj-note").classList.toggle("pj-err", !!err || !all.length);
-    $("pj-note").textContent = (err ? "tm registry unreadable: " + err + ". " : "") + (!all.length ? "The tm registry returned no projects. " : "") + (q ? shown + " of " + inScope + " match. " : "") + "Read-only. Config shows names, never values.";
+    $("pj-note").textContent = (err ? "tm registry unreadable: " + err + ". " : "") + (!all.length ? "The tm registry returned no projects. " : "") + (q ? shown + " of " + inScope + " match. " : "") + "Watch and Unwatch queue a request for the Architect; nothing else here writes. Config shows names, never values.";
     count(all.filter(isActive).length); detail();   /* the owner 2026-10-27 22:38Z: the badge counts active projects only; inactive ones are counted inside the Inactive group */
   }
   async function load() {
-    if (busy) return; busy = true;
+    if (busy) { again = true; return; } busy = true;
     try {
       const r = await fetch("/api/projects", { cache: "no-store" });
       if (!r.ok) throw new Error(r.status === 404 ? "this dashboard server predates the Projects route; it needs a restart" : "HTTP " + r.status);
@@ -7962,6 +8304,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       data = d; at = Date.now(); render();
     } catch (e) { fail(e.message); detail(); }
     busy = false;
+    if (again) { again = false; load(); }   /* #10896: a load asked for during this one (after a Watch write) runs once more */
   }
   window.addEventListener("hashchange", () => { if (data) render(); else detail(); });
   $("pj-refresh").addEventListener("click", load);
@@ -7972,6 +8315,62 @@ html.lib-strip.rd-open body { padding-right: 0; }
   if (document.documentElement.dataset.mode !== "session") load();   /* the nav count needs the list before the category is opened */
 })();
 /* END projectsNav */
+/* BEGIN projectsKeyNames */
+/* #10350 (DOC-82 §10): the Secrets list on the Projects view, by owner/project, key names only. GET /api/projects/key-names
+   (scripts/dashboard_keynames.py runs `tm secrets list` per tm-registered project and keeps only key-name lines). Loaded only when
+   the list is opened, since each load runs tm once per project. The owner filter is the Projects view's own (#view/projects/owner:<key>):
+   an owner header links there. Every string is set with textContent, never markup. */
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const box = $("pj-keys"); if (!box) return;
+  let data = null, busy = false;
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function curOwner() { const m = /^#view\/projects\/(.+)$/.exec(location.hash || ""); let s = ""; if (m) { try { s = decodeURIComponent(m[1]); } catch (_) { s = ""; } } return s.indexOf("owner:") === 0 ? s.slice(6) : ""; }
+  const ownerHref = (k) => "#view/projects/" + encodeURIComponent("owner:" + k);
+  function names(list, host) {
+    if (!list.length) { host.appendChild(el("span", "pj-none", "no keys")); return; }
+    list.forEach((n) => { const c = el("code", "pj-kn", n.name); if (n.push_only) c.title = "push-only for agents"; host.appendChild(c); });
+  }
+  function render() {
+    const list = $("pj-keys-list"), own = curOwner();
+    list.replaceChildren();
+    if (!data) return;
+    let shown = 0;
+    data.owners.forEach((g) => {
+      if (own && g.key !== own) return;
+      const h = el("a", "pj-owner", g.owner || "No owner"); h.href = ownerHref(g.key);
+      h.appendChild(el("span", "pj-sub", "(" + g.projects.length + ")"));
+      list.appendChild(h);
+      g.vaults.forEach((v) => { const r = el("div", "pj-row"); r.append(el("span", "pj-id", v.vault), el("span", "pj-chip", "owner scope")); names(v.names, r); list.appendChild(r); });
+      g.projects.forEach((p) => {
+        const r = el("div", "pj-row"); r.appendChild(el("span", "pj-id", p.label));
+        if (p.vault) r.appendChild(el("span", "pj-sub", p.vault));
+        if (p.error) r.appendChild(el("span", "pj-chip pj-err", p.error)); else names(p.names, r);
+        list.appendChild(r); shown++;
+      });
+    });
+    const err = data.registry_error;
+    $("pj-keys-note").classList.toggle("pj-err", !!err);
+    $("pj-keys-note").textContent = (err ? "tm registry unreadable: " + err + ". " : "") + (own ? "Owner " + own + ": " : "") + shown + (shown === 1 ? " project" : " projects") + ". Key names only, listed at " + (data.at || "unknown") + "; values are never read or shown.";
+  }
+  async function load(refresh) {
+    if (busy) return; busy = true;
+    $("pj-keys-note").classList.remove("pj-err"); $("pj-keys-note").textContent = "Listing key names…";
+    try {
+      const r = await fetch("/api/projects/key-names" + (refresh ? "?refresh=1" : ""), { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status === 404 ? "this dashboard server predates the Secrets list; it needs a restart" : "HTTP " + r.status);
+      const d = await r.json();
+      if (!d || !Array.isArray(d.owners)) throw new Error("unexpected reply (no owners list)");
+      data = d; render();
+    } catch (e) { data = null; $("pj-keys-list").replaceChildren(); $("pj-keys-note").classList.add("pj-err"); $("pj-keys-note").textContent = "Secrets list unavailable: " + e.message; }
+    busy = false;
+  }
+  box.addEventListener("toggle", () => { if (box.open && !data) load(false); });
+  $("pj-keys-refresh").addEventListener("click", () => load(true));
+  window.addEventListener("hashchange", () => { if (data) render(); });
+})();
+/* END projectsKeyNames */
 /* BEGIN projectsLifecycle */
 /* Archive / Decommission / Restore (ar-Tb3, the owner 2026-10-27 14:4xZ). Buttons sit only in an expanded project (the detail view) or an expanded archived
    row, and use the session-row vocabulary: `row cmd` with `rm` buttons, a `line` confirm sentence, `rm` yes/Cancel (the Park confirm), `err` text.

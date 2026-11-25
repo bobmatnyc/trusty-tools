@@ -31,7 +31,8 @@
 //! partial survey is how the direction got reversed the first time: **every unit
 //! with a live daemon obeys it** — `com.trusty.mpm`, `com.trusty.memory`,
 //! `com.trusty.analyze`, `com.trusty.search`, `com.trusty.console`,
-//! `com.trusty.agents.slack`, all confirmed from `launchctl list` with a pid.
+//! `com.trusty.agents.slack` (retired in #11632), all confirmed from
+//! `launchctl list` with a pid.
 //! Two do not, and both are being normalised onto it here rather than being
 //! counted as support for it: `com.trusty.trusty-search.logrotate` is loaded
 //! with no pid and no main unit beside it, and `com.trusty.trusty-review.plist`
@@ -139,8 +140,25 @@ pub const CONSOLE: &str = agent!("console");
 /// old binary, respawning a `serve` subcommand the binary no longer has.
 pub const REVIEW: &str = agent!("review");
 
-/// The trusty-agents Slack gateway (`tagent --slack`).
+/// The per-user Python browser control service.
+pub const BROWSER: &str = agent!("browser");
+
+/// The RETIRED trusty-agents Slack gateway (`tagent --slack`).
+///
+/// #11632 cut the Slack gateway with the harness and renamed the crate to
+/// trusty-assistants, so nothing runs or installs this unit. The label keeps
+/// its pre-rename `agents` stem because that is what hosts have loaded. It
+/// lives in [`RETIRED_SERVICES`] so an upgrade can evict it; see [`ANALYZE`]
+/// for why a retired label is never deleted.
 pub const AGENTS_SLACK: &str = agent!("agents", "slack");
+
+/// The Architect's job scheduler (`trusty-architect-sched`). Canonical name
+/// only: `trusty-architect` is a leaf crate and renders its own plist with a
+/// copy of this label (#9171 A1), so it is not in [`SERVICES`].
+pub const ARCHITECT_SCHED: &str = agent!("architect-sched");
+
+/// The trusty-computer desktop control service.
+pub const COMPUTER: &str = agent!("computer");
 
 /// A launchd-managed service: its member name, canonical label, and the labels
 /// earlier installs used for the same service.
@@ -177,6 +195,18 @@ pub struct Service {
 /// Test: `canonical_consts_match_the_convention` proves no entry restates a
 /// label the convention would not produce.
 pub const SERVICES: &[Service] = &[
+    Service {
+        member: "trusty-browser",
+        sub_unit: None,
+        label: BROWSER,
+        legacy: &[],
+    },
+    Service {
+        member: "trusty-computer",
+        sub_unit: None,
+        label: COMPUTER,
+        legacy: &[],
+    },
     Service {
         member: "trusty-mpm",
         sub_unit: None,
@@ -218,12 +248,6 @@ pub const SERVICES: &[Service] = &[
         label: CONSOLE,
         legacy: &["com.trusty.trusty-console"],
     },
-    Service {
-        member: "trusty-agents",
-        sub_unit: Some("slack"),
-        label: AGENTS_SLACK,
-        legacy: &[],
-    },
 ];
 
 /// Services this workspace once installed and now only EVICTS (#6290, #6350).
@@ -249,7 +273,8 @@ pub const SERVICES: &[Service] = &[
 ///
 /// Test: `retired_services_are_not_installed`,
 /// `retired_review_carries_both_its_labels`,
-/// `retired_analyze_carries_both_its_labels`.
+/// `retired_analyze_carries_both_its_labels`,
+/// `retired_agents_slack_is_evicted_not_registered`.
 pub const RETIRED_SERVICES: &[Service] = &[
     // #6290: ADR-0032's review lane. Reviews run per invocation
     // (`trusty-review run`); there is no listener to supervise.
@@ -266,6 +291,15 @@ pub const RETIRED_SERVICES: &[Service] = &[
         sub_unit: None,
         label: ANALYZE,
         legacy: &["com.trusty.trusty-analyze"],
+    },
+    // #11632: the Slack gateway (`tagent --slack`) was cut, and the crate
+    // renamed to trusty-assistants, so the member is the new name while the
+    // label keeps the stem hosts have loaded.
+    Service {
+        member: "trusty-assistants",
+        sub_unit: Some("slack"),
+        label: AGENTS_SLACK,
+        legacy: &[],
     },
 ];
 

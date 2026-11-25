@@ -1,2 +1,0 @@
-Added
-- New ungated module `console_rpc` (#10902): the method names `console.health` and `console.fleet_status`, their response types `ConsoleHealth` and `ConsoleFleetStatus`, and the per-service row types `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` (moved from trusty-console), so a client without a trusty-console dependency can decode the console socket's answers. No type uses `deny_unknown_fields`.

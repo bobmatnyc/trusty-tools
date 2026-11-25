@@ -556,7 +556,7 @@ fn deploy_records_files_written_before_a_mid_loop_failure() {
 // #4949 — directory-shaped skills at the user tier
 // ---------------------------------------------------------------------------
 
-/// Write a directory-shaped skill mirroring the real `duetto-design-system`.
+/// Write a directory-shaped skill mirroring the real `acme-design-system`.
 fn write_directory_skill(dir: &Path, stem: &str) {
     let skill = dir.join(stem);
     fs::create_dir_all(skill.join("references")).unwrap();
@@ -573,16 +573,16 @@ fn deploy_directory_shaped_skill() {
     // the deploy reported success having written nothing.
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
-    write_directory_skill(src.path(), "duetto-design-system");
+    write_directory_skill(src.path(), "acme-design-system");
 
     let stats = deploy_skills(src.path(), tgt.path()).unwrap();
 
     assert!(
-        stats.deployed.contains(&"duetto-design-system".to_string()),
+        stats.deployed.contains(&"acme-design-system".to_string()),
         "the entry point must deploy: {stats:?}"
     );
     // Every file the skill carries lands at the destination.
-    let dest = tgt.path().join("duetto-design-system");
+    let dest = tgt.path().join("acme-design-system");
     assert!(dest.join("SKILL.md").is_file(), "SKILL.md missing");
     assert!(
         dest.join("metadata.json").is_file(),
@@ -609,16 +609,16 @@ fn deploy_directory_skill_records_every_file_in_the_manifest() {
     // then frozen forever.
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
-    write_directory_skill(src.path(), "duetto-design-system");
+    write_directory_skill(src.path(), "acme-design-system");
 
     deploy_skills(src.path(), tgt.path()).unwrap();
 
     let manifest = SkillManifest::load(tgt.path()).unwrap();
     for key in [
-        "duetto-design-system",
-        "duetto-design-system/metadata.json",
-        "duetto-design-system/references/tokens.md",
-        "duetto-design-system/references/index.md",
+        "acme-design-system",
+        "acme-design-system/metadata.json",
+        "acme-design-system/references/tokens.md",
+        "acme-design-system/references/index.md",
     ] {
         assert!(manifest.is_managed(key), "manifest missing key {key}");
     }
@@ -647,11 +647,11 @@ fn deploy_flat_skill_still_works_alongside_a_directory_skill() {
         "# CLI\n",
     )
     .unwrap();
-    write_directory_skill(src.path(), "duetto-design-system");
+    write_directory_skill(src.path(), "acme-design-system");
 
     let stats = deploy_skills(src.path(), tgt.path()).unwrap();
 
-    for stem in ["tm-doctor", "example-skill", "duetto-design-system"] {
+    for stem in ["tm-doctor", "example-skill", "acme-design-system"] {
         assert!(
             tgt.path().join(stem).join("SKILL.md").is_file(),
             "{stem}/SKILL.md missing: {stats:?}"
@@ -699,14 +699,14 @@ fn deploy_directory_skill_respects_the_select_predicate() {
     // be selectable by the same stem the planner derives.
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
-    write_directory_skill(src.path(), "duetto-design-system");
+    write_directory_skill(src.path(), "acme-design-system");
     write_directory_skill(src.path(), "cto-kb-ingest");
 
     let stats =
         deploy_skills_filtered(src.path(), tgt.path(), |name| name == "cto-kb-ingest").unwrap();
 
     assert!(stats.deployed.contains(&"cto-kb-ingest".to_string()));
-    assert!(!tgt.path().join("duetto-design-system").exists());
+    assert!(!tgt.path().join("acme-design-system").exists());
 }
 
 #[test]
@@ -715,18 +715,18 @@ fn deploy_directory_skill_preserves_a_user_edited_reference() {
     // preserved while the rest of the skill still refreshes.
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
-    write_directory_skill(src.path(), "duetto-design-system");
+    write_directory_skill(src.path(), "acme-design-system");
     deploy_skills(src.path(), tgt.path()).unwrap();
 
     let edited = tgt
         .path()
-        .join("duetto-design-system")
+        .join("acme-design-system")
         .join("references")
         .join("tokens.md");
     fs::write(&edited, "# Tokens (hand-edited)\n").unwrap();
     fs::write(
         src.path()
-            .join("duetto-design-system")
+            .join("acme-design-system")
             .join("references")
             .join("index.md"),
         "# Index v2\n",
@@ -738,7 +738,7 @@ fn deploy_directory_skill_preserves_a_user_edited_reference() {
     assert!(
         stats
             .skipped
-            .contains(&"duetto-design-system/references/tokens.md".to_string()),
+            .contains(&"acme-design-system/references/tokens.md".to_string()),
         "{stats:?}"
     );
     assert_eq!(
@@ -748,7 +748,7 @@ fn deploy_directory_skill_preserves_a_user_edited_reference() {
     assert!(
         stats
             .deployed
-            .contains(&"duetto-design-system/references/index.md".to_string()),
+            .contains(&"acme-design-system/references/index.md".to_string()),
         "{stats:?}"
     );
 }

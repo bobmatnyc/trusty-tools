@@ -150,7 +150,9 @@ fn loop_sleeps_once_per_cycle() -> TestResult {
         if n != 3 {
             failures.push(format!("{name}: {n} interval sleeps for 3 cycles"));
         }
-        if started.elapsed() > Duration::from_secs(1) {
+        // #10784: the bound is one interval, not machine speed: three cycles
+        // under a fake clock finish before one real `sleep(60s)` would.
+        if started.elapsed() >= MINUTE {
             failures.push(format!("{name}: took {:?}", started.elapsed()));
         }
     }
@@ -235,6 +237,101 @@ fn loop_refuses_to_start_while_locked() -> TestResult {
         .run_loop("60", Some(1));
     assert!(matches!(r, Err(RunError::AlreadyRunning { .. })), "{r:?}");
     assert!(tmux.calls().is_empty());
+    Ok(())
+}
+
+/// A dry run naming ARCHITECT_DRY_RUN_STATE reads and saves that file only,
+/// so a second dry run dedupes what the first saw; the inbox stays untouched
+/// and no key is sent. Red against a dry run that never saves its state.
+#[test]
+fn dry_run_with_its_own_state_dedupes_across_runs() -> TestResult {
+    let scratch = tempfile::tempdir()?;
+    let own = scratch.path().join("dry-run-state.json");
+    let own_str = own.display().to_string();
+    let env = Env::new(&[("ARCHITECT_DRY_RUN_STATE", own_str.as_str())])?;
+    let tmux = fleet(
+        &[("tm-architect", "%1", "claude"), ("tm-a", "%2", "claude")],
+        &screen(50),
+    )
+    .fallback("display-message", "tm-architect\n")
+    .fallback("send-keys", "");
+    let clock = FakeClock::new(1_000.0);
+    let mut runner = env.runner(&tmux, &clock, &QuietHost);
+    runner.dry_run = true;
+    let first = runner.run_single("60")?;
+    assert!(!first.new.is_empty(), "the first dry run alerts");
+    assert!(own.exists(), "the dry run saved its own state");
+    let second = runner.run_single("60")?;
+    assert!(second.new.is_empty(), "deduped: {:?}", second.new);
+    assert!(second.suppressed >= 1, "the seen alert is suppressed");
+    let files: Vec<String> = fs::read_dir(&env.config.inbox)?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, ["events.jsonl"], "the inbox is untouched");
+    assert!(tmux.sends().is_empty());
+    Ok(())
+}
+
+/// Runs one dry run whose ARCHITECT_DRY_RUN_STATE is `own`, prepared by
+/// `prepare`, beside a live poll-state.json; returns the live bytes before
+/// and after. See #11616.
+fn dry_run_beside_live(
+    own: &std::path::Path,
+    prepare: impl FnOnce(&std::path::Path) -> io::Result<()>,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    let own_str = own.display().to_string();
+    let env = Env::new(&[("ARCHITECT_DRY_RUN_STATE", own_str.as_str())])?;
+    let live = env.config.state();
+    if let Some(dir) = live.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&live, br#"{"live": true}"#)?;
+    let before = fs::read(&live)?;
+    prepare(own)?;
+    let tmux = fleet(
+        &[("tm-architect", "%1", "claude"), ("tm-a", "%2", "claude")],
+        &screen(50),
+    )
+    .fallback("display-message", "tm-architect\n")
+    .fallback("send-keys", "");
+    let clock = FakeClock::new(1_000.0);
+    let mut runner = env.runner(&tmux, &clock, &QuietHost);
+    runner.dry_run = true;
+    runner.run_single("60")?;
+    Ok((before, fs::read(&live)?))
+}
+
+/// A corrupt dry-run state is kept as a copy before it is saved over, as the
+/// live path does; the live state is untouched. Red against 9817f2db99.
+#[test]
+fn dry_run_keeps_a_copy_of_its_corrupt_state() -> TestResult {
+    let scratch = tempfile::tempdir()?;
+    let own = scratch.path().join("dry-run-state.json");
+    let (before, after) = dry_run_beside_live(&own, |p| fs::write(p, "{not json"))?;
+    assert_eq!(before, after, "live poll-state.json is byte-identical");
+    let copies: Vec<_> = fs::read_dir(scratch.path())?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".corrupt."))
+        .collect();
+    assert_eq!(copies.len(), 1, "one copy of the corrupt state");
+    assert_eq!(fs::read(copies[0].path())?, b"{not json");
+    Ok(())
+}
+
+/// An unreadable dry-run state (a directory) blocks the save: the cycle
+/// succeeds and nothing is written over it. Red against 9817f2db99.
+#[test]
+fn dry_run_never_saves_over_an_unreadable_state() -> TestResult {
+    let scratch = tempfile::tempdir()?;
+    let own = scratch.path().join("dry-run-state.json");
+    let (before, after) = dry_run_beside_live(&own, |p| {
+        fs::create_dir(p)?;
+        fs::write(p.join("keep"), "x")
+    })?;
+    assert_eq!(before, after, "live poll-state.json is byte-identical");
+    assert!(own.is_dir(), "the unreadable path is not replaced");
+    assert_eq!(fs::read(own.join("keep"))?, b"x");
     Ok(())
 }
 

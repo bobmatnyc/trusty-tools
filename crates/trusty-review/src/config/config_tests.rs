@@ -75,6 +75,7 @@ fn role_models_precedence_env_wins() {
         verifier_model: None,
         summarizer_model: None,
         provider: None,
+        ..Default::default()
     };
     let roles = RoleModels::from_env(&env);
     assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
@@ -231,6 +232,40 @@ fn load_github_installations_parses_known_orgs() {
         assert!(!org.is_empty(), "org name must be non-empty");
         assert!(*id > 0, "installation id must be > 0");
     }
+}
+
+fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map: std::collections::HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    move |k| map.get(k).cloned()
+}
+
+#[test]
+fn installations_new_default_org_vars() {
+    let got = super::installations_from(env_of(&[
+        ("GITHUB_INSTALLATION_ID_DEFAULT_ORG", " 42 "),
+        ("GITHUB_INSTALLATION_DEFAULT_ORG", "Acme"),
+    ]));
+    assert_eq!(got, vec![("acme".to_string(), 42)]);
+}
+
+#[test]
+fn installations_deprecated_var_still_resolves() {
+    let got =
+        super::installations_from(env_of(&[("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "777")]));
+    assert_eq!(got, vec![("duettoresearch".to_string(), 777)]);
+}
+
+#[test]
+fn installations_new_var_wins_over_deprecated() {
+    let got = super::installations_from(env_of(&[
+        ("GITHUB_INSTALLATION_ID_DEFAULT_ORG", "1"),
+        ("GITHUB_INSTALLATION_DEFAULT_ORG", "acme"),
+        ("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "2"),
+    ]));
+    assert_eq!(got, vec![("acme".to_string(), 1)]);
 }
 
 // ── APEX retrieval removed (#4999) ──────────────────────────────────────
@@ -567,7 +602,8 @@ fn role_models_openrouter_cost_roles_resolve_classification_tier() {
         ..Default::default()
     };
     let roles = RoleModels::from_env(&env);
-    assert_eq!(roles.verifier.model, "anthropic/claude-haiku-4.5");
+    // #11527: the verifier takes a non-Claude family, not the tier.
+    assert_eq!(roles.verifier.model, "google/gemini-2.5-flash");
     assert_eq!(roles.summarizer.model, "anthropic/claude-haiku-4.5");
 }
 
@@ -588,15 +624,11 @@ fn role_models_bedrock_reviewer_keeps_sonnet_default() {
         "Bedrock's opus tiers are unmapped by ruling — the pinned Sonnet default must survive"
     );
     assert_eq!(roles.reviewer.model, "us.anthropic.claude-sonnet-5-5");
-    for (role, model) in [
-        ("verifier", &roles.verifier.model),
-        ("summarizer", &roles.summarizer.model),
-    ] {
-        assert_eq!(
-            model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "{role} default stays Haiku 4.5"
-        );
-    }
+    assert_eq!(roles.verifier.model, "us.amazon.nova-pro-v1:0");
+    assert_eq!(
+        roles.summarizer.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "summarizer default stays Haiku 4.5"
+    );
 }
 
 /// Why: the two cost-driven roles must keep the value they had — only the
@@ -605,15 +637,11 @@ fn role_models_bedrock_reviewer_keeps_sonnet_default() {
 #[test]
 fn role_models_bedrock_cost_roles_resolve_the_same_id_as_before() {
     let roles = RoleModels::from_env(&RoleEnv::default());
-    for (role, model) in [
-        ("verifier", &roles.verifier.model),
-        ("summarizer", &roles.summarizer.model),
-    ] {
-        assert_eq!(
-            model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "{role} must still resolve the date-versioned Bedrock Haiku profile"
-        );
-    }
+    // #11527 moved the verifier off Haiku; the summarizer keeps it.
+    assert_eq!(
+        roles.summarizer.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "summarizer must still resolve the date-versioned Bedrock Haiku profile"
+    );
 }
 
 /// Why: a tier default that outranked an explicitly-named model id would break
@@ -786,3 +814,178 @@ fn config_manifest_layer_beats_a_local_config_file() {
 
 // resolve_index and wiring-path tests are in the sibling file to stay under
 // the 500-line cap (#610).  See `config_resolve_index_tests.rs`.
+
+/// Why: #11527 — the default verifier must not share the reviewer's model
+/// family, on either default provider.
+/// What: resolves defaults for Bedrock and OpenRouter; asserts the reviewer is
+/// Claude, the verifier is not, and no same-model warning fires.
+#[test]
+fn default_verifier_is_a_different_family_from_the_reviewer() {
+    for provider in [None, Some("openrouter".to_string())] {
+        let env = RoleEnv {
+            provider,
+            ..Default::default()
+        };
+        let roles = RoleModels::from_env(&env);
+        assert!(roles.reviewer.model.contains("claude"), "{roles:?}");
+        assert!(!roles.verifier.model.contains("claude"), "{roles:?}");
+        assert_eq!(roles.same_model_warning(), None);
+    }
+}
+
+/// Why: #11527 — an operator may still pin both roles to one model, and that
+/// override must win, but the pair must be flagged.
+/// What: CLI names the same id for reviewer and verifier (one with a routing
+/// prefix); asserts the override stands and the warning names the model.
+#[test]
+fn same_model_warning_fires_when_reviewer_and_verifier_match() {
+    let cli = RoleCliOverrides {
+        reviewer_model: Some("us.anthropic.claude-sonnet-5-5".to_string()),
+        verifier_model: Some("bedrock/us.anthropic.claude-sonnet-5-5".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &RoleEnv::default(), None);
+    assert_eq!(
+        roles.verifier.model,
+        "bedrock/us.anthropic.claude-sonnet-5-5"
+    );
+    let warning = roles
+        .same_model_warning()
+        .expect("same reviewer and verifier model must warn");
+    assert!(
+        warning.contains("us.anthropic.claude-sonnet-5-5"),
+        "{warning}"
+    );
+}
+
+/// A model the config file declares authorized is in the compare set (#10757).
+///
+/// Why: model access must come from config, not a compiled-in list; Opus 4.8
+/// was authorized on the account but absent from every built-in list.
+/// What: loads a `[models] authorized` file with the env var unset and asserts
+/// the resolved list, and the `compare` default set, name Opus 4.8.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn compare_set_uses_config_authorized_model() {
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models]\nauthorized = [\"bedrock/us.anthropic.claude-opus-4-8\", \" \"]\n",
+    )
+    .expect("write config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+
+    let opus_4_8 = "bedrock/us.anthropic.claude-opus-4-8".to_string();
+    assert_eq!(config.role_models.authorized_models, vec![opus_4_8.clone()]);
+    assert_eq!(
+        crate::llm::models::compare_models(&config.role_models.authorized_models),
+        vec![opus_4_8],
+        "an authorized model must be selectable by compare"
+    );
+}
+
+/// A malformed `[models] authorized` makes `compare` refuse (#10757).
+///
+/// Why: the loader fails open on a parse error, which let `compare` run the
+/// built-in set — models the operator never authorized.
+/// What: writes `authorized` as a string, env var unset, and asserts the
+/// compare default set is an error naming the key and the file; then asserts
+/// a non-blank env list still wins over the bad file.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn compare_refuses_malformed_authorized_key() {
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models]\nauthorized = \"bedrock/us.anthropic.claude-opus-4-8\"\n",
+    )
+    .expect("write config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+    let err = config
+        .role_models
+        .compare_default_models()
+        .expect_err("a malformed authorized key must not fall back to the built-in set");
+    let message = err.to_string();
+    assert!(message.contains("[models] authorized"), "{message}");
+    assert!(message.contains(&path.display().to_string()), "{message}");
+
+    unsafe {
+        std::env::set_var(
+            "TRUSTY_REVIEW_AUTHORIZED_MODELS",
+            "bedrock/us.anthropic.claude-haiku-5-5",
+        );
+    }
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    assert_eq!(
+        config.role_models.compare_default_models(),
+        Ok(vec!["bedrock/us.anthropic.claude-haiku-5-5".to_string()])
+    );
+}
+
+/// A valid `authorized` list in a file that fails the typed parse refuses (#10757).
+///
+/// Why: the typed parse fails on another key, so the list is never read and
+/// `compare` would run the built-in set.
+/// What: valid `[models] authorized` plus a wrong-typed `[verification]` key;
+/// asserts the compare default set is an error naming the key and the file.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn compare_refuses_valid_authorized_in_unparseable_file() {
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models]\nauthorized = [\"bedrock/us.anthropic.claude-haiku-5-5\"]\n\n[verification]\nenabled = \"not-a-bool\"\n",
+    )
+    .expect("write config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+    let err = config
+        .role_models
+        .compare_default_models()
+        .expect_err("an unread authorized list must not fall back to the built-in set");
+    let message = err.to_string();
+    assert!(message.contains("[models] authorized"), "{message}");
+    assert!(message.contains(&path.display().to_string()), "{message}");
+}
+
+/// `TRUSTY_REVIEW_AUTHORIZED_MODELS` beats `[models] authorized` (#10757).
+#[test]
+fn authorized_models_env_beats_config_file() {
+    let file = FileModels {
+        authorized: vec!["bedrock/us.anthropic.claude-opus-4-8".to_string()],
+        ..Default::default()
+    };
+    let env_ids = " bedrock/us.anthropic.claude-haiku-5-5, ,bedrock/us.anthropic.claude-opus-5-5";
+    assert_eq!(
+        role_models::resolve_authorized_models(Some(env_ids), Some(&file)),
+        vec![
+            "bedrock/us.anthropic.claude-haiku-5-5".to_string(),
+            "bedrock/us.anthropic.claude-opus-5-5".to_string(),
+        ]
+    );
+    assert_eq!(
+        role_models::resolve_authorized_models(Some("  "), Some(&file)),
+        file.authorized
+    );
+    assert!(role_models::resolve_authorized_models(None, None).is_empty());
+}

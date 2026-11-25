@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use crate::catchup::git::capture_git_status;
+use crate::catchup::secret_scrub::scrub_secret_like;
 use crate::catchup::session_log::{self, SessionLogEntry};
-use crate::catchup::sha_scrub::scrub_sha_like;
 
 /// Input fields for a single pause snapshot.
 ///
@@ -78,9 +78,9 @@ pub struct PauseSnapshotOutcome {
 /// report this pause".
 /// What: joins `items` as `- <item>` lines under `## <header>`; returns `None`
 /// for an empty slice so the caller can skip the section entirely.
-/// #9390: each item passes through [`scrub_sha_like`], so a head SHA the PM
-/// typed is flagged rather than recorded.
-/// Test: `write_pause_snapshot_omits_empty_sections`, `a_snapshot_contains_no_head_sha`.
+/// #10595: each item passes through [`scrub_secret_like`], which redacts
+/// credentials and keeps commit SHAs and message ids.
+/// Test: `write_pause_snapshot_omits_empty_sections`, `a_snapshot_keeps_shas_and_message_ids`.
 fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
     if items.is_empty() {
         return None;
@@ -88,7 +88,7 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
     let mut out = format!("## {header}\n");
     for item in items {
         out.push_str("- ");
-        out.push_str(&scrub_sha_like(item));
+        out.push_str(&scrub_secret_like(item)); // #10595: keep SHAs, redact secrets.
         out.push('\n');
     }
     Some(out)
@@ -109,9 +109,9 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// is the new file's path RELATIVE to the store root. Returns the resolved
 /// absolute path and timestamp.
 ///
-/// #9390: the PM's free text (Summary, Completed, In Progress, Next Steps)
-/// passes through [`scrub_sha_like`]; the code-generated `Last commit:` line
-/// does not, because #7501 reads it as the supersession baseline.
+/// #10595: the PM's free text (Summary, Completed, In Progress, Next Steps)
+/// passes through [`scrub_secret_like`], which redacts credentials and keeps
+/// commit SHAs and message ids exactly as typed.
 ///
 /// #5272: a session id that cannot be a directory name (see
 /// [`session_log::session_dir_name`]) writes flat at the store root instead,
@@ -124,7 +124,8 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// `write_pause_snapshot_appends_log_entry`,
 /// `write_pause_snapshot_writes_under_session_dir`,
 /// `write_pause_snapshot_falls_back_to_root_for_unsafe_id`,
-/// `a_snapshot_contains_no_head_sha`.
+/// `a_snapshot_keeps_shas_and_message_ids`,
+/// `a_snapshot_redacts_a_secret_shaped_hex_value`.
 pub fn write_pause_snapshot(
     project_dir: &Path,
     input: &PauseSnapshotInput<'_>,
@@ -167,7 +168,7 @@ pub fn write_pause_snapshot(
     let mut md = format!(
         "# Session Pause - {}\n\n## Summary\n{}\n\n",
         now.to_rfc3339(),
-        scrub_sha_like(input.summary) // #9390: PM text keeps identifiers, not heads.
+        scrub_secret_like(input.summary) // #10595: keep SHAs, redact secrets.
     );
     if let Some(section) = render_bullet_section("Completed", input.completed) {
         md.push_str(&section);
@@ -398,78 +399,69 @@ mod tests {
         );
     }
 
-    /// Every 7-40 character hex token mixing digits and letters, outside the
-    /// code-generated `Last commit:` line. Written independently of the
-    /// production rule so a broken scrub cannot also break its own check.
-    fn head_sha_tokens(md: &str) -> Vec<String> {
-        md.lines()
-            .filter(|line| !line.starts_with("Last commit:"))
-            .flat_map(|line| line.split(|c: char| !c.is_ascii_alphanumeric()))
-            .filter(|w| {
-                (7..=40).contains(&w.len())
-                    && w.chars().all(|c| c.is_ascii_hexdigit())
-                    && w.chars().any(|c| c.is_ascii_digit())
-                    && w.chars().any(|c| c.is_ascii_alphabetic())
-            })
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Why (#9390): two of 13 relaunches resumed from snapshots carrying wrong
-    /// PR head SHAs the PM had typed into the free-text sections.
-    /// What: SHA-like tokens in Summary / Completed / In Progress / Next Steps
-    /// are flagged, the code-generated `Last commit:` line keeps its id, and
-    /// branch names, issue numbers, dates, times and hex-looking words survive.
+    /// Why (#10595): a resume lost every SHA and Architect message id the
+    /// pause had recorded, so it could not read the Architect's reply.
+    /// What: a SHA, a full SHA-1 id, a range and a hex message id written into
+    /// the free-text sections come back unchanged through the reader.
     /// Test: itself.
     #[test]
-    fn a_snapshot_contains_no_head_sha() {
-        let tmp = TempDir::new().unwrap();
-        init_git_repo(tmp.path());
-        let head = std::process::Command::new("git")
-            .arg("-C")
-            .arg(tmp.path())
-            .args(["log", "-1", "--format=%h"])
-            .output()
-            .unwrap();
-        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-
+    fn a_snapshot_keeps_shas_and_message_ids() {
+        let tmp = TempDir::new().expect("tempdir");
+        let sha = "d3963848ab";
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        let msg_id = "19a2f3c4d5e6f0a12b";
+        let summary = format!("PR #12 head {sha}; Architect message {msg_id}.");
         let input = PauseSnapshotInput {
             session_id: "s1",
-            summary: "On feat/9390-x for #9390, 2026-10-10 21:46: PR #12 head d3963848ab.",
-            completed: &["added the facade; deadbeef and xdeadbeef1x are words".to_string()],
-            in_progress: &[
-                "PR #12 head d3963848ab awaiting CI".to_string(),
-                "compare abc1234..def5678".to_string(),
-            ],
-            next_steps: &["merge `0123456789abcdef0123456789abcdef01234567`".to_string()],
+            summary: &summary,
+            completed: &[format!("merged {full}")],
+            in_progress: &["compare abc1234..def5678".to_string()],
+            next_steps: &[format!("read reply to msg-{msg_id}")],
             tmux_window: None,
         };
-        let outcome = write_pause_snapshot(tmp.path(), &input).unwrap();
-        let md = std::fs::read_to_string(&outcome.snapshot_path).unwrap();
+        let out = write_pause_snapshot(tmp.path(), &input).expect("pause");
+        let md = std::fs::read_to_string(&out.snapshot_path).expect("read");
+        assert!(md.contains(&format!("- merged {full}")), "{md}");
+        let sessions = find_paused_sessions(tmp.path()).expect("reader");
+        let PausedSession::TrustyMpm {
+            summary: got,
+            in_progress,
+            next_steps,
+            ..
+        } = &sessions[0]
+        else {
+            panic!("expected TrustyMpm variant, got {:?}", sessions[0]);
+        };
+        assert_eq!(got, &summary);
+        assert_eq!(in_progress.as_deref(), Some("- compare abc1234..def5678"));
+        let next = format!("- read reply to msg-{msg_id}");
+        assert_eq!(next_steps.as_deref(), Some(next.as_str()));
+    }
 
-        assert_eq!(
-            head_sha_tokens(&md),
-            Vec::<String>::new(),
-            "no head SHA may survive outside `Last commit:`:\n{md}"
-        );
-        for kept in [
-            "feat/9390-x",
-            "#9390",
-            "2026-10-10",
-            "21:46",
-            "PR #12",
-            "added the facade",
-            "deadbeef",
-            "xdeadbeef1x",
-        ] {
-            assert!(md.contains(kept), "{kept:?} must survive:\n{md}");
-        }
-        assert!(md.contains("<sha?>"), "a stripped id is flagged:\n{md}");
-        assert!(
-            md.lines()
-                .any(|l| l.starts_with(&format!("Last commit: {head} "))),
-            "the #7501 baseline keeps its commit id:\n{md}"
-        );
+    /// Why (#10595): keeping SHAs must not let a credential through.
+    /// What: a 64-character hex key and a `ghp_` token are redacted while a
+    /// SHA on the same line survives.
+    /// Test: itself.
+    #[test]
+    fn a_snapshot_redacts_a_secret_shaped_hex_value() {
+        let tmp = TempDir::new().expect("tempdir");
+        let hex_key = "9f8e7d6c".repeat(8);
+        let ghp = format!("ghp_{}", "A1b2C3d4".repeat(4));
+        let summary = format!("head d3963848ab api_key={hex_key} token {ghp}");
+        let input = PauseSnapshotInput {
+            session_id: "s1",
+            summary: &summary,
+            completed: &[],
+            in_progress: &[],
+            next_steps: &[],
+            tmux_window: None,
+        };
+        let out = write_pause_snapshot(tmp.path(), &input).expect("pause");
+        let md = std::fs::read_to_string(&out.snapshot_path).expect("read");
+        assert!(!md.contains(&hex_key), "hex key leaked:\n{md}");
+        assert!(!md.contains(&ghp), "token leaked:\n{md}");
+        let want = "head d3963848ab api_key=[REDACTED] token [REDACTED]";
+        assert!(md.contains(want), "{md}");
     }
 
     #[test]

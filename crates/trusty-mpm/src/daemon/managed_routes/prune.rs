@@ -395,7 +395,11 @@ pub(crate) async fn prune_worktrees_pass(
         .filter_map(|r| r.workspace_path.clone())
         .collect();
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
+    // #11821: a broken install.toml refuses the prune (df-D1t).
+    let repos_root = match crate::core::trusty_tools_config::try_workspace_root(&config) {
+        Ok(root) => root,
+        Err(e) => return RouteOutcome::text(500, format!("workspace root unresolved: {e}")),
+    };
     // Item 7 (#1845): propagate scan failures as HTTP 500 instead of silently
     // returning an empty path list (which could mask the underlying error).
     // #4091: the ONLY place `ForceDiscard` can be requested, and only via an

@@ -402,3 +402,29 @@ pub(crate) fn origin_remote_url(dir: &Path) -> Option<String> {
     let url = url.trim();
     (!url.is_empty()).then(|| url.to_string())
 }
+
+/// The git config key a checkout with no `origin` remote sets to name its
+/// `<owner>/<repo>` secrets identity.
+// #11346: a local-only checkout (the Architect's) has no remote to read.
+pub const SECRETS_REPO_GIT_KEY: &str = "trusty.secrets.repo";
+
+/// The checkout's own `trusty.secrets.repo` value, if set.
+///
+/// Why: #11346 — a checkout with no `origin` names its identity explicitly.
+/// What: `git config --local --get trusty.secrets.repo` through
+/// [`git_command`]. `--local` reads `.git/config` only, the same file that
+/// holds `remote.origin.url`; a global or system value never applies, so
+/// one setting cannot map every remote-less checkout to one vault.
+/// Test: `scope_derive_without_a_remote_reads_the_local_repo_key`.
+pub(crate) fn local_secrets_repo(dir: &Path) -> Option<String> {
+    let output = git_command(dir)
+        .args(["config", "--local", "--get", SECRETS_REPO_GIT_KEY])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}

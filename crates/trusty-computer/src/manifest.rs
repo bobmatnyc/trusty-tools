@@ -1,0 +1,99 @@
+//! The bounded-mode capability manifest for one lease scope.
+//!
+//! Why: the daemon ceiling must name one process, not an app identity. In
+//! cua-driver 0.23.2 an `apps[].bundle_id` entry admits a signed bundle, but
+//! it matches the claimed bundle id only: an ad-hoc build of other code with
+//! the same id is admitted too, even when the real app is Developer ID signed
+//! (#11697, `tests/live_bundle_scope.rs`). Exact pid and window entries
+//! (`desktop.applications` / `desktop.windows`) refuse every other process.
+//! So the manifest is rendered per lease scope, and a scope change means a
+//! daemon restart (plan section 3).
+//! What: [`LeaseScope`] is one pid plus one window id; [`render`] emits the
+//! version-3 YAML with the tool ceiling of `tests/fixtures/capabilities.live.yaml`
+//! plus `invoke_menu` (#11695), `bring_to_front` and `set_window_frame` (#11696)
+//! and `drag` (#11756),
+//! and no `resources.apps` entry; the `write()` function stores it 0600 without following a
+//! symlink.
+//! Test: `manifest_pins_exact_pid_and_window_only`, `manifest_file_is_private`.
+
+use std::io::{self, Write};
+use std::path::Path;
+
+use crate::private;
+
+/// The daemon-side tool ceiling; the broker's policy narrows it further.
+pub const TOOLS: [&str; 15] = [
+    "start_session",
+    "end_session",
+    "list_apps",
+    "list_windows",
+    "get_window_state",
+    "verify_state",
+    "click",
+    "type_text",
+    "set_value",
+    "press_key",
+    "check_permissions",
+    // #11695: the broker admits it only under a grant naming it, path deny list applied.
+    "invoke_menu",
+    // #11696 Phase B: the broker drives these only for the granted window of the granted pid.
+    "bring_to_front",
+    "set_window_frame",
+    // #11756: the broker drives it only for `drag_at` past the window-on-top gate.
+    "drag",
+];
+
+/// The one app window a lease may touch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaseScope {
+    pub pid: u32,
+    pub window_id: u64,
+}
+
+/// Manifest lifetimes, in cua duration syntax (`2h`, `15m`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lifetimes {
+    pub expires_after: String,
+    pub idle_timeout: String,
+}
+
+impl Default for Lifetimes {
+    fn default() -> Lifetimes {
+        Lifetimes {
+            expires_after: "2h".into(),
+            idle_timeout: "15m".into(),
+        }
+    }
+}
+
+/// The manifest YAML for `scope`.
+pub fn render(scope: LeaseScope, life: &Lifetimes) -> String {
+    let tools: String = TOOLS.iter().map(|t| format!("    - {t}\n")).collect();
+    format!(
+        "# trusty-computer lease manifest (issue #11460); exact pid and window only.\n\
+         version: 3\n\
+         expires_after: {}\n\
+         idle_timeout: {}\n\
+         allow:\n  tools:\n{tools}\
+         resources:\n  desktop:\n    applications: [{pid}]\n    windows:\n\
+         \x20     - pid: {pid}\n        window_id: {wid}\n    display: false\n",
+        life.expires_after,
+        life.idle_timeout,
+        pid = scope.pid,
+        wid = scope.window_id,
+    )
+}
+
+/// Write `render(scope, life)` to `path` (0600, no symlink follow, truncated).
+pub fn write(path: &Path, scope: LeaseScope, life: &Lifetimes) -> io::Result<()> {
+    let mut file = private::open_nofollow(path, false)?;
+    if !private::private_file(&file.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "manifest must be an owner-only regular file",
+        ));
+    }
+    file.set_len(0)?;
+    file.write_all(render(scope, life).as_bytes())?;
+    file.sync_all()
+}

@@ -151,6 +151,8 @@ pub mod daemon_identity;
 pub mod dbatg;
 // #10063: the `mpm.architect.dashboard.*` host facts and verb routing.
 pub mod architect_dashboard;
+// #10944: the Architect directory and the dashboard store root the daemon resolves.
+pub mod architect_store;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
@@ -196,10 +198,14 @@ pub mod gh_login_verify;
 pub mod gh_org_accounts;
 // #8914: `--account` sessions run gh and HTTPS git as the account named.
 pub mod gh_session_account;
+// #11673: the gh shim's rate-limit refusal, shared by `tm wait` and the PR watch.
+pub mod gh_rate_limit;
 // #9750: the per-call gh credential shim a pinned session runs (D6e).
 pub mod gh_session_shim;
 // #9750: tm's own gh children run the real gh, not a pinned session's shim.
 pub mod gh_shim_path;
+// #10487: a session's github.token_env binding runs through the gh shim.
+pub mod gh_token_env_shim;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]
@@ -267,12 +273,18 @@ pub mod memory_reachable;
 // #8352: `tm memory recall|remember|note` — palace access over the daemon
 // socket, so a dead MCP connection does not cut the session off from memory.
 pub mod memory_verbs;
+// #11625: the MCP-only memory tools as `tm memory` verbs, over the same socket.
+pub mod memory_tool_verbs;
 // #9340: `tm memory forget` — the forget-specific half of `memory_verbs`.
 pub mod memory_forget;
 // #9544: `tm memory rename` — trusty-memory's `palace_rename` over the socket.
 pub mod memory_rename;
 // #9538: the protocol-checked door to the memory socket.
 pub mod memory_checked;
+// #10648: a verb's first call survives a cold palace open in the daemon.
+pub mod memory_first_call;
+#[cfg(test)]
+mod memory_first_call_tests;
 #[cfg(test)]
 mod memory_protocol_gate_tests;
 pub mod model_inject;
@@ -296,6 +308,8 @@ pub mod pane_foreground;
 #[cfg(test)]
 pub(crate) mod pane_foreground_tests;
 pub mod paths;
+// #10753: tmux-ancestry evidence that a pid file's session still exists.
+pub mod pid_host;
 pub mod pid_registry;
 // #8992: the built-in tools a tm-launched PM does not load.
 pub mod pm_tool_trim;
@@ -308,12 +322,26 @@ pub mod policy_labels;
 // `tm pr cleanup <n>`, shared by `tm pr merge`'s final step and the
 // supervisor's periodic merged-PR sweep.
 pub mod pr_cleanup;
+// #11673: protection and ruleset required checks, shared with the PR watch.
+pub mod pr_required;
+// #8638, #11673: the rollup entry and latest-run rule, shared with the daemon.
+pub mod pr_rollup;
+// #11673: the tracked-PR table and the head-aware CI transition rule.
+pub mod pr_watch;
 pub mod process;
 pub mod project;
+/// `[accounts]` in `.trusty-mpm.toml` and the ops-prompt block it renders (#11390).
+pub mod project_accounts;
+#[cfg(test)]
+mod project_accounts_tests;
 pub mod project_aliases;
+// #7684: the project CLAUDE.md rules appended to every `Agent` dispatch.
 /// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
 pub mod project_config;
 pub mod project_discovery;
+pub mod project_rules;
+#[cfg(test)]
+mod project_rules_tests;
 // #7892: `.mcp.json` follows Claude Code's own approval flow, so tm reports
 // that state rather than deciding it.
 pub mod project_mcp_approval;
@@ -363,14 +391,20 @@ pub mod savings;
 // The `tm compress` tool-output producer, the ledger's third row source — what
 // makes the 💸 segment include bash and gate output, not just prompts and reads.
 pub mod savings_compress;
+// #11560: whether a `tm compress` run saved anything, for the opportunity row.
+pub mod savings_compress_outcome;
 // #6959: the bulk-read diversion producer, the ledger's second row source.
 pub mod savings_divert;
 pub mod savings_instructions;
 // #10973: the per-tool-call compression opportunity ledger rows.
 pub mod savings_opportunity;
+// #10973: why an opportunity row was not compressed, and the per-reason fold.
+pub mod savings_opportunity_reason;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;
+// #11033: read side for `tm savings status` and the doctor rows/day check.
+pub mod savings_status;
 // #7245: the side files that carry an instruction-compression row from the
 // compiling process to the hook that learns the session id, and that keep the
 // "nothing folded" decline to one warning per project.
@@ -436,11 +470,27 @@ pub mod stack_profile;
 pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
+// #10960: the Architect's standing-rules block, injected by `tm hook --standing-rules`.
+pub mod standing_rules;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg's `current`.
+pub mod turn_task_stamp;
+// #10575: the completion-standard check behind `tm hook --completion-evidence`.
+pub mod completion_evidence;
+#[cfg(test)]
+#[path = "completion_evidence_tests.rs"]
+mod completion_evidence_tests;
+// #10574: the stale-copy guard's config and observed-version store.
+pub mod stale_copy;
+#[cfg(test)]
+#[path = "stale_copy_tests.rs"]
+mod stale_copy_tests;
 // #6556: a `SubagentStop` the hook could not deliver, parked on disk where the
 // daemon's reap loop replays it — instead of the record sitting Running for the
 // six hours of `RUNNING_STALE_AFTER_SECS`.
 pub mod startup_context;
 pub mod stop_spool;
+// #11674: ledger task id round trip for subagent dispatches.
+pub mod subagent_task_roundtrip;
 // #7617: the one seed-or-repair rule for the `statusLine` settings entry, which
 // every tier's writer and `tm doctor --fix` go through.
 pub mod statusline_settings;
@@ -465,6 +515,8 @@ pub mod architect_launch;
 pub mod guard_policy; // #10641: the policy table every pm-guard refusal names.
 // #10127: the Architect's own `--settings` deny and chat-token env scrub.
 pub mod architect_lockdown;
+// MB159a: the bundled agents an Architect launch hides from its roster.
+pub mod architect_agent_scope;
 pub mod architect_prompt;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;
@@ -485,6 +537,8 @@ pub mod presence_store;
 #[cfg(test)]
 pub(crate) mod presence_test_support;
 pub mod presence_verify;
+// #8878 PR2b-1b: the WebAuthn passkey adapter (ES256 only, D72).
+pub mod presence_webauthn;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;

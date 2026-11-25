@@ -38,16 +38,19 @@ use super::errors::ErrorKind;
 use super::exec;
 use super::grant::GrantRegistry;
 use super::methods::{self, Caller, MethodFn};
+use super::remote;
 use super::sandbox::{self, SandboxEnv};
 use super::settings::ServerSettings;
 use super::ticket::TicketStore;
 use super::ticket_methods;
+use super::unlock;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
+use crate::store::timeout_note::TimeoutNote;
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends, open_backend,
-    open_backend_at_in, platform,
+    HeldKeychain, KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends,
+    open_backend, open_backend_at_in, platform,
 };
 
 /// Maps a configured backend id to an implementation.
@@ -277,6 +280,9 @@ pub struct State {
     pub(crate) sandbox_override: bool,
     /// Replaces the account-config sync-target opener; tests only (#9069).
     pub(crate) sync_targets: Option<super::sync_target::SyncTargetFactory>,
+    /// Reads one named Keychain item for a named copy (#10998).
+    // The OS read; tests give a fake so none touches the Keychain.
+    pub(crate) keychain_item_read: crate::store::keychain_item::ItemRead,
     /// The Architect launch-record directory under the account's home;
     /// `None` grants no Architect exemption.
     // #10459 P1: from the password database, never `$HOME`, so a spawner
@@ -289,6 +295,11 @@ pub struct State {
     /// nothing. #10459 PR1: from the password database, like
     /// `architect_records`.
     pub(crate) tm_bin_dir: Option<PathBuf>,
+    /// Where the unlock grant hears of system sleep (#10524).
+    // Tests give a fake, so none registers with the OS.
+    pub(crate) power: Arc<dyn super::power::PowerSource>,
+    /// How often an unlock grant's sentinel checks it (#10524).
+    pub(crate) grant_tick: Duration,
 }
 
 impl State {
@@ -367,9 +378,12 @@ impl State {
             sandboxed: sandbox.flag_set(),
             sandbox_override: sandbox::sandbox_consent_config(sandbox, account_home).is_some(),
             sync_targets: None,
+            keychain_item_read: crate::store::keychain_item::os_read,
             architect_records: super::architect::records_dir(account_home),
             tickets: Arc::new(TicketStore::os_default()),
             tm_bin_dir: super::ticket_checks::tm_bin_dir(account_home),
+            power: Arc::new(super::power::OsPower),
+            grant_tick: super::unlock::SENTINEL_TICK,
         }
     }
 
@@ -390,7 +404,15 @@ impl State {
                 backend: id.to_string(),
             });
         }
-        (self.backends)(id)
+        let backend = (self.backends)(id)?;
+        // #10524: Keychain reads answer from the unlock grant's held blob.
+        if id.as_str() == BackendId::KEYCHAIN {
+            return Ok(Arc::new(HeldKeychain::new(
+                backend,
+                Arc::clone(&self.cache),
+            )));
+        }
+        Ok(backend)
     }
 
     /// The whole-operation deadline for one request of `name`.
@@ -432,7 +454,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 13] = [
+pub(crate) const METHODS: [(&str, MethodFn); 17] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -449,6 +471,13 @@ pub(crate) const METHODS: [(&str, MethodFn); 13] = [
     (method::TICKET_MINT, ticket_methods::mint),
     (method::TICKET_VOID, ticket_methods::void),
     (method::TICKET_PENDING, ticket_methods::pending),
+    // #11464 D3a: the remote gate's one entry.
+    (method::GATE, remote::gate),
+    // #10524: the 8 h unlock grant.
+    (method::UNLOCK, unlock::unlock),
+    (method::LOCK, unlock::lock),
+    // #10524: the vault blob migration.
+    (method::MIGRATE, super::migrate::migrate),
 ];
 
 /// The `secrets.*` router over `state`.
@@ -462,7 +491,7 @@ pub(crate) const METHODS: [(&str, MethodFn); 13] = [
 /// the call arrives and is set on the body's thread, so every CLI call the
 /// body makes is bounded by it (`store::deadline`). #9572: every method
 /// shares one admission semaphore of [`State::admission_cap`] permits; see
-/// [`run_blocking`]. #9070: the request's peer pid is read here, in the
+/// [`run_blocking_noted`]. #9070: the request's peer pid is read here, in the
 /// handler's own task, because `request_peer_pid`'s task-local does not
 /// cross onto the blocking pool; it reaches the body as a [`Caller`].
 /// Test: `server_error_text_is_fixed_per_method_and_kind`,
@@ -489,9 +518,10 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
                     let deadline = Instant::now() + state.deadline_for(name);
                     // #9066: a bridged call answers as its direct method.
                     let reply_as = crate::api::bridge::direct_method(name).unwrap_or(name);
-                    run_blocking(state, admission, deadline, body, caller, params)
-                        .await
-                        .map_err(|kind| kind.to_rpc(reply_as))
+                    // #11215: a time-out reply names its wait or refusal.
+                    let (result, note) =
+                        run_blocking_noted(state, admission, deadline, body, caller, params).await;
+                    result.map_err(|kind| kind.to_rpc_noted(reply_as, note.as_ref()))
                 }
             })
         })
@@ -514,6 +544,8 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
 /// `server_timed_out_request_keeps_its_permit_until_its_call_returns`,
 /// `server_closed_admission_is_internal_and_never_runs_the_body`,
 /// `server_request_admitted_past_its_deadline_never_runs_the_body`.
+// #11215: the router calls `run_blocking_noted`; this form is the tests'.
+#[cfg(test)]
 pub(crate) async fn run_blocking(
     state: Arc<State>,
     admission: Arc<Semaphore>,
@@ -522,26 +554,45 @@ pub(crate) async fn run_blocking(
     caller: Caller,
     params: Value,
 ) -> Result<Value, ErrorKind> {
+    run_blocking_noted(state, admission, deadline, body, caller, params)
+        .await
+        .0
+}
+
+/// `run_blocking`, plus the backend time-out the body left on its thread
+/// (#11215); `None` when the body noted none or never ran to its end.
+/// Test: `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`.
+pub(crate) async fn run_blocking_noted(
+    state: Arc<State>,
+    admission: Arc<Semaphore>,
+    deadline: Instant,
+    body: MethodFn,
+    caller: Caller,
+    params: Value,
+) -> (Result<Value, ErrorKind>, Option<TimeoutNote>) {
     let until = tokio::time::Instant::from_std(deadline);
     // #9572: the wait for a permit counts against the request's deadline.
     let permit = match tokio::time::timeout_at(until, admission.acquire_owned()).await {
         Ok(Ok(permit)) => permit,
-        Ok(Err(_closed)) => return Err(ErrorKind::Internal),
-        Err(_elapsed) => return Err(ErrorKind::DeadlineExceeded),
+        Ok(Err(_closed)) => return (Err(ErrorKind::Internal), None),
+        Err(_elapsed) => return (Err(ErrorKind::DeadlineExceeded), None),
     };
     // #9572: `timeout_at` polls the acquire before its timer, so a free
     // permit is granted past the deadline; the body must not start then.
     // Returning drops the permit, which releases it.
     if Instant::now() >= deadline {
-        return Err(ErrorKind::DeadlineExceeded);
+        return (Err(ErrorKind::DeadlineExceeded), None);
     }
     let task = tokio::task::spawn_blocking(move || {
         // #9572: the permit is the thread's, released only when it finishes.
         let _permit = permit;
         // #9572: the body's CLI calls also watch the server's cancel flag.
         let cancel = Arc::clone(&state.cancel);
-        crate::store::deadline::within(deadline, || {
-            crate::store::deadline::cancellable(cancel, || body(&state, caller, params))
+        // #11215: the pool thread is reused, so the note starts empty.
+        crate::store::timeout_note::scoped(|| {
+            crate::store::deadline::within(deadline, || {
+                crate::store::deadline::cancellable(cancel, || body(&state, caller, params))
+            })
         })
     });
     // See #9572: past the deadline and its grace the request answers
@@ -549,8 +600,9 @@ pub(crate) async fn run_blocking(
     // running, and keeps its permit, until the backend call returns; the cap
     // bounds such threads.
     match tokio::time::timeout_at(until + BODY_GRACE, task).await {
-        Ok(joined) => joined.unwrap_or(Err(ErrorKind::Internal)),
-        Err(_elapsed) => Err(ErrorKind::DeadlineExceeded),
+        Ok(Ok((result, note))) => (result, note),
+        Ok(Err(_panicked)) => (Err(ErrorKind::Internal), None),
+        Err(_elapsed) => (Err(ErrorKind::DeadlineExceeded), None),
     }
 }
 
@@ -711,8 +763,8 @@ pub(crate) async fn serve_state(
             source: Box::new(source),
         })?;
     let idle_timeout = state.settings.idle_timeout;
-    let grants = Arc::clone(&state.grants);
-    let router = Arc::new(build_router(Arc::new(state)));
+    let state = Arc::new(state);
+    let router = Arc::new(build_router(Arc::clone(&state)));
     let mut shutdown = std::pin::pin!(shutdown);
     let exit = loop {
         let exit = serve_until_idle(
@@ -725,10 +777,14 @@ pub(crate) async fn serve_state(
         .await;
         // #9070: an idle window that ends with a live grant starts another;
         // the listener stays bound throughout.
-        if serving_ends(exit, &grants) {
+        // #10524: a live unlock grant defers the idle exit too.
+        let unlocked = || matches!(exit, UdsServeExit::Idle) && unlock::grant_keeps_serving(&state);
+        if serving_ends(exit, &state.grants) && !unlocked() {
             break exit;
         }
     };
+    // #10524: the session is over; a live unlock grant ends as `logout`.
+    unlock::end_session(&state);
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))

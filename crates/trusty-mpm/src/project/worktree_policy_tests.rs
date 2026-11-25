@@ -40,6 +40,8 @@ fn project(name: &str, repo_url: &str, worktree: Option<bool>) -> Project {
         commit_email: None,
         worktree,
         project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -68,27 +70,27 @@ fn worktree_enabled_in_defaults_true() {
 fn worktree_enabled_in_honors_false() {
     let opted_out = vec![project(
         "cto",
-        "https://github.com/bob-duetto/cto",
+        "https://github.com/acme-admin/cto",
         Some(false),
     )];
     assert!(
-        !worktree_enabled_in(&opted_out, "https://github.com/bob-duetto/cto"),
+        !worktree_enabled_in(&opted_out, "https://github.com/acme-admin/cto"),
         "worktree: false must disable isolation for the matched project"
     );
 
-    let unset = vec![project("cto", "https://github.com/bob-duetto/cto", None)];
+    let unset = vec![project("cto", "https://github.com/acme-admin/cto", None)];
     assert!(
-        worktree_enabled_in(&unset, "https://github.com/bob-duetto/cto"),
+        worktree_enabled_in(&unset, "https://github.com/acme-admin/cto"),
         "an absent `worktree` key must resolve to ON (unwrap_or(true))"
     );
 
     let opted_in = vec![project(
         "cto",
-        "https://github.com/bob-duetto/cto",
+        "https://github.com/acme-admin/cto",
         Some(true),
     )];
     assert!(
-        worktree_enabled_in(&opted_in, "https://github.com/bob-duetto/cto"),
+        worktree_enabled_in(&opted_in, "https://github.com/acme-admin/cto"),
         "worktree: true must resolve to ON"
     );
 }

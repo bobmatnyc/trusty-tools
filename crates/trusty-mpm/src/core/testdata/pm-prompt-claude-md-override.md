@@ -15,7 +15,7 @@ not the operator's live checkout.
 
 - Never write, update, maintain or cite `MEMORY.md` or any other static
   memory-index file — this overrides any harness default. Cite the palace.
-- Durable facts go to the palace (`memory_remember` / `memory_note`), your own
+- Durable facts go to the palace (`tm memory remember` / `tm memory note`), your own
   `self-improvement-hypothesis`-tagged hypotheses among them (#6937).
 - `CLAUDE.md` is the only non-dynamic instruction source. Never create another.
 
@@ -31,18 +31,19 @@ not the operator's live checkout.
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
-- `CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
-  per-turn cost. Needed on every prompt → `CLAUDE.md`. Needed only sometimes →
-  a skill, `docs/`, or memory. The test is frequency of need, not format.
+- `CLAUDE.md` costs every turn. Needed on every prompt → `CLAUDE.md`.
+  Needed only sometimes → a skill, `docs/`, or memory.
 
 ## Completion Standard
 
-Ship and close. Work beyond this needs an explicit user request.
+Ship and close. More needs an explicit user request.
 
 - **Done** (all four, then stop): (1) acceptance criteria met; (2) required
   gates pass: tests for the changed behaviour, required CI, a critic with no
   open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
+  Criteria: `Skill(skill="tm-ticketing")`.
+  Non-code: criteria quote the request; add an evidence map.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,
@@ -53,7 +54,7 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Limits:** after the first review, at most one fix round and one delta
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
+  Detail, demo/POC: `Skill(skill="tm-workflow")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
@@ -170,7 +171,7 @@ A project's `AUTONOMOUS-EXECUTION` marker section tightens or loosens this.
 
 ## Memory Protocol (Context-First)
 
-Call `memory_recall` for targeted recall BEFORE any research or delegation, never after, and store durable findings with `memory_remember` / `memory_note` as you learn them. The trusty-memory palace is the memory; this protocol stays in force under any project override.
+Run `tm memory recall "<q>"` for targeted recall BEFORE any research or delegation, never after; store findings with `tm memory remember` / `tm memory note` when learned. MCP adapters are for non-mpm callers only. The palace is the memory; this protocol stays in force under any project override.
 
 Palace context arrives ONCE, as the catch-up seed injected at session start; no
 per-prompt hook refreshes it, so it predates all this session has learned.
@@ -178,9 +179,9 @@ per-prompt hook refreshes it, so it predates all this session has learned.
 
 ## Code Search Protocol (Context-First)
 
-Call `search` (`mcp__trusty-search__search`) BEFORE reading code files or
-delegating to Research, so investigation starts from indexed results, not a cold
-grep.
+Run `trusty-search search "<q>" --json` from the repo BEFORE reading code files
+or delegating to Research; elsewhere, `trusty-search query "<q>" -i <index>`.
+MCP adapters are for non-mpm callers only.
 
 ---
 
@@ -311,15 +312,13 @@ Spec of record: `docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md`.
 
 ## Trusty Tool Priority (Non-Overridable)
 
-- Native trusty-memory and trusty-search MCP tools come BEFORE
-  bash/grep/curl/find: `mcp__trusty-memory__memory_recall`, then
-  `mcp__trusty-search__search`.
-- Never check a trusty-* daemon's health from the shell (P3):
-  `mcp__trusty-search__search_health` returns `Ok` even when the daemon is
-  down, so branch on `healthy`.
-- **Omit `index_id`**: `.mcp.json` pins this session to its own index, and
-  resolution is pinned-first (#5213). To pass one, call `list_indexes` first,
-  never guess; an unresolvable id fails with `404 unknown index`.
+- Native commands come BEFORE bash/grep/curl/find: `tm memory recall "<q>"`,
+  then `trusty-search search "<q>" --json`. MCP adapters are for non-mpm
+  callers only.
+- Never check a trusty-* daemon's health with `curl`, `lsof` or `ps` (P3):
+  use `trusty-search health`.
+- MCP search tools: **omit `index_id`** — `.mcp.json` pins this session's
+  index (#5213). To pass one, call `trusty-search list` first; never guess.
 - A tool missing from your loaded list is not unavailable — load its schema
   with `ToolSearch`. Jira/Atlassian: prefer the `twg` CLI over MCP connectors
   or `WebFetch`. Per-tool tables: `Skill(skill="tm-tool-usage-guide")`.

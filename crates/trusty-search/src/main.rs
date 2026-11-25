@@ -376,14 +376,23 @@ enum Commands {
     /// Examples:
     ///   trusty-search list
     ///   trusty-search list --json
+    ///   trusty-search list --details --json   # MCP `list_indexes` parity
     #[command(alias = "ls", display_order = 10)]
-    List,
+    List {
+        /// Return `{id, size_bytes, …}` rows instead of bare ids (#11625)
+        #[arg(long)]
+        details: bool,
+    },
 
     /// Search across all or named indexes  [alias: q]
     ///
     /// Examples:
     ///   trusty-search query "fn authenticate" --indexes "*"
     ///   trusty-search query "database pool" --indexes proj-a,proj-b
+    ///
+    /// `query "<text>" --indexes "*"` is the basic form of the MCP `search_all`
+    /// fan-out: both call `search.query.all`, but the CLI lacks `mode`,
+    /// `path_prefix` and `compact` (#11625).
     #[command(alias = "q", display_order = 11)]
     Query {
         /// Search query
@@ -401,6 +410,14 @@ enum Commands {
         #[arg(short, long)]
         full: bool,
     },
+
+    // #11625: `similar`, `call-chain`, `grep` and `typeahead`.
+    #[command(flatten)]
+    Verb(commands::search_verbs::SearchVerb),
+
+    // #11625: `lexical`, `semantic` and `kg` (the MCP lane tools).
+    #[command(flatten)]
+    Lane(commands::search_lane_verbs::LaneVerb),
 
     /// Check daemon liveness (alias for `status`)
     ///
@@ -464,8 +481,34 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search stop
+    #[cfg(not(target_os = "linux"))]
     #[command(display_order = 21)]
     Stop,
+
+    /// Stop the daemon serving this data dir's socket (#11085)
+    ///
+    /// Signals only a proven `trusty-search` peer; exits 1 when none runs or a
+    /// process survives SIGKILL.
+    ///
+    /// Examples:
+    ///   trusty-search stop
+    ///   trusty-search stop --data-dir /tmp/test-daemon
+    #[cfg(target_os = "linux")]
+    #[command(display_order = 21)]
+    Stop(commands::linux_lifecycle::LifecycleArgs),
+
+    /// Stop the daemon, confirm it stopped, then start the installed binary
+    ///
+    /// A daemon that is not running is started. Refuses while the
+    /// trusty-search.service systemd unit is active (#11085).
+    ///
+    /// Respawns as `start --foreground [--data-dir]`: `--auto-discover` and
+    /// `--no-auto-discover` are not carried over; `--device` and the fan-out
+    /// cap survive through daemon.env. A daemon started with `--socket` is
+    /// refused as unidentified by `stop` and `restart`.
+    #[cfg(target_os = "linux")]
+    #[command(display_order = 22)]
+    Restart(commands::linux_lifecycle::LifecycleArgs),
 
     /// Start the MCP server over stdio
     ///
@@ -969,7 +1012,7 @@ enum IntentArg {
 /// Embed-pool workers block on 30 s sidecar calls; with only num_cpus workers the
 /// axum accept loop starves under heavy CoreML/CUDA load → false "daemon down".
 /// What: `max(available_parallelism, 16)` workers. Blocking pool unchanged (512).
-/// Test: `worker_thread_count_at_least_16` in tests_state.rs.
+/// Test: `worker_thread_count_at_least_16` in state_tests.rs.
 fn main() {
     // #4764: panic payloads reach the log stream via the hook that
     // `trusty_common::init_tracing*` installs — see `trusty_common::panic_hook`.
@@ -1198,7 +1241,13 @@ async fn run() -> Result<()> {
             commands::reindex::handle_reindex(&cli.index, index_source, path, timeout).await?;
         }
 
-        Commands::List => commands::list::handle_list(cli.json).await?,
+        Commands::List { details } => commands::list::handle_list(cli.json, details).await?,
+
+        Commands::Verb(verb) => commands::search_verbs::handle(verb, &cli.index, cli.json).await?,
+
+        Commands::Lane(verb) => {
+            commands::search_lane_verbs::handle(verb, &cli.index, cli.json).await?
+        }
 
         Commands::Query {
             query,
@@ -1218,7 +1267,13 @@ async fn run() -> Result<()> {
         // #9214: the flags live in `commands::start::StartArgs`.
         Commands::Start { args } => commands::start::handle_start(args, cli.verbose).await?,
 
+        #[cfg(not(target_os = "linux"))]
         Commands::Stop => commands::stop::handle_stop().await?,
+        // #11085: Linux stop/restart on trusty_common::linux_lifecycle.
+        #[cfg(target_os = "linux")]
+        Commands::Stop(args) => commands::linux_lifecycle::stop(args).await?,
+        #[cfg(target_os = "linux")]
+        Commands::Restart(args) => commands::linux_lifecycle::restart(args).await?,
 
         Commands::Serve {
             with_http,

@@ -261,6 +261,13 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// #10747: press one named key in a SPECIFIC pane.
+    fn send_key_to_pane(&self, name: &str, pane_id: &str, key: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_key(&TmuxTarget::pane(name, pane_id), key)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     /// Send Ctrl-C to the session (overrides the no-op trait default; #1461).
     fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
         self.driver
@@ -300,6 +307,19 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         let lines = u32::try_from(lines).unwrap_or(u32::MAX);
         self.driver
             .capture(&TmuxTarget::pane(name, pane_id), Some(lines))
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// #8407: the pane's escaped capture, for the input-box classifier.
+    fn capture_pane_escaped(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let lines = u32::try_from(lines).unwrap_or(u32::MAX);
+        self.driver
+            .capture_escaped(&TmuxTarget::pane(name, pane_id), lines)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 

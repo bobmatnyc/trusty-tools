@@ -541,10 +541,17 @@ pub(crate) async fn session_context_pause_with(
     let (pruned_worktrees, skipped_dirty) = if prune_worktrees {
         let mgr = state.session_manager().await;
         let tt_config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-        let repos_root = crate::core::trusty_tools_config::workspace_root(&tt_config);
         // #7357: resolved here, at the MCP entry point.
         let adopted = crate::project::adopted_anchors_under(state.framework_root());
-        prune_for_pause(&mgr, &repos_root, &adopted, &project_path).await
+        // #11821: a broken install.toml skips the prune (df-D1t), as any
+        // other prune failure on this path does.
+        match crate::core::trusty_tools_config::try_workspace_root(&tt_config) {
+            Ok(repos_root) => prune_for_pause(&mgr, &repos_root, &adopted, &project_path).await,
+            Err(e) => {
+                tracing::warn!("session_context_pause: no worktree prune — {e}");
+                (Vec::new(), Vec::new())
+            }
+        }
     } else {
         (Vec::new(), Vec::new())
     };

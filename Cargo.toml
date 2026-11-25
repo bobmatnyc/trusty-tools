@@ -2,23 +2,14 @@
 # Glob picks up every crate directory under `crates/`. Add a new crate by
 # dropping its directory in `crates/` with its own Cargo.toml.
 #
-# The explicit `crates/trusty-agents/ui/src-tauri` entry (#3053) is the
-# trusty-agents Tauri desktop app. It lives NESTED inside the trusty-agents
-# member's directory rather than as a top-level `crates/*` dir, so the glob
-# above does not match it — it must be listed by full path. It used to declare
-# its own standalone `[workspace]` table (self-excluding from all
-# workspace-wide build/clippy/test); that has been removed so the crate is now
-# workspace-verified. It is deliberately NOT in `default-members` below (same
-# as the two other Tauri GUIs — bare builds skip it) and is excluded from the
-# headless CI jobs (WebKit2GTK-dependent); a dedicated `agents-ui` CI job
-# build- and lint-verifies it.
+# #11632: the nested `crates/trusty-agents/ui/src-tauri` member
+# (`trusty-agents-ui`) was deleted with the trusty-agents HTTP API.
 #
 # `tga`, `trusty-audit` and its Tauri shell `trusty-audit-ui` left this
 # workspace (owner ruling 2026-09-28); they live and publish in
 # bobmatnyc/trusty-git-analytics.
 members = [
     "crates/*",
-    "crates/trusty-agents/ui/src-tauri",
 ]
 resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
@@ -28,15 +19,19 @@ resolver = "2"
 # `workers/okf-extract` (#10745) holds the trusty-okf extraction worker. It
 # needs Rust 1.98 (xberg) and builds on its own rust-toolchain.toml, outside the
 # 1.94 workspace MSRV (ADR-0029). Guard: scripts/check_worker_dir_excluded.sh.
-exclude = ["workers/okf-extract"]
+# `workers/summarizer-convert` holds the trusty-summarizer converter worker; it
+# links xberg 1.3.10 (Rust 1.98) on its own rust-toolchain.toml, under the same
+# guard.
+# #10682: vendor/hnsw_rs is a patched dependency, not a member.
+exclude = ["workers/okf-extract", "workers/summarizer-convert", "vendor/hnsw_rs"]
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
 # except `trusty-code-gui` (#2983 — a Tauri desktop GUI needing the pnpm/Svelte
 # UI toolchain).
 #
 # Why: CI already runs the workspace-wide gates with
-# `--workspace --exclude trusty-code-gui --exclude trusty-agents-ui`
-# (`.github/workflows/ci.yml`) because these GUIs need the pnpm/Svelte UI
+# `--workspace --exclude trusty-code-gui`
+# (`.github/workflows/ci.yml`) because this GUI needs the pnpm/Svelte UI
 # toolchain — a bare `cargo build`/`test`/`check` had no equivalent exclusion,
 # so every agent worktree (which routinely runs the bare form per this
 # repo's own documented workflow) silently rebuilt the GUI too. Seven stray
@@ -47,13 +42,7 @@ exclude = ["workers/okf-extract"]
 # and keep working exactly as before (`cargo build --workspace`,
 # `cargo check -p trusty-code-gui`, etc.), so
 # this only changes what the bare, no-flag form does — it does not remove
-# the GUI crate from the workspace. `trusty-agents-ui` needs the same
-# `--exclude` on `--workspace` invocations for a different reason: its
-# `tauri::generate_context!()` reads the same `crates/trusty-agents/ui/dist/`
-# that `trusty-agents`' own build.rs populates, so a `--workspace` run that
-# happens to check/build `trusty-agents-ui` before that build script has run
-# panics on the missing path — a real cargo build-order race, not merely a
-# missing-toolchain skip (#3053).
+# the GUI crate from the workspace.
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
@@ -62,16 +51,16 @@ exclude = ["workers/okf-extract"]
 # a new crate here is a mildly stale default, not a build break).
 default-members = [
     "crates/tc-services",
-    "crates/trusty-agents",
     "crates/trusty-agents-common",
     "crates/trusty-analyze",
+    "crates/trusty-assistants",
     "crates/trusty-channels",
     "crates/trusty-code",
     "crates/trusty-code-tui",
     "crates/trusty-common",
     "crates/trusty-connectors",
     "crates/trusty-console",
-    "crates/trusty-cto-db",
+    "crates/trusty-delegation-guard",
     "crates/trusty-embedderd",
     "crates/trusty-embedderd-py",
     "crates/trusty-events",
@@ -86,6 +75,7 @@ default-members = [
     "crates/trusty-review",
     "crates/trusty-search",
     "crates/trusty-sld-lint",
+    "crates/trusty-summarizer",
 ]
 
 [workspace.package]
@@ -107,7 +97,7 @@ rust-version = "1.94"
 # NOTE: workspace-level license is MIT. All crates inherit this via `license.workspace = true`.
 license = "MIT"
 repository = "https://github.com/bobmatnyc/trusty-tools"
-authors = ["Bob Matsuoka <bob@matsuoka.com>"]
+authors = ["bobmatnyc"]
 
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
@@ -115,22 +105,26 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # First published to crates.io at version 0.1.0.
 trusty-code = { path = "crates/trusty-code", version = "0.8" }
 # trusty-code-tui: engine-agnostic terminal-UI seam (`TuiEngine` trait + `ReplEvent`)
-# shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
+# behind trusty-code's `tcode tui`; the tagent REPL that also used it was cut in
+# #11632 (DOC-50,
 # epic #3411). Published as of #4713 so `trusty-code` can publish again; 0.1.0
 # is the first upload. Bumped to 0.2 by #7940's delegation seam (a required
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9.4" }
-trusty-common = { path = "crates/trusty-common", version = "0.69" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.11.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.70.8" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
-trusty-secrets = { path = "crates/trusty-secrets", version = "0.4.0", default-features = false }
+trusty-secrets = { path = "crates/trusty-secrets", version = "0.9", default-features = false }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
+# #11692: peer, codesign, launchd, private and audit-file helpers shared by
+# trusty-browser and trusty-computer.
+trusty-daemon-common = { path = "crates/trusty-daemon-common", version = "0.1" }
 # #8454 S2c: the deny-by-default channel route policy; trusty-mpm reads it
 # for `tm doctor`.
-trusty-channels = { path = "crates/trusty-channels", version = "0.2.0" }
+trusty-channels = { path = "crates/trusty-channels", version = "0.3.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -164,7 +158,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.40", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.42", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -180,7 +174,7 @@ trusty-console = { path = "crates/trusty-console", version = "0.14" }
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-architect: the Architect's poller library behind `tm architect` (#9171, #9822).
 # A leaf: it never depends on trusty-mpm or on any crate that does.
-trusty-architect = { path = "crates/trusty-architect", version = "0.2" }
+trusty-architect = { path = "crates/trusty-architect", version = "0.4" }
 # trusty-installer: the pinned, fail-closed prebuilt download entry point
 # (#5491, #5495) is also consumed as a library by trusty-audit, which now
 # builds from bobmatnyc/trusty-git-analytics against the crates.io release.
@@ -234,6 +228,9 @@ parking_lot = "0.12"
 dirs = "5"
 colored = "2"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# #8878 PR2b-1b (D72): passkey verifier for presence devices; ES256 only.
+webauthn-rs = "=0.6.2"
+webauthn-authenticator-rs = { version = "=0.6.2", default-features = false, features = ["softtoken"] }
 futures = "0.3"
 futures-util = "0.3"
 axum = { version = "0.8", features = ["macros"] }
@@ -500,6 +497,8 @@ scip = "0.7"
 protobuf = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 hmac = "0.12"
+# AES-256-GCM for trusty-browser vault sealing (Python `cryptography` AESGCM parity).
+aes-gcm = "0.11"
 hex = "0.4"
 ort = "2.0.0-rc.10"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
@@ -513,7 +512,9 @@ candle-nn = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
 # #6067: no `tokio` feature; both callers use only `api::sync`, and `tokio`
 # pulls reqwest 0.11 -> h2 0.3.27 (RUSTSEC-2026-0258).
-hf-hub = { version = "0.3", default-features = false, features = ["online"] }
+# #10866: 0.5 follows HuggingFace's relative 307 `location`; 0.3.2's sync
+# client passed it to ureq unresolved. 0.5 is already in the lock via fastembed.
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 http-body-util = "0.1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
@@ -526,6 +527,8 @@ tree-sitter-ruby = "0.23"
 tree-sitter-php = "0.23"
 tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
+# #11431: the minimal pm-guard parses shell with a real grammar (MIT).
+tree-sitter-bash = "0.25"
 tree-sitter-c-sharp = "=0.23.1"
 tree-sitter-kotlin-ng = "1.1"
 tree-sitter-swift = "=0.7.0"
@@ -569,6 +572,9 @@ quick-xml = "0.41"
 trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
 trusty-console = { path = "crates/trusty-console" }
+# #10682: hnsw_rs 0.3.4 with the reverse-update lock-order fix; see
+# vendor/hnsw_rs/README.trusty-tools.md. Drop once upstream ships the fix.
+hnsw_rs = { path = "vendor/hnsw_rs" }
 
 # Owner ruling 2026-09-27: workspace crates keep file:line tables so panic and
 # test-failure backtraces still resolve; dependencies carry no debuginfo. The

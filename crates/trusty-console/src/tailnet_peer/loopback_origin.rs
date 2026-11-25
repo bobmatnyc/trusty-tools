@@ -61,7 +61,7 @@ struct LoopbackGuard {
 /// Refuse with 403 any request [`check_loopback_target`] does not admit.
 async fn guard_loopback_target(
     State(guard): State<LoopbackGuard>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let checked = check_loopback_target(
@@ -85,6 +85,8 @@ async fn guard_loopback_target(
         )
             .into_response();
     }
+    // #11748: mark the request as gated for the assistants routes.
+    req.extensions_mut().insert(super::AdmittedBy::Loopback);
     next.run(req).await
 }
 

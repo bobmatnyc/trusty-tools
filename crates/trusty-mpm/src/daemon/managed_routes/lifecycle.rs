@@ -179,10 +179,13 @@ pub struct SpawnParams {
 /// `Err` before any side effect); (1) provisions an isolated workspace; (2)
 /// creates the tmux session rooted at that workspace; (3) spawns the selected
 /// runtime in the pane (a spawn failure marks the record errored but is not
-/// fatal — the record still exists). Returns the final [`SessionRecord`].
+/// fatal — the record still exists); (4) clears the project's decommissioned
+/// state (#10988), returning `Err` when that fails. Returns the final
+/// [`SessionRecord`].
 /// Test: `crate::daemon::mcp_session::tests::session_new_invalid_runtime_errors`
 /// covers the early runtime-rejection path; the HTTP spawn tests cover the
-/// provision/create/spawn path.
+/// provision/create/spawn path; `a_launch_on_main_spawn_reactivates_a_decommissioned_project`
+/// and `a_spawn_reports_a_failed_reactivation` cover step 4.
 ///
 /// #2605: the session id is now a CALLER-SUPPLIED parameter rather than minted
 /// internally, so the asynchronous-spawn path (`background: true`) can learn it
@@ -295,6 +298,28 @@ pub async fn spawn_managed(
     // uses, so `tm session new --task` / `tm ticket` start working immediately
     // instead of sitting idle at an empty prompt.
     spawn_task_injection(state.clone(), record.clone(), inject_flag);
+
+    // #10988: every spawn path (launch-on-main, worktree, local-only) returns
+    // through here, so this is the one place a new session reactivates its
+    // decommissioned project. A failure is the caller's error: the session
+    // runs, but the project still reads decommissioned.
+    let registry = state.project_registry().await;
+    registry
+        .reactivate_for_session(&record)
+        .await
+        .map_err(|e| {
+            format!(
+                "session {} ({}) is running, but its project could not be reactivated and \
+             still reads decommissioned (#10988): {e}",
+                record.id, record.tmux_name
+            )
+        })?;
+    // #10989: undo a decommission park of this project's index; a failure is named.
+    state
+        .session_manager()
+        .await
+        .restore_parked_index(&registry, &record)
+        .await?;
 
     Ok(record)
 }
@@ -460,7 +485,10 @@ async fn spawn_managed_routed(
                     &session_id,
                     &params,
                     runtime,
-                    &placement,
+                    super::launch_on_main::Dirs {
+                        placement: &placement,
+                        launch: local_path,
+                    },
                     &SessionSource::github(&gh.owner, &gh.repo),
                 )
                 .await;
@@ -807,7 +835,8 @@ pub(super) async fn spawn_managed_inproject(
     // must land in `<worktree>/.claude/{agents,skills}` (where Claude Code's
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
-    prepare_inproject_session(&fw, session_id, &worktree, source.repo_url.as_deref())?;
+    let repo_url = source.repo_url.as_deref();
+    prepare_inproject_session(&fw, session_id, &worktree, &worktree, repo_url)?;
 
     // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
@@ -1085,6 +1114,11 @@ pub async fn resume_managed(
         .await
         .map_err(ResumeManagedError::from)?;
     mgr.note_operator_resume(id).await;
+    // #10989 F3: unpark a decommission park before the launch; a failure is
+    // this resume's error once the runtime is up, as on the spawn path.
+    let restored = mgr
+        .restore_parked_index(&*state.project_registry().await, &record)
+        .await;
 
     let workspace = record
         .workspace_path
@@ -1199,6 +1233,7 @@ pub async fn resume_managed(
         // an error.
         return Err(ResumeManagedError::Other(msg));
     }
+    restored.map_err(ResumeManagedError::Other)?;
 
     Ok(mgr.get(id).await.unwrap_or(record))
 }

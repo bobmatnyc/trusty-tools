@@ -47,6 +47,7 @@ use trusty_agents_common::compress::tool_output::is_source_file_read;
 // #7477: the worktree resolver the `EnterWorktree` guard already uses.
 use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::worktree_root;
+use trusty_mpm::core::savings_opportunity::SkipReason;
 
 /// Day-one orchestrator-command exclusion list.
 ///
@@ -116,7 +117,17 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// already fails `has_filter_for`, but `cat -n foo.rs` derives `"cat -n"` and
 /// reaches the file-read filter, so the flagged spelling bypass-permissions
 /// mode uses paid a compress spawn for its own bytes back.
+/// One chained form is accepted (D60): a single leading `cd <dir> && <cmd>`,
+/// in the grammar [`super::hook_rewrite_cd::split_leading_cd`] names. Every
+/// guard above runs against `<cmd>` alone, a `<cmd>` that is itself a `cd` is
+/// refused, and the result keeps the prefix verbatim in front:
+/// `cd <dir> && { <cmd>; <exit sentinel>; } | tm compress --tool "…"`.
+/// #10973: a `<cmd>` that chains with `&&`/`;` or ends in `| <reader>` is
+/// judged segment by segment in [`super::hook_rewrite_chain`].
 /// Test: `rewrite_appends_compress_pipe_for_plain_command`,
+/// `rewrite_accepts_one_leading_cd_before_a_covered_command`,
+/// `rewrite_refuses_every_other_cd_chain`,
+/// `a_cd_rewrite_runs_like_the_original_in_a_real_shell`,
 /// `rewrite_skips_a_flagged_source_read`,
 /// `rewrite_appends_compress_pipe_with_subcommand_tool_name`,
 /// `rewrite_skips_orchestrator_commands`, `rewrite_skips_piped_commands`,
@@ -125,38 +136,74 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// `rewrite_skips_tools_with_no_compression_filter`,
 /// `rewrite_still_wraps_tools_with_a_compression_filter`.
 pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<String> {
+    compression_rewrite_decision(command).ok()
+}
+
+/// [`rewrite_bash_command_for_compression`], with the guard that refused named.
+///
+/// Why (#10973): the opportunity row's `skip_reason` must come from the same
+/// decision as the rewrite, D60's `cd <dir> && ` split included.
+/// What: `Ok(rewrite)` exactly when [`rewrite_bash_command_for_compression`] is
+/// `Some(rewrite)`. A `cd` after the one leading `cd <dir> && ` is `Chained`;
+/// any other refusal is [`compressible_tool_decision`]'s for the inner command.
+/// Test: `the_skip_reason_replays_the_rewrite_decision`,
+/// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
+pub(crate) fn compression_rewrite_decision(command: &str) -> Result<String, SkipReason> {
     let trimmed = command.trim();
-    let tool = compressible_tool_name(trimmed)?;
+    // D60 (Refs #10973): one leading `cd <dir> && ` stays outside the group, so
+    // a failing `cd` short-circuits and the shell keeps the `cd`'s cwd.
+    let (cd_prefix, inner) =
+        super::hook_rewrite_cd::split_leading_cd(trimmed).unwrap_or(("", trimmed));
+    if !cd_prefix.is_empty() && first_command_token(inner).as_deref() == Some("cd") {
+        return Err(SkipReason::Chained);
+    }
+    let tool = match compressible_tool_decision(inner) {
+        // #10973: a chain is judged segment by segment, never as a raw string.
+        // #11507: each step keeps its own filter and the chain its own status.
+        Err(SkipReason::Chained) => {
+            return super::hook_rewrite_chain::chain_rewrite(cd_prefix, inner);
+        }
+        other => other?,
+    };
     // #7384: the brace group carries the wrapped command's exit status into the
     // filter, which a pipeline otherwise discards.
-    Some(format!(
-        "{} | tm compress --tool \"{tool}\"",
-        crate::commands::compress::wrap_command_reporting_exit(trimmed)
+    Ok(format!(
+        "{cd_prefix}{} | tm compress --tool \"{tool}\"",
+        crate::commands::compress::wrap_command_reporting_exit(inner)
     ))
 }
 
-/// The `tm compress --tool` value for `trimmed`, when every rewrite guard passes.
+/// The `tm compress --tool` value for `trimmed`, or the guard that refused it.
 ///
 /// Why (#10973): the brace-group rewrite above and the isolation-worktree
 /// rewrite in `hook_rewrite_isolated` must refuse exactly the same commands, so
-/// the guards live in one place.
-/// What: `None` for every case [`rewrite_bash_command_for_compression`]
-/// documents; otherwise the [`effective_tool_name`] a filter covers.
-/// Test: every `rewrite_*` case reaches this.
-pub(crate) fn compressible_tool_name(trimmed: &str) -> Option<String> {
+/// the guards live in one place; naming the refusing guard gives the
+/// opportunity ledger its reason from the decision itself. D60's
+/// `cd <dir> && ` split runs before this, in the brace rewrite only, so the
+/// isolated shape still refuses that form.
+/// What: `Err` with the first refusing guard, in the order below, for every
+/// case [`rewrite_bash_command_for_compression`] documents; otherwise
+/// `Ok` with the [`effective_tool_name`] a filter covers.
+/// Test: every `rewrite_*` case reaches this; `a_bash_row_names_each_guard_refusal`,
+/// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
+pub(crate) fn compressible_tool_decision(trimmed: &str) -> Result<String, SkipReason> {
     if trimmed.is_empty() {
-        return None;
+        return Err(SkipReason::EmptyCommand);
     }
     if is_orchestrator_command(trimmed) {
-        return None;
+        // #10973: an unresolvable program word is refused by the same guard.
+        return Err(match first_command_token(trimmed) {
+            Some(_) => SkipReason::Orchestrator,
+            None => SkipReason::UnresolvedProgram,
+        });
     }
     if has_unsafe_pipe_composition(trimmed) {
-        return None;
+        return Err(SkipReason::Chained);
     }
     // #7384: a comment or a trailing `\` would swallow or absorb the brace
     // group's own `printf`, so such a command is never wrapped.
     if cannot_be_brace_wrapped(trimmed) {
-        return None;
+        return Err(SkipReason::Unwrappable);
     }
     // #7120: asked of the WHOLE command, because `effective_tool_name` keeps
     // only the first two tokens and a flag displaces the path out of them —
@@ -164,18 +211,18 @@ pub(crate) fn compressible_tool_name(trimmed: &str) -> Option<String> {
     // the file-read filter the #6986 passthrough exists to keep source away
     // from.
     if is_source_file_read(trimmed) {
-        return None;
+        return Err(SkipReason::SourceRead);
     }
     let tool = effective_tool_name(trimmed);
     if !is_safe_tool_name(&tool) {
-        return None;
+        return Err(SkipReason::UnsafeToolName);
     }
     // #6566: no filter covers this tool name, so the wrap would spawn a
     // process that returns its input unchanged.
     if !has_filter_for(&tool) {
-        return None;
+        return Err(SkipReason::NoFilter);
     }
-    Some(tool)
+    Ok(tool)
 }
 
 /// [`rewrite_bash_command_for_compression`], unless the call runs in an
@@ -524,6 +571,7 @@ fn has_unsafe_pipe_composition(command: &str) -> bool {
         || command.contains(';')
         || command.contains('>')
         || command.contains('<')
+        || command.contains('\n') // #10973 critic: a line break is a second command
 }
 
 /// Whether wrapping `command` in a brace group would change what runs.
@@ -730,15 +778,6 @@ mod tests {
         }
     }
 
-    /// Whether `shell` can be spawned on this host.
-    fn shell_is_available(shell: &str) -> bool {
-        std::process::Command::new(shell)
-            .arg("-c")
-            .arg("exit 0")
-            .output()
-            .is_ok()
-    }
-
     /// Run `script` under `shell`, returning its exit code, stdout and stderr.
     fn run_script(shell: &str, script: &str) -> (Option<i32>, String, String) {
         let out = std::process::Command::new(shell)
@@ -783,14 +822,8 @@ mod tests {
             (format!("{plain} \\"), "hi there"),
         ];
 
-        for shell in ["sh", "bash", "zsh"] {
-            if !shell_is_available(shell) {
-                // Announce the skip: a silently-skipped shell reads as a pass.
-                eprintln!(
-                    "SKIP every_rewrite_this_module_emits_runs_correctly_in_a_real_shell: no {shell} on this host"
-                );
-                continue;
-            }
+        // See #11658: a missing zsh fails under CI instead of skipping.
+        for shell in super::super::hook_rewrite_shells::available_shells() {
             for (command, expected) in &cases {
                 let Some(rewritten) = rewrite_bash_command_for_compression(command) else {
                     // The no-op arm: forwarded unmodified, so it must still
@@ -860,11 +893,16 @@ mod tests {
 
     #[test]
     fn rewrite_skips_chained_commands() {
+        // #10973: `cargo build && cargo test` is now compressed
+        // (`a_safe_chain_is_compressed`); `||` and a `cd` segment stay refused.
         assert_eq!(
-            rewrite_bash_command_for_compression("cargo build && cargo test"),
+            rewrite_bash_command_for_compression("cargo build || cargo test"),
             None
         );
-        assert_eq!(rewrite_bash_command_for_compression("cd /tmp; ls"), None);
+        assert_eq!(
+            rewrite_bash_command_for_compression("cd /tmp; cd a; ls"),
+            None
+        );
     }
 
     #[test]

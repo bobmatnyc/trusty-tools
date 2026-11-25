@@ -26,7 +26,11 @@ fn cli_parses_hook_divert_check() {
             pm_guard: false,
             divert_check: true,
             prompt_feedback: false,
-            egress_guard: false
+            egress_guard: false,
+            standing_rules: false,
+            turn_task: false,
+            pm_guard_shadow: false,
+            completion_evidence: false
         }
     ));
 }
@@ -70,4 +74,30 @@ fn cli_parses_divert_bulk_read() {
         Cli::try_parse_from(["trusty-mpm", "divert", "bulk-read"]).is_err(),
         "bulk-read must require at least one file"
     );
+}
+
+/// #11033: `tm savings status` parses with its three flags and defaults.
+#[test]
+fn cli_parses_savings_status() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "savings",
+        "status",
+        "--by",
+        "subagent",
+        "--days",
+        "3",
+        "--json",
+    ])
+    .unwrap();
+    match cli.command.expect("command") {
+        Command::Savings {
+            action: crate::cli::SavingsAction::Status { by, days, json },
+        } => {
+            assert_eq!(by, crate::cli::SavingsGroupArg::Subagent);
+            assert_eq!(days, 3);
+            assert!(json);
+        }
+        other => panic!("expected Savings, got {other:?}"),
+    }
 }

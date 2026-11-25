@@ -73,13 +73,15 @@ fn keep_copy(path: &Path, now: f64) -> io::Result<String> {
     Ok(name.to_string_lossy().into_owned())
 }
 
-/// Reads `config.state()`, logging into `log` what it found.
+/// Reads `config.state_read(dry_run)`, logging into `log` what it found.
 fn read_state(config: &Config, dry_run: bool, now: f64, log: &mut Vec<String>) -> Read {
-    let path = config.state();
+    let path = config.state_read(dry_run);
     match load_state(&path) {
         (state, None) => Some(Box::new(state)),
         (_, Some(e @ StateError::Corrupt { .. })) => {
-            if dry_run {
+            // See #11616: a dry run with its own state file saves it, so it
+            // keeps a copy first exactly as the live path does.
+            if dry_run && config.dry_run_state.is_none() {
                 log.push(format!("state CORRUPT {e}; dry run: starting empty"));
                 return Some(Box::default());
             }

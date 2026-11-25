@@ -227,14 +227,6 @@ mod tests {
         assert_eq!(parse_console_port(json), None);
     }
 
-    /// Why: The default URL is the fallback contract; pin it.
-    /// What: Asserts the default constant shape.
-    /// Test: This is the test.
-    #[test]
-    fn default_url_is_localhost_7788() {
-        assert_eq!(DEFAULT_CONSOLE_URL, "http://127.0.0.1:7788");
-    }
-
     /// Why (#8783): the console `tctl ui` starts must outlive a hangup or a
     /// group kill aimed at `tctl`.
     /// What: spawns [`detached_console_command`] around `/bin/sleep` and

@@ -26,7 +26,7 @@
 #
 # LINUX BINARY PORTABILITY (issue #2037):
 #   Historically the Linux x86_64 leg ran a bare `cargo build` on the
-#   `ubuntu-latest` runner (Ubuntu 24.04, glibc 2.39), so every released
+#   `ubuntu-24.04` runner (pinned, #11061; glibc 2.39), so every released
 #   binary carried a `GLIBC_2.39` floor and failed to even execute on
 #   Debian 12 (2.36), Ubuntu 22.04 LTS (2.35), RHEL 9 / AL2023 (2.34), etc.
 #   There was also no Linux arm64 build at all.
@@ -182,7 +182,7 @@ env:
 jobs:
   setup:
     name: Parse tag / resolve crate config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       crate:    ${{ steps.parse.outputs.crate }}
       # Why (#1128): the ORIGINAL tag prefix before alias canonicalization. Used
@@ -209,7 +209,7 @@ jobs:
       # `config` step — i.e. all library-only crates. Examples: trusty-common
       # (shared lib), trusty-embedderd (a sidecar binary that ships INSIDE a
       # host crate, single-owner-per-binary), trusty-progress,
-      # the internal trusty-agents* libs, etc. Previously a library-only tag
+      # the internal trusty-assistants / trusty-agents-common libs, etc. Previously a library-only tag
       # (e.g. trusty-common-v0.15.3) errored RED; it now green-skips. (trusty-console
       # is NOT bundled — it has its own standalone release job.)
       bundled:  ${{ steps.config.outputs.bundled }}
@@ -562,8 +562,8 @@ jobs:
             echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-embedderd, trusty-progress,"
-            echo "  trusty-agents*, tc-services,"
-            echo "  trusty-cto-db, trusty-gworkspace, and any future library crate."
+            echo "  trusty-assistants, trusty-agents-common, tc-services,"
+            echo "  trusty-gworkspace, and any future library crate."
             echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
             echo "above (see the 'TO ADD A NEW CRATE' note) — otherwise this skip is correct."
             echo "bundled=true" >> "$GITHUB_OUTPUT"
@@ -596,7 +596,7 @@ jobs:
       # linux-zigbuild variants (issue #2037 — portable glibc 2.17 baseline,
       # built via `cargo zigbuild --target <triple>.2.17`; see the file-header
       # comment for the full rationale):
-      #   { runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
+      #   { runner: ubuntu-24.04,    target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
       #   { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, variant: linux-zigbuild, best_effort: false }
       #   (2533: aarch64 builds NATIVELY on an arm64 runner — it is no longer
       #    cross-compiled and no longer best-effort; for ORT-bundling crates it
@@ -604,7 +604,7 @@ jobs:
       #    since bundled-ort has no aarch64 build-time binary to download)
       #
       # AL2023 variant (crates with AL2023_VARIANT=true: trusty-search, trusty-analyze):
-      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: al2023   }
+      #   { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu,  variant: al2023   }
       #   (built inside an amazonlinux:2023 container; named …-x86_64-linux-al2023)
       #
       # `best_effort: true` legs run with `continue-on-error` at the job level —
@@ -663,13 +663,13 @@ jobs:
           ZIG_GLIBC = "2.17"
 
           # 2533: each Linux leg builds on a runner of its OWN architecture —
-          # amd64 targets on `ubuntu-latest`, arm64 targets on
+          # amd64 targets on `ubuntu-24.04`, arm64 targets on
           # `ubuntu-24.04-arm` — so HOST == TARGET and pkg-config-dependent
           # `-sys` build scripts (openssl-sys) work. `host_multiarch` is the
           # runner's Debian multiarch directory name, consumed by HOST_CFLAGS
           # in the build step; it tracks the RUNNER's arch, not the target's.
           LINUX_RUNNERS = {
-              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",   "x86_64-linux-gnu"),
+              "x86_64-unknown-linux-gnu":  ("ubuntu-24.04",   "x86_64-linux-gnu"),
               "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-gnu"),
           }
 
@@ -848,7 +848,7 @@ jobs:
           # from this very matrix, so a missing arm64 AL2023 asset produces a
           # `::warning` annotation and a `DROPPED` row automatically.
           AL2023_RUNNERS = {
-              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",    "x86_64-linux-al2023"),
+              "x86_64-unknown-linux-gnu":  ("ubuntu-24.04",    "x86_64-linux-al2023"),
               "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-al2023"),
           }
 
@@ -926,7 +926,7 @@ jobs:
   preflight:
     name: Verify tag ancestry + resolve publish identity (issue #3366)
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       pkg_name:     ${{ steps.pkg.outputs.pkg_name }}
@@ -1018,7 +1018,7 @@ jobs:
   # Produces: one .tar.gz + one .tar.gz.sha256 per matrix entry.
   #
   # AL2023 entries run inside an amazonlinux:2023 container (glibc 2.34).
-  # linux-zigbuild entries cross/native-compile on the ubuntu-latest runner via
+  # linux-zigbuild entries cross/native-compile on the ubuntu-24.04 runner via
   # `cargo zigbuild` against a pinned old-glibc baseline (issue #2037; see the
   # file-header comment). Standard (macOS) entries run natively, no linker
   # tricks needed.
@@ -1075,7 +1075,7 @@ jobs:
         run: |
           dnf install -y --allowerasing \
             gcc gcc-c++ make openssl-devel perl \
-            curl tar gzip pkg-config findutils binutils file
+            curl tar gzip pkg-config findutils binutils file unzip
 
       # ── Linux runners (linux-zigbuild): install system deps ─────────────────
       # Same base toolchain as before; zigbuild only replaces the final linker,
@@ -1085,13 +1085,12 @@ jobs:
         # `standard` here means an ORT-bundling-crate native Linux leg (see
         # native_linux_entry in the matrix-generation step); the OTHER
         # `standard` entry is macOS, which the runner check guards out.
-        # 2533: keyed off the runner PREFIX, not the literal `ubuntu-latest`,
+        # 2533: keyed off the runner PREFIX, not the literal `ubuntu-24.04`,
         # so the arm64 runner (`ubuntu-24.04-arm`) is covered too — matching on
         # the exact string silently skipped apt on the whole arm64 leg.
         if: matrix.container == '' && startsWith(matrix.runner, 'ubuntu')
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev binutils curl file
 
       # ── zig + cargo-zigbuild (issue #2037) ──────────────────────────────────
@@ -1184,31 +1183,14 @@ jobs:
           # hardcoded `linux-x64` while the only AL2023 leg was x86_64; the new
           # aarch64 AL2023 leg needs `linux-aarch64`, and a wrong-arch download
           # would fail late and confusingly (ORT_DYLIB_PATH set to a library the
-          # loader rejects) rather than here. Upstream publishes both under the
-          # same v${ORT_VERSION} tag.
+          # loader rejects) rather than here. The nupkg carries both.
           case "${TARGET}" in
             aarch64-*) ORT_ARCH="aarch64" ;;
             *)         ORT_ARCH="x64" ;;
           esac
-          ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
-          ORT_TARBALL="onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}.tgz"
-          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
-
-          echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
-          curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${ORT_TARBALL}" "${ORT_URL}"
-          mkdir -p "${ORT_DIR}"
-          tar -xzf "/tmp/${ORT_TARBALL}" -C "${ORT_DIR}" --strip-components=1
-          rm "/tmp/${ORT_TARBALL}"
-
-          DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so.${ORT_VERSION}" | head -1)
-          if [[ -z "${DYLIB_PATH}" ]]; then
-            DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so" | head -1)
-          fi
-          if [[ -z "${DYLIB_PATH}" ]]; then
-            echo "ERROR: libonnxruntime.so not found after extraction."
-            find "${ORT_DIR}" -name "*.so*" || true
-            exit 1
-          fi
+          # #11458: GitHub release assets 404; the NuGet nupkg (linux-x64 and
+          # linux-arm64 runtimes in one package) is the checksum-pinned source.
+          DYLIB_PATH=$(./scripts/fetch_ort_nupkg.sh "${ORT_VERSION}" "${ORT_ARCH}" "/opt/onnxruntime-${ORT_VERSION}")
 
           echo "ORT_DYLIB_PATH=${DYLIB_PATH}" >> "$GITHUB_ENV"
           echo "Found: ${DYLIB_PATH}"
@@ -1426,8 +1408,8 @@ jobs:
           LOAD_DYNAMIC_BUILD_FEATURES="${{ matrix.cargo_features }}"
           if [[ "${LOAD_DYNAMIC_BUILD_FEATURES}" == *"load-dynamic"* ]]; then
             case "${TARGET}" in
-              aarch64-*) ORT_ARCH="aarch64" ;;
-              *)         ORT_ARCH="x64" ;;
+              aarch64-*) ORT_ARCH="aarch64"; ORT_NUPKG_RID="arm64" ;;
+              *)         ORT_ARCH="x64"; ORT_NUPKG_RID="x64" ;;
             esac
             {
               printf 'Linux load-dynamic ORT build (portable across glibc versions)\n'
@@ -1445,12 +1427,14 @@ jobs:
               # the version comes from the job-level ORT_VERSION.
               printf 'Compatible ORT build: 1.24.x linux-%s (%s tested; needs glibc >= 2.27)\n' "${ORT_ARCH}" "${ORT_VERSION}"
               printf "Older runtimes fail at startup with: expected version >= '1.24.x'\n"
-              printf '  https://github.com/microsoft/onnxruntime/releases/tag/v%s\n' "${ORT_VERSION}"
+              printf '  https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/%s\n' "${ORT_VERSION}"
               printf '\n'
               printf 'Example install:\n'
-              printf '  curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v%s/onnxruntime-linux-%s-%s.tgz \\\n' "${ORT_VERSION}" "${ORT_ARCH}" "${ORT_VERSION}"
-              printf '    | tar xz -C /opt\n'
-              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-linux-%s-%s/lib/libonnxruntime.so.%s\n' "${ORT_ARCH}" "${ORT_VERSION}" "${ORT_VERSION}"
+              # #11458: GitHub release assets 404; the NuGet nupkg is a zip.
+              printf '  curl -fsSL -o ort.nupkg https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/%s/microsoft.ml.onnxruntime.%s.nupkg\n' "${ORT_VERSION}" "${ORT_VERSION}"
+              printf '  mkdir -p /opt/onnxruntime-%s/lib\n' "${ORT_VERSION}"
+              printf '  unzip -j ort.nupkg "runtimes/linux-%s/native/libonnxruntime.so*" -d /opt/onnxruntime-%s/lib\n' "${ORT_NUPKG_RID}" "${ORT_VERSION}"
+              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-%s/lib/libonnxruntime.so\n' "${ORT_VERSION}"
             } > "${STAGING_DIR}/ORT-RUNTIME-NOTE.txt"
           fi
 
@@ -1524,7 +1508,7 @@ jobs:
       !cancelled() &&
       needs.setup.outputs.bundled != 'true' &&
       needs.build.result != 'skipped'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # continue-on-error: with zero artifacts (every leg failed) the download
@@ -1669,7 +1653,7 @@ jobs:
     # (`publish = false`, e.g. trusty-agents-common's INTERNAL sibling crates,
     # the Tauri GUIs) — there is nothing to dry-run.
     if: needs.preflight.outputs.publishable == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -1700,7 +1684,7 @@ jobs:
     # available here — but see the "ASSET-COMPLETENESS GATE" note below for why
     # it is deliberately NOT gated on in this `if:`.
     needs: [setup, build, release-completeness-audit]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # TOLERATED-FAILURE BEHAVIOR (issue #3540):
     #
     # `needs.build.result` is 'failure' whenever ANY non-continue-on-error
@@ -1854,41 +1838,27 @@ jobs:
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Generate release notes from conventional commits (issue #1322) ───────
-      # Why: replaces softprops' generic generate_release_notes with a curated,
-      # per-crate, Keep-a-Changelog-grouped body driven by the same cliff.toml
-      # that produces the per-crate CHANGELOG.md files.
-      #
-      # Scoping (issue #1128): two distinct keys are used here on purpose.
-      #   --include-path crates/<crate>/**  keys off needs.setup.outputs.crate,
-      #     the CANONICAL crate/directory name. This
-      #     must be the directory under crates/ so git-cliff scopes commits to
-      #     the right path.
-      #   --tag-pattern <tag_prefix>-v*  keys off needs.setup.outputs.tag_prefix,
-      #     the ORIGINAL tag prefix actually pushed. This must match
-      #     the literal tag so --latest selects this release's section.
-      # For non-aliased crates the two are identical (tag_prefix == crate); only
-      # an aliased tag would differ, and none exists today.
-      #
-      # --latest emits only this tag's section; --strip all drops the
-      # Keep-a-Changelog header/footer so the body is just the grouped commits.
-      #
-      # OUTPUT writes the rendered notes to ${{ github.workspace }}/RELEASE_NOTES.md.
-      # The git-cliff-action runs from the repo root (no working-directory), and so
-      # does the softprops step below, so a plain relative "RELEASE_NOTES.md" path
-      # resolves to the same file in both steps.
-      - name: Generate release notes (git-cliff)
+      # ── Release notes from the assembled per-crate CHANGELOG (issue #11452) ──
+      # Why: this step used git-cliff with `--include-path crates/<crate>/**
+      #   --latest`. include-path drops every commit outside the crate, so when
+      #   the tagged commit touches nothing under crates/<crate>/ (a release-gate
+      #   fix, a cross-crate PR: trusty-mpm-v1.14.8, trusty-mpm-v1.14.7,
+      #   trusty-memory-v1.0.1) the tag matches no commit, git-cliff sees no
+      #   release, and the body starts with `## [Unreleased]`. Tags whose commit
+      #   is the crate's own CHANGELOG assembly (trusty-search-v1.0.1,
+      #   trusty-review-v0.42.0) rendered correctly by luck of tag placement.
+      # What: copies the `## [<version>]` section of crates/<crate>/CHANGELOG.md
+      #   (written per release by scripts/assemble-changelog.sh) to
+      #   RELEASE_NOTES.md in the repo root, where the next steps read it. The
+      #   step fails when the section is missing, so a release cannot publish
+      #   with a wrong or empty header. cliff.toml no longer feeds the release.
+      - name: Generate release notes (CHANGELOG section)
         id: changelog
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: >-
-            --include-path "crates/${{ needs.setup.outputs.crate }}/**"
-            --tag-pattern "${{ needs.setup.outputs.tag_prefix }}-v*"
-            --latest
-            --strip all
-        env:
-          OUTPUT: RELEASE_NOTES.md
+        shell: bash
+        run: |
+          ./scripts/release_notes_from_changelog.sh \
+            "${{ needs.setup.outputs.crate }}" \
+            "${{ needs.setup.outputs.version }}" > RELEASE_NOTES.md
 
       # ── Point release notes at the public site (owner ruling) ────────────────
       # Why: every crate's Homepage now points at https://trustytools.dev, and
@@ -1992,13 +1962,10 @@ jobs:
           tag_name: ${{ needs.setup.outputs.tag }}
           name: "${{ needs.setup.outputs.crate }} v${{ needs.setup.outputs.version }}"
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
-          # Release notes are now generated by git-cliff (step above) instead of
-          # softprops' generic generate_release_notes. We point body_path at the
-          # file the git-cliff step wrote (OUTPUT: RELEASE_NOTES.md) rather than
-          # piping multi-line content through the `body:` expression, which is
-          # fragile for multi-line strings. If a tag has no in-scope conventional
-          # commits, RELEASE_NOTES.md is empty — that is intentional and softprops
-          # handles an empty body_path file fine (empty release body).
+          # Release notes are the crate's CHANGELOG.md section (step above), not
+          # softprops' generic generate_release_notes. body_path points at the
+          # file that step wrote rather than piping multi-line content through
+          # the `body:` expression, which is fragile for multi-line strings.
           body_path: RELEASE_NOTES.md
           # fail_on_unmatched_files is safe under Linux-leg-failure tolerance:
           # these are GLOB patterns, not fixed per-platform filenames, so each
@@ -2058,7 +2025,7 @@ jobs:
   homebrew-bump:
     name: "Homebrew tap update"
     needs: [setup, release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Only run on real tag releases (not dry-runs) and only when the tap is enabled.
     # HOMEBREW_TAP_ENABLED must be set to 'true' as a repository/org variable AND
     # HOMEBREW_TAP_TOKEN must be configured as a secret before this job does anything.

@@ -354,10 +354,8 @@ fn lowercase_holds_are_never_dropped() {
             .unwrap()
             .contains("hold all merges")
     );
-    assert!(
-        il_init::holds_in_state_md("- we hold the release\n").is_err(),
-        "unclassifiable"
-    );
+    // #11480: the word alone, not at the head, is neither a hold nor an error.
+    assert_eq!(read("- we hold the release\n"), il_init::Holds::default());
     assert_eq!(read("- holding pattern\n"), il_init::Holds::default());
 }
 
@@ -378,8 +376,9 @@ fn an_unreadable_state_md_stops_before_the_ledger() {
 #[test]
 fn ambiguous_hold_text_fails_before_the_ledger_is_created() {
     for (text, line) in [
-        ("# State\n- usage: we are on hold until Monday\n", 2),
-        ("# State\n\nThe HOLD is in place\n", 3),
+        // #11480: only text that starts with a hold format and cannot be read fails.
+        ("# State\n- HOLD until Monday\n", 2),
+        ("# State\n\nOn hold: the release\n", 3),
     ] {
         assert_eq!(
             il_init::hold_in_state_md(text).unwrap_err().0,
@@ -449,4 +448,167 @@ fn holds_with_an_unreadable_ledger_fail_visibly() {
         "{}",
         report.render()
     );
+}
+
+/// Fresh install with `state` already in `local/state.md`: the report, and
+/// whether the ledger or any ledger hook exists afterwards.
+fn fresh_init_with_state(state: &str) -> (super::super::InitReport, bool, bool) {
+    let fx = Fixture::new();
+    let dir = fx.dir();
+    std::fs::create_dir_all(dir.join("local")).unwrap();
+    std::fs::write(dir.join("local/state.md"), state).unwrap();
+    let report = fx.init().unwrap();
+    let hooks = std::fs::read_to_string(dir.join(".claude/settings.json"))
+        .is_ok_and(|t| t.contains("datg-hook.sh"));
+    (report, state_path(&dir).exists(), hooks)
+}
+
+/// #11498: a hold longer than its field stops init before the ledger and
+/// hooks exist; it is never cut to fit.
+#[test]
+fn a_hold_that_cannot_be_recorded_stops_init_before_the_ledger() {
+    let (report, ledger, hooks) =
+        fresh_init_with_state(&format!("# State\n- HOLD: {}\n", "x".repeat(1200)));
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Failed(t)
+            if t.contains("hold from local/state.md is 1200 characters")
+                && t.contains("at most 1000"))),
+        "{}",
+        report.render()
+    );
+    assert!(!ledger, "no ledger without its hold");
+    assert!(!hooks, "no ledger hook without its hold");
+}
+
+/// #11498: 1000 multi-byte characters (2000 B, over the old 2048 B record
+/// cap with the rest of the record) are recorded in full on a fresh install.
+#[test]
+fn a_1000_character_multibyte_hold_is_never_shortened() {
+    let hold = "é".repeat(1000);
+    let (_fx, dir, report) = reinit_with_state(format!("# State\n- HOLD: {hold}\n").as_bytes());
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(session(&dir)["hold"].as_str(), Some(hold.as_str()));
+}
+
+/// An installed ledger whose session record already carries `refs` of
+/// `value_len` characters each, `n` of them; then `state` is written and init
+/// runs again.
+fn init_over_refs(
+    n: usize,
+    value_len: usize,
+    state: &str,
+) -> (Fixture, std::path::PathBuf, super::super::InitReport) {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for i in 0..n {
+        let r = format!("ref{i}={}", "v".repeat(value_len));
+        let out = datg(&dir, &["session", "set", "--ref", &r]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    std::fs::write(dir.join("local/state.md"), state).unwrap();
+    let report = fx.init().unwrap();
+    (fx, dir, report)
+}
+
+/// #11498: the owner's shape — about 1.9 KB of refs — plus a usage hold and a
+/// merge hold at full length (about 4 KB, twice the old cap) is recorded in
+/// full, and a later `session set --boundary` is not refused for size.
+#[test]
+fn full_length_holds_over_an_owner_sized_record_fit() {
+    let usage = format!("HOLD: {}", "u".repeat(1000));
+    let merge = format!("On hold (owner): no merge {}", "m".repeat(974));
+    let (_fx, dir, report) = init_over_refs(8, 160, &format!("# State\n- {usage}\n- {merge}\n"));
+    assert!(!report.failed(), "{}", report.render());
+    let ses = session(&dir);
+    assert_eq!(
+        ses["hold"].as_str().map(str::chars).map(Iterator::count),
+        Some(1000)
+    );
+    assert_eq!(ses["merge_hold"].as_str(), Some(merge.as_str()));
+    assert!(ses.to_string().len() > 2048, "{ses}");
+    let out = datg(&dir, &["session", "set", "--boundary"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// #11498: holds that push the record over the 8192 B cap are refused with
+/// the sizes named; the ledger is left without them, never with a cut hold.
+#[test]
+fn holds_over_the_raised_cap_are_refused_never_cut() {
+    let usage = format!("HOLD: {}", "\u{1F600}".repeat(1000));
+    let merge = format!("On hold (owner): no merge {}", "é".repeat(974));
+    let (_fx, dir, report) = init_over_refs(12, 200, &format!("# State\n- {usage}\n- {merge}\n"));
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Failed(t)
+            if t.contains("limit is 8192 B") && t.contains("hold is 4000 B"))),
+        "{}",
+        report.render()
+    );
+    let ses = session(&dir);
+    assert!(ses["hold"].as_str().is_none_or(str::is_empty), "{ses}");
+    assert!(
+        ses["merge_hold"].as_str().is_none_or(str::is_empty),
+        "{ses}"
+    );
+}
+
+/// #11498: the three code copies of the session record cap agree: this
+/// crate's, the shipped `datg_store.py` (byte-identical to its source) and
+/// the Rust ledger port's.
+#[test]
+fn the_session_record_cap_copies_agree() {
+    let cap = super::super::il_init::SESSION_MAX;
+    let py = include_str!("../../../../assets/architect/scripts/datg_store.py");
+    assert!(
+        py.lines().any(|l| l
+            .strip_prefix("SESSION_MAX = ")
+            .and_then(|v| v.split_whitespace().next())
+            == Some(cap.to_string().as_str())),
+        "datg_store.py SESSION_MAX differs from {cap}"
+    );
+    let port = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../trusty-architect/src/ledger/limits.rs");
+    let rs = std::fs::read_to_string(&port).unwrap();
+    assert!(
+        rs.contains(&format!("pub const SESSION_MAX: usize = {cap};")),
+        "{} SESSION_MAX differs from {cap}",
+        port.display()
+    );
+}
+
+/// #11480: the two notes from the owner's state.md that stopped init or became
+/// a fake merge hold; neither starts with a hold format.
+#[test]
+fn notes_that_only_mention_hold_or_merge_are_not_holds() {
+    let relay = "## Improvement candidates\n\n- relay.sh into a pane in tmux copy-mode \
+        (2026-11-18 15:53Z): send-keys -l failed with repeated \"not in a mode\" and nothing \
+        landed; a fix would log a hold instead of a failure.\n";
+    let owed = "- relay owed: none. D19 stays a hold until D18 is answered; PR 10610 MERGED.\n";
+    for text in [relay, owed] {
+        assert_eq!(
+            il_init::holds_in_state_md(text),
+            Ok(il_init::Holds::default()),
+            "{text}"
+        );
+    }
+    let (_fx, dir, report) = reinit_with_state(format!("# State\n{relay}{owed}").as_bytes());
+    assert!(!report.failed(), "{}", report.render());
+    if state_path(&dir).exists() {
+        let ses = session(&dir);
+        assert!(
+            ses["merge_hold"].as_str().is_none_or(str::is_empty),
+            "{ses}"
+        );
+        assert!(ses["hold"].as_str().is_none_or(str::is_empty), "{ses}");
+    }
 }

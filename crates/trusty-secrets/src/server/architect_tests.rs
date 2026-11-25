@@ -520,17 +520,18 @@ fn verified_bridge_call_over_an_architect_peer_keeps_the_agent_rules() {
     assert!(records(&fx).iter().all(|r| r.architect.is_none()));
 }
 
-/// Why: #10459 P1 scope — `delete`, deny removal and a sync-target push stay
-/// operator-only for the Architect too (a separate follow-up covers them),
-/// and none of their records says `architect`. #10459 PR1: a pending
-/// ticket changes none of them.
+/// Why: #10459 P1 scope — `delete` and deny removal stay operator-only for
+/// the Architect too, and none of their records says `architect`. #10459
+/// PR1: a pending ticket changes none of them. #10999: a sync-target push
+/// by any agent, the Architect included, keeps the key's deny: the denied
+/// key fails and nothing is sent.
 /// Test: itself.
 #[test]
 fn architect_delete_deny_removal_and_sync_push_stay_operator_only() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
     let arch = architect(&fx);
-    let (state, _target, opens) = with_fake_target(arch.ticketed(&fx, "set", "API_KEY").0);
+    let (state, sent, _opens) = with_fake_target(arch.ticketed(&fx, "set", "API_KEY").0);
     let caller = Caller::new(Some(me()));
     let target = json!({"project": fx.project(), "vault": PROJECT_VAULT, "key": "API_KEY"});
     let deleted = methods::delete(&state, caller, target.clone());
@@ -545,8 +546,9 @@ fn architect_delete_deny_removal_and_sync_push_stay_operator_only() {
 
     assert_eq!(deleted, Err(ErrorKind::AgentUseRefused));
     assert_eq!(lifted, Err(ErrorKind::AgentUseRefused));
-    assert_eq!(pushed, Err(ErrorKind::AgentUseRefused));
-    assert_eq!(opens.load(Ordering::SeqCst), 0, "no target opened");
+    // #10999: the push is admitted; the denied key fails and nothing is sent.
+    assert_eq!(pushed, Ok(json!({"copied": [], "failed": ["API_KEY"]})));
+    assert!(sent.pushed.lock().unwrap().is_empty(), "nothing sent");
     assert!(stored(&fx, "API_KEY", SENTINEL_VALUE), "the value stays");
     assert!(denied_in(&fx.keychain, "API_KEY"), "the deny stays");
     let all: Vec<_> = records(&fx)

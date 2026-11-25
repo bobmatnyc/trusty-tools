@@ -40,12 +40,16 @@
 //! `bedrock_request_includes_tool_config_when_schema_set` (all unit-level,
 //! no real AWS calls).
 
-pub(crate) mod arn;
+// #10892: the ARN parser moved to trusty-common; re-exported so every
+// `arn::` path in this crate resolves to the one shared copy.
+pub(crate) use trusty_common::inference::bedrock::arn;
 // #9310: opt-in raw capture of reviewer replies.
 mod capture;
 pub mod pricing;
 mod request_metadata;
 pub mod tool_use;
+// #10759: the vendor a model id names (non-Anthropic Converse reviewers).
+pub(crate) mod vendor;
 
 pub use pricing::{estimate_bedrock_cost_usd, normalize_model_family};
 pub use tool_use::{build_tool_config, document_to_json_string, json_to_document};
@@ -98,26 +102,34 @@ pub use trusty_common::inference::bedrock::resolve_bedrock_region;
 /// ValidationException; we surface the error at construction time so operators
 /// see it immediately (same behaviour as `us.`-prefix validation in
 /// trusty-analyze).
-/// What: returns `Ok(())` if any `INFERENCE_PROFILE_PREFIXES` matches or
-/// [`arn::parse`] accepts the id; `Err(LlmError::Validation)` otherwise.
+/// What: returns `Ok(())` if any `INFERENCE_PROFILE_PREFIXES` matches,
+/// [`arn::parse`] accepts the id, or the id is a bare foundation-model id from
+/// a non-Anthropic vendor (#10759, e.g. `qwen.qwen3-coder-480b-a35b-v1:0`);
+/// `Err(LlmError::Validation)` otherwise.
 /// Test: `bedrock_us_prefix_validation`,
 /// `application_inference_profile_arn_routes_to_bedrock`,
-/// `inference_profile_arn_routes_to_bedrock`, `foundation_model_arn_routes_to_bedrock`.
+/// `inference_profile_arn_routes_to_bedrock`, `foundation_model_arn_routes_to_bedrock`,
+/// `non_anthropic_bedrock_reviewer_routes_through_converse_and_parses`.
 fn validate_model_id(model_id: &str) -> Result<(), LlmError> {
     let has_profile_prefix = INFERENCE_PROFILE_PREFIXES
         .iter()
         .any(|pfx| model_id.starts_with(pfx));
     // #9200: a Bedrock model ARN names its resource and region in full.
-    if has_profile_prefix || arn::parse(model_id).is_some() {
+    // #10759: a non-Anthropic bare foundation id runs on demand via Converse.
+    if has_profile_prefix
+        || arn::parse(model_id).is_some()
+        || vendor::is_non_anthropic_foundation_id(model_id)
+    {
         return Ok(());
     }
     // #9200: the id may be a near-ARN; never echo its account id.
     let shown = arn::mask_account_ids(model_id);
     Err(LlmError::Validation(format!(
         "Bedrock model id {shown:?} must start with a cross-region inference-profile \
-         prefix (us., eu., ap., jp., or global.), or be a Bedrock model ARN. \
+         prefix (us., eu., ap., jp., or global.), be a Bedrock model ARN, or be a \
+         non-Anthropic foundation-model id. \
          Example: \"us.anthropic.claude-sonnet-4-6\". \
-         Bare foundation-model ids are not supported."
+         Bare Anthropic foundation-model ids are not supported."
     )))
 }
 
@@ -490,7 +502,10 @@ fn system_blocks(req: &LlmRequest, model: &str) -> Vec<SystemContentBlock> {
 
 /// Model families whose Bedrock Converse API rejects `temperature` with
 /// `ValidationException` (#9304).
-const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+// #10757: Haiku 5.5 also rejects it ("`temperature` is deprecated", probed
+// 2026-11-22, us-east-1).
+const NO_TEMPERATURE_FAMILIES: &[&str] =
+    &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 
 /// Whether `model` accepts a `temperature` on Bedrock Converse.
 ///
@@ -656,3 +671,7 @@ fn extract_token_usage(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "arn_tests.rs"]
+mod arn_tests;

@@ -1,5 +1,5 @@
 {
-  "created": "2026-10-11T04:00:00Z",
+  "created": "2026-10-21T10:00:00Z",
   "done_at": "2026-10-11T04:00:00Z",
   "goal": "G02",
   "kind": "question",
@@ -8,6 +8,6 @@
   "session": "pm-1",
   "status": "done",
   "title": "lore",
-  "updated": "2026-10-11T04:00:00Z",
+  "updated": "2026-10-21T10:00:00Z",
   "version": 1
 }

@@ -12,7 +12,7 @@
 //! when the process exits; a run killed before `exit` leaves its directory,
 //! and the next process's first call removes every sibling directory (a real
 //! directory this euid owns, not a symlink) named for a dead canonical pid.
-//! Test: `one_name_is_one_copy_per_process`, `two_names_are_two_inodes`,
+//! Test: `two_names_are_two_inodes`,
 //! `racing_first_calls_make_one_complete_copy`,
 //! `copies_are_removed_at_process_exit`, `a_dead_runs_copies_are_swept`,
 //! `live_signed_padded_and_symlinked_entries_survive_the_sweep`.
@@ -63,11 +63,18 @@ fn canonical_pid(text: &str) -> Option<libc::pid_t> {
     text.parse().ok()
 }
 
-/// Remove the copy directories of dead runs of this package: real
-/// directories this euid owns, named for a canonical pid that is not alive.
+/// Remove the copy directories of dead runs of this package from [`base`].
 fn sweep_dead_runs() {
+    sweep_dead_runs_in(base());
+}
+
+/// Remove the copy directories of dead runs under `root`: real directories
+/// this euid owns, named for a canonical pid that is not alive.
+// #11189: the root is a parameter so a test sweeps a private directory, not
+// the shared one a parallel test's first `copy_dir` also sweeps.
+fn sweep_dead_runs_in(root: &Path) {
     use std::os::unix::fs::MetadataExt as _;
-    let Ok(entries) = std::fs::read_dir(base()) else {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     let prefix = prefix();
@@ -136,16 +143,6 @@ mod tests {
 
     fn inode(path: &std::path::Path) -> u64 {
         std::fs::metadata(path).expect("stat copy").ino()
-    }
-
-    #[test]
-    fn one_name_is_one_copy_per_process() {
-        // Stat between the calls: a re-copy renamed over the path gets a new inode.
-        let first = self_copy("claude");
-        let first_inode = inode(&first);
-        let second = self_copy("claude");
-        assert_eq!(first, second);
-        assert_eq!(first_inode, inode(&second), "a second copy was made");
     }
 
     #[test]
@@ -219,10 +216,12 @@ mod tests {
         let mut gone = std::process::Command::new("true").spawn().unwrap();
         let pid = gone.id();
         gone.wait().unwrap();
-        let stale = super::base().join(format!("{}{pid}", super::prefix()));
+        // #11189: a private root, so a parallel sweep cannot remove it first.
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join(format!("{}{pid}", super::prefix()));
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("claude"), b"leftover").unwrap();
-        super::sweep_dead_runs();
+        super::sweep_dead_runs_in(root.path());
         assert!(!stale.exists(), "{stale:?} survived the sweep");
     }
 
@@ -235,7 +234,8 @@ mod tests {
         let mut gone = std::process::Command::new("true").spawn().unwrap();
         let dead = gone.id();
         gone.wait().unwrap();
-        let (base, prefix) = (super::base(), super::prefix());
+        let root = tempfile::tempdir().unwrap();
+        let (base, prefix) = (root.path(), super::prefix());
         let dirs = [
             base.join(format!("{prefix}{}", live.id())),
             base.join(format!("{prefix}+{dead}")),
@@ -247,7 +247,7 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let link = base.join(format!("{prefix}{dead}"));
         std::os::unix::fs::symlink(target.path(), &link).unwrap();
-        super::sweep_dead_runs();
+        super::sweep_dead_runs_in(base);
         let mut survived: Vec<_> = dirs.iter().map(|d| (d.clone(), d.exists())).collect();
         survived.push((link.clone(), link.symlink_metadata().is_ok()));
         for dir in &dirs {

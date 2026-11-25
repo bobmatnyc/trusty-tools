@@ -183,9 +183,11 @@ async fn drive(root: &std::path::Path, socket: &std::path::Path) {
     let answer = call_over_socket(socket, "mpm.health")
         .await
         .expect("the rpc listener must answer");
+    // `status` reads "degraded" when trusty-memory/search are absent; liveness
+    // is `alive`.
     assert_eq!(
-        answer["result"]["status"],
-        serde_json::json!("ok"),
+        answer["result"]["alive"],
+        serde_json::json!(true),
         "mpm.health answers over the socket: {answer}"
     );
 

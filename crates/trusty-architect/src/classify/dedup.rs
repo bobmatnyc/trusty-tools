@@ -7,7 +7,7 @@
 //! in [`REEMIT`] re-emits after its interval. [`DedupState`] keeps keys in
 //! insertion order so it serializes like the Python dict.
 //! Test: `test_dedup_suppresses_until_cleared_for_one_cycle`,
-//! `test_dedup_reemits_idle_every_30_minutes_but_not_dialog`,
+//! `test_dedup_reemits_ctx_every_30_minutes_but_not_idle_or_dialog`,
 //! `dedup_matches_python_goldens`.
 
 use serde::ser::{SerializeMap, Serializer};
@@ -16,10 +16,11 @@ use serde::{Deserialize, Serialize};
 use super::Alert;
 
 /// Kinds that re-emit while still present, and their interval in seconds.
-/// `band` is absent on purpose: it fires once per change.
+/// `band` is absent on purpose: it fires once per change. `idle` is absent
+/// too: it fires once per idle screen (its fingerprint carries the screen
+/// hash), as the deployed `fleet-poll.py` REEMIT has it (MB1595).
 // #9171: fleet-poll.py's table, which adds the architect_* and token kinds.
-pub const REEMIT: [(&str, f64); 10] = [
-    ("idle", 1800.0),
+pub const REEMIT: [(&str, f64); 9] = [
     ("ctx", 1800.0),
     ("load", 1800.0),
     ("disk", 1800.0),
@@ -93,7 +94,30 @@ impl Serialize for DedupState {
 }
 
 fn reemit_interval(kind: &str) -> Option<f64> {
+    // #11474: fleet-classify.py re-emits `owner_answer` every 1800 s while
+    // it stays pending; kept out of `REEMIT` so its public type is unchanged.
+    if kind == "owner_answer" {
+        return Some(1800.0);
+    }
     REEMIT.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
+}
+
+impl DedupState {
+    /// The `(key, seen)` pairs whose key starts with `prefix` (#11474: a
+    /// failed answer read keeps its keys, as `fleet-poll.py` does).
+    pub fn prefixed(&self, prefix: &str) -> Vec<(String, Seen)> {
+        let keep = |(k, _): &&(String, Seen)| k.starts_with(prefix);
+        self.alerts.iter().filter(keep).cloned().collect()
+    }
+
+    /// Puts back each of `kept` whose key this cycle did not set.
+    pub fn restore(&mut self, kept: Vec<(String, Seen)>) {
+        for (k, s) in kept {
+            if self.get(&k).is_none() {
+                self.alerts.push((k, s));
+            }
+        }
+    }
 }
 
 /// Splits `candidates` into `(new, suppressed_count)` and replaces the state.

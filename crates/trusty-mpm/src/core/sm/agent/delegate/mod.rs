@@ -512,8 +512,14 @@ impl SessionManagerAgent {
                     .map(|e| format!("verified {session_id}: {e}")),
             };
             let mut store = goals.lock().await;
+            // #10722: a refused update (e.g. Verified without evidence) leaves the
+            // link at its prior state; the warning carries the error's cause.
             if let Err(e) = store.update(goal_id, update).await {
                 tracing::warn!(%session_id, %goal_id, "delegate: goal update failed: {e}");
+                // #10722: record the refusal on the goal, as the observe arm does.
+                let _ = store
+                    .note(goal_id, format!("update {session_id} failed: {e}"))
+                    .await;
             }
         }
         Ok(())
@@ -559,11 +565,8 @@ impl SessionManagerAgent {
         let Some(goal) = store.get(goal_id) else {
             return format!("Goal {goal_id}: launched {} session(s).", launched.len());
         };
-        let verified = goal
-            .sessions
-            .iter()
-            .filter(|s| s.state.is_verified())
-            .count();
+        // #10722: count with the gate's definition (state AND evidence).
+        let verified = goal.verified_count();
         let total = goal.sessions.len();
         if goal_done {
             format!(

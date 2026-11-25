@@ -6,8 +6,10 @@
     <title>Trusty Secrets</title>
     <!-- #9067: the canonical trusty favicon, copied from ui-analyze. No web
          fonts are requested: a credentials page loads nothing from a third
-         party. The console injects `window.__SECRETS_BASE__` before </head>
-         (src/tools_ui.rs). -->
+         party. The console injects `window.__SECRETS_BASE__` before the head
+         close (src/tools_ui.rs). #11758: never write the literal head-close
+         tag in this comment: Vite and the console both insert before its
+         first match, and the page renders blank. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script>
       (function () {

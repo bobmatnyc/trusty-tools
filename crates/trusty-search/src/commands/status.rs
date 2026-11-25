@@ -20,13 +20,69 @@ pub async fn handle_status(json: bool) -> Result<()> {
     crate::commands::daemon_guard::ensure_daemon_up(&client).await?;
     let Some(report) = gather_status(&client).await else {
         if json {
-            println!(r#"{{"daemon":"not_running"}}"#);
+            println!("{}", not_running_json());
             // JSON consumers parse the body; suppress the central ✗ line.
             return Err(anyhow::anyhow!(""));
         }
         anyhow::bail!("Daemon not running  (start with `trusty-search start`)");
     };
     render_status(&report, json)
+}
+
+/// The `--json` body printed when the daemon does not answer.
+///
+/// Why: a JSON consumer gates on `healthy`; the not-running body must carry it
+/// as `false` rather than omit it.
+/// Test: `not_running_json_reports_healthy_false`.
+fn not_running_json() -> serde_json::Value {
+    serde_json::json!({"daemon": "not_running", "healthy": false})
+}
+
+/// Indexes whose status is not serving cleanly, as `{id, status}` rows.
+///
+/// Why: a held or failed index is not a daemon outage, so it must not fold
+/// into `healthy`; it gets its own `unhealthy_indexes` field instead.
+/// What: an index whose status body reads `held`, `degraded` or `failed`, or
+/// carries no `status` at all (its status call failed), is listed.
+/// Test: `status_json_lists_failed_indexes_separately_from_healthy`.
+fn unhealthy_indexes(per_index: &[(String, serde_json::Value)]) -> Vec<serde_json::Value> {
+    per_index
+        .iter()
+        .filter_map(|(id, body)| {
+            let status = body.get("status").and_then(|s| s.as_str());
+            match status {
+                Some("held" | "degraded" | "failed") | None => Some(serde_json::json!({
+                    "id": id,
+                    "status": status.unwrap_or("unknown"),
+                })),
+                Some(_) => None,
+            }
+        })
+        .collect()
+}
+
+/// The `--json` document for a daemon that answered.
+///
+/// Why: `healthy` is "the daemon is up and answering", which is what reaching
+/// this function proves; index trouble goes in `unhealthy_indexes`.
+/// Test: `status_json_carries_healthy_true`,
+/// `status_json_lists_failed_indexes_separately_from_healthy`.
+fn status_json(report: &StatusReport) -> serde_json::Value {
+    let arr: Vec<serde_json::Value> = report
+        .per_index
+        .iter()
+        .map(|(n, b)| serde_json::json!({"id": n, "status": b}))
+        .collect();
+    serde_json::json!({
+        "daemon": "running",
+        "healthy": true,
+        "url": report.location,
+        "version": report.health.get("version").cloned().unwrap_or(serde_json::json!(null)),
+        "indexes": arr,
+        "unhealthy_indexes": unhealthy_indexes(&report.per_index),
+        // #8727: the registrations `indexes` omits but create still checks.
+        "parked": report.list.get("parked").cloned().unwrap_or(serde_json::json!([])),
+    })
 }
 
 /// Everything `status` prints, read from the daemon.
@@ -110,21 +166,7 @@ fn render_status(report: &StatusReport, json: bool) -> Result<()> {
         per_index,
     } = report;
     if json {
-        let arr: Vec<serde_json::Value> = per_index
-            .iter()
-            .map(|(n, b)| serde_json::json!({"id": n, "status": b}))
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({
-                "daemon": "running",
-                "url": base,
-                "version": health_body.get("version").cloned().unwrap_or(serde_json::json!(null)),
-                "indexes": arr,
-                // #8727: the registrations `indexes` omits but create still checks.
-                "parked": list_body.get("parked").cloned().unwrap_or(serde_json::json!([])),
-            })
-        );
+        println!("{}", status_json(report));
     } else {
         let version = health_body
             .get("version")
@@ -197,6 +239,55 @@ mod tests {
             .map(|(n, b)| (n.as_str(), b["chunk_count"].as_u64().unwrap()))
             .collect();
         assert_eq!(rows, vec![("a", 1), ("b", 2)]);
+    }
+
+    fn report_with(per_index: Vec<(String, serde_json::Value)>) -> StatusReport {
+        StatusReport {
+            location: "/s".to_owned(),
+            health: serde_json::json!({"version": "1.0.0"}),
+            list: serde_json::json!({"indexes": []}),
+            per_index,
+        }
+    }
+
+    /// Test: this test.
+    #[test]
+    fn status_json_carries_healthy_true() {
+        let v = status_json(&report_with(vec![(
+            "a".to_owned(),
+            serde_json::json!({"status": "ready"}),
+        )]));
+        assert_eq!(v["healthy"], true);
+        assert_eq!(v["daemon"], "running");
+        assert_eq!(v["unhealthy_indexes"], serde_json::json!([]));
+    }
+
+    /// Test: this test.
+    #[test]
+    fn status_json_lists_failed_indexes_separately_from_healthy() {
+        let v = status_json(&report_with(vec![
+            ("a".to_owned(), serde_json::json!({"status": "ready"})),
+            ("b".to_owned(), serde_json::json!({"status": "held"})),
+            ("c".to_owned(), serde_json::json!({})),
+            ("d".to_owned(), serde_json::json!({"status": "degraded"})),
+        ]));
+        assert_eq!(v["healthy"], true, "index trouble is not a daemon outage");
+        assert_eq!(
+            v["unhealthy_indexes"],
+            serde_json::json!([
+                {"id": "b", "status": "held"},
+                {"id": "c", "status": "unknown"},
+                {"id": "d", "status": "degraded"},
+            ])
+        );
+    }
+
+    /// Test: this test.
+    #[test]
+    fn not_running_json_reports_healthy_false() {
+        let v = not_running_json();
+        assert_eq!(v["healthy"], false);
+        assert_eq!(v["daemon"], "not_running");
     }
 
     /// #9214: an absent socket is "not running", never a dial of TCP.

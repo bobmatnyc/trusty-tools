@@ -39,11 +39,12 @@ fn project_managed_hook_additions_combines_all_three_sources() {
     let pre = hooks["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be an array");
-    // #8454: plus the egress-guard group, written unconditionally.
+    // #8454: plus the egress-guard group, written unconditionally; #11431:
+    // plus the shadow guard.
     assert_eq!(
         pre.len(),
-        3,
-        "PreToolUse must carry guard + triad + egress groups"
+        4,
+        "PreToolUse must carry guard + triad + egress + shadow groups"
     );
     let pre_commands: Vec<&str> = pre
         .iter()
@@ -107,7 +108,7 @@ fn project_managed_hook_additions_is_stable_across_calls() {
 /// toggle that also takes out `SessionStart` — the other `TRUSTY_MEMORY_HOOKS`
 /// key, sharing the same constant and the same `trusty-memory ` command prefix.
 /// What: builds the additions with the toggle off and asserts `UserPromptSubmit`
-/// is absent while `SessionStart`, the PM guard, and all seven lifecycle-triad
+/// holds only the #11398 turn-task group while `SessionStart`, the PM guard, and all seven lifecycle-triad
 /// events are byte-identical to the enabled build.
 #[test]
 fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
@@ -125,9 +126,16 @@ fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
     .expect("a stable hook exe resolves in the test environment");
 
     let off = disabled["hooks"].as_object().expect("hooks is an object");
-    assert!(
-        !off.contains_key("UserPromptSubmit"),
-        "UserPromptSubmit must be absent when the toggle is off: {off:?}"
+    // #11398: the PM's turn-task stamp is not prompt context; it is the only
+    // `UserPromptSubmit` group left when the toggle is off.
+    assert_eq!(
+        off.get("UserPromptSubmit"),
+        Some(&serde_json::json!([
+            super::super::turn_task_hooks::turn_task_group(std::path::Path::new(
+                "/usr/local/bin/tm"
+            ))
+        ])),
+        "only the turn-task group may remain when the toggle is off: {off:?}"
     );
 
     // Every other event must survive with its enabled-build value untouched.
@@ -147,10 +155,11 @@ fn project_managed_hook_additions_omits_prompt_context_when_disabled() {
             "{event} must be unchanged by the prompt_context toggle"
         );
     }
+    // #11398: the turn-task group keeps `UserPromptSubmit` as a key.
     assert_eq!(
         off.len(),
-        on.len() - 1,
-        "exactly one event key may differ between the two builds"
+        on.len(),
+        "no event key may appear or vanish between the two builds"
     );
 }
 
@@ -432,7 +441,7 @@ fn write_project_hooks_writes_via_atomic_path() {
 /// while every other hook trusty-mpm writes is still there. The measured cost
 /// this buys back is ~1,211 tokens per prompt (#4904).
 /// What: writes with the toggle off into a fresh project and asserts
-/// `UserPromptSubmit` is absent, `SessionStart` still carries the
+/// `UserPromptSubmit` holds only the #11398 turn-task group, `SessionStart` still carries the
 /// `trusty-memory inbox-check` group, `PreToolUse` still carries the PM guard,
 /// and all seven lifecycle-triad events are present.
 #[test]
@@ -454,9 +463,17 @@ fn write_project_hooks_omits_prompt_context_when_disabled() {
     .unwrap();
     let hooks = value["hooks"].as_object().expect("hooks must be an object");
 
-    assert!(
-        !hooks.contains_key("UserPromptSubmit"),
-        "UserPromptSubmit must not be written when disabled: {hooks:?}"
+    // #11398: only the PM's turn-task stamp stays on `UserPromptSubmit`.
+    let submit: Vec<&str> = hooks["UserPromptSubmit"]
+        .as_array()
+        .expect("the turn-task group keeps the key")
+        .iter()
+        .map(|g| g["hooks"][0]["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        submit,
+        vec!["/usr/local/bin/tm hook --turn-task"],
+        "no prompt-context group may be written when disabled: {hooks:?}"
     );
     let raw = serde_json::to_string(&value).unwrap();
     assert!(
@@ -574,9 +591,10 @@ fn write_project_hooks_strips_stale_prompt_context_when_disabled() {
         .iter()
         .map(|g| g["hooks"][0]["command"].as_str().unwrap())
         .collect();
+    // #11398: the PM's turn-task group is written after the foreign one.
     assert_eq!(
         remaining,
-        vec!["my-own-tool inject"],
+        vec!["my-own-tool inject", "/usr/local/bin/tm hook --turn-task"],
         "a foreign UserPromptSubmit entry must survive the strip"
     );
 }
@@ -902,8 +920,8 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
     let pre = value["hooks"]["PreToolUse"].as_array().expect("array");
     assert_eq!(
         pre.len(),
-        3,
-        "PM guard + lifecycle triad + egress guard (#8454) must remain: {pre:?}"
+        4,
+        "PM guard + lifecycle triad + egress guard (#8454) + shadow guard (#11431) must remain: {pre:?}"
     );
 }
 
@@ -1003,7 +1021,8 @@ fn write_project_hooks_strips_stale_prompt_feedback_when_disabled() {
     // And it must strip ONLY those: the lifecycle triad's `Stop` entry survives.
     let value: serde_json::Value = serde_json::from_str(&after).unwrap();
     let stop = value["hooks"]["Stop"].as_array().expect("array");
-    assert_eq!(stop.len(), 1, "the lifecycle triad must remain: {stop:?}");
+    // #10575: plus the PM completion-evidence group.
+    assert_eq!(stop.len(), 2, "the lifecycle triad must remain: {stop:?}");
 }
 
 /// The pinned installed-looking binary every test in this module writes with.

@@ -16,6 +16,7 @@ use crate::engine::community::KnowledgeGap;
 use crate::engine::maintenance_lease::MaintenanceLease;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::palace_not_found::PalaceNotFound;
+use crate::engine::reopen_cost::ReopenCosts;
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::concurrent_open::OpenIntent;
 use crate::engine::store::hnsw_store::{HnswOp, OpWatch};
@@ -34,6 +35,9 @@ use std::time::Duration;
 #[path = "registry_rename.rs"]
 mod rename;
 pub use rename::PalaceRenameError;
+// #10989: an unload answers unloaded only once the palace's files are closed.
+#[cfg(feature = "server")]
+pub(crate) use rename::await_files_closed;
 #[cfg(feature = "server")]
 pub(crate) use rename::{DEFAULT_RENAME_BUSY_WAIT, RenameOptions, RenameOutcome};
 
@@ -80,6 +84,27 @@ pub(crate) fn max_open_palaces_from_env() -> usize {
 /// What: A compile-time constant; overridable per-instance.
 /// Test: `lru_evicts_least_recently_used` forces eviction below this limit.
 pub(crate) const DEFAULT_MAX_OPEN_PALACES: usize = 64;
+
+/// A palace open gave up waiting for the palace's open lock (#3992).
+///
+/// Why (#11255): a recall that joined a shared open must tell this bound,
+/// which says "the palace is busy, try again", apart from a real open failure.
+/// What: the wait that elapsed, under the same message the untyped error had.
+/// Test: `a_joiner_past_the_open_queue_bound_answers_palace_opening`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "palace '{palace}' open queue timed out after {waited:?} \
+     waiting behind other callers retrying a redb write-lock conflict (issue #3992); \
+     another process may be holding the lock persistently — stop it, or raise \
+     TRUSTY_OPEN_QUEUE_TIMEOUT_SECS (and TRUSTY_WRITE_OP_BUDGET_SECS, which caps \
+     the whole operation — issue #4002) if this is expected under heavy contention"
+)]
+pub(crate) struct OpenQueueTimeout {
+    /// The palace whose open lock was contended.
+    pub(crate) palace: PalaceId,
+    /// The queue wait that elapsed.
+    pub(crate) waited: Duration,
+}
 
 /// Concurrent palace registry with LRU-bounded open-handle cache (issue #463).
 ///
@@ -206,6 +231,9 @@ pub struct PalaceRegistry {
     /// registered, kept past eviction; see [`Self::oldest_hnsw_op`]. A dead
     /// `Weak` (its store dropped) is pruned on every insert and read.
     hnsw_ops: Arc<Mutex<HnswWatches>>,
+    /// #11613: each palace's last measured open; `evict_idle` keeps a palace
+    /// whose re-open would outlast the client's exchange budget.
+    reopen_costs: Arc<ReopenCosts>,
 }
 
 /// #9487: each registered vector store's in-flight HNSW registry, by palace.
@@ -251,6 +279,7 @@ impl PalaceRegistry {
             maintenance: None,
             data_root: None,
             hnsw_ops: Arc::default(),
+            reopen_costs: Arc::default(),
         }
     }
 
@@ -400,7 +429,36 @@ impl PalaceRegistry {
     /// on [`Self::may_run_maintenance`].
     /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
     pub(crate) fn open_handle(&self, palace: &Palace) -> Result<Arc<PalaceHandle>> {
-        PalaceHandle::open_with_intent_purging(palace, self.open_intent, self.may_run_maintenance())
+        let started = std::time::Instant::now();
+        let handle = PalaceHandle::open_with_intent_purging(
+            palace,
+            self.open_intent,
+            self.may_run_maintenance(),
+        )?;
+        // #11613: measure only a successful open; `evict_idle` reads it.
+        self.reopen_costs.record(&palace.id, started.elapsed());
+        Ok(handle)
+    }
+
+    /// Keep a palace whose last open took at least
+    /// [`crate::engine::reopen_cost::SLOW_REOPEN`] through `evict_idle`.
+    ///
+    /// Why (#11613): only the daemon answers a client with a fixed exchange
+    /// budget; armed elsewhere, a load-slowed test open would pin its palace.
+    /// What: consuming builder; replaces the cost table with a pinning one.
+    /// Test: `registry_tests::a_slow_to_reopen_palace_survives_the_idle_sweep`.
+    #[cfg(any(test, feature = "server"))]
+    pub(crate) fn with_reopen_pin(mut self) -> Self {
+        self.reopen_costs = Arc::new(ReopenCosts::pinning_at(
+            crate::engine::reopen_cost::SLOW_REOPEN,
+        ));
+        self
+    }
+
+    /// #11613 test seam: pretend `id`'s last open took `took`.
+    #[cfg(test)]
+    pub(crate) fn record_open_cost_for_test(&self, id: &PalaceId, took: Duration) {
+        self.reopen_costs.record(id, took);
     }
 
     /// Insert a new palace handle, replacing any prior entry with the same id.
@@ -604,6 +662,7 @@ impl PalaceRegistry {
             cache.pop(palace_id)
         };
         self.gaps_cache.remove(palace_id);
+        self.reopen_costs.forget(palace_id);
         // `_evicted` drops here, closing fds outside the lock.
     }
 
@@ -713,15 +772,13 @@ impl PalaceRegistry {
         // `open_palace_within`, `queue_wait` is what the operation's joint
         // budget has left after the write-lock leg, so the two waits no longer
         // sum.
-        let _open_guard = open_lock.try_lock_for(queue_wait).ok_or_else(|| {
-            anyhow::anyhow!(
-                "palace '{effective_id}' open queue timed out after {queue_wait:?} \
-                 waiting behind other callers retrying a redb write-lock conflict (issue #3992); \
-                 another process may be holding the lock persistently — stop it, or raise \
-                 TRUSTY_OPEN_QUEUE_TIMEOUT_SECS (and TRUSTY_WRITE_OP_BUDGET_SECS, which caps \
-                 the whole operation — issue #4002) if this is expected under heavy contention"
-            )
-        })?;
+        // #11255: typed, so a recall joiner can answer it as retryable.
+        let _open_guard = open_lock
+            .try_lock_for(queue_wait)
+            .ok_or_else(|| OpenQueueTimeout {
+                palace: effective_id.clone(),
+                waited: queue_wait,
+            })?;
         // Re-check under the open lock: another racer may have opened it while
         // we waited for the lock.
         if let Some(h) = self.get(&effective_id) {
@@ -955,7 +1012,7 @@ impl PalaceRegistry {
     /// Open a registry rooted at `data_root` and pre-hydrate every persisted
     /// palace into the in-memory LRU cache.
     ///
-    /// Why: Issue #52 — production hosts (trusty-agents) want a single call that
+    /// Why: Issue #52 — production hosts (trusty-assistants) want a single call that
     /// brings up the full registry on daemon startup so that recall paths
     /// don't pay a lazy-open latency on the first request after a restart.
     /// Existing call sites continue to use `new()` + `open_palace()`; this is
@@ -1128,7 +1185,11 @@ impl PalaceRegistry {
     /// double-opens the files. Victims are `pop`ed and dropped OUTSIDE the lock
     /// (fd close / RAM free must not run under it, mirroring `remove`). A zero
     /// `threshold` disables the sweep. Returns the number of handles evicted.
+    /// #11613: a palace whose last measured open took at least
+    /// [`crate::engine::reopen_cost::SLOW_REOPEN`] is never evicted, so its
+    /// next call is never a re-open past the client's exchange budget.
     /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
+    /// `registry_tests::a_slow_to_reopen_palace_survives_the_idle_sweep`,
     /// `registry_tests::evict_idle_skips_referenced_handle`,
     /// `registry_tests::evict_idle_skips_recently_accessed_handle`.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
@@ -1144,7 +1205,12 @@ impl PalaceRegistry {
             // `iter()` borrows the cache immutably and `pop()` needs it mutably.
             let victims: Vec<PalaceId> = cache
                 .iter()
-                .filter(|(_, h)| Arc::strong_count(h) == 1 && h.idle_secs() >= threshold_secs)
+                .filter(|(id, h)| {
+                    Arc::strong_count(h) == 1
+                        && h.idle_secs() >= threshold_secs
+                        // #11613: a slow re-open would outlast the client.
+                        && !self.reopen_costs.too_slow_to_evict(id)
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             victims

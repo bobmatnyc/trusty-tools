@@ -138,6 +138,23 @@ class TestSeed(StoreCase):
         self.assertEqual(data["owner_name"], "owner")
         self.assertNotIn("next_ids", data)   # next ids are computed from the store (dashboard_ids.py, the page)
 
+    def test_seed_meta_seeds_valid_settings_and_never_overwrites_it(self):
+        # #10752: an absent meta/settings 404s on every page poll and grows the serve log.
+        import dashboard_schema
+        self.store.seed_meta(os.path.join(self._tmp.name, "none.md"))
+        body = self.store.get("meta", "settings")["data"]
+        self.assertEqual(list(body), ["updated"])
+        self.assertEqual(dashboard_schema.validate("meta", "settings", body), [])
+        self.store.set("meta", "settings", {"tz": "UTC"}, if_version=1)
+        self.store.seed_meta(os.path.join(self._tmp.name, "none.md"))
+        self.assertEqual(self.store.get("meta", "settings")["data"], {"tz": "UTC"})
+
+    def test_page_no_longer_subscribes_to_gh_track(self):
+        # #10752: no writer ships for meta/gh_track, so the page must not poll it (one 404 per poll).
+        page = os.path.join(os.path.dirname(HERE), "templates", "dashboard", "index.html")
+        with open(page) as f:
+            self.assertNotIn("gh_track", f.read())
+
 
 class ServerCase(StoreCase):
     def setUp(self):
@@ -222,6 +239,10 @@ eval(fs.readFileSync(process.argv[1], "utf8"));
         self.assertEqual(r["hiddenPoll"], 2)      # later poll runs while hidden
         self.assertEqual(r["visiblePoll"], 3)
 
+    def test_fresh_store_serves_meta_settings_without_a_404(self):
+        # #10752: the page polls meta/settings; a fresh seeded store must answer 200.
+        self.assertEqual(self.call("GET", "/api/meta/settings")[0], 200)
+
     def test_round_trip_list_get_patch_conflict_add_delete_batch_user(self):
         status, body = self.call("GET", "/api/items?status=open")
         docs = json.loads(body)
@@ -266,12 +287,12 @@ class TestCli(StoreCase):
         self.assertEqual((rc, json.loads(out)["version"]), (0, 1))
         rc, out, _ = self.run_cli("list", "items", "--status", "open")
         self.assertEqual([d["id"] for d in json.loads(out)], ["D01"])
-        self.assertEqual(self.run_cli("update", "items", "D01", "--json", '{"a":1}', "--if-version", "9")[0], 3)
+        self.assertEqual(self.run_cli("update", "items", "D01", "--json", '{"detail":"a"}', "--if-version", "9")[0], 3)
         self.assertEqual(self.run_cli("get", "items", "nope")[0], 1)
         self.assertEqual(self.run_cli("set", "items", "../x", "--json", "{}")[0], 2)
         opsf = os.path.join(self._tmp.name, "ops.json")
         with open(opsf, "w") as f:
-            json.dump({"ops": [{"op": "update", "collection": "items", "id": "D01", "data": {"b": 2}},
+            json.dump({"ops": [{"op": "update", "collection": "items", "id": "D01", "data": {"detail": "b"}},
                                {"op": "delete", "collection": "items", "id": "zzz"}]}, f)
         self.assertEqual(self.run_cli("batch", opsf)[0], 1)
         self.assertEqual(self.store.get("items", "D01")["data"], {"status": "open"})
@@ -344,7 +365,7 @@ class TestQuestionValidation(StoreCase):
         with open(opsf, "w") as f:
             json.dump([{"op": "set", "collection": "questions", "id": "Q09", "data": {"question": "q"}}], f)
         self.assertEqual(self.run_cli("batch", opsf)[0], 2)
-        self.assertEqual(self.run_cli("set", "items", "D01", "--json", '{"anything":1}')[0], 0)
+        self.assertEqual(self.run_cli("set", "items", "D01", "--json", '{"detail":"anything"}')[0], 0)   # #10766: only named fields
 
 
 if __name__ == "__main__":

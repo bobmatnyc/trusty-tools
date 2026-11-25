@@ -119,6 +119,38 @@ The server sets `CorsLayer::permissive()` (wildcard `*` on all origins). This
 is intentional for a local developer dashboard and does not change with
 `--tailscale`.
 
+## Assistants
+
+The Trusty Assistants page is mounted at `/tools/assistants/`
+(`http://127.0.0.1:7788/tools/assistants/` on this machine,
+`http://100.x.y.z:7788/tools/assistants/` from a tailnet device). It lists the
+instances `ta list` names, shows each one's history oldest first, and asks a
+question of a running instance.
+
+There is no login. The page and its `/api/console/assistants` routes are
+served only on the loopback listener and the tailnet-gated listener; the peer
+gate above is the only access control. An ask also needs the console's own
+`Origin`, which the browser sends.
+
+The console never starts an assistant. When no ask daemon serves an
+instance, an ask answers `503` and the page shows the hint verbatim: run
+`ta ask-daemon <id>` in a terminal and leave it running.
+
+To try the page against a throwaway, seeded instance on the offline echo
+model, with no credentials and none of your real assistant homes:
+
+```bash
+cargo build -p trusty-console -p trusty-assistants
+scripts/sandbox_assistants_console.sh \
+  --console-bin <target-dir>/debug/trusty-console --ta-bin <target-dir>/debug/ta
+# open http://127.0.0.1:17891/tools/assistants/
+scripts/sandbox_assistants_console_selftest.sh   # the same pair, checked with curl
+```
+
+`<target-dir>` is your `$CARGO_TARGET_DIR` (or `target/`). The script prints
+its sandbox directory; `--stop-daemon <dir>` stops only the assistant, so the
+page shows the `503` hint, and `--stop <dir>` or Ctrl-C stops both.
+
 ## Building the UI
 
 The Svelte SPA is built automatically by `build.rs` when `pnpm` is on PATH.

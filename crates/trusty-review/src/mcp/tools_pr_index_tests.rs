@@ -112,7 +112,7 @@ async fn run_captured(state: &AppState, owner: &str, repo: &str) -> (Option<Seen
 #[tokio::test]
 async fn two_repos_resolve_to_their_own_indexes_in_one_server() {
     let state = state_with(Some(two_repo_registry()), true);
-    let ci = resolve_pr_index(&state, "DuettoResearch", "code-intelligence").await;
+    let ci = resolve_pr_index(&state, "Acme-Labs", "code-intelligence").await;
     assert_eq!(
         ci.ok(),
         Some(PrIndex::Resolved("code-intelligence-9f1c2e3a".into()))
@@ -138,7 +138,7 @@ async fn resolved_config_reaches_the_review_for_each_repo() {
     let mut state = state_with(Some(two_repo_registry()), true);
     state.config.github_token = "test-token-8649".into();
 
-    let (ci, _) = run_captured(&state, "duettoresearch", "code-intelligence").await;
+    let (ci, _) = run_captured(&state, "acme-labs", "code-intelligence").await;
     let (tt, _) = run_captured(&state, "bobmatnyc", "trusty-tools").await;
     // SAFETY: restore env before any assertion can unwind the test.
     unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
@@ -220,14 +220,47 @@ async fn registry_failure_is_an_error_when_search_is_required() {
     assert!(matches!(bad, Err(RepoIndexError::InvalidRepo { .. })));
 }
 
-/// A repo with no index is an in-band error naming the repo and the index id,
-/// returned before auth, even with search not required (#6687).
+/// #11409: a repo with no index, search not required, runs a DEGRADED
+/// diff-only review with null search and analyze clients carrying a notice
+/// that names the repo and the fix — no longer the #6687 in-band error.
 #[tokio::test]
 #[serial_test::serial]
-async fn missing_index_error_names_the_repo_and_the_index_id() {
+async fn missing_index_degrades_to_a_diff_only_review() {
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "cli") };
+    let mut state = state_with(Some(two_repo_registry()), false);
+    state.config.github_token = "test-token-11409".into();
+    let (seen, envelope) = run_captured(&state, "acme", "unindexed-repo").await;
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+
+    let seen = seen.unwrap_or_else(|| panic!("the review must run degraded: {envelope}"));
+    assert_eq!(seen.index, "", "a degraded review must carry no index");
+    let reason = seen
+        .search_health
+        .expect_err("search must be the null client");
+    for needle in [
+        "DEGRADED",
+        "acme/unindexed-repo",
+        "trusty-search index <path>",
+    ] {
+        assert!(reason.contains(needle), "{needle}: {reason}");
+    }
+    assert_eq!(
+        seen.analyze_ready,
+        Some(false),
+        "analyze must be the null client"
+    );
+}
+
+/// #11409: an explicit `require_search = true` keeps the in-band error naming
+/// the repo and the index id, returned before auth (#6687).
+#[tokio::test]
+#[serial_test::serial]
+async fn missing_index_is_an_error_when_search_is_required() {
     // SAFETY: test-only env mutation, serialised via #[serial].
     unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "app") };
-    let state = state_with(Some(two_repo_registry()), false);
+    let state = state_with(Some(two_repo_registry()), true);
     let args = json!({ "owner": "acme", "repo": "unindexed-repo", "pr": 5906 });
     let result = call_tool("review_pr", &args, &state).await;
     // SAFETY: restore env before any assertion can unwind the test.
@@ -241,6 +274,84 @@ async fn missing_index_error_names_the_repo_and_the_index_id() {
     let text = envelope["content"][0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("acme/unindexed-repo"), "{text}");
     assert!(text.contains("\"unindexed-repo\""), "{text}");
+}
+
+/// LLM stand-in answering a clean APPROVE, for the end-to-end degrade test.
+struct ApproveLlm;
+
+#[async_trait]
+impl LlmProvider for ApproveLlm {
+    fn name(&self) -> &str {
+        "approve-11409"
+    }
+
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        Ok(LlmResponse {
+            text: "Looks good.\n\n```json\n{\"verdict\":\"APPROVE\",\"summary\":\"LGTM\",\"findings\":[]}\n```".into(),
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 5,
+            latency_ms: 0,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
+/// #11409 end to end: an unindexed repo runs the real pipeline under the
+/// `DiffOnly` config and deps (the GitHub diff swapped for a local one). The
+/// envelope is DEGRADED with a `degraded_reason`, the model's APPROVE is
+/// capped below an authoritative APPROVE, and the ledger names search
+/// unavailable for want of an index.
+#[tokio::test]
+#[serial_test::serial]
+async fn unindexed_review_envelope_is_degraded_and_never_an_authoritative_approve() {
+    use std::io::Write;
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "cli") };
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = None; // the interactive default
+    config.github_token = "test-token-11409".into();
+    let registry = Arc::new(Registry::new(Some(two_repo_registry())));
+    let state = AppState::new(config, Arc::new(ApproveLlm), registry, None);
+    let mut diff = tempfile::NamedTempFile::new().expect("temp diff");
+    diff.write_all(b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn a() {}\n+fn a() { let _x = 1; }\n")
+        .expect("write diff");
+    let path = diff.path().to_path_buf();
+    let args = json!({ "owner": "acme", "repo": "unindexed", "pr": 7, "report_context": true });
+    let envelope = review_pr_with(&args, &state, move |config, mut input, deps, options| {
+        input.diff_source = crate::pipeline::DiffSource::LocalFile { path };
+        async move { crate::pipeline::run_review_with(&config, input, deps, options).await }
+    })
+    .await;
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+
+    let envelope = envelope.expect("the degraded review runs");
+    assert_eq!(envelope["isError"], json!(false), "{envelope}");
+    assert_eq!(envelope["mcp_status"], "degraded_context", "{envelope}");
+    let reason = envelope["degraded_reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("DEGRADED") && reason.contains("acme/unindexed"),
+        "{envelope}"
+    );
+    let text = envelope["content"][0]["text"].as_str().unwrap_or_default();
+    let result: ReviewResult = serde_json::from_str(text).expect("a ReviewResult");
+    assert_eq!(result.status, crate::models::ReviewStatus::Degraded);
+    assert!(!result.status.is_authoritative());
+    assert_ne!(result.verdict, crate::models::Verdict::Approve, "{text}");
+    let search = envelope["context_sources"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["source"] == "search"))
+        .unwrap_or_else(|| panic!("no search row: {envelope}"));
+    assert_eq!(search["state"], "unavailable", "{search}");
+    assert!(
+        search["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no trusty-search index"),
+        "{search}"
+    );
 }
 
 /// The filtered listing is asked first; the unfiltered one only on a miss.
@@ -299,7 +410,7 @@ async fn owner_named_unknown_owner_sentinel_is_invalid() {
 #[test]
 fn pinned_index_wins_only_when_it_belongs_to_the_repo() {
     let reg = two_repo_registry();
-    let key = "duettoresearch/code-intelligence";
+    let key = "acme-labs/code-intelligence";
     let pinned = select_repo_index(
         &reg,
         key,

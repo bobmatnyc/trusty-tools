@@ -233,25 +233,81 @@ fn every_kept_item_reaches_the_architect_prompt() {
     for (item, marker) in [
         ("identity", "You are a direct-action supervisor"),
         ("hard limits", "### Hard Limits"),
-        // #9997: the marker relay.sh accepts names the Architect.
-        ("relay marker", "`[<Name> Architect HH:MMZ]`"),
-        ("two-step send", "Send with the two-step pattern"),
         ("exact tmux targets", "`-t '=<session>:'`"),
-        ("evidence labels", "**reported**"),
-        ("evidence labels", "**verified**"),
         ("decisions as options", "\"(Recommended)\""),
-        // #9289: the question-id rule, pinned by its hex wrap step.
-        ("question ids", "`ff` is followed by `01`"),
         ("completion standard", "Clear a PR when Done items 1-3 hold"),
-        ("monitoring", "## Monitoring and heartbeat"),
-        ("heartbeat", "Run exactly one heartbeat"),
-        ("trusty tool priority", "## Trusty tool priority"),
         (
             "prose style",
             "\"Communication — Write Plainly\" section governs",
         ),
     ] {
         assert!(prompt.contains(marker), "{item}: `{marker}` missing");
+    }
+}
+
+/// MB159a: the items below left `architect.md` for the `architect-*` skills,
+/// behind the trigger the manual's skill index names. Each marker must still
+/// ship, in exactly the skill that owns it, so no rule is lost.
+#[test]
+fn every_moved_item_reaches_its_architect_skill() {
+    let skill = |stem: &str| {
+        rc().instruction(&format!("architect/skills/{stem}.md"))
+            .unwrap_or_default()
+    };
+    for (item, stem, marker) in [
+        // #9997: the marker relay.sh accepts names the Architect.
+        (
+            "relay marker",
+            "architect-operating-rules",
+            "`[<Name> Architect HH:MMZ]`",
+        ),
+        (
+            "two-step send",
+            "architect-operating-rules",
+            "Send with the two-step pattern",
+        ),
+        (
+            "evidence labels",
+            "architect-operating-rules",
+            "**reported**",
+        ),
+        (
+            "evidence labels",
+            "architect-operating-rules",
+            "**verified**",
+        ),
+        // #9289: the question-id rule, pinned by its hex wrap step.
+        (
+            "question ids",
+            "architect-operating-rules",
+            "`ff` is followed by `01`",
+        ),
+        (
+            "trusty tool priority",
+            "architect-operating-rules",
+            "## Trusty tool priority",
+        ),
+        (
+            "monitoring",
+            "architect-workflow",
+            "## Monitoring and heartbeat",
+        ),
+        (
+            "heartbeat",
+            "architect-workflow",
+            "Run exactly one heartbeat",
+        ),
+        ("builder bands", "architect-host-admin", "## Builder bands"),
+        (
+            "classify asks",
+            "architect-dashboard",
+            "Task (work: an IL T and a dashboard T)",
+        ),
+    ] {
+        assert!(
+            skill(stem).contains(marker),
+            "{item}: `{marker}` missing from {stem}"
+        );
     }
 }
 

@@ -63,6 +63,14 @@ pub struct IndexConfigView {
     /// the index is held — it indexes nothing until a PATCH fixes them.
     #[serde(default)]
     pub invalid_exclude_globs: Vec<String>,
+    /// #10739: the subtrees the index is narrowed to, relative to its root
+    /// (`.` for the root itself). Empty = the whole root. Reported so a caller
+    /// can prove from this reply alone which paths the binding admits.
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+    /// #10739: the issue #111 immediate-subdirectory glob filter. Empty = off.
+    #[serde(default)]
+    pub path_filter: Vec<String>,
     /// Whether prose docs (`*.md`, CHANGELOG, …) are indexed.
     pub include_docs: bool,
     /// Whether the walk honours `.gitignore` / `.ignore` / `.rgignore`.
@@ -81,7 +89,8 @@ impl IndexConfigView {
     /// Why: both GET and the PATCH echo-back need the same projection of the
     /// handle's hygiene + component fields.
     /// What: clones the relevant handle fields into the wire struct.
-    /// Test: `get_returns_current_config` in `tests_index_config`.
+    /// Test: `get_returns_current_config` in `tests_index_config`,
+    /// `config_get_reports_include_paths_and_path_filter`.
     fn from_handle(handle: &IndexHandle) -> Self {
         Self {
             extra_skip_dirs: handle.extra_skip_dirs.clone(),
@@ -91,6 +100,8 @@ impl IndexConfigView {
             invalid_exclude_globs: crate::core::repo_config::invalid_exclude_globs(
                 &handle.exclude_globs,
             ),
+            include_paths: relative_include_paths(handle),
+            path_filter: handle.path_filter.clone(),
             include_docs: handle.include_docs,
             respect_gitignore: handle.respect_gitignore,
             kg: !handle.skip_kg,
@@ -122,6 +133,12 @@ pub struct PatchIndexConfigRequest {
     /// removed from the index in place; nothing is rebuilt.
     #[serde(default)]
     pub profile: Option<String>,
+    /// #10739: replace the subtree allowlist, root-relative. `Some([])` clears
+    /// it, so the whole root is admitted again. Files the new list refuses are
+    /// removed in place; files it newly admits are indexed by the next reindex
+    /// (or a watcher event for that file), never by this PATCH.
+    #[serde(default)]
+    pub include_paths: Option<Vec<String>>,
     #[serde(default)]
     pub include_docs: Option<bool>,
     #[serde(default)]
@@ -211,8 +228,13 @@ pub(crate) fn reject_invalid_globs(
 /// already indexed. `kg`/`vector` toggle the components at runtime (#2984
 /// Phase 1): off is instantaneous, on spawns a catch-up (`catch_up_started`),
 /// and a PATCH that releases a held index starts a catch-up reindex (#9059).
+/// #10739: `include_paths` reconciles like `exclude_globs` (#10532): files the
+/// new list refuses are purged in place; newly admitted files wait for the
+/// next reindex.
 ///
-/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
+/// Test: `config_set_clears_include_paths_and_refused_paths_become_admissible`,
+/// `setting_include_paths_purges_newly_refused_files`,
+/// `a_valid_patch_catches_up_what_the_hold_refused`,
 /// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
 /// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
 /// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
@@ -249,6 +271,12 @@ pub(crate) async fn patch_index_config_report(
             serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) }),
         ));
     };
+    // #10739: resolved before anything mutates, so a refusal changes nothing.
+    let new_include_paths = req
+        .include_paths
+        .as_deref()
+        .map(|paths| resolve_include_paths(&existing.root_path, paths))
+        .transpose()?;
 
     // #3049 round 3: hold this id's teardown-lock SHARED side across the whole
     // PATCH, then hand it to the catch-up task exactly as `permit` is handed
@@ -288,7 +316,9 @@ pub(crate) async fn patch_index_config_report(
     // flight on this index answers 409 exactly as for a toggle.
     // #10532: a changed exclude list takes the permit too, so a reindex walking
     // with the old globs cannot re-add the files the purge below removes.
-    let permit = if transition.needs_catch_up() || rearm || stamp.is_some() {
+    // #10739: so does a changed include_paths list, for the same reason.
+    let reconcile = stamp.is_some() || new_include_paths.is_some();
+    let permit = if transition.needs_catch_up() || rearm || reconcile {
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
@@ -343,7 +373,10 @@ pub(crate) async fn patch_index_config_report(
         root_path: existing.root_path.clone(),
         // #7434: a config PATCH does not touch the root table.
         additional_roots: existing.additional_roots.clone(),
-        include_paths: existing.include_paths.clone(),
+        // #10739: config.set can now replace or clear the allowlist.
+        include_paths: new_include_paths
+            .clone()
+            .unwrap_or_else(|| existing.include_paths.clone()),
         exclude_globs,
         extensions,
         domain_terms: existing.domain_terms.clone(),
@@ -407,6 +440,9 @@ pub(crate) async fn patch_index_config_report(
         view.data_file_max_bytes,
         &view.extensions,
         &view.exclude_globs,
+        new_include_paths
+            .as_ref()
+            .map(|_| view.include_paths.as_slice()),
         view.include_docs,
         view.respect_gitignore,
         transition.new_skip_kg,
@@ -419,14 +455,34 @@ pub(crate) async fn patch_index_config_report(
     // catch-up below, which takes over the teardown guard.
     // Whenever the request names the list, not only when it changed: the new
     // globs are already stored, so a retry after a failed purge sees no change.
-    let purge = if stamp.is_some() {
+    // #10739: a named include_paths list purges the files outside it the same way.
+    let mut include_skip: Option<String> = None;
+    let purge = if reconcile {
+        let roots = (new_include_paths.is_some() && !registered.include_paths.is_empty())
+            .then(|| crate::service::index_admission::configured_roots(&registered))
+            .transpose();
+        // #10739: an unresolvable include root skips include-list pruning
+        // entirely; the reply reports the skip and nothing is deleted for it.
+        let roots = match roots {
+            Ok(roots) => roots,
+            Err(err) => {
+                include_skip = Some(err.to_string());
+                None
+            }
+        };
         Some(
-            super::profile_apply::purge_newly_excluded(&registered, &index_id, &view.exclude_globs)
-                .await,
+            super::profile_apply::purge_newly_excluded(
+                &registered,
+                &index_id,
+                &view.exclude_globs,
+                roots.as_deref(),
+            )
+            .await,
         )
     } else {
         None
     };
+    let include_named = new_include_paths.is_some();
 
     // Issue #2984 Phase 1: spawn the background catch-up. `permit` (held since
     // the semaphore acquisition above) moves into the task and is released
@@ -495,7 +551,13 @@ pub(crate) async fn patch_index_config_report(
                 "catch_up_started": catch_up_started,
             },
         });
-        with_profile(&mut body, stamp.as_ref(), purge.as_ref());
+        with_profile(
+            &mut body,
+            stamp.as_ref(),
+            include_named,
+            purge.as_ref(),
+            include_skip.as_deref(),
+        );
         with_catch_up_reindex(&mut body, catch_up_reindex);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
@@ -515,18 +577,29 @@ pub(crate) async fn patch_index_config_report(
             "catch_up_started": catch_up_started,
         },
     });
-    with_profile(&mut body, stamp.as_ref(), purge.as_ref());
+    with_profile(
+        &mut body,
+        stamp.as_ref(),
+        include_named,
+        purge.as_ref(),
+        include_skip.as_deref(),
+    );
     with_catch_up_reindex(&mut body, catch_up_reindex);
     Ok(body)
 }
 
 /// Add `profile` and `profile_purge` to a PATCH body when it changed the excludes (#10532).
 ///
-/// What: a PATCH that touched neither leaves the body as it was.
+/// What: a PATCH that touched neither leaves the body as it was. #10739: a
+/// PATCH naming `include_paths` reports the same purge as `include_paths_purge`,
+/// or `{skipped: true, reason}` when `include_skip` says the include-list
+/// pruning did not run.
 fn with_profile(
     body: &mut serde_json::Value,
     stamp: Option<&crate::core::profile::ResolvedProfile>,
+    include_named: bool,
     purge: Option<&Result<(usize, usize), String>>,
+    include_skip: Option<&str>,
 ) {
     let Some(map) = body.as_object_mut() else {
         return;
@@ -534,11 +607,97 @@ fn with_profile(
     if let Some(stamp) = stamp {
         map.insert("profile".into(), stamp.label().into());
     }
-    if let Some(purge) = purge {
+    let Some(purge) = purge else { return };
+    if stamp.is_some() {
         map.insert(
             "profile_purge".into(),
             super::profile_apply::purge_body(purge),
         );
+    }
+    if include_named {
+        // #10739: a skipped include-list pruning is reported, not shown as 0 removed.
+        let body = match include_skip {
+            Some(reason) => serde_json::json!({
+                "skipped": true, "reason": reason, "rebuilt": false,
+            }),
+            None => super::profile_apply::purge_body(purge),
+        };
+        map.insert("include_paths_purge".into(), body);
+    }
+}
+
+/// The root-relative form of an index's `include_paths` (#10739).
+///
+/// What: strips the primary root; the root itself is `.`; a subtree outside
+/// the root (a relocated pre-#10739 row) is reported absolute.
+fn relative_include_paths(handle: &IndexHandle) -> Vec<String> {
+    handle
+        .include_paths
+        .iter()
+        .map(|p| match p.strip_prefix(&handle.root_path) {
+            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => p.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+/// Resolve a PATCH's root-relative `include_paths` to absolute subtrees (#10739).
+///
+/// Why: create resolves the list the same way (`indexes.rs`); a `..` segment
+/// or an absolute path outside the root would let a binding admit files the
+/// index root does not hold.
+/// What: trims, drops blanks and `.` (both mean the whole root), joins the
+/// rest to `root`, de-duplicates. `400 invalid_include_path` names the first
+/// entry that escapes the root.
+/// Test: `config_set_refuses_an_include_path_outside_the_root`,
+/// `config_set_refuses_an_include_path_symlinked_outside_the_root`.
+fn resolve_include_paths(
+    root: &std::path::Path,
+    paths: &[String],
+) -> Result<Vec<std::path::PathBuf>, (StatusCode, serde_json::Value)> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for raw in paths {
+        let p = raw.trim();
+        if p.is_empty() || p == "." {
+            continue;
+        }
+        let given = std::path::Path::new(p);
+        // #10739: also refuse a path whose real target leaves the root.
+        let abs = root.join(given);
+        let escapes = given
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+            || (given.is_absolute() && !given.starts_with(root))
+            || !really_inside(root, &abs);
+        if escapes {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "invalid_include_path",
+                    "message": format!("include path '{p}' is outside the index root"),
+                }),
+            ));
+        }
+        if !out.contains(&abs) {
+            out.push(abs);
+        }
+    }
+    Ok(out)
+}
+
+/// Does an existing include path `abs` really resolve under `root` (#10739)?
+///
+/// What: a path that does not exist yet passes (the walk re-checks it); one
+/// that exists, even as a dangling link, must canonicalise under the root.
+/// Any other I/O error refuses.
+/// Test: `config_set_refuses_an_include_path_symlinked_outside_the_root`.
+fn really_inside(root: &std::path::Path, abs: &std::path::Path) -> bool {
+    // #10739: the lexical check alone admitted a symlink to outside the root.
+    match std::fs::symlink_metadata(abs) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+        Ok(_) => crate::service::index_admission::resolves_inside_root(root, abs).unwrap_or(false),
     }
 }
 
@@ -605,6 +764,7 @@ fn persist_hygiene_update(
     data_file_max_bytes: u64,
     extensions: &[String],
     exclude_globs: &[String],
+    include_paths: Option<&[String]>,
     include_docs: bool,
     respect_gitignore: bool,
     skip_kg: bool,
@@ -641,6 +801,10 @@ fn persist_hygiene_update(
     entry.data_file_max_bytes = Some(data_file_max_bytes);
     entry.extensions = extensions.to_vec();
     entry.exclude_globs = exclude_globs.to_vec();
+    // #10739: only a PATCH that names the list rewrites the stored allowlist.
+    if let Some(include_paths) = include_paths {
+        entry.include_paths = include_paths.to_vec();
+    }
     entry.include_docs = include_docs;
     entry.respect_gitignore = respect_gitignore;
     entry.skip_kg = skip_kg;

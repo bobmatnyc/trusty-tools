@@ -97,6 +97,9 @@ mod resume_claim_tests;
 // #8983: the resume grant across both daemon resume paths.
 #[cfg(test)]
 mod resume_grant_tests;
+// #10989 F3: a resume unparks a decommission-parked index.
+#[cfg(test)]
+mod resume_restore_tests;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;
@@ -501,14 +504,46 @@ pub struct SendInputRequest {
 /// Response body for POST /api/v1/sessions/managed/{id}/send.
 ///
 /// Why: confirms the inject succeeded without echoing the full session record.
-/// What: sent flag and tmux_name for logging.
-/// Test: send handler test.
+/// #11796: the route now reports the same observed verdict as MCP
+/// `session_send`, so a caller can tell a refused send from a delivered one.
+/// What: sent flag, tmux_name, the `submit_state` wire name, the reason when
+/// the send may not have landed, and (on a refusal only) an `error` string the
+/// CLI prints.
+/// Test: `rest_send_refuses_a_typed_draft`, `rest_send_delivers_into_an_empty_box`.
 #[derive(Debug, Serialize)]
 pub struct SendInputResponse {
     /// True when the text was injected.
     pub sent: bool,
     /// tmux session name the text was sent to.
     pub tmux_name: String,
+    /// #11796: [`crate::session_manager::SubmitState::as_str`].
+    pub submit_state: &'static str,
+    /// #11796: [`crate::session_manager::SubmitState::reason`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// #11796: set only when `sent` is false; the message a client surfaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SendInputResponse {
+    /// The body for one observed send verdict (#11796).
+    pub fn from_submit(submit: crate::session_manager::SubmitState, tmux_name: String) -> Self {
+        let sent = submit.delivered();
+        Self {
+            sent,
+            tmux_name,
+            submit_state: submit.as_str(),
+            reason: submit.reason(),
+            error: (!sent).then(|| {
+                format!(
+                    "not sent ({}): {}",
+                    submit.as_str(),
+                    submit.reason().unwrap_or("the send was refused")
+                )
+            }),
+        }
+    }
 }
 
 /// Request body for POST /api/v1/sessions/managed/{id}/answer.
@@ -676,8 +711,9 @@ pub async fn get_managed_session(
 ///
 /// Why: the calling agentic process or human operator sends messages to the
 /// harness without needing to attach to the tmux pane.
-/// What: delegates to SessionManager::send_input.
-/// Test: send handler test.
+/// What: delegates to [`cores::send_core`], which runs the observed send
+/// (#11796): a refused or undelivered send is a 409 with `sent: false`.
+/// Test: `rest_send_refuses_a_typed_draft`, `rest_send_delivers_into_an_empty_box`.
 pub async fn send_to_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
@@ -803,6 +839,10 @@ pub(crate) fn dirt_policy(force: bool) -> ProvisioningDirt {
 
 #[cfg(test)]
 mod answer_route_tests;
+#[cfg(test)]
+mod reconcile_server_tests;
+#[cfg(test)]
+mod send_route_tests;
 #[cfg(test)]
 mod staleness_bench_tests;
 #[cfg(test)]

@@ -28,9 +28,10 @@ use crate::commands::egress_guard::Verdict;
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::hook_stdin::HookStdinError;
 
-/// The two Slack MCP server segments the allowlist covers, matched exactly:
-/// the native `slack-mcp` and claude.ai's hosted connector.
-pub(crate) const SLACK_READ_SERVERS: &[&str] = &["slack-mcp", "claude_ai_Slack"];
+/// The Slack MCP server segment the allowlist covers, matched exactly: the
+/// native `slack-mcp`. #10735: claude.ai's hosted `claude_ai_Slack` is no
+/// longer denied, so it has nothing to lift.
+pub(crate) const SLACK_READ_SERVERS: &[&str] = &["slack-mcp"];
 
 /// The check slug of the deny this arm may lift.
 const FAMILY_CHECK: &str = "egress-family";

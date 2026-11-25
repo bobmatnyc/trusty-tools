@@ -98,8 +98,9 @@ current project's absolute path explicitly. Pass `tmux_window` and
 [ -n "$TMUX" ] && tmux display-message -p '#{session_created}'
 ```
 
-Every trusty-mpm tmux session is named `tm-<folder>`, so a later session
-reuses the name. Without `tmux_session_created` the session-name route
+A trusty-mpm tmux session is named `tm-<folder>` by default, so a later
+session reuses the name. Several PMs can share one folder; read your own
+name from `$TMUX_PANE`, never from the folder (#11685). Without `tmux_session_created` the session-name route
 resolves nothing (#8408).
 
 <!-- rule:tm-session-resume/lean-default -->

@@ -1120,6 +1120,32 @@ fn parse_review_reply_reads_only_the_tool_input() {
     assert_eq!(valid.verdict, Verdict::Block);
 }
 
+/// #10759: a text reply (tool-choice `auto`, no schema enforcement) with a
+/// verdict but no `findings` key fails safe instead of passing as clean.
+#[test]
+fn parse_review_reply_text_only_without_findings_key_is_fail_safe() {
+    let parsed = parse_review_reply(&reply(
+        r#"{"verdict":"APPROVE","grade":"A"}"#,
+        Some("end_turn"),
+    ));
+    assert!(parsed.is_fail_safe);
+    assert_eq!(parsed.verdict, Verdict::Unknown);
+    let reason = parsed.fail_safe_reason.unwrap_or_default();
+    assert!(reason.contains("findings"), "{reason}");
+}
+
+/// #10759: a text reply that names an empty `findings` list is a normal review.
+#[test]
+fn parse_review_reply_text_only_with_empty_findings_parses() {
+    let parsed = parse_review_reply(&reply(
+        r#"{"verdict":"APPROVE","findings":[]}"#,
+        Some("end_turn"),
+    ));
+    assert!(!parsed.is_fail_safe);
+    assert_eq!(parsed.verdict, Verdict::Approve);
+    assert!(parsed.findings.is_empty());
+}
+
 // ── #9310: reviewer severity, null fields, one decode position ───────────
 
 /// #9310 item 2.2: the reviewer's severity is kept on the finding and maps to

@@ -3,7 +3,7 @@ name: tm-secrets
 description: Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. Which tm secrets verbs ship in which release.
 user-invocable: true
 metadata:
-  version: "1.5.0"
+  version: "1.7.0"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
@@ -14,14 +14,31 @@ effort: medium
 🔴 **Which `tm secrets` verbs ship depends on the release.** In trusty-mpm
 1.8.x: `set`, `list`, `remove`, `import`, `copy` and `doctor`. `exec` and
 `resolve` land in trusty-mpm 1.9.0 ([DOC-74](../../docs/specs/DOC-74-secrets-integration.md)
-§15.8). Run `tm secrets --help` before you plan around either.
+§15.8). `assign` lands in the release after 1.9.0
+([#11015](https://github.com/bobmatnyc/trusty-tools/issues/11015)); its
+`--project` refuses every project until the project registry
+([#10368](https://github.com/bobmatnyc/trusty-tools/issues/10368)) ships.
+Run `tm secrets --help` before you plan around any of them.
+
+**`tm secrets assign SRC --project owner/repo [--as KEY]`** copies one key of
+any trusty vault into the named project's vault. SRC is
+`trusty/<owner>[/<repo>]:KEY` or `secret://<owner>[/<repo>]/KEY`;
+`secret://KEY` names no vault and is refused. The destination key is the
+source's name, or `--as`. The project must share the source vault's owner.
+Only a person or the Architect session may name another project; a PM or a
+subagent may name only its own checkout's project. A re-run replaces
+the destination value, as `copy` does. The value moves inside the server and
+never reaches tm, the clipboard or the transcript; tm prints names only.
 
 These are designed in DOC-74 §15 and are not in any binary yet: the
 `secrets_get_ref` MCP tool
 ([#7522](https://github.com/bobmatnyc/trusty-tools/issues/7522)), the console
-secrets page, the file backend
-([#9326](https://github.com/bobmatnyc/trusty-tools/issues/9326)) and the audit
-trail ([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)).
+secrets page and the file backend
+([#9326](https://github.com/bobmatnyc/trusty-tools/issues/9326)). The
+server writes a value-free audit record per request
+(`crates/trusty-secrets/src/server/audit.rs`); the wider audit trail
+([#4567](https://github.com/bobmatnyc/trusty-tools/issues/4567)) is still
+design.
 
 What ships: the `trusty-common` credential store the daemon reads, and the
 `trusty-secrets` 0.1.0 crate — a Keychain backend, a names-only index and an
@@ -52,8 +69,11 @@ line that could carry one.
 4. Never commit or stage a `.env` or `.env.*` file. A committed credential is
    the same defect as one in a LaunchAgent plist (#8236). An example file
    holds key names and `secret://` references only.
-5. Never move a value out of the Keychain — no `security … -w` export, no copy
-   into a file, a plist, `.env.local` or another store.
+5. Never print, export, echo or read a value into the transcript. `security
+   … -w`/`-g`, a value in argv and a value in an env overlay stay forbidden,
+   and so does a copy into a file, a plist or `.env.local`. `tm secrets copy`
+   between stores is allowed: it moves the value from store to store, and the
+   value never reaches you (#11000). See "Copying between stores" below.
 6. Never call `secrets.set`, and never hand-roll a call to the `trusty-secrets`
    socket from a shell or a script. The `secrets.set` request carries the
    value. `tm hook --pm-guard` refuses `nc`.
@@ -71,6 +91,8 @@ line that could carry one.
     value-adjacent data. A value that prints anyway is an exposure to report
     (#9158).
 11. A review agent (`code-critic`, `code-analyzer`, `security`) never runs `tm secrets` (any verb), the `trusty-secrets` CLI, or any call to the live trusty-secrets socket or server on the operator's machine. If a review needs secrets behaviour exercised, report it as a gap for a sandboxed live check (temp HOME, file backend); never run that check against the live store. (#7524, D05)
+
+Exception: a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. All other secrets keep this rule. The exception does not allow printing or logging any value, and it does not cover a credential the owner did not declare.
 
 A value that reaches a transcript, log or commit is a security defect. Stop
 and report its location to the PM; it is already exposed.
@@ -116,9 +138,42 @@ field. An agent may write a deny; only a person may remove one. An agent
 may `set` (and so `import`) or locally `copy` a key that has no deny, in its
 own project or owner scope, when the owner asked for it (#10459); its `set`
 confirmation shows only `[N chars]`, and the audit record names its pid and
-project. `delete`, removing a deny, and a copy to a sync target such as
-GitHub Actions stay operator-only. A copy carries a key's deny; a denied key
+project. An agent may also copy a key with no deny to a sync target such as
+GitHub Actions or Vercel (#10999); the value goes to the CLI's stdin and
+never to the agent, and a denied key fails with `agent_key_denied`.
+`delete` and removing a deny stay operator-only. A copy carries a key's deny; a denied key
 cannot be copied into 1Password or Keeper, which cannot hold a deny.
+
+**Copying between stores (#11000).** A user has access to every secret on
+their machine, so pointing a secret at another store is the user's call, and
+no agent needs to see the value. A copy moves the value from the source store
+to the destination and prints names only.
+
+- Sources (#10998): any macOS Keychain item, or a key of any trusty vault,
+  such as the owner vault. A named copy writes one key, the KEY you give, in
+  the caller's project vault.
+- Keychain item: `tm secrets copy --from keychain --from-service <S>
+  --from-account <A> --to <backend> KEY`. Vault key: `tm secrets copy --from
+  <backend> --from-vault <VAULT> --from-key <K> --to <backend> KEY`.
+- A Keychain service that starts with `trusty` fails with `invalid_params`.
+  Name a trusty key with `--from-vault`, so its deny is checked.
+- An agent's copy of a Keychain item lands push-only for agents. `tm secrets
+  list` marks it `(push-only for agents)`. No agent may read, grant, `exec`
+  or locally copy it (`agent_key_denied`); an agent may push it. Only a
+  person lifts the mark.
+- A named copy cannot name a sync target as source or destination
+  (`unsupported`). Copy the item into the project vault, then push it with
+  `tm secrets copy --from <backend> --to <target> KEY`. Residual risk: a writer of the
+  destination repository can add a workflow or deployment that reads the
+  pushed variable.
+- A key denied to agents stays blocked for an agent's copy and push
+  (`agent_key_denied`).
+- Each key leaves one audit record: source locator, destination, key, the
+  caller's pid and the agent flag. It never holds the value.
+- A `secret://` reference to a foreign store is later work; copy the value.
+- The case this serves: copy an existing GitHub PAT from the Keychain into
+  the project vault, then push it to a project's Vercel environment. Never
+  substitute `vercel env add`, `gh secret set` or a value on a command line.
 
 **Socket.** `trusty-secrets serve` answers on
 `~/.trusty-tools/trusty-secrets/secrets.sock`, started by a client on first
@@ -132,7 +187,7 @@ server derives the vaults from that checkout's remote.
 | `secrets.set` | `new` or `updated`, and a one-time mask: `[N chars]` only for an agent. Its request carries the value. An agent is refused a denied key (`agent_key_denied`). |
 | `secrets.delete` | Whether a key was removed. Operator-only. |
 | `secrets.set_agents_may_use` | `allowed: false` writes the key's agent deny (an agent may); `allowed: true` removes it (a person only) |
-| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies only keys with no deny, never to a sync target. |
+| `secrets.copy` | Names copied and failed; a key's deny travels with it. An agent copies or pushes only keys with no deny. A Vercel key that already existed fails as unproven; do not retry it. `tm secrets assign` sends it with a vault `source` and `project` set to the named project's checkout. |
 | `secrets.doctor` | Backend availability and paths |
 
 Only `secrets.set` echoes any part of a value, and only to a person: its
@@ -148,11 +203,11 @@ kind and the key or reference to the PM. Do not retry under another name.
 
 | Kind | Meaning and action |
 |---|---|
-| `vault_out_of_scope` | The reference or vault is not the project's or its owner's. Cross-project access does not ship. Do not widen a config file. |
+| `vault_out_of_scope` | The reference or vault is not the project's or its owner's. A reference cannot name another store yet; copy the value with `tm secrets copy`. Do not widen a config file. |
 | `remote_host_unsupported` | `origin` is not a github.com URL in an accepted form. Do not change the remote. |
 | `project_unresolved`, `project_invalid` | No usable checkout or remote. Report the directory. |
-| `agent_key_denied` | The operator denied this key to agents (per-key deny). Report the key to the PM; only a person removes a deny. |
-| `agent_use_refused` | The method is operator-only for agents (`delete`, removing a deny, a copy to a sync target). Report the method to the PM. |
+| `agent_key_denied` | The operator denied this key to agents (per-key deny), for use, copy and push alike, or the key is push-only and an agent tried to read or locally copy it. Report the key to the PM; only a person removes a deny. |
+| `agent_use_refused` | The method is operator-only for agents (`delete`, removing a deny). Report the method to the PM. |
 | `not_found` | Neither vault indexes the key. Tell the PM the vault and key; the operator enters the value outside every session. |
 | `unknown_backend`, `same_backend` | No such backend on this build or OS, or a copy onto itself. |
 | `backend_failed`, `index_busy`, `index_corrupt`, `storage_unavailable`, `orphaned_backend_entry` | Store fault. Report it; do not touch the Keychain or the index by hand. |

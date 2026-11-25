@@ -478,3 +478,71 @@ fn inline_equivalent_picks_a_delimiter_the_body_does_not_carry() {
     );
     assert!(text.ends_with("\nTM_PM_GUARD_SCRIPT_BODY_\n"), "{text}");
 }
+
+/// A python-docx inspect script that keeps a cell's paragraphs in `ps`.
+const INSPECT_PY: &str = "import sys\nfrom docx import Document\n\ndoc = Document(sys.argv[1])\nfor table in doc.tables:\n    for row in table.rows:\n        for cell in row.cells:\n            ps = cell.paragraphs\n            print(len(ps), [p.style.name for p in ps])\n            for p in ps:\n                print(p.text)\n";
+
+/// 🔴 REGRESSION (#10688): a local variable named `ps` in a Python script is
+/// not the `ps` command; the read-only inspect run is allowed.
+#[test]
+fn a_python_ps_variable_allows_10688() {
+    let dir = tempfile::tempdir().expect("dir");
+    script(dir.path(), "inspect.py", INSPECT_PY);
+    let reason = eval("python3 inspect.py in.docx", dir.path());
+    assert!(reason.is_none(), "must allow: {reason:?}");
+}
+
+/// #10688: the same body plus a real secret read or env dump still refuses.
+#[test]
+fn the_inspect_shape_plus_a_secret_read_refuses() {
+    let dir = tempfile::tempdir().expect("dir");
+    let mut leaked = Vec::new();
+    for (name, extra) in [
+        ("key.py", "key = open('.env').read()\n"),
+        (
+            "kc.py",
+            "import subprocess\nsubprocess.run(['security', 'find-generic-password', '-s', 'fake-svc', '-w'])\n",
+        ),
+        ("pse.sh", "ps eww 1\n"),
+        ("psauxe.sh", "ps auxe\n"),
+        (
+            "pslist.py",
+            "import subprocess\nsubprocess.run([\"ps\", \"eww\"])\n",
+        ),
+        (
+            "pscompact.py",
+            "import subprocess\nsubprocess.run([\"ps\",\"eww\"])\n",
+        ),
+        (
+            "psdashe.py",
+            "import subprocess\nsubprocess.run(['ps','-p','1','-E'])\n",
+        ),
+        (
+            "pstuple.py",
+            "import subprocess\nsubprocess.Popen(('ps','eww'))\n",
+        ),
+        ("psystem.py", "import os\nos.system(\"ps eww\")\n"),
+        (
+            "psshell.py",
+            "import subprocess\nsubprocess.run(\"ps eww\", shell=True)\n",
+        ),
+        (
+            "lclist.py",
+            "import subprocess\nsubprocess.run([\"launchctl\", \"print\", \"gui/501/x\"])\n",
+        ),
+        ("environ.py", "print(open('/proc/1/environ').read())\n"),
+        ("launchctl.sh", "launchctl print gui/501/com.example.fake\n"),
+    ] {
+        script(dir.path(), name, &format!("{INSPECT_PY}{extra}"));
+        let interp = if name.ends_with(".sh") {
+            "bash"
+        } else {
+            "python3"
+        };
+        let command = format!("{interp} {name} in.docx");
+        if eval(&command, dir.path()).is_none() {
+            leaked.push(command);
+        }
+    }
+    assert!(leaked.is_empty(), "must deny: {leaked:#?}");
+}

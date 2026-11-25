@@ -27,6 +27,10 @@ pub const OPEN_GLYPH: &str = "▾";
 pub const CLOSED_GLYPH: &str = "▸";
 /// Marker for a project, a leaf of the tree (#10754).
 pub const PROJECT_GLYPH: &str = "·";
+/// Marker for the Architect's privileged top-level row (#11554).
+pub const ARCHITECT_GLYPH: &str = "◆";
+/// The tag after the Architect's name that marks it privileged (#11554).
+pub const PRIVILEGED_TAG: &str = "privileged · ";
 
 /// The open/closed marker for an owner row.
 fn marker(expanded: bool) -> &'static str {
@@ -100,6 +104,11 @@ pub fn row_line_fit(row: &TreeRow, width: usize) -> Line<'static> {
         TreeRowKind::Project { name, total, live } => {
             let lead = format!("  {PROJECT_GLYPH} ");
             (lead, Style::default(), name, String::new(), *total, *live)
+        }
+        // #11554: top level, no indent, tagged privileged
+        TreeRowKind::Architect { name, total, live } => {
+            let lead = format!("{ARCHITECT_GLYPH} ");
+            (lead, bold, name, PRIVILEGED_TAG.to_string(), *total, *live)
         }
     };
     let len = |s: &str| s.chars().count();
@@ -260,6 +269,26 @@ mod tests {
         // #10754: the left column holds owner and projects only.
         assert_eq!(lines[2], "  · beta  0 sessions, 0 live");
         assert_eq!(lines.len(), 3, "{lines:?}");
+    }
+
+    /// #11554: the Architect row draws unindented and tagged privileged.
+    #[test]
+    fn architect_row_is_marked_privileged() {
+        let row = TreeRow {
+            id: NodeId::Project {
+                owner: String::new(),
+                name: "architect".to_string(),
+            },
+            kind: TreeRowKind::Architect {
+                name: "architect".to_string(),
+                total: 1,
+                live: 1,
+            },
+        };
+        assert_eq!(
+            line_text(&row_line(&row)),
+            "◆ architect  privileged · 1 session, 1 live"
+        );
     }
 
     #[test]

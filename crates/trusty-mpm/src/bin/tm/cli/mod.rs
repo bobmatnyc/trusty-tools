@@ -103,9 +103,9 @@ pub(crate) struct Cli {
     /// global `!gh auth git-credential` helper, a fixed SSH key) — the
     /// account with visibility into the repo is simply never tried. This flag
     /// names it explicitly. It is a clap `global = true` flag, so it parses
-    /// anywhere in the invocation: `tm --account bob-duetto <url>`, `tm run
-    /// --account bob-duetto <owner>/<repo>`, and `tm register --account
-    /// bob-duetto <owner>/<repo>` all bind the same field. The
+    /// anywhere in the invocation: `tm --account acme-admin <url>`, `tm run
+    /// --account acme-admin <owner>/<repo>`, and `tm register --account
+    /// acme-admin <owner>/<repo>` all bind the same field. The
     /// `<account>@<owner>/<repo>` shorthand
     /// (`commands::register_args::classify`) is the terser
     /// equivalent for the bare/`run` managed-repo forms; passing both is only
@@ -126,7 +126,7 @@ pub(crate) struct Cli {
     /// concurrently-running session under a different account is unaffected.
     /// #5850: `--user <login>` is a VISIBLE ALIAS of this same arg, not a
     /// second one — the owner reached for that spelling (`tm <url> --user
-    /// bob-duetto`) and got a clap parse error. One arg means one field, so
+    /// acme-admin`) and got a clap parse error. One arg means one field, so
     /// every parse position and the `is_name_segment` validation in
     /// [`crate::commands::register_args::resolve_account`] carry over
     /// unchanged; no validation against `gh auth status` exists for either
@@ -173,7 +173,7 @@ pub(crate) struct Cli {
 /// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
 fn non_blank_login(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
-        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+        return Err("needs a gh login — e.g. `--user acme-admin`.".to_string());
     }
     Ok(value.to_string())
 }
@@ -472,8 +472,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_mouse: bool,
         /// The Architect dashboard store root the Architect view reads
-        /// (`a` on the home screen). Until #10944 the daemon does not resolve
-        /// it; afterwards this stays an override (#10966).
+        /// (`a` on the home screen). Optional: without it the daemon resolves
+        /// the root (#10944); given, it overrides that (#10966).
         #[arg(long, env = "TM_ARCHITECT_STORE")]
         architect_store: Option<std::path::PathBuf>,
     },
@@ -627,6 +627,28 @@ pub(crate) enum Command {
         /// Gmail, Notion and Google Chat MCP tool, for every caller.
         #[arg(long)]
         egress_guard: bool,
+        /// Run in standing-rules mode (#10960): on `SessionStart` /
+        /// `UserPromptSubmit`, inject the Architect's
+        /// `local/standing-rules.md` into context. Architect sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        standing_rules: bool,
+        /// Run in turn-task mode (#11398): on `UserPromptSubmit`, stamp
+        /// `Task: <id>@<MMDD>` from datg's `current` field. PM sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        turn_task: bool,
+        /// Run the minimal pm-guard in shadow mode (#11431): judge a
+        /// `PreToolUse` call on parsed facts (rules 1-3, 5) and log each
+        /// would-refuse to `~/.trusty-mpm/guard/shadow.jsonl`. Never blocks;
+        /// always exits 0.
+        #[arg(long)]
+        pm_guard_shadow: bool,
+        /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
+        /// final message claims completion with no evidence map or sets an
+        /// invented size target. Warn-only; always exits 0.
+        #[arg(long)]
+        completion_evidence: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
@@ -650,11 +672,20 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: DivertAction,
     },
-    /// Palace access and maintenance without MCP (#4837, #8352).
+    /// Tool-output savings read side (#11033).
     ///
-    /// USE `recall`, `remember` and `note` AS THE FALLBACK whenever the
-    /// `mcp__trusty-memory__*` tools are unavailable — a dead MCP connection
-    /// does not cut this session off from memory. They call the same daemon
+    /// Why: compress and opportunity rows were written but never shown.
+    /// What: `tm savings status [--by tool|subagent] [--days N] [--json]`.
+    /// Test: `cli_parses_savings_status`.
+    Savings {
+        /// Action to run.
+        #[command(subcommand)]
+        action: SavingsAction,
+    },
+    /// Native palace access and maintenance (#4837, #8352).
+    ///
+    /// USE `recall`, `remember` and `note` in every mpm session; MCP adapters
+    /// are for non-mpm callers only. They call the same daemon
     /// methods the MCP tools do (`memory_recall`, `memory_remember`,
     /// `memory_note`) over its Unix socket, honour the session's own palace
     /// (`TRUSTY_MEMORY_PALACE`, then the committed pin, then the repo slug)
@@ -702,6 +733,9 @@ pub(crate) enum Command {
         /// #10973: the program and arguments to run; empty reads stdin.
         #[arg(last = true)]
         command: Vec<String>,
+        /// #11507: the chain marker nonce; `--tool` is then the chain's step spec.
+        #[arg(long, conflicts_with = "command")]
+        chain: Option<String>,
     },
     /// Wait for a condition, in-turn, without blocking past the harness ceiling.
     ///
@@ -734,6 +768,7 @@ pub(crate) enum Command {
     /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
     /// slot's pool directory unless one is pinned, runs the command and exits
     /// with its status; exits 75 naming the holders when no slot frees.
+    /// `tm build-lease where <bin>` prints the freshest built binary (#10835).
     /// Test: `tests/tm_build_lease.rs`.
     BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// List the worktrees the machine-wide ledger records (#8994).
@@ -785,6 +820,13 @@ pub(crate) enum Command {
         /// allowlist).
         #[arg(long)]
         sandbox: bool,
+        /// Admit exactly one provider credential into the sandbox (#10721):
+        /// `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, read once from the
+        /// environment and then removed from it. Any other name, or the
+        /// variable unset, refuses. The sandbox launcher's `--credential`
+        /// sets it through `tm secrets exec`; requires `--sandbox`.
+        #[arg(long, value_name = "NAME", requires = "sandbox")]
+        sandbox_credential: Option<String>,
     },
     /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
@@ -828,8 +870,8 @@ pub(crate) enum Command {
         dir: Option<String>,
         /// Active output style id for this launch (HR-4). Overrides the
         /// `[style] active` config key. Bundled ids: `trusty-mpm` (default),
-        /// `trusty-mpm-teacher`, `trusty-mpm-research`. An unknown id falls back
-        /// to the default.
+        /// `trusty-mpm-teacher`, `trusty-mpm-research`, `owner-plain`. An
+        /// unknown id falls back to the default.
         #[arg(long)]
         style: Option<String>,
         /// Run this session in its own git worktree instead of the project's
@@ -905,12 +947,13 @@ pub(crate) enum Command {
     /// The Architect's deterministic commands: the poller and its readers.
     ///
     /// `poll`, `classify`, `input-state`, `quiet` and `self-ctx` replace the
-    /// Architect's Python scripts with the same arguments and output.
-    // #9822. Test: `cli_parses_architect_verbs`.
+    /// Architect's Python scripts with the same arguments and output. With
+    /// no verb, `tm architect` is `tm architect up` plus attach.
+    // #9822, #11364. Test: `cli_parses_architect_verbs`.
     Architect {
-        /// Architect action to perform.
+        /// Architect action to perform; none means `up` and attach.
         #[command(subcommand)]
-        action: ArchitectAction,
+        action: Option<ArchitectAction>,
     },
     /// Prove you are at the Studio, so the Architect may write trust anchors.
     ///
@@ -936,8 +979,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`.
+    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`.
     /// No verb prints a value.
+    ///
+    /// The scope comes from the checkout's `origin` remote. A checkout with
+    /// no `origin` sets `git config --local trusty.secrets.repo <owner>/<repo>`.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {
         /// Secrets action to perform.

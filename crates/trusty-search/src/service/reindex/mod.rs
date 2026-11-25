@@ -95,7 +95,7 @@ pub(crate) mod validate;
 /// `crate::service::reindex::ReindexProgress` / `ReindexStatus` keep working.
 ///
 /// Why: `server::state`, `server::status`, `server::reindex_handlers`, and
-/// `server::tests_state` all import these types directly from this module.
+/// `server::state_tests` all import these types directly from this module.
 /// What: re-exports from `progress` submodule.
 /// Test: compilation of the consumer files is the gate.
 pub use progress::{ReindexProgress, ReindexStatus};
@@ -318,6 +318,9 @@ mod root_hijack_tests;
 // #7434: the multi-root walk and the per-root corpus-path encoding.
 #[cfg(test)]
 mod multi_root_tests;
+// #11651: the walk records files the size cap refused.
+#[cfg(test)]
+mod size_skip_11651_tests;
 // #8438: the swap and staging paths honour the registry's layout.
 #[cfg(test)]
 mod registry_layout_8438_tests;

@@ -374,7 +374,7 @@ pub struct IndexHandle {
     /// Why: large polyrepo roots (e.g. a directory of cloned Git repos) need
     /// a quick way to scope an index to a subset of sibling repositories
     /// without enumerating every absolute subtree. Glob patterns (`*` only,
-    /// no `**`) match repo-name shapes like `common-*` or `duetto-common*`.
+    /// no `**`) match repo-name shapes like `common-*` or `acme-common*`.
     /// What: A `Vec<String>` of glob patterns; empty = scan the whole
     /// `root_path` (current behaviour, no regression).
     /// Test: `path_filter_matches_immediate_subdir` covers the glob logic;
@@ -591,6 +591,11 @@ pub struct WalkDiagnostics {
     /// error.  `None` on a clean walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_walk_error: Option<String>,
+    /// #10692: the last walk was refused over the index budget, so the corpus
+    /// is stale even when every lane still reads Ready. Cleared at walk start.
+    /// Test: `refused_walk_keeps_ready_stages_ready` in `tests/index_budget_env.rs`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub walk_refused: bool,
     /// #7434: index roots absent (or not directories) at the last walk.
     ///
     /// Why: a multi-root index whose additional root is unmounted still walks
@@ -600,6 +605,69 @@ pub struct WalkDiagnostics {
     /// Test: `walk_records_a_missing_additional_root`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_index_roots: Vec<String>,
+    /// #11651: files the last walk refused for size, at most
+    /// [`MAX_SKIPPED_FILE_RECORDS`] entries; in memory only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_files: Vec<SkippedFile>,
+    /// #11651: every file the last walk refused for size, including those
+    /// past the `skipped_files` cap.
+    #[serde(default)]
+    pub skipped_for_size_total: u64,
+}
+
+/// #11651: most `WalkDiagnostics::skipped_files` entries kept per walk.
+pub const MAX_SKIPPED_FILE_RECORDS: usize = 100;
+
+/// #11651: why the walker refused a file it would otherwise index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Larger than the walker's size cap for the file's extension.
+    ExceedsSizeLimit,
+}
+
+/// #11651: one file the walk refused, as `index_status` reports it.
+///
+/// `path` is absolute, the form the walker emits and a search hit's `file`
+/// carries.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkippedFile {
+    pub path: String,
+    pub size_bytes: u64,
+    pub reason: SkipReason,
+}
+
+impl WalkDiagnostics {
+    /// #10692: a new walk starts with no error and no refusal on record.
+    pub fn clear_walk_outcome(&mut self) {
+        self.last_walk_error = None;
+        self.walk_refused = false;
+    }
+
+    /// #10692: record an over-budget refusal; `/health` and status read it.
+    pub fn record_refusal(&mut self, reason: String) {
+        self.last_walk_error = Some(reason);
+        self.walk_refused = true;
+    }
+
+    /// #11651: replace the size-skip record with `oversized` (path, bytes).
+    ///
+    /// Why: a file over the size cap is never indexed and was invisible.
+    /// What: keeps the first [`MAX_SKIPPED_FILE_RECORDS`] entries and the
+    /// full count.
+    /// Test: `size_skips_are_capped_with_a_full_total`.
+    pub fn record_size_skips(&mut self, oversized: &[(std::path::PathBuf, u64)]) {
+        self.skipped_for_size_total = oversized.len() as u64;
+        self.skipped_files = oversized
+            .iter()
+            .take(MAX_SKIPPED_FILE_RECORDS)
+            .map(|(path, size_bytes)| SkippedFile {
+                path: path.display().to_string(),
+                size_bytes: *size_bytes,
+                reason: SkipReason::ExceedsSizeLimit,
+            })
+            .collect();
+    }
 }
 
 impl IndexHandle {
@@ -731,9 +799,9 @@ mod tests {
         ));
 
         // Exact match on immediate subdir.
-        let patterns = vec!["duetto-common".to_string()];
+        let patterns = vec!["acme-common".to_string()];
         assert!(path_matches_filter(
-            &PathBuf::from("/data/repos/duetto-common/src/lib.rs"),
+            &PathBuf::from("/data/repos/acme-common/src/lib.rs"),
             &root,
             &patterns,
         ));
@@ -744,14 +812,14 @@ mod tests {
         ));
 
         // Glob wildcard with `*`.
-        let patterns = vec!["common-*".to_string(), "duetto-common*".to_string()];
+        let patterns = vec!["common-*".to_string(), "acme-common*".to_string()];
         assert!(path_matches_filter(
             &PathBuf::from("/data/repos/common-utils/foo.rs"),
             &root,
             &patterns,
         ));
         assert!(path_matches_filter(
-            &PathBuf::from("/data/repos/duetto-common-events/lib.rs"),
+            &PathBuf::from("/data/repos/acme-common-events/lib.rs"),
             &root,
             &patterns,
         ));
@@ -763,7 +831,7 @@ mod tests {
 
         // Path outside root → not matched.
         assert!(!path_matches_filter(
-            &PathBuf::from("/elsewhere/duetto-common/lib.rs"),
+            &PathBuf::from("/elsewhere/acme-common/lib.rs"),
             &root,
             &patterns,
         ));
@@ -971,7 +1039,7 @@ impl IndexRegistry {
     /// What: wraps `DashMap::remove`; returns `(true, Some(handle))` when the
     /// id was present, `(false, None)` otherwise.
     /// Test: `registry_remove_and_get_returns_handle_atomically` in
-    /// `service::server::tests_state`.
+    /// `service::server::state_tests`.
     pub fn remove_and_get(&self, id: &IndexId) -> (bool, Option<Arc<IndexHandle>>) {
         match self.indexes.remove(id) {
             Some((_k, handle)) => (true, Some(handle)),

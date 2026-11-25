@@ -26,6 +26,9 @@ fn args_for(condition: WaitFor) -> WaitArgs {
         pr: None,
         repo: None,
         allow_empty_checks: false,
+        required_only: false,
+        watch: false,
+        owner: None,
         timeout: 1800,
         interval: None,
         slice: 100,
@@ -1289,4 +1292,55 @@ fn cli_parses_wait_for_check() {
         }
         other => panic!("expected Wait, got {other:?}"),
     }
+}
+
+/// #11673: `--required-only` judges only the required contexts — a failing
+/// or running non-required check neither holds nor settles the wait.
+#[test]
+fn check_condition_required_only_ignores_other_checks() {
+    let poll = |json: &str| {
+        CheckCondition::new(
+            FakeProbe {
+                json: json.to_string(),
+            },
+            5843,
+            None,
+            false,
+        )
+        .with_required(Some(vec!["ci".to_string()]))
+        .poll(ANY_BUDGET)
+        .unwrap()
+    };
+    let ci_green = r#"{"state":"OPEN","statusCheckRollup":[
+        {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"},
+        {"name":"slow","status":"IN_PROGRESS","conclusion":""}]}"#;
+    assert!(matches!(poll(ci_green), Poll::Met(d) if d.contains("green")));
+    let ci_running = r#"{"state":"OPEN","statusCheckRollup":[
+        {"name":"ci","status":"IN_PROGRESS","conclusion":""},
+        {"name":"lint","status":"COMPLETED","conclusion":"FAILURE"}]}"#;
+    assert!(matches!(poll(ci_running), Poll::Pending(_)));
+    let ci_absent = r#"{"state":"OPEN","statusCheckRollup":[]}"#;
+    assert!(matches!(poll(ci_absent), Poll::Pending(_)));
+}
+
+/// #11673: the new flags belong to `--for check`, and `--owner` to `--watch`.
+#[test]
+fn required_flags_need_for_check() {
+    let mut a = args_for(WaitFor::File);
+    a.watch = true;
+    assert!(super::required::validate(&a).is_err());
+    let mut c = args_for(WaitFor::Check);
+    c.owner = Some("pm".into());
+    assert!(super::required::validate(&c).is_err());
+    c.watch = true;
+    c.required_only = true;
+    assert!(super::required::validate(&c).is_ok());
+    c.pr = Some(7);
+    let plan = resolve_plan(&c).unwrap();
+    let rerun = rerun_command(&c, &plan);
+    assert!(
+        rerun.contains("--required-only --watch --owner pm"),
+        "{rerun}"
+    );
+    assert!(condition::spec(&c).ends_with(":required"));
 }

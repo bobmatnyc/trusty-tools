@@ -31,12 +31,17 @@ pub(crate) mod ledger_reclaim;
 // plus the daemon loop that runs it automatically after a merge.
 pub mod merged_pr_reclaim;
 pub mod pairing_service;
+// #11673: the PR watch loop and its production ports.
+pub mod pr_watch_loop;
+pub mod pr_watch_ports;
 pub mod session_service;
 // #8451: the disk-budget sweep over the builder slot pool.
 pub(crate) mod slot_pool_evict;
 // #6556: the reader for the `SubagentStop` records a hook parked on disk when
 // this daemon was unreachable.
 pub mod stop_spool_drain;
+// #11674: a SubagentStop's bound ledger task, for the round-trip check.
+pub mod subagent_task_binding;
 // #8059: the durable, cross-process half of that status — `tm doctor` runs
 // daemonless, so the in-memory timings alone reported every sweep idle.
 pub(crate) mod sweep_state_file;

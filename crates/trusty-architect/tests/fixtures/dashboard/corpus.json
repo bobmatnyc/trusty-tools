@@ -735,7 +735,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [localhost](http://127.0.0.1:7890/) · [tailnet](https://dash.example.ts.net:7890/) — 3 open dashboard items: 1 question, 1 action, 1 task (2 parked)",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 3 open dashboard items: 1 question, 1 action, 1 task (2 parked)",
     "free": {
      "A": 255,
      "D": 251,
@@ -5647,7 +5647,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [localhost](http://127.0.0.1:7890/) · [tailnet](https://dash.example.ts.net:7890/) — 2 open dashboard items: 0 questions, 1 action, 1 task",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 2 open dashboard items: 0 questions, 1 action, 1 task",
     "free": {
      "A": 248,
      "D": 225,
@@ -5700,9 +5700,7 @@
      "briefs/doc-001": [
       "briefs/doc-001: /doc: 'lorem ipsum dolor sit amet elit sed tempor über m' does not match ^docs/briefs/[^/].*[.]md$"
      ],
-     "goal_removals/doc-001": [
-      "goal_removals/doc-001: /created: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
-     ],
+     "goal_removals/doc-001": [],
      "goal_reorders/doc-001": [
       "goal_reorders/doc-001: /at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "goal_reorders/doc-001: /moved/from: \"lorem ip\" is not one of [\"standing\", \"directed\", \"factory\"]",
@@ -5787,8 +5785,7 @@
      "goals/G0b": [],
      "goals/G0c": [
       "goals/G0c: /park_ack: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "goals/G0c: /parked: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "goals/G0c: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "goals/G0c: /parked: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "goals/G0d": [
       "goals/G0d: /repo: 'lorem ipsum dolor sit ' does not match ^[^/ ,]+/[^/ ,]+(, [^/ ,]+/[^/ ,]+)*$"
@@ -5806,45 +5803,38 @@
      ],
      "items/A01": [],
      "items/A02": [
-      "items/A02: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/A02: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/A02: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/A03": [
       "items/A03: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/A04": [
       "items/A04: /relayed: property is not allowed",
-      "items/A04: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "items/A04: /wont_do/at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
      "items/A05": [],
      "items/A06": [
       "items/A06: /due: matches 0 of the 2 allowed shapes (need exactly 1)",
       "items/A06: /relayed: property is not allowed",
-      "items/A06: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "items/A06: /wont_do/at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
      "items/A07": [
       "items/A07: /due: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/A08": [
-      "items/A08: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "items/A08: /wont_do/at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
      "items/D01": [
       "items/D01: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D02": [
-      "items/D02: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D02: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D02: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D03": [
-      "items/D03: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D03: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D03: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D04": [
-      "items/D04: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D04: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D04: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D05": [
       "items/D05: /id: property is not allowed",
@@ -5853,16 +5843,14 @@
      ],
      "items/D06": [
       "items/D06: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D06: /relayed_at: property is not allowed",
-      "items/D06: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D06: /relayed_at: property is not allowed"
      ],
      "items/D07": [
       "items/D07: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D08": [
       "items/D08: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D08: /relayed_at: property is not allowed",
-      "items/D08: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D08: /relayed_at: property is not allowed"
      ],
      "items/D09": [
       "items/D09: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
@@ -5882,20 +5870,17 @@
       "items/D0d: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D0e": [
-      "items/D0e: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D0e: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D0e: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D0f": [
       "items/D0f: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
       "items/D0f: /relayed: property is not allowed",
-      "items/D0f: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "items/D0f: /updates/0/text: required property is missing",
       "items/D0f: /updates/0/note: property is not allowed"
      ],
      "items/D10": [
       "items/D10: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D10: /id: property is not allowed",
-      "items/D10: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D10: /id: property is not allowed"
      ],
      "items/D11": [
       "items/D11: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
@@ -5907,47 +5892,39 @@
       "items/D13: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D14": [
-      "items/D14: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D14: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D14: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D15": [
       "items/D15: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
       "items/D15: /due: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D15: /relayed: property is not allowed",
-      "items/D15: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D15: /relayed: property is not allowed"
      ],
      "items/D16": [
       "items/D16: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D17": [
       "items/D17: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D17: /relayed_at: property is not allowed",
-      "items/D17: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D17: /relayed_at: property is not allowed"
      ],
      "items/D18": [
-      "items/D18: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D18: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D18: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D19": [
       "items/D19: /due: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D1a": [
-      "items/D1a: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D1a: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D1a: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D1b": [
       "items/D1b: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
       "items/D1b: /relayed: property is not allowed",
-      "items/D1b: /relayed_at: property is not allowed",
-      "items/D1b: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D1b: /relayed_at: property is not allowed"
      ],
      "items/D1c": [
-      "items/D1c: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D1c: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D1c: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D1d": [
-      "items/D1d: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D1d: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D1d: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/D1e": [
       "items/D1e: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
@@ -5955,8 +5932,7 @@
       "items/D1e: /relayed_at: property is not allowed"
      ],
      "items/D1f": [
-      "items/D1f: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)",
-      "items/D1f: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "items/D1f: /answered_at: matches 0 of the 2 allowed shapes (need exactly 1)"
      ],
      "items/T01": [
       "items/T01: /progress/confidence: \"lorem \" is not one of [\"low\", \"medium\", \"high\"]",
@@ -5967,9 +5943,7 @@
       "meta/gh_track: /merged_7d: property is not allowed",
       "meta/gh_track: /merged_7d_capped: property is not allowed"
      ],
-     "meta/seen": [
-      "meta/seen: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
-     ],
+     "meta/seen": [],
      "meta/settings": [
       "meta/settings: /sleep_auto_on: 'lorem ipsu' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
       "meta/settings: /sleep_end: 'lorem' does not match ^[0-9]{2}:[0-9]{2}$",
@@ -5983,21 +5957,17 @@
      ],
      "questions/Q01": [
       "questions/Q01: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q01: /links/0/url: 'lorem ipsum dolor sit amet elit sed tempor über magna lorem ' does not match ^https?://",
-      "questions/Q01: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q01: /links/0/url: 'lorem ipsum dolor sit amet elit sed tempor über magna lorem ' does not match ^https?://"
      ],
      "questions/Q02": [
       "questions/Q02: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q02: /links/0/url: 'lorem ipsum dolor sit ' does not match ^https?://",
-      "questions/Q02: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q02: /links/0/url: 'lorem ipsum dolor sit ' does not match ^https?://"
      ],
      "questions/Q03": [
-      "questions/Q03: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q03: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q03: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "questions/Q04": [
-      "questions/Q04: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q04: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q04: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "questions/Q05": [
       "questions/Q05: /brief: 'lorem ipsum dolor sit amet elit sed tempor über magna ' does not match ^[^/]+/docs/briefs/.+[.]md$",
@@ -6007,35 +5977,28 @@
      ],
      "questions/Q06": [
       "questions/Q06: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q06: /links/0/url: 'lorem ipsum dolor sit amet elit sed tempor über ma' does not match ^https?://",
-      "questions/Q06: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q06: /links/0/url: 'lorem ipsum dolor sit amet elit sed tempor über ma' does not match ^https?://"
      ],
      "questions/Q07": [
       "questions/Q07: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q07: /links/0/url: 'lorem ipsum dolor sit amet elit sed tempor über magna lorem ' does not match ^https?://",
-      "questions/Q07: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q07: /links/0/url: 'lorem ipsum dolor sit amet elit sed tempor über magna lorem ' does not match ^https?://"
      ],
      "questions/Q08": [
-      "questions/Q08: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q08: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q08: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "questions/Q09": [
       "questions/Q09: /brief: 'lorem ipsum dolor sit amet elit sed tempor über magna lorem ' does not match ^[^/]+/docs/briefs/.+[.]md$",
-      "questions/Q09: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q09: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q09: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "questions/Q0a": [
       "questions/Q0a: /brief: 'lorem ipsum dolor sit amet elit sed tempor über magna lo' does not match ^[^/]+/docs/briefs/.+[.]md$",
-      "questions/Q0a: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q0a: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q0a: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "questions/Q0b": [
-      "questions/Q0b: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q0b: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q0b: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "questions/Q0c": [
-      "questions/Q0c: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "questions/Q0c: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "questions/Q0c: /cleared_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "sessions/S01": [],
      "sessions/S02": [],
@@ -6052,74 +6015,59 @@
       "step_progress/A02: /steps/1/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "step_progress/A02: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A02: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A02: /steps/3/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
-      "step_progress/A02: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A02: /steps/3/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
      "step_progress/A03": [
       "step_progress/A03: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A03: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A03: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A03: /steps/4/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A03: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A03: /steps/4/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A09": [
       "step_progress/A09: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A09: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A09: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A09: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A0a": [
       "step_progress/A0a: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A0a: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A0a: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0a: /steps/4/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0a: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A0a: /steps/4/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
-     "step_progress/A0b": [
-      "step_progress/A0b: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
-     ],
+     "step_progress/A0b": [],
      "step_progress/A0c": [
-      "step_progress/A0c: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0c: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A0c: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A0d": [
       "step_progress/A0d: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A0d: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A0d: /steps/2/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "step_progress/A0d: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0d: /steps/3/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
-      "step_progress/A0d: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A0d: /steps/3/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
      "step_progress/A0e": [
       "step_progress/A0e: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0e: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0e: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A0e: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A0f": [
       "step_progress/A0f: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A0f: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0f: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A0f: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A0f: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A10": [
       "step_progress/A10: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A10: /steps/2/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A10: /steps/3/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A10: /steps/4/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A10: /steps/5/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A10: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A10: /steps/5/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A11": [
-      "step_progress/A11: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A11: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A11: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$"
      ],
      "step_progress/A12": [
       "step_progress/A12: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A12: /steps/1/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
-      "step_progress/A12: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A12: /steps/1/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
-     "step_progress/A13": [
-      "step_progress/A13: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
-     ],
+     "step_progress/A13": [],
      "step_progress/A14": [
       "step_progress/A14: /steps/1/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A14: /steps/1/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
@@ -6130,8 +6078,7 @@
       "step_progress/A14: /steps/4/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
       "step_progress/A14: /steps/4/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
       "step_progress/A14: /steps/5/done_at: 'lorem ipsum dolor sit am' does not match ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
-      "step_progress/A14: /steps/5/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
-      "step_progress/A14: /updated: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
+      "step_progress/A14: /steps/5/note_at: 'lorem ipsum dolor sit am' does not match ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$"
      ],
      "step_progress/T02": []
     },
@@ -7348,7 +7295,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [localhost](http://127.0.0.1:7890/) · [tailnet](https://dash.example.ts.net:7890/) — 0 open dashboard items: 0 questions, 0 actions, 0 tasks",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 open dashboard items: 0 questions, 0 actions, 0 tasks",
     "free": {
      "A": 256,
      "D": 256,

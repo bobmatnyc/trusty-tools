@@ -182,14 +182,18 @@ pub struct ManagedCheckout {
 /// What: resolves the base path via [`super::inproject::base_clone_path`]
 /// (the SAME resolver the daemon and `tm launch` use, so all three agree on
 /// where a project lives) and delegates to [`ensure_managed_checkout_at`].
-/// Test: `tests/inproject_cold_start.rs`.
+/// A broken `install.toml` is a [`ColdStartError::Provision`] before any
+/// clone (#11821).
+/// Test: `tests/inproject_cold_start.rs`, `cold_start_refuses_on_a_broken_install_file`.
 pub fn ensure_managed_checkout(
     owner: &str,
     repo: &str,
     clone_url: &str,
     account: Option<&str>,
 ) -> Result<ManagedCheckout, ColdStartError> {
-    let base_path = inproject::base_clone_path(owner, repo);
+    // #11821: a broken install.toml refuses the clone (df-D1t).
+    let base_path = inproject::try_base_clone_path(owner, repo)
+        .map_err(|e| ColdStartError::Provision(format!("cannot resolve the repos root: {e}")))?;
     ensure_managed_checkout_at(&base_path, clone_url, account)
 }
 
@@ -391,8 +395,8 @@ pub fn canonical_remote(url: &str) -> String {
 
 /// [`canonical_remote`], with an SSH transport's host resolved through `aliases`.
 ///
-/// Why (#9089): `git@github-duetto:o/r.git`, where `~/.ssh/config` maps
-/// `Host github-duetto` to `github.com`, is the repository at
+/// Why (#9089): `git@github-acme:o/r.git`, where `~/.ssh/config` maps
+/// `Host github-acme` to `github.com`, is the repository at
 /// `https://github.com/o/r`. Keeping the alias as the host refused that
 /// checkout with `RemoteMismatch`. Same bug class as #7196.
 /// What: the [`canonical_remote`] steps, plus one: for an `ssh://` URL or an

@@ -35,6 +35,9 @@ scripts/notify-supervisor.sh
 scripts/pm-digest.py
 scripts/pm-notify.sh
 scripts/pm_intake.py
+# #11101: the Task-ID tag grammar (pm_intake.py and datg_task.py import it) and the task pulse.
+scripts/task_tag.py
+scripts/task_pulse.py
 
 # Intent Ledger set (P3). datg.py stages whole; the subproject splits it into
 # datg_store/ops/log/read.py behind a datg.py facade (500-SLOC cap).
@@ -171,6 +174,24 @@ scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
 # scratch, diff against the shipped copy, hand-merge the delta.
 .claude/skills/architect-dashboard/SKILL.md	skills/architect-dashboard.md
 
+# Architect agents and their two skills (D3c, #10161): .claude/agents/<name>.md ->
+# agents/<name>.md. All are hand-merged into trusty-tools form (see the note at
+# the top). token-optimizer ships with the usage set (D3d).
+.claude/agents/runner.md	agents/runner.md
+.claude/agents/improver.md	agents/improver.md
+.claude/skills/architect-drift-guard/SKILL.md	skills/architect-drift-guard.md
+.claude/skills/architect-improver/SKILL.md	skills/architect-improver.md
+# Held until the Architect applies .trusty-mpm/plans/d3c-mirror-lines.md at
+# source (each still fails the leak gate there); enable a row once its source
+# exports clean. verify-claim.py is split here into verify-claim.py and
+# verify_claim_input.py (500-SLOC cap) and reads its repo map from
+# local/architect.json.
+# .claude/agents/event-extractor.md	agents/event-extractor.md
+# .claude/agents/improvement-curator.md	agents/improvement-curator.md
+# .claude/agents/drift-guard.md	agents/drift-guard.md
+# scripts/verify-claim.py
+# scripts/test_verify_claim.py	tests/test_verify_claim.py
+
 # P1 dashboard + Intent Ledger (#10571), from prototype 23da8a9. dashboard-serve.py,
 # dashboard_harness.py and datg.py stage whole and are hand-merged into their split
 # modules (dashboard_http/page/docs/routes.py, dashboard_fleet.py and
@@ -181,6 +202,7 @@ scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
 # profile and Notion modules, which dashboard-serve.py imports optionally.
 scripts/dashboard_attach.py
 scripts/dashboard_projects.py
+scripts/dashboard_toml.py
 scripts/dashboard_archctx.py
 scripts/brief_ids.py
 scripts/brief-id.py
@@ -188,10 +210,17 @@ scripts/turn-active.py
 scripts/pm_cursor.py
 scripts/pending-answers.py
 scripts/pending_hook_dedupe.py
+# #11064: technical level reader, from prototype ab5a222 (hand-merged: TECH LEVEL line, per-user and per-item levels).
+scripts/technical_level.py
+# #11064: warn-only level lint, from prototype ab5a222 (hand-merged: warn_item moved here from dashboard-db.py).
+scripts/level_lint.py
+scripts/test_technical_level.py	tests/test_technical_level.py
 templates/dashboard/tokens.css
 scripts/test_brief_id.py	tests/test_brief_id.py
 scripts/test_ctx_watch.py	tests/test_ctx_watch.py
 scripts/test_datg.py	tests/test_datg.py
+scripts/test_task_tag.py	tests/test_task_tag.py
+scripts/test_task_pulse.py	tests/test_task_pulse.py
 scripts/test_il_cron.py	tests/test_il_cron.py
 scripts/test_pm_cursor.py	tests/test_pm_cursor.py
 scripts/test_pending_answers_hook.py	tests/test_pending_answers_hook.py
@@ -223,3 +252,72 @@ scripts/test_dashboard_tokens.py	tests/test_dashboard_tokens.py
 # fleet_alert_dedupe.py (ar-T8a) has no prototype source either.
 # templates/local/il-schedule.json is written in trusty-tools form: the prototype copy holds
 # instance sessions and names, so only its job and threshold shape is kept.
+
+# Prototype re-sync (#10571): section skeleton. Later slices add their rows under
+# the matching header, each hand-merged per the note at the top, and add a seed
+# row for each shipped script (scripts/architect_bundle_meta.py history
+# --from-repo records the live versions).
+# -- Re-sync, Phase 1: dashboard + Intent Ledger.
+# P1c (#10571 S1), from prototype a64108f (architect-target-2026-11-24): the usage ledger
+# and token watcher. usage.py and token_watch.py stage whole and are hand-merged into a
+# re-exporting entry point plus usage_calc.py / token_watch_rules.py (500-SLOC cap), which
+# have no prototype source. rc-lib.sh ships here because usage-probe.sh sources it.
+# fleet-poll-ledger.py is not shipped (#11540 keeps it as the Python shim).
+scripts/usage-probe.sh
+scripts/effort-send.sh
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/usage.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/token_watch.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/effort-governor.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/ctx_bar.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/statusline-tee.sh
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/rc-lib.sh
+# -- Re-sync, Phase 2: poller + PM relay.
+# #10571 S2 (P1b): the poller helpers and the #11369 cadence, from architect-target-2026-11-24. Every row
+# is hand-merged (see the note at the top): owner names are scrubbed from comments; architect-start.sh and
+# poll-supervise.sh read poll_interval_s through architect_config.py (#11369); poll-reset-wake.py takes the
+# poller session from the environment; session-relaunch.sh, relaunch_brief.py, dashboard_updates.py and
+# dream_catchup.py read owner_name or claude_config_dir from local/architect.json; dashboard_feed.py loads
+# token_watch.py (S1) optionally. The tests drop the cases that drive fleet-poll.py (S3) or the S4 modules;
+# test_fleet_poll_morning_brief.py becomes tests/test_morning_brief.py. tests/test_il_timeline.py and
+# tests/test_poll_cadence.py and tests/test_shell_parse.py have no prototype source;
+# rc-lib.sh and its test ship with S1 (usage-probe.sh sources it). Held: factory_tasks.py and its test (they need the S4
+# dashboard_ids counters and the items-schema `factory` object, and hold the instance's factory session table).
+scripts/architect-start.sh
+scripts/poll-supervise.sh
+scripts/poll-reset-wake.py
+scripts/rc-restore.sh
+scripts/rc-disconnect.sh
+scripts/session-relaunch.sh
+scripts/relaunch_brief.py
+scripts/fleet-restart.sh
+scripts/ids36.py
+scripts/il_timeline.py
+scripts/auto_sleep.py
+scripts/user_state.py
+scripts/morning_brief.py
+scripts/dream_catchup.py
+scripts/dashboard_updates.py
+scripts/il_remind.py
+scripts/dashboard_feed.py
+scripts/test_auto_sleep.py	tests/test_auto_sleep.py
+scripts/test_dashboard_feed.py	tests/test_dashboard_feed.py
+scripts/test_dashboard_updates.py	tests/test_dashboard_updates.py
+scripts/test_dream_catchup.py	tests/test_dream_catchup.py
+scripts/test_fleet_poll_morning_brief.py	tests/test_morning_brief.py
+scripts/test_ids36.py	tests/test_ids36.py
+scripts/test_il_remind.py	tests/test_il_remind.py
+scripts/test_poll_supervise.py	tests/test_poll_supervise.py
+scripts/test_relaunch_brief.py	tests/test_relaunch_brief.py
+scripts/test_session_relaunch_il.py	tests/test_session_relaunch_il.py
+scripts/test_user_state.py	tests/test_user_state.py
+scripts/test_user_state_effective.py	tests/test_user_state_effective.py
+# -- Re-sync, Phase 3: the rest (generic and mixed scripts only).
+# -- Re-sync: tests for the rows above.
+# P1c (#10571 S1): each test reads ../scripts and drops its fleet-poll, ctx-watch and
+# alert_triage checks, which port with those scripts in S3.
+scripts/test_token_watch_lock.py	tests/test_token_watch_lock.py
+scripts/test_rc_lib.py	tests/test_rc_lib.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_usage.py	tests/test_usage.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_token_watch.py	tests/test_token_watch.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_effort_governor.py	tests/test_effort_governor.py
+# hand-scrubbed (#10571, the prototype copy carries an instance name or path): scripts/test_ctx_bar.py	tests/test_ctx_bar.py

@@ -303,6 +303,9 @@ mod tests {
     /// `Unknown` naming the server, and a second run while the first probe
     /// still blocks spawns no second tmux client. Red on ed04279554, whose
     /// unbounded probe waited out every hung call.
+    // #10748: the tmux spawn guard reads process-global `$HOME`, which a
+    // concurrent `#[serial]` test redirects; the probe then reads refused.
+    #[serial_test::serial]
     #[test]
     fn a_hung_workspace_server_reads_unknown_within_the_budget() {
         let dir = crate::test_support::hermetic_temp_dir();

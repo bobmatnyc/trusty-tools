@@ -7,6 +7,8 @@
 //! byte for byte. Regenerate the goldens with the command in
 //! `tests/fixtures/parity/README.md`; never edit them by hand.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -31,18 +33,7 @@ fn corpus() -> Result<Value, Box<dyn std::error::Error>> {
 
 /// Compares `rows` with the golden file line by line, naming the first diff.
 fn assert_golden(name: &str, rows: &[String]) -> TestResult {
-    let golden = fs::read_to_string(fixture_dir().join(name))?;
-    let got: String = rows.iter().map(|r| format!("{r}\n")).collect();
-    for (i, (g, r)) in golden.lines().zip(got.lines()).enumerate() {
-        assert_eq!(
-            r,
-            g,
-            "{name} line {}: Rust (left) differs from Python (right)",
-            i + 1
-        );
-    }
-    assert_eq!(got, golden, "{name}: row count or trailing bytes differ");
-    Ok(())
+    common::assert_golden_in(&fixture_dir(), name, rows)
 }
 
 fn str_of(v: &Value) -> &str {
@@ -91,7 +82,16 @@ struct EvalRow<'a> {
     case: &'a str,
     step: usize,
     alerts: Vec<Alert>,
-    ps: &'a PaneState,
+    ps: GoldenPs<'a>,
+}
+
+/// The `ps` keys the Python goldens carry. See parity window 5: C, D
+/// add episode bookkeeping that the goldens predate.
+#[derive(Serialize)]
+struct GoldenPs<'a> {
+    idle_since: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    errors: Option<&'a Vec<String>>,
 }
 
 #[test]
@@ -114,7 +114,10 @@ fn evaluate_matches_python_goldens() -> TestResult {
                 case: str_of(&sc["case"]),
                 step,
                 alerts,
-                ps: &ps,
+                ps: GoldenPs {
+                    idle_since: ps.idle_since,
+                    errors: ps.errors.as_ref(),
+                },
             };
             rows.push(to_python_json(&row, false)?);
         }

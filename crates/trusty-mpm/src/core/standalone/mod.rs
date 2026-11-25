@@ -15,6 +15,7 @@
 //! managed config dir).
 //! Test: unit tests in each submodule's `#[cfg(test)]` block.
 
+pub mod config_dir_mode;
 pub mod global_config;
 pub mod hooks;
 pub mod load;
@@ -28,5 +29,10 @@ pub mod trust_seed;
 #[cfg(test)]
 #[path = "tests_malformed_settings_7789.rs"]
 mod tests_malformed_settings_7789;
+
+// #11195: launch leaves the managed config dir and its secret files owner-only.
+#[cfg(test)]
+#[path = "tests_config_dir_mode_11195.rs"]
+mod tests_config_dir_mode_11195;
 
 pub use trust_seed::preseed_managed_trust;

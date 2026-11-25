@@ -703,3 +703,273 @@ fn audit_sink_ends_a_torn_line_before_the_next_record() {
     sink.open().unwrap().append(&record).unwrap();
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 3);
 }
+
+/// A Keychain stand-in whose value calls block until the test drops the
+/// sender [`HungValues::new`] returns, as a call waiting on an unanswered
+/// access prompt does (#11215). Control items answer at once.
+#[derive(Debug)]
+struct HungValues {
+    inner: MemoryBackend,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HungValues {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backend = Self {
+            inner: MemoryBackend::new(),
+            release: std::sync::Mutex::new(rx),
+        };
+        (Arc::new(backend), tx)
+    }
+
+    fn hang(&self) {
+        if let Ok(rx) = self.release.lock() {
+            let _ = rx.recv();
+        }
+    }
+}
+
+impl SecretBackend for HungValues {
+    fn id(&self) -> BackendId {
+        BackendId::from_static(BackendId::KEYCHAIN)
+    }
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.inner.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.hang();
+        self.inner.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<(), SecretsError> {
+        self.hang();
+        self.inner.set(vault, key, value)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.hang();
+        self.inner.delete(vault, key)
+    }
+    fn holds_agent_controls(&self) -> bool {
+        self.inner.holds_agent_controls()
+    }
+    fn control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        self.inner.control_item(item, vault, key)
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        self.inner.set_control_item(item, vault, key, allowed)
+    }
+}
+
+/// The time limit [`HungValues`] runs under in the #11215 reply-shape tests.
+const HUNG_LIMIT: Duration = Duration::from_millis(300);
+
+// See #11609: the at-once refusal is bounded against the hang, not against
+// ordinary I/O latency. A 300 ms hang left no room: a loaded host spent
+// 437 ms on the socket round trip alone. With a 2 s hang the bound is 1 s,
+// so it sits 1 s above the slowest round trip seen (437 ms) and 1 s below
+// the wait a broken refusal would add, which is the full 2 s.
+/// The time limit the refusal test runs the hung Keychain under.
+const REFUSAL_HANG: Duration = Duration::from_secs(2);
+/// The most the at-once refusal may take: half the hang.
+const REFUSAL_BOUND: Duration = Duration::from_secs(1);
+
+/// Why: #11215 — the first call on a fresh server timed out on the Keychain
+/// and every retry failed at once, yet the reply was a bare
+/// `backend_timeout` and the audit row held no wait, so neither the caller
+/// nor the log could tell a call that waited out its limit from one refused
+/// because an earlier call still hangs.
+/// What: behind the real [`TimeLimited`] wrapper, (a) the first `set` waits
+/// its limit; its reply names the Keychain, the seconds waited and the
+/// recovery step, and its deny row records `waited_ms` and no refusal;
+/// (b) the second `set` of the same key is refused at once; its reply says
+/// so and its row records the refusal. Both stay `backend_timeout` errors
+/// with no result, and no reply or row carries the value.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal() {
+    use crate::store::time_limit::TimeLimited;
+    let fx = fixture();
+    let (hung, release) = HungValues::new();
+    let limited: Arc<dyn SecretBackend> = Arc::new(TimeLimited::new(
+        Arc::clone(&hung) as Arc<dyn SecretBackend>,
+        REFUSAL_HANG,
+    ));
+    let base = fx.backends();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        "keychain" => Ok(Arc::clone(&limited)),
+        _ => base(id),
+    });
+    let server = fx.start_with(factory).await;
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "HUNG_KEY", "value": FAKE_VALUE});
+
+    let first = call(&fx.settings.socket, method::SET, params.clone()).await;
+    let started = std::time::Instant::now();
+    let second = call(&fx.settings.socket, method::SET, params).await;
+    let second_took = started.elapsed();
+    drop(release);
+
+    let timeout_reply = |response: &RpcResponse| {
+        assert!(response.result.is_none(), "{response:?}");
+        let error = response.error.as_ref().expect("an error reply");
+        let data = error.data.as_ref().expect("error data");
+        assert_eq!(data["kind"], json!("keychain_access_prompt"), "{error:?}");
+        assert_eq!(error.code, ErrorKind::KeychainAccessPrompt.code());
+        assert!(!wire(response).contains(FAKE_VALUE), "{error:?}");
+        assert!(
+            error.message.contains("pkill -x trusty-secrets"),
+            "{error:?}"
+        );
+        (error.message.clone(), data.clone())
+    };
+    let (message, data) = timeout_reply(&first);
+    assert!(
+        message.starts_with(
+            "secrets.set: the Keychain did not answer in time: this call waited 2.0 s"
+        ),
+        "{message}"
+    );
+    assert_eq!(data["abandoned_item"], json!(false));
+    assert_eq!(data["waited_ms"], json!(2000));
+    let (message, data) = timeout_reply(&second);
+    assert!(
+        message.starts_with("secrets.set: refused at once:"),
+        "{message}"
+    );
+    assert_eq!(data["abandoned_item"], json!(true));
+    assert_eq!(data["waited_ms"], json!(0));
+    assert!(
+        second_took < REFUSAL_BOUND,
+        "the refusal waited {second_took:?}, bound {REFUSAL_BOUND:?}, hang {REFUSAL_HANG:?}"
+    );
+
+    let waits: Vec<BackendWait> = records(&fx)
+        .into_iter()
+        .filter(|r| r.reason.as_ref().map(AuditReason::as_str) == Some("keychain_access_prompt"))
+        .map(|r| r.backend_wait.expect("a timeout row records its wait"))
+        .collect();
+    assert_eq!(waits.len(), 2, "{waits:?}");
+    assert_eq!(
+        (waits[0].backend.as_str(), waits[0].waited_ms),
+        ("keychain", 2000)
+    );
+    assert!(!waits[0].abandoned_item);
+    assert_eq!((waits[1].waited_ms, waits[1].abandoned_item), (0, true));
+    let log = std::fs::read_to_string(audit_log(&fx)).unwrap();
+    assert!(!log.contains(FAKE_VALUE));
+    server.stop().await;
+}
+
+/// Why: #11215 — each time-out case needs its own sentence and the way out.
+/// What: a wait, an at-once refusal, a call with no time left, and another
+/// backend each get their text; a kind other than `backend_timeout` keeps
+/// its fixed text even with a note.
+/// Test: itself.
+#[test]
+fn timeout_reply_text_names_wait_or_refusal_and_the_recovery() {
+    use crate::store::timeout_note::TimeoutNote;
+    let note = |backend: &str, ms, abandoned_item| TimeoutNote {
+        backend: backend.to_owned(),
+        waited: Duration::from_millis(ms),
+        abandoned_item,
+    };
+    let text = |n: &TimeoutNote| errors::timeout_text(n);
+    assert!(
+        text(&note("keychain", 15_000, false))
+            .starts_with("the Keychain did not answer in time: this call waited 15.0 s")
+    );
+    assert!(text(&note("keychain", 0, true)).starts_with("refused at once: an earlier call"));
+    assert!(text(&note("keychain", 0, false)).starts_with("the Keychain was not called"));
+    assert!(text(&note("file", 2_000, false)).starts_with("the file backend did not answer"));
+    for n in [note("keychain", 1, false), note("keychain", 0, true)] {
+        assert!(text(&n).contains("pkill -x trusty-secrets"), "{}", text(&n));
+    }
+    let other =
+        ErrorKind::BackendFailed.to_rpc_noted(method::SET, Some(&note("keychain", 1, false)));
+    assert_eq!(
+        other.message,
+        format!("{}: {}", method::SET, ErrorKind::BackendFailed.text())
+    );
+    let bare = ErrorKind::BackendTimeout.to_rpc_noted(method::SET, None);
+    assert_eq!(
+        bare.message,
+        format!("{}: {}", method::SET, ErrorKind::BackendTimeout.text())
+    );
+}
+
+/// Why: #11429 — a `set` blocked on a Keychain access prompt came back as a
+/// generic `backend_timeout`, and a client that gave up first reported "Not
+/// stored" although the write could still land once the prompt was approved.
+/// What: behind the real [`TimeLimited`] wrapper, a `set` that hangs on the
+/// Keychain answers the distinct kind `keychain_access_prompt` (code -32089)
+/// within its limit, says the outcome is unknown and points at
+/// `tm secrets list`, never claims the value was not stored, and carries no
+/// value. A time-out of a non-Keychain backend stays `backend_timeout`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keychain_prompt_timeout_on_set_answers_its_own_kind_with_outcome_unknown() {
+    use crate::store::time_limit::TimeLimited;
+    let fx = fixture();
+    let (hung, release) = HungValues::new();
+    let limited: Arc<dyn SecretBackend> = Arc::new(TimeLimited::new(
+        Arc::clone(&hung) as Arc<dyn SecretBackend>,
+        HUNG_LIMIT,
+    ));
+    let base = fx.backends();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        "keychain" => Ok(Arc::clone(&limited)),
+        _ => base(id),
+    });
+    let server = fx.start_with(factory).await;
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "PROMPT_KEY", "value": FAKE_VALUE});
+    let started = std::time::Instant::now();
+    let reply = call(&fx.settings.socket, method::SET, params).await;
+    let took = started.elapsed();
+    drop(release);
+
+    assert!(reply.result.is_none(), "{reply:?}");
+    let error = reply.error.as_ref().expect("an error reply");
+    let data = error.data.as_ref().expect("error data");
+    assert_eq!(data["kind"], json!("keychain_access_prompt"), "{error:?}");
+    assert_eq!(error.code, -32089, "{error:?}");
+    assert!(error.message.contains("outcome unknown"), "{error:?}");
+    assert!(error.message.contains("tm secrets list"), "{error:?}");
+    assert!(
+        !error.message.to_lowercase().contains("not stored"),
+        "{error:?}"
+    );
+    assert!(!wire(&reply).contains(FAKE_VALUE), "{error:?}");
+    assert!(took < HUNG_LIMIT * 10, "the reply waited {took:?}");
+    server.stop().await;
+
+    // The error arm: only a Keychain time-out is a prompt.
+    let timeout = |backend: &str| crate::api::SecretsError::Timeout {
+        backend: backend.to_owned(),
+        operation: "set",
+        vault: "v".to_owned(),
+        key: "k".to_owned(),
+        waited: Duration::from_secs(1),
+    };
+    assert_eq!(
+        ErrorKind::from(timeout("keychain")).as_str(),
+        "keychain_access_prompt"
+    );
+    assert_eq!(ErrorKind::from(timeout("file")).as_str(), "backend_timeout");
+}

@@ -27,6 +27,19 @@ use std::path::{Component, Path, PathBuf};
 /// Test: `a_directory_wider_than_the_budget_is_incomplete`.
 pub const WORKSPACE_SCAN_BUDGET: usize = 256;
 
+/// Visit budget for the project-directory guards: the `CLAUDE.md` seed guard
+/// and `auto_git_init`.
+///
+/// Why: #10461 — at [`WORKSPACE_SCAN_BUDGET`] a project with more than 256
+/// subdirectories exhausted the scan, and both guards refused a directory
+/// with nothing wrong in it. Exhaustion still refuses; the budget is sized so
+/// an ordinary large project finishes.
+/// What: 64x [`WORKSPACE_SCAN_BUDGET`], the fleet preflight's size (#10456),
+/// spent under the shallow rule of [`scan_for_child_repo_within`].
+/// Test: `a_project_wider_than_the_workspace_budget_may_seed`,
+/// `auto_init_initializes_a_project_wider_than_the_workspace_budget`.
+pub const PROJECT_SCAN_BUDGET: usize = 64 * WORKSPACE_SCAN_BUDGET;
+
 /// Directory names the scan checks shallowly instead of descending.
 ///
 /// Why: vendor, dependency, build and cache trees are the widest directories
@@ -217,14 +230,32 @@ pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
     scan(dir, &[except], WORKSPACE_SCAN_BUDGET, None)
 }
 
+/// [`scan_for_child_repo_except`] with the visit budget named by the caller.
+///
+/// Why: #10461 — the seed guard and `auto_git_init` need a budget wider than
+/// [`WORKSPACE_SCAN_BUDGET`] but keep the shallow rule, which the exhaustive
+/// walk would turn into more false refusals.
+/// What: the shallow rule of [`scan_for_child_repo`], `except` left out when
+/// `Some`, every non-skip-listed directory charged to `budget`. Exhaustion is
+/// [`ScanIncomplete::BudgetExhausted`] carrying `budget`, never `Clear`.
+/// Test: `within_spends_the_budget_the_caller_names`.
+pub fn scan_for_child_repo_within(
+    dir: &Path,
+    except: Option<&Path>,
+    budget: usize,
+) -> ChildRepoScan {
+    scan(dir, except.as_slice(), budget, None)
+}
+
 /// The fleet preflight's scan: no skip list, every directory charged to
 /// `budget`, and no exit from the tree through a symlink or a mount.
 ///
 /// Why: #10457 — `tm fleet init` grants the supervisor profile over `dir`, so
 /// a repository the shallow rule never reads (`node_modules/a/b/.git`, or one
 /// behind a symlinked directory) must refuse, not pass. The seed guard and
-/// `auto_git_init` keep [`scan_for_child_repo`]: their harm is smaller and the
-/// wider walk would raise their false refusals.
+/// `auto_git_init` keep the shallow rule ([`scan_for_child_repo_within`],
+/// #10461): their harm is smaller and the wider walk would raise their false
+/// refusals.
 /// What: each real directory beneath `dir` is charged to `budget` and
 /// descended, skip-listed names included; only `.git` keeps the shallow check
 /// of [`SCAN_SKIP_DIRS`]. A directory whose `st_dev` differs from the root's
@@ -345,7 +376,11 @@ impl Fence {
     /// longest existing prefix is canonicalized and the missing remainder is
     /// appended with `.` and `..` folded. A missing component that is itself
     /// a dangling link inside the root is an entry the walk fences on its own.
+    /// A `..` after such a missing link refuses (#10473): the kernel would
+    /// take the parent of the link's future target, which text cannot know.
     /// Every other stat or canonicalize error is [`ScanIncomplete::Unreadable`].
+    /// Test: `exhaustive_refuses_dotdot_past_a_dangling_link_inside_the_root`,
+    /// `exhaustive_refuses_an_absolute_dotdot_past_a_dangling_link`.
     fn check_target(&self, link: &Path) -> Result<(), ScanIncomplete> {
         match std::fs::metadata(link) {
             Ok(_) => return self.check_link(link),
@@ -363,6 +398,19 @@ impl Fence {
             let prefix: PathBuf = parts[..split].iter().collect();
             match std::fs::canonicalize(&prefix) {
                 Ok(mut target) => {
+                    // #10473: a `..` after a missing component that is a
+                    // dangling link folds by text, but the kernel takes the
+                    // parent of whatever the link later resolves to.
+                    if split < parts.len()
+                        && parts[split + 1..].contains(&Component::ParentDir)
+                        && std::fs::symlink_metadata(target.join(parts[split]))
+                            .is_ok_and(|meta| meta.file_type().is_symlink())
+                    {
+                        return Err(unreadable(
+                            link,
+                            io::Error::other("its target folds `..` past a dangling symlink"),
+                        ));
+                    }
                     for part in &parts[split..] {
                         match part {
                             Component::ParentDir => {

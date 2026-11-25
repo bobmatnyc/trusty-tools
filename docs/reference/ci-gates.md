@@ -295,6 +295,87 @@ broken locally at `1f732b6d5`, while CI's `Rustdoc intra-doc links` job on the
 same SHA reported 2 broken, both introduced on `main` by #7603 after the PR's
 merge-base, in `trusty-mpm`'s `guided.rs`.
 
+## An Architect-bundle PR must hold main's bundle changes (#11120)
+
+🔴 **`Architect bundle PR is current with main`** (`bundle-pr-current.yml`)
+fails a PR that changes an Architect bundle file while `main` has a commit,
+absent from the PR head, that changes a bundle file. Two bundle PRs from one
+base merge their regenerated `provenance.json` and `seed_history.tsv` into
+bytes neither generated; #11236 and #11191 turned `main` red that way. Owner
+ruling 2026-11-14.
+
+- A bundle PR that lacks only commits touching no bundle file passes, and the
+  message says how many commits behind it is. A TICKETING.md-only commit on
+  `main` no longer forces another merge and CI cycle (#11248).
+- The check walks each commit in `<head>..main`, not the net diff from the
+  merge base, so a bundle file `main` changed and then reverted still fails.
+  `seed_history.tsv` is append-only, so a reverted seed asset leaves history
+  lines behind anyway. Renames count on both sides, and deletions count.
+- A merge commit counts for a file it changes against every parent, and for
+  a file it changes against its first parent that the first-parent side also
+  changed since the merge base. So a merge that resolves a file both sides
+  changed fails the PR even when it keeps one side's bytes. A merge that only
+  carries a side's change over does not count; that side's own commits do,
+  when the PR head lacks them. A stacked PR whose base PR merged therefore
+  passes.
+- The bundle path list and the remedy commands are in
+  `scripts/check_bundle_pr_current.sh`; its selftest is
+  `scripts/check_bundle_pr_current_selftest.sh`.
+- It judges the PR head SHA against a freshly fetched `origin/main`, never the
+  merge commit, which always contains `main`.
+- It fails closed with exit 2 on a failed fetch, an unresolvable ref, a
+  shallow repository, no merge base or any git error; it never passes on one.
+- No `paths:` filter and no job-level `if:`, so it reports on every PR. A PR
+  that changes no bundle file passes at once.
+- It runs only for PRs that target `main` (`branches: [main]`). A PR with
+  merge conflicts gets no `pull_request` run at all, as with `ci.yml`, so the
+  check stays unreported there until the conflict is resolved.
+- For bundle PRs this overrides "a `BEHIND` branch merges fine" below, when
+  `main` is ahead by a bundle commit.
+- It runs when the PR changes or a run is re-requested. When a push to `main`
+  changes a bundle path, `Architect bundle PR re-check`
+  (`bundle-pr-rerun.yml`, #11342) re-runs its latest run on every open PR
+  that targets `main`. The re-run fetches `main` fresh, so a bundle PR that
+  another bundle PR overtook turns red. The job's path list is the script's
+  `BUNDLE_PATHS`. A PR with no run is logged and not counted. A run still
+  in progress that started after the push already fetches the new `main`; one
+  that started before is awaited (up to 180 s) and then re-run. A refused
+  re-run, or a run not completed by the bound, logs a `::warning::` and
+  exits 1. GitHub re-runs only runs from the last 30 days. Its logic is
+  `scripts/rerun_bundle_pr_current.sh`, its selftest
+  `scripts/rerun_bundle_pr_current_selftest.sh`.
+- On `merge_group` it reports success with a message: a queue commit already
+  contains `main`. The history check below judges the queue commit.
+- Known limit (#11120): a feature branch can merge `main`, keep its own bytes
+  for a bundle file, then land. A PR whose head already holds both sides'
+  commits for that file passes. Check such a PR by hand, or merge `main` into it.
+
+## The bundle seed history is checked on the merge result (#11342)
+
+🔴 **`Architect bundle history/provenance check`** (`architect-bundle-meta.yml`)
+runs `scripts/architect_bundle_meta.py history --check` and
+`provenance --check` on the commit the event checks out. On `pull_request`
+that is `refs/pull/N/merge`; on `merge_group` it is the queue commit. #11333
+and #11334 each recorded their own provenance bytes and were green alone;
+squash-merged in sequence, `main` held bytes neither recorded and went red.
+
+- No `paths:` filter and no job-level `if:`, so it reports on every PR in
+  seconds. It moved out of `architect-subproject.yml`, whose `paths:` filter
+  skipped it, and a skipped workflow can never satisfy a required context.
+- `scripts/bundle_merge_result_selftest.sh` runs first. It replays two bundle
+  PRs merged in sequence and asserts that `check_bundle_pr_current.sh` fails
+  the second PR's head and `history --check` fails the merge of both. Both
+  pass once the second PR merges `main` and regenerates the history.
+- Without a merge queue, it judges the merge ref at event time only: a
+  `pull_request` run, and any re-run of it, reuses that merge SHA. After
+  `main` moves, only `Architect bundle PR is current with main` (re-run as
+  above) turns the overtaken PR red; this check stays green.
+- **Pending, for the owner:** neither context is required in branch
+  protection, and no merge queue is enabled. Making
+  `Architect bundle history/provenance check` and
+  `Architect bundle PR is current with main` required is an owner protection
+  change. Until then a red check warns but does not block a merge.
+
 ## Merge states, and what each one means
 
 - 🟡 **A `BEHIND` branch merges fine** — use `gh pr merge --squash
@@ -345,7 +426,7 @@ rustup run 1.98.1 cargo clippy --version
 
 # The CI job's own invocation, copied from ci.yml's clippy step.
 rustup run 1.98.1 cargo clippy --workspace --all-targets \
-  --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
+  --exclude trusty-code-gui -- -D warnings
 ```
 
 Re-read the pin from `ci.yml` each time rather than trusting this snippet:

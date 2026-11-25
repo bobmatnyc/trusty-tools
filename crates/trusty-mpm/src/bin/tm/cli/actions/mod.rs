@@ -30,6 +30,8 @@ mod dbatg;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
+// #11033: `tm savings status`.
+mod savings;
 // #8939: `tm env set|keys` — dotenv edits that print no value.
 mod env;
 // #8436: `tm fleet` — the Architect's setup and status.
@@ -39,6 +41,8 @@ mod hooks;
 mod issue;
 mod mcp;
 mod memory;
+// #11625: split from `memory` so it stays under the SLOC cap.
+mod memory_tools;
 mod meta;
 mod optimizer;
 mod overseer;
@@ -62,7 +66,7 @@ mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
-pub(crate) use architect::ArchitectAction;
+pub(crate) use architect::{ArchitectAction, UpArgs};
 pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
@@ -81,17 +85,21 @@ pub(crate) use hooks::HooksAction;
 pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
+pub(crate) use memory_tools::{MemoryKgAction, MemoryTaskAction, MemoryToolAction, ToolOutput};
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
-pub(crate) use pr::{PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
-pub(crate) use presence::PresenceAction;
+pub(crate) use pr::{
+    PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs, PrWatchArgs, PrWatchCmd,
+};
+pub(crate) use presence::{DevicesAction, PresenceAction};
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,
 };
 pub(crate) use repair::RepairAction;
-pub(crate) use secrets::{ArgText, SecretsAction};
+pub(crate) use savings::{SavingsAction, SavingsGroupArg};
+pub(crate) use secrets::{ArgText, ImportFormat, SecretsAction};
 pub(crate) use services::ServicesAction;
 pub(crate) use sessctl::SessctlAction;
 pub(crate) use session::SessionAction;

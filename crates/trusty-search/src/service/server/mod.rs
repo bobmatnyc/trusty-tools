@@ -54,9 +54,14 @@ mod lexical_lane;
 // #6822: the scalar-precision backfill route.
 // #9169 PR-B1: what a parked index answers, and its park/unpark side effects.
 mod project_ensure;
+// #11417: ensure re-activates a parked index.
+mod project_ensure_unpark;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;
+// #10989: the decommission park of a main checkout.
+#[cfg(test)]
+mod project_park_decommission_tests;
 // #10551: `search.index.embed_missing`, the embed-only resume of a failed semantic stage.
 mod embed_missing;
 #[cfg(test)]
@@ -67,6 +72,10 @@ mod reindex_handlers;
 #[cfg(test)]
 mod profile_10532_tests;
 mod profile_apply;
+// #10739: `search.index.path.admits` and the include_paths config tests.
+#[cfg(test)]
+mod include_paths_10739_tests;
+mod path_admits;
 mod remove_files;
 #[cfg(test)]
 mod remove_files_tests;
@@ -105,6 +114,8 @@ mod facet_route_tests;
 mod list_last_used_tests;
 #[cfg(test)]
 mod list_repo_identity_tests;
+#[cfg(test)]
+mod state_tests;
 // #6699: vector-lane health on the index list, and its agreement with status.
 #[cfg(test)]
 mod list_vector_health_tests;
@@ -286,8 +297,6 @@ mod tests_list;
 mod tests_search;
 #[cfg(test)]
 mod tests_stall;
-#[cfg(test)]
-mod tests_state;
 
 // Re-export the public surface that was previously at `crate::service::server::*`.
 // External callers (`daemon.rs`, `start.rs`, `service/mod.rs`) use these names.
@@ -321,6 +330,7 @@ pub(crate) use files::{call_chain_report, index_chunks_report, CallChainParams};
 pub(crate) use file_status::{file_status_report, FileStatusRequest};
 pub(crate) use index_config::{index_config_report, IndexConfigView};
 pub(crate) use indexes::{list_indexes_report, ListIndexesParams};
+pub(crate) use path_admits::{path_admits_report, PathAdmission, PathAdmitsParams};
 pub(crate) use status::{graph_report, graph_stats_report, index_status_report, GraphQueryParams};
 
 // #6285 slice 3: the query surface's transport-neutral bodies. Same contract as

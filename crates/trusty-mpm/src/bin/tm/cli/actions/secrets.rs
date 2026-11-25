@@ -14,6 +14,18 @@ use std::str::FromStr;
 
 use clap::Subcommand;
 
+/// Which parser `import` runs.
+// See G0b secrets JSON import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ImportFormat {
+    /// `KEY=value` lines.
+    Dotenv,
+    /// A JSON object, flattened to `KEY_PATH` names.
+    Json,
+    /// A Google OAuth client JSON (`installed` or `web`).
+    GoogleOauth,
+}
+
 /// A free-text argument of `set`, redacted in `Debug`.
 ///
 /// Why: a caller who types the secret on the command line by mistake —
@@ -49,7 +61,8 @@ impl fmt::Debug for ArgText {
 /// Actions for the `secrets` subcommand.
 ///
 /// Every verb resolves the project from the working directory's git
-/// checkout and prints names only, never a value.
+/// checkout (`assign` writes to the project it names) and prints names
+/// only, never a value.
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsAction {
     /// Add or replace one key of the project scope. The value comes from the
@@ -90,17 +103,34 @@ pub(crate) enum SecretsAction {
     /// A syntax error names the line number, never its text, and stores
     /// nothing. Any key that fails makes the exit status 1. The file is left
     /// in place.
+    ///
+    /// A `.json` file, or `--format json`, is a JSON object: nested keys
+    /// join with `_` and upper-case (`DB_PASSWORD`); an array or null is
+    /// refused by key name. A Google OAuth client JSON (`installed` or `web`
+    /// at the top), or `--google-oauth`, stores `client_id`, `client_secret`
+    /// and `project_id` as `google-oauth.<project_id>.CLIENT_ID` and so on.
     Import {
-        /// The dotenv file.
+        /// The dotenv, JSON or Google OAuth client file.
         path: PathBuf,
         /// Optional label applied to every key (`<group>.<KEY>`).
         group: Option<ArgText>,
+        // See G0b secrets JSON import.
+        /// The file format; default: by extension and content.
+        #[arg(long, value_enum, conflicts_with = "google_oauth")]
+        format: Option<ImportFormat>,
+        /// The file is a Google OAuth client JSON (`--format google-oauth`).
+        #[arg(long)]
+        google_oauth: bool,
     },
-    /// Copy this project's keys from one backend to another.
+    /// Copy keys into this project's scope from a backend.
     ///
     /// Copies the named keys, or every key of the project scope when none is
-    /// named. Stays inside the project and prints names only. Any key not
-    /// copied makes the exit status 1.
+    /// named, between backends. With `--from-service`/`--from-account` (a
+    /// Keychain item, `--from keychain`) or `--from-vault`/`--from-key` (a
+    /// key of any trusty vault, e.g. the owner vault), copies that one value
+    /// into the project scope as the single KEY given. The value never
+    /// reaches tm; prints names only. Any key not copied makes the exit
+    /// status 1.
     Copy {
         /// Source backend id, e.g. `keychain`.
         #[arg(long)]
@@ -108,11 +138,83 @@ pub(crate) enum SecretsAction {
         /// Destination backend id.
         #[arg(long)]
         to: String,
-        /// Stored key names (`<group>.<KEY>` for a grouped key); none means all.
+        // #10998: a named source — a Keychain item or another vault's key.
+        /// Source Keychain item's service (with `--from keychain`).
+        #[arg(long, requires = "from_account", conflicts_with_all = ["from_vault", "from_key"])]
+        from_service: Option<String>,
+        /// Source Keychain item's account.
+        #[arg(long, requires = "from_service")]
+        from_account: Option<String>,
+        /// Source vault, e.g. `trusty/<owner>`; read on the `--from` backend.
+        #[arg(long, requires = "from_key")]
+        from_vault: Option<String>,
+        /// Source key in `--from-vault`.
+        #[arg(long, requires = "from_vault")]
+        from_key: Option<String>,
+        /// Stored key names (`<group>.<KEY>` for a grouped key); none means
+        /// all. With a named source, exactly one: the destination key.
         keys: Vec<ArgText>,
+    },
+    // #11015: copy one vault key into another project's scope.
+    /// Copy one key of any trusty vault into a named project's scope.
+    ///
+    /// SRC is `trusty/<owner>[/<repo>]:KEY` or
+    /// `secret://<owner>[/<repo>]/KEY`. The destination is the project
+    /// `--project owner/repo` names, under the source's key name or `--as`.
+    /// The project must share the source vault's owner. Under Claude Code,
+    /// any session but the Architect's may name only this checkout's own
+    /// project. A re-run replaces the
+    /// destination value, as `copy` does. The value never reaches tm; prints
+    /// names only.
+    Assign {
+        /// The source key: `trusty/<owner>[/<repo>]:KEY` or a `secret://`
+        /// reference naming its vault.
+        src: ArgText,
+        /// The destination project, `owner/repo`.
+        #[arg(long)]
+        project: String,
+        /// The destination key name; defaults to the source key's name.
+        #[arg(long = "as", value_name = "DEST_KEY")]
+        dest: Option<String>,
+        /// Backend the source is read from.
+        #[arg(long, default_value = "keychain")]
+        from_backend: String,
+        /// Backend the destination is written to.
+        #[arg(long, default_value = "keychain")]
+        to_backend: String,
     },
     /// Report socket and backend reachability, never a value.
     Doctor,
+    // #10524: the 8 h unlock grant (owner ruling Dd5).
+    /// Approve once, with Touch ID or the login password, so Keychain and
+    /// 1Password reads raise no prompt for 8 h.
+    ///
+    /// The grant lives only in the running trusty-secrets server. It ends
+    /// after 8 h, on system sleep, at logout, on `tm secrets lock`, or when
+    /// the server exits; it never survives a restart. Refused under an agent.
+    Unlock,
+    /// End the unlock grant now; the next read prompts again.
+    Lock,
+    // #10524: the vault blob (owner ruling 2026-11-19).
+    /// Move every trusty Keychain item into one Keychain item, so
+    /// `tm secrets unlock` prompts once.
+    ///
+    /// Plain `migrate` writes a verified backup item, then the blob, and
+    /// keeps the old items. `--finish` deletes the old items once the blob and
+    /// backup exist. `--rollback` writes every item back to its own Keychain
+    /// item, then deletes the blob. `--dry-run` reports counts and key names
+    /// and writes nothing. Never prints a value. Refused under an agent.
+    Migrate {
+        /// Report what the step would do; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Delete the old per-item Keychain items after a migration.
+        #[arg(long, conflicts_with = "rollback")]
+        finish: bool,
+        /// Restore the per-item layout and delete the blob.
+        #[arg(long)]
+        rollback: bool,
+    },
     // #9072: tier 3 of DOC-74 §15.8 for any language, on the command line.
     /// Print one key's value inside a `tm secrets exec` grant.
     ///

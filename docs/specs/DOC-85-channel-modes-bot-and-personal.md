@@ -42,7 +42,7 @@ A channel call runs in exactly one mode.
 
 A mode never grants more than the route and the host ceiling already allow. The table is the most a mode may do.
 
-Separately from modes, the `tm hook --egress-guard` backstop (#8454) refuses every Slack MCP tool in a tm-launched session. Its one exception is the host `channels.slack_read_allowlist` (#10387): a listed project may call `slack_read_channel` and `slack_read_thread` on the `slack-mcp` or `claude_ai_Slack` server, and nothing else. Schema and rules: `crates/trusty-channels/src/policy/slack_read.rs`.
+Separately from modes, the `tm hook --egress-guard` backstop (#8454) refuses every Slack MCP tool to a subagent except claude.ai's hosted `claude_ai_Slack` connector, which #10735 exempts. Owner ruling 2026-11-14 (#11273): a PM's or the Architect's main session may call the family read, search and list tools; a send or write needs the tm launch record, which only the Architect has today (#10447), bar a PM's send to the owner's DM (#11194). The host `channels.slack_read_allowlist` (#10387) still grants any caller in a listed project `slack_read_channel` and `slack_read_thread` on the `slack-mcp` server. Schema and rules: `crates/trusty-channels/src/policy/slack_read.rs`.
 
 ### 2.1 Service-account scope {#SPEC-CHMODE-02A~draft}
 
@@ -112,10 +112,10 @@ Notion credential per use (Bob ruling, 12:17Z; De6; PD-5). Refs and scopes only.
 
 | Use | Mode | Ref | Registry key | Store scope |
 |---|---|---|---|---|
-| Trusty brief sharing (a brief synced to Docs or Notion) | personal | `NOTION.NOTION_PAT` | `notion-user` | `trusty/bob-duetto` |
-| APEX Companion | bot | `NOTION.NOTION_CONNECTOR_APEX_COMPANION` | `notion-companion` | `trusty/duettoresearch` |
-| mcp-services and all internal tooling | bot | `NOTION.NOTION_CONNECTOR_ARIA` | `notion-aria` | `trusty/duettoresearch` |
-| CTO bot | bot | `NOTION.NOTION_CONNECTOR_CTO_ASSISTANT` | `notion-cto` | `trusty/duettoresearch` |
+| Trusty brief sharing (a brief synced to Docs or Notion) | personal | `NOTION.NOTION_PAT` | `notion-user` | `trusty/acme-admin` |
+| APEX Companion | bot | `NOTION.NOTION_CONNECTOR_APEX_COMPANION` | `notion-companion` | `trusty/acme` |
+| mcp-services and all internal tooling | bot | `NOTION.NOTION_CONNECTOR_ARIA` | `notion-aria` | `trusty/acme` |
+| CTO bot | bot | `NOTION.NOTION_CONNECTOR_CTO_ASSISTANT` | `notion-cto` | `trusty/acme` |
 
 `NOTION.NOTION_PAT` is never accepted in `bot_ref` (Ddb is resolved by De6).
 

@@ -747,6 +747,21 @@ impl TrustyToolsConfig {
         }
         cfg
     }
+
+    /// Load the config under `home` when given, else the real one ([`Self::load`]).
+    ///
+    /// Why (#11170): an isolated daemon state pins a test home and must never
+    /// seed from the real `~/.trusty-tools` config.
+    /// Test: `isolated_state_seeds_projects_only_from_its_pinned_home_11170`.
+    pub fn load_under(home: Option<&Path>) -> Self {
+        match home {
+            Some(home) => trusty_common::crate_config::load_or_default_at(
+                &trusty_common::crate_config::crate_config_path_at(home, CRATE_NAME),
+                CRATE_NAME,
+            ),
+            None => Self::load(),
+        }
+    }
 }
 
 /// Resolve the shared tm-owned `CLAUDE_CONFIG_DIR` for daemon-managed sessions.
@@ -791,11 +806,31 @@ pub fn managed_claude_config_dir_at(base: &Path) -> PathBuf {
 /// from [`TrustyToolsConfig`] and delegate. The precedence is unchanged
 /// (**`TRUSTY_MPM_WORKSPACE_ROOT` env > config `workspace_root_template` >
 /// built-in `~/trusty-mpm-projects`**).
+/// A broken `~/.trusty-tools/install.toml` is logged and defaulted here, so
+/// this serves readers only; a caller that clones, deletes or writes under the
+/// root uses [`try_workspace_root`] (#11821).
 /// Test: `default_template_is_trusty_mpm_projects`, `env_overrides_config_and_default`,
 /// `config_template_used_when_no_env`.
 pub fn workspace_root(config: &TrustyToolsConfig) -> PathBuf {
     // #5203: one resolver, in trusty-common, for every consumer.
     trusty_common::workspace_layout::resolve_workspace_root(
+        config.workspace_root_template.as_deref(),
+    )
+}
+
+/// [`workspace_root`] that fails closed on a broken `install.toml`.
+///
+/// Why: df-D1t (#11821): a clone, delete or write under the workspace root
+/// must not land on the default root because the operator's install file is
+/// broken.
+/// What: delegates to
+/// [`trusty_common::workspace_layout::try_resolve_workspace_root`] with the
+/// config's template; the error is the install-paths error.
+/// Test: `broken_install_file_fails_the_workspace_root_closed` (env_serial).
+pub fn try_workspace_root(
+    config: &TrustyToolsConfig,
+) -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    trusty_common::workspace_layout::try_resolve_workspace_root(
         config.workspace_root_template.as_deref(),
     )
 }
@@ -887,6 +922,7 @@ pub(crate) fn load_disk_keep_list_at(base: &Path) -> KeepList {
 /// on the same repo group together and the path mirrors the GitHub identity.
 /// What: returns `<root>/<owner>/<repo>` for the given [`GithubPath`]. The session
 /// id is appended by the provisioner, not here, so this stays the "project home".
+/// Readers only: it inherits [`workspace_root`]'s logged default (#11821).
 /// Test: `subpath_nests_owner_repo`.
 pub fn workspace_subpath(config: &TrustyToolsConfig, gh: &GithubPath) -> PathBuf {
     workspace_root(config).join(&gh.owner).join(&gh.repo)

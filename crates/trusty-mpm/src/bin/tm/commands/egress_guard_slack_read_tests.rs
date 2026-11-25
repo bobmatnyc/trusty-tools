@@ -214,7 +214,7 @@ fn slack_read_lookalike_names_are_not_judged() {
     for name in [
         "mcp__slack-evil__slack_read_channel",
         "mcp__Slack-MCP__slack_read_channel",
-        "mcp__claude_ai_slack__slack_read_channel",
+        "mcp__claudeai_slack__slack_read_channel",
         "mcp__slack_mcp__slack_read_channel",
         "mcp__slack-mcp-x__slack_read_channel",
         "mcp__x__slack-mcp__slack_read_channel",

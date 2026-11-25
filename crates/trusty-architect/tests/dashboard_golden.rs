@@ -7,12 +7,16 @@
 //! here runs the same batches through [`Store::batch`] on an empty temporary
 //! root and compares every outcome and, after the last batch, every file.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use common::no_secret;
 use serde_json::Value;
+use trusty_architect::FakeClock;
 use trusty_architect::dashboard::ids::{KEEP_FREE, free_count, next_id, retire_candidates};
 use trusty_architect::dashboard::{
     DashError, DeleteArchive, FooterLinks, Format, ListQuery, Op, Removed, SchemaDir, SchemaSet,
@@ -20,12 +24,6 @@ use trusty_architect::dashboard::{
 };
 
 type R = Result<(), Box<dyn std::error::Error>>;
-
-/// A test scanner: nothing is secret-shaped (#10063 PR 2: a store with no
-/// scan refuses writes).
-fn no_secret(_: &str) -> Option<String> {
-    None
-}
 
 /// 2026-10-21T10:00:00Z, the regen script's `NOW`.
 const NOW: f64 = 1_792_576_800.0;
@@ -99,7 +97,9 @@ fn dashboard_writer_matches_prototype_bytes() -> R {
             let root = tmp.path().join("store");
             let store = Store::new(&root, format)
                 .with_secret_scan(no_secret)
-                .with_archive(Box::new(Accept::default()));
+                .with_archive(Box::new(Accept::default()))
+                // #10678: the store stamps created/updated; pin it to the regen clock.
+                .with_clock(Arc::new(FakeClock::new(NOW)));
             for (n, batch) in case["batches"]
                 .as_array()
                 .ok_or("batches")?

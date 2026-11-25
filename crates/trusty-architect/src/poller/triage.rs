@@ -22,6 +22,25 @@ pub trait Triage {
         state: &mut PollState,
         dry_run: bool,
     ) -> (Vec<Alert>, u64);
+
+    /// How many of the last call's woken alerts no rule decided (the
+    /// prototype's Haiku path, MB1595); parity leaves them out.
+    fn haiku_woken(&self) -> u64 {
+        0
+    }
+
+    /// `session|kind|fingerprint` of each of the last call's woken alerts no
+    /// rule decided; the shadow's structured wake keys mark them (MB1595 fix
+    /// round).
+    fn haiku_keys(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// The identity of an alert in the shadow's structured output and in the
+/// parity join: `session|kind|fingerprint`.
+pub fn alert_key(a: &Alert) -> String {
+    format!("{}|{}|{}", a.session, a.kind, a.fingerprint)
 }
 
 /// Wakes for every new alert and logs none.

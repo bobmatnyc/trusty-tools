@@ -101,7 +101,7 @@ cargo run -p trusty-mpm -- --help
 # corpus copy indexed; talks over its socket (#9993), no default socket.
 # Optional TRUSTY_SEARCH_BENCH_ENVELOPE=<absolute path> writes the schema-1
 # perf envelope (p50/p95/p99, n, qps per operation); unset writes nothing.
-TRUSTY_SEARCH_BENCH_SOCKET=<sandbox dir>/data/trusty-search.sock \
+TRUSTY_SEARCH_BENCH_SOCKET=<sandbox dir>/data/trusty-search/trusty-search.sock \
 TRUSTY_SEARCH_BENCH_INDEX=<index id> \
 TRUSTY_SEARCH_TEST_CORPUS_ROOT=<marked corpus copy> \
   cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --nocapture --test-threads=1
@@ -130,7 +130,7 @@ everything regardless of `default-members`.
 **Crate names** match the `name` field in each crate's `Cargo.toml`, which is
 not always the directory name:
 
-- `crates/trusty-agents/` → `-p trusty-agents`
+- `crates/trusty-assistants/` → `-p trusty-assistants` (formerly `trusty-agents`, #11632)
 
 If you get "package not found", read the `name` field in that crate's
 `Cargo.toml`. The abbreviation table in `CLAUDE.md` resolves the conversational

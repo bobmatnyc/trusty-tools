@@ -70,6 +70,32 @@ pub struct RoleModels {
     pub verifier: RoleConfig,
     /// Summarizer: diff Stage-C classification.
     pub summarizer: RoleConfig,
+    /// True when the verifier model came from the built-in default, with no
+    /// CLI, manifest, env, or config-file model named (#11527). Only then may
+    /// the startup liveness gate fall back to `FALLBACK_VERIFIER_MODEL`.
+    pub verifier_from_builtin_default: bool,
+    /// Model slugs the operator's account is authorized to invoke (#10757).
+    /// Empty when neither `TRUSTY_REVIEW_AUTHORIZED_MODELS` nor
+    /// `[models] authorized` names any; see [`resolve_authorized_models`].
+    pub authorized_models: Vec<String>,
+    /// #10757: set when the config file declares `[models] authorized` but it
+    /// cannot be parsed and no env list overrides it; `compare` must refuse.
+    pub authorized_models_error: Option<AuthorizedModelsError>,
+}
+
+/// A `[models] authorized` key that is present but unparseable (#10757).
+///
+/// Why: falling back to the built-in compare set would invoke models the
+/// operator never authorized.
+/// What: carries the config file path and the parse error text.
+/// Test: `config_tests::compare_refuses_malformed_authorized_key`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("cannot parse `[models] authorized` in {path}: {reason}")]
+pub struct AuthorizedModelsError {
+    /// The config file that declared the key.
+    pub path: String,
+    /// Why the value could not be read as a list of model slugs.
+    pub reason: String,
 }
 
 impl RoleModels {
@@ -82,9 +108,10 @@ impl RoleModels {
     /// carries any values the caller parsed from `--reviewer-model` etc.
     /// `file_models` carries parsed TOML table values.  Both may be `None` to
     /// skip that layer.  The built-in default is a `ModelTier` (#5971): the
-    /// reviewer asks for `Analysis`, the verifier and summarizer for
-    /// `Classification`, and the tier resolves against whichever provider won
-    /// its own chain.
+    /// reviewer asks for `Analysis`, the summarizer for `Classification`, and
+    /// the tier resolves against whichever provider won its own chain. The
+    /// verifier's built-in layer is a non-Claude model instead (#11527, see
+    /// `cross_family_verifier_default`); a same-model pair logs a warning.
     ///
     /// The verifier and summarizer take `Classification` for its COST, not
     /// because verifying or summarising IS classification (#5987).  The owner
@@ -137,12 +164,21 @@ impl RoleModels {
             env.reviewer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.reviewer.as_ref()),
-            ModelTier::Analysis,
+            |p| ModelTier::Analysis.resolve(p.provider_id()),
             crate::llm::models::DEFAULT_REVIEWER_MODEL,
             Provider::Bedrock,
             0.3,
             4096,
         );
+        // #11527: record whether any explicit layer named a verifier model.
+        let verifier_from_builtin_default = cli_overrides
+            .and_then(|c| c.verifier_model.as_deref())
+            .or(manifest.and_then(|m| m.verifier_model.as_deref()))
+            .or(env.verifier_model.as_deref())
+            .or(file_models
+                .and_then(|f| f.verifier.as_ref())
+                .and_then(|v| v.model.as_deref()))
+            .is_none();
         let verifier = resolve_role(
             cli_overrides.and_then(|c| c.verifier_model.as_deref()),
             cli_overrides.and_then(|c| c.provider.as_deref()),
@@ -151,7 +187,8 @@ impl RoleModels {
             env.verifier_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.verifier.as_ref()),
-            ModelTier::Classification,
+            // #11527: a different model family from the reviewer, not the tier.
+            cross_family_verifier_default,
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
             Provider::Bedrock,
             1.0,
@@ -165,17 +202,51 @@ impl RoleModels {
             env.summarizer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.summarizer.as_ref()),
-            ModelTier::Classification,
+            |p| ModelTier::Classification.resolve(p.provider_id()),
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL,
             Provider::Bedrock,
             0.0,
             4096,
         );
-        Self {
+        let roles = Self {
             reviewer,
             verifier,
             summarizer,
+            verifier_from_builtin_default,
+            // #10757: model access comes from config, not a hard-coded list.
+            authorized_models: resolve_authorized_models(
+                env.authorized_models.as_deref(),
+                file_models,
+            ),
+            authorized_models_error: None,
+        };
+        // #11527: surface a reviewer/verifier pair that shares one model.
+        if let Some(message) = roles.same_model_warning() {
+            warn!("{message}");
         }
+        roles
+    }
+
+    /// Warning text when the reviewer and verifier resolve to the same model.
+    ///
+    /// Why: a verifier on the reviewer's own model repeats the reviewer's
+    /// errors instead of catching them (#11527). An operator may still choose
+    /// that pair, so it is a warning, never a refusal.
+    /// What: compares the two model ids after stripping any `bedrock/` /
+    /// `openrouter/` / `fireworks/` routing prefix; `Some` names the shared id.
+    /// Test: `config_tests::same_model_warning_fires_when_reviewer_and_verifier_match`,
+    /// `config_tests::default_verifier_is_a_different_family_from_the_reviewer`.
+    pub fn same_model_warning(&self) -> Option<String> {
+        let reviewer = crate::llm::strip_provider_prefix(&self.reviewer.model);
+        let verifier = crate::llm::strip_provider_prefix(&self.verifier.model);
+        (reviewer == verifier).then(|| {
+            format!(
+                "reviewer and verifier both resolve to model {reviewer:?}; the verifier \
+                 cannot catch errors its own model makes — set a different verifier \
+                 model (TRUSTY_REVIEW_VERIFIER_MODEL / --verifier-model) unless this is \
+                 intended"
+            )
+        })
     }
 
     /// Convenience: resolve with only env vars (no CLI, no config file).
@@ -227,6 +298,8 @@ pub struct RoleEnv {
     pub verifier_model: Option<String>,
     pub summarizer_model: Option<String>,
     pub provider: Option<String>,
+    /// `TRUSTY_REVIEW_AUTHORIZED_MODELS` — comma-separated slugs (#10757).
+    pub authorized_models: Option<String>,
 }
 
 /// Per-role model ids a report manifest declares (#6135).
@@ -265,6 +338,7 @@ impl RoleEnv {
             verifier_model: std::env::var("TRUSTY_REVIEW_VERIFIER_MODEL").ok(),
             summarizer_model: std::env::var("TRUSTY_REVIEW_SUMMARIZER_MODEL").ok(),
             provider: std::env::var("TRUSTY_REVIEW_PROVIDER").ok(),
+            authorized_models: std::env::var("TRUSTY_REVIEW_AUTHORIZED_MODELS").ok(),
         }
     }
 }
@@ -279,9 +353,71 @@ pub struct FileModels {
     pub reviewer: Option<RoleConfigOverride>,
     pub verifier: Option<RoleConfigOverride>,
     pub summarizer: Option<RoleConfigOverride>,
+    /// `[models] authorized = ["bedrock/<id>", ...]` — the models the
+    /// operator's account is authorized to invoke (#10757).
+    #[serde(default)]
+    pub authorized: Vec<String>,
+}
+
+/// Resolve the operator-declared authorized model list (#10757).
+///
+/// Why: whether an account may invoke a model is a fact about that account,
+/// so it must come from the operator, never from a list compiled into the
+/// binary (a stale one hid Opus 4.8 after the account was granted it).
+/// What: a non-blank `TRUSTY_REVIEW_AUTHORIZED_MODELS` (comma-separated)
+/// wins; otherwise `[models] authorized`. Entries are trimmed, blanks dropped.
+/// Empty means "none declared".
+/// Test: `config_tests::authorized_models_env_beats_config_file`,
+/// `config_tests::compare_set_uses_config_authorized_model`.
+pub fn resolve_authorized_models(env: Option<&str>, file: Option<&FileModels>) -> Vec<String> {
+    let clean = |ids: &mut dyn Iterator<Item = &str>| -> Vec<String> {
+        ids.map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let from_env = env.map(|v| clean(&mut v.split(','))).unwrap_or_default();
+    if !from_env.is_empty() {
+        return from_env;
+    }
+    file.map(|f| clean(&mut f.authorized.iter().map(String::as_str)))
+        .unwrap_or_default()
+}
+
+impl RoleModels {
+    /// The model set `compare` runs when `--models` is not given (#10757).
+    ///
+    /// Why: a malformed `[models] authorized` must not fail open to the
+    /// built-in set, which may name models the account cannot invoke.
+    /// What: returns `authorized_models_error` when set; otherwise
+    /// `compare_models(&authorized_models)`.
+    /// Test: `config_tests::compare_refuses_malformed_authorized_key`,
+    /// `config_tests::compare_set_uses_config_authorized_model`.
+    pub fn compare_default_models(&self) -> Result<Vec<String>, AuthorizedModelsError> {
+        match &self.authorized_models_error {
+            Some(err) => Err(err.clone()),
+            None => Ok(crate::llm::models::compare_models(&self.authorized_models)),
+        }
+    }
 }
 
 // ─── Resolution helper (private) ─────────────────────────────────────────────
+
+/// Built-in verifier model for `provider`: a non-Claude family (#11527).
+///
+/// Why: every reviewer default is Claude, and a verifier from the same family
+/// shares its blind spots (owner ruling D52). The verifier's built-in layer
+/// therefore names a different family, not the `Classification` tier.
+/// What: Bedrock → Amazon Nova Pro, OpenRouter → Gemini 2.5 Flash; any other
+/// provider falls back to the `Classification` tier.
+/// Test: `config_tests::default_verifier_is_a_different_family_from_the_reviewer`.
+fn cross_family_verifier_default(provider: &Provider) -> Option<&'static str> {
+    match provider {
+        Provider::Bedrock => Some(crate::llm::models::DEFAULT_VERIFIER_MODEL),
+        Provider::OpenRouter => Some(crate::llm::models::OPENROUTER_VERIFIER_MODEL),
+        Provider::Fireworks => ModelTier::Classification.resolve(provider.provider_id()),
+    }
+}
 
 /// Parse one precedence layer's provider string, warning on a value that fails.
 ///
@@ -332,7 +468,7 @@ pub(super) fn resolve_role(
     env_model: Option<&str>,
     env_provider: Option<&str>,
     file: Option<&RoleConfigOverride>,
-    default_tier: ModelTier,
+    builtin_default: fn(&Provider) -> Option<&'static str>,
     default_model: &str,
     default_provider: Provider,
     default_temp: f32,
@@ -361,7 +497,7 @@ pub(super) fn resolve_role(
         .or(manifest_model)
         .or(env_model)
         .or(file.and_then(|f| f.model.as_deref()))
-        .or_else(|| default_tier.resolve(provider.provider_id()))
+        .or_else(|| builtin_default(&provider))
         .unwrap_or(default_model)
         .to_string();
 

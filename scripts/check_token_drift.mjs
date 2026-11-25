@@ -4,8 +4,8 @@
  *
  * Why: docs/design/UI/design-system/tokens.css is the canonical Foundry v2
  * design-token source (hex values, light + `[data-theme='dark']` blocks).
- * crates/trusty-agents/ui/src/app.css and crates/trusty-code-gui/ui/src/app.css
- * both adopted it, but by HAND-TRANSCRIBING the hex into Tailwind's
+ * crates/trusty-code-gui/ui/src/app.css adopted it (#11632 deleted the
+ * trusty-agents UI that did the same), but by HAND-TRANSCRIBING the hex into Tailwind's
  * `--color-*: R G B` space-separated RGB-triple convention (consumed as
  * `rgb(var(--color-*) / <alpha-value>)`), so a hand-edit to either side can
  * silently drift the two apart. Nothing previously checked the two stay in
@@ -19,7 +19,7 @@
  * parser, but sufficient for these small, flat, hand-maintained files (no
  * nested `{}` inside a declaration block). Two comparison MODES exist:
  *
- *   - `rgb-triple` (Tailwind crates: trusty-agents, trusty-code-gui): the crate hand-transcribes canonical hex into
+ *   - `rgb-triple` (Tailwind crates: trusty-code-gui): the crate hand-transcribes canonical hex into
  *     Tailwind's `--color-*: R G B` space-separated triple convention. An
  *     explicit MAPPING per crate pins which `--color-*` var corresponds to
  *     which canonical `--trusty-*` token (derived from that crate's own
@@ -113,26 +113,6 @@ const ALLOWLIST = [];
 // ---------------------------------------------------------------------------
 const ENFORCED = [
   {
-    name: "trusty-agents",
-    file: "crates/trusty-agents/ui/src/app.css",
-    mode: "rgb-triple",
-    lightSelector: /:root\s*\{([\s\S]*?)\n\}/,
-    darkSelector: /\.dark\s*\{([\s\S]*?)\n\}/,
-    mappings: [
-      ["content-bg", "trusty-content-bg"],
-      ["card-bg", "trusty-card-bg"],
-      ["text-primary", "trusty-text-primary"],
-      ["text-muted", "trusty-text-muted"],
-      ["border", "trusty-border"],
-      ["primary", "trusty-accent"],
-      ["info", "trusty-info"],
-      ["success", "trusty-success"],
-      ["warning", "trusty-warning"],
-      ["sidebar-accent", "trusty-sidebar-accent"],
-    ],
-    passthrough: [["trusty-surface-hover", "trusty-surface-hover"]],
-  },
-  {
     name: "trusty-code-gui",
     file: "crates/trusty-code-gui/ui/src/app.css",
     mode: "rgb-triple",
@@ -188,6 +168,14 @@ const ENFORCED = [
     // #9067: a copy of trusty-analyze's token file, same selectors.
     name: "trusty-console-secrets",
     file: "crates/trusty-console/ui-secrets/src/lib/styles/tokens.css",
+    mode: "hex",
+    lightSelector: /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/,
+    darkSelector: /:root\s*,\s*\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/,
+  },
+  {
+    // #11749: a copy of ui-secrets' token file, same selectors.
+    name: "trusty-console-assistants",
+    file: "crates/trusty-console/ui-assistants/src/lib/styles/tokens.css",
     mode: "hex",
     lightSelector: /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/,
     darkSelector: /:root\s*,\s*\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/,

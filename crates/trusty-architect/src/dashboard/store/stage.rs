@@ -10,7 +10,8 @@
 //! store refuses blind sets, a `set` with none on a document that existed
 //! before the batch) and the body
 //! (an object without `version`; minute timestamps under time keys gain
-//! `:00`), and chains later ops on one document. [`Store::commit`] writes
+//! `:00`; `created`/`updated` take the store's clock, #10678), and chains
+//! later ops on one document. [`Store::commit`] writes
 //! every dirty target (`dir`: one file each; `jsonl`: each touched
 //! collection re-rendered whole, removed when empty) and, if any write
 //! fails, restores the bytes of every earlier one; a restore that fails too
@@ -278,6 +279,22 @@ fn is_minute_ts(s: &str) -> bool {
         })
 }
 
+/// Why: a client clock or a hand-typed value must not decide when a document
+/// was written (#10678).
+/// What: a body carrying `updated` gets `now`; one carrying `created` keeps
+/// `prior_created` (the stored document's), else gets `now`. A field the body
+/// lacks is not added, since several schemas forbid it. Event fields (`at`,
+/// `*_at`) stay the client's.
+/// Test: `store_stamps_created_and_updated_and_ignores_client_values`.
+fn stamp_write(data: &mut Map<String, Value>, prior_created: Option<Value>, now: &str) {
+    if let Some(updated) = data.get_mut("updated") {
+        *updated = Value::String(now.to_owned());
+    }
+    if let Some(created) = data.get_mut("created") {
+        *created = prior_created.unwrap_or_else(|| Value::String(now.to_owned()));
+    }
+}
+
 fn check_body(data: &Value) -> Result<&Map<String, Value>, DashError> {
     let body = data
         .as_object()
@@ -291,8 +308,14 @@ fn check_body(data: &Value) -> Result<&Map<String, Value>, DashError> {
 }
 
 impl Store {
-    /// Stages `op` on top of `staged`; reads the target under the caller's lock.
-    pub(super) fn stage(&self, staged: &mut Staged, op: &Op) -> Result<OpResult, DashError> {
+    /// Stages `op` on top of `staged`; reads the target under the caller's
+    /// lock. `now` is the batch's one write time, stamped by [`stamp_write`].
+    pub(super) fn stage(
+        &self,
+        staged: &mut Staged,
+        op: &Op,
+        now: &str,
+    ) -> Result<OpResult, DashError> {
         let (coll, id, expected) = op.parts();
         check_name("collection", coll)?;
         check_name("doc id", id)?;
@@ -357,6 +380,12 @@ impl Store {
                 "document body must be a JSON object".into(),
             ));
         };
+        let prior_created = if cur.exists {
+            // #10678: a stored null counts as absent, as in dashboard_store.py.
+            cur.data.get("created").filter(|v| !v.is_null()).cloned()
+        } else {
+            None
+        };
         if matches!(op, Op::Update { .. }) {
             if !cur.exists {
                 return Err(DashError::NotFound(format!("{coll}/{id} not found")));
@@ -367,6 +396,8 @@ impl Store {
             cur.data = body;
             cur.op = "set";
         }
+        // #10678: the store owns write times; a client created/updated is ignored.
+        stamp_write(&mut cur.data, prior_created, now);
         cur.exists = true;
         cur.dirty = true;
         cur.version += 1;

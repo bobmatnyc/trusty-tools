@@ -106,9 +106,10 @@ fn arrows_move_the_selection_within_the_table() {
     assert_eq!(state.selected, 6);
 }
 
-// #10966: `a` opens the read-only Architect view; Esc returns home.
+// #10966: `a` opens the read-only Architect view, `v` its Live tab; Esc
+// returns home.
 #[test]
-fn a_opens_the_architect_view_and_esc_returns() {
+fn a_opens_architect_and_v_opens_live() {
     use crate::tui::architect::Tab;
     let mut state = HomeState::default();
     let now = Instant::now();
@@ -118,6 +119,11 @@ fn a_opens_the_architect_view_and_esc_returns() {
     handle_key(&mut state, key(KeyCode::Esc), now);
     assert_eq!(state.view, View::Home);
     assert!(!state.should_exit);
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('v')), now), None);
+    assert_eq!(
+        (state.view, state.architect.tab),
+        (View::Architect, Tab::Live)
+    );
 }
 
 #[test]
@@ -140,6 +146,18 @@ fn enter_on_search_opens_its_view_and_esc_returns() {
     handle_key(&mut state, key(KeyCode::Esc), Instant::now());
     assert_eq!(state.view, View::Home);
     assert!(!state.should_exit);
+}
+
+/// #10908: `i` opens MPM's service view and fetches its UDS metrics; Enter
+/// on MPM still opens the projects view.
+#[test]
+fn i_opens_the_mpm_service_view() {
+    let mut state = HomeState::default();
+    select(&mut state, ServiceId::Mpm);
+    up(&mut state, ServiceId::Mpm);
+    let action = handle_key(&mut state, key(KeyCode::Char('i')), Instant::now());
+    assert_eq!(action, Some(HomeAction::FetchMetrics(ServiceId::Mpm)));
+    assert_eq!(state.view, View::Service(ServiceId::Mpm));
 }
 
 #[test]
@@ -422,7 +440,8 @@ async fn a_hung_probe_does_not_hold_back_the_other_tiles() {
 
 #[tokio::test]
 async fn a_service_without_console_metrics_is_refused_without_a_spawn() {
-    let update = fetch_metrics(ServiceId::Events, Duration::from_millis(50)).await;
+    // #10907: the console now serves console_metrics; Agents still serves none.
+    let update = fetch_metrics(ServiceId::Agents, Duration::from_millis(50)).await;
     assert!(update.result.is_err());
 }
 

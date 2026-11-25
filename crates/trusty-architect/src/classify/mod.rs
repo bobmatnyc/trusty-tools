@@ -17,6 +17,7 @@ pub mod alerts;
 pub mod dedup;
 mod guard;
 pub(crate) mod matchers;
+pub mod screen;
 #[cfg(test)]
 mod tests;
 
@@ -28,13 +29,14 @@ use crate::input::{InputState, classify_input};
 use crate::pystr::{is_space, lstrip, splitlines, strip};
 use matchers::{
     account_field, find_pct, has_dialog_marker, has_waiting, is_active, is_agent_row,
-    is_box_top_rule, is_completed, is_error, is_footer_noise, is_limit, is_option, is_rc_failed,
-    is_rule, is_spinner, strip_ansi, strip_timers,
+    is_box_top_rule, is_completed, is_error, is_footer_noise, is_limit, is_option, is_rc_active,
+    is_rc_failed, is_rule, is_spinner, strip_ansi, strip_timers,
 };
 
+pub(crate) use alerts::clean;
 pub use alerts::{
-    Alert, CTX_HIGH, CTX_WARN, DETAIL_MAX, IDLE_AFTER, PLAN_HIGH, PaneState, alert, evaluate,
-    fleet_plan_alerts,
+    Alert, CTX_HIGH, CTX_WARN, DETAIL_MAX, IDLE_AFTER, IDLE_EXEMPT_SESSIONS, PLAN_HIGH, PaneState,
+    alert, evaluate, fleet_plan_alerts,
 };
 pub use dedup::{DedupState, REEMIT, Seen, dedup};
 pub use guard::input_state_for_send;
@@ -77,6 +79,8 @@ pub struct PaneInfo {
     pub box_reading: BoxReading,
     /// The input line's text with escapes removed (`input-state.py`).
     pub box_text: String,
+    /// [`screen::screen_hash`] of the rows above the box (MB1595, Bob D9t).
+    pub screen: String,
     /// True when a rule-bounded input box was found.
     pub has_box: bool,
     /// `(fingerprint text, detail)` of an open dialog below the box.
@@ -101,6 +105,8 @@ pub struct PaneInfo {
     pub account: Option<String>,
     /// `/rc failed` (Remote Control dropped) in the last 12 rows.
     pub rc_failed: bool,
+    /// A connected `/rc` at the end of one of the last 12 rows (df-T7i P1b).
+    pub rc_active: bool,
     /// The newest usage-limit notice in the last 30 rows.
     pub limit: Option<String>,
     /// Distinct error lines in the last 30 rows, sorted.
@@ -278,6 +284,7 @@ pub fn parse_pane(capture: &str) -> PaneInfo {
     PaneInfo {
         box_reading,
         box_text,
+        screen: screen::screen_hash(&lines, top),
         has_box: found.is_some(),
         dialog,
         status,
@@ -292,6 +299,9 @@ pub fn parse_pane(capture: &str) -> PaneInfo {
         rc_failed: lines[lines.len().saturating_sub(12)..]
             .iter()
             .any(|l| is_rc_failed(l)),
+        rc_active: lines[lines.len().saturating_sub(12)..]
+            .iter()
+            .any(|l| is_rc_active(l)),
         limit: tail
             .iter()
             .rev()

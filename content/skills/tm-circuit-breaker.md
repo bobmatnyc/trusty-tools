@@ -3,7 +3,7 @@ name: tm-circuit-breaker
 description: Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.2"
 category: pm-framework
 tags: [circuit-breaker, enforcement, pm-required, validation]
 effort: high
@@ -101,8 +101,8 @@ investigation intent (>2 patterns); investigation keywords ("check",
 "analyze", "find", "explore", "investigate").
 
 **Action**: BLOCK — delegate to the Research agent. Before Read/Grep, the PM
-must attempt `mcp__trusty-search__search` / `search_semantic` /
-`search_lexical` first (see CB#10 below and `tm-tool-usage-guide`).
+must attempt `trusty-search search "<q>" --json` (or the MCP `search_semantic`
+/ `search_lexical`, see #11771) first (see CB#10 below and `tm-tool-usage-guide`).
 
 **Allowed exception**: up to 3 small config/doc files (`Cargo.toml`,
 `package.json`, `.mcp.json`) read for delegation context only — never source
@@ -117,7 +117,7 @@ PM: Grep("<symbol>", path="src/")                      # investigation
 
 **Correct:**
 ```
-PM: mcp__trusty-search__search(query="<what to find>")
+PM: Bash(trusty-search search "<what to find>" --json)
 PM: *delegates to Research if results are insufficient*
 Research: reads/greps as needed, returns findings
 PM: uses findings to write a grounded Engineer delegation
@@ -184,11 +184,11 @@ explicitly; internal refactor with no public API change.
 **Trigger**: PM directly calls browser-automation or `gh issue`/`gh pr`
 tooling instead of delegating.
 
-**Detection**: `mcp__claude-in-chrome__*`, `mcp__chrome-devtools__*`,
+**Detection**: `mcp__trusty-browser__*`, `mcp__claude-in-chrome__*`, `mcp__chrome-devtools__*`,
 `mcp__playwright__*`; `gh issue list/view/create/close`; `gh pr
 view/list/diff/review`.
 
-**Action**: delegate to **Web QA** (browser) or **Version Control** (PRs/git
+**Action**: delegate to **Web QA** (browser, on trusty-browser) or **Version Control** (PRs/git
 hosting operations). Ticket-shaped work (issue creation, ticket state
 transitions) delegates to the **ticketing** agent — see `tm-ticketing`.
 
@@ -208,16 +208,13 @@ ps`, `make`, `pytest`, `npm test` directly via Bash.
 
 **Action**: delegate to **Local Ops** (process/port checks, `make`/`mise`
 targets) or **QA** (test suites, endpoint checks). Service liveness for
-trusty-* daemons specifically routes through MCP health tools, never Bash —
-see `tm-tool-usage-guide` (`mcp__trusty-search__search_health`,
-`mcp__trusty-memory__memory_recall`). `search_health` returns `Ok` whether or
-not the daemon is up — branch on the response's `healthy` field, not on the
-call succeeding.
+trusty-* daemons specifically routes through its native health verb, never `curl`/`lsof`/`ps` —
+see `tm-tool-usage-guide` (`trusty-search health`).
 
 **Violation:** `PM: Bash(nc -U "$TRUSTY_SEARCH_SOCKET")`
 
-**Correct:** `PM: mcp__trusty-search__search_health()` — or delegate to
-local-ops for anything not covered by a trusty-* MCP health tool.
+**Correct:** `PM: trusty-search health` — or delegate to
+local-ops for anything not covered by a trusty-* health verb.
 
 ## CB#8: QA Verification Gate
 

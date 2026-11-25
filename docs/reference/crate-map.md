@@ -22,9 +22,9 @@ versions, publishability, and targets.
 | Package | Code | Primary targets | Documentation |
 |---|---|---|---|
 | `tc-services` | [`crates/tc-services/`](../../crates/tc-services/) | library | [crate README](../../crates/tc-services/README.md), [extended docs](../tc-services/README.md) |
-| `trusty-agents` | [`crates/trusty-agents/`](../../crates/trusty-agents/) | library, `tagent` | [crate README](../../crates/trusty-agents/README.md), [extended docs](../trusty-agents/README.md) |
 | `trusty-agents-common` | [`crates/trusty-agents-common/`](../../crates/trusty-agents-common/) | library | [crate README](../../crates/trusty-agents-common/README.md), [extended docs](../trusty-agents-common/README.md) |
 | `trusty-analyze` | [`crates/trusty-analyze/`](../../crates/trusty-analyze/) | library, `trusty-analyze` | [crate README](../../crates/trusty-analyze/README.md), [extended docs](../trusty-analyze/README.md) |
+| `trusty-assistants` | [`crates/trusty-assistants/`](../../crates/trusty-assistants/) | library, `ta`, `tagent` (one-release alias); formerly `trusty-agents` (#11632) | [crate README](../../crates/trusty-assistants/README.md), [extended docs](../trusty-assistants/README.md) |
 | `trusty-architect` | [`crates/trusty-architect/`](../../crates/trusty-architect/) | library — leaf crate for the trusty-mpm Architect: tmux access behind a trait and the guarded send path; never depends on `trusty-mpm` (#9171) | [crate README](../../crates/trusty-architect/README.md) |
 | `trusty-channels` | [`crates/trusty-channels/`](../../crates/trusty-channels/) | library, `slack-mcp`, `telegram-mcp` | [crate README](../../crates/trusty-channels/README.md) |
 | `trusty-code` | [`crates/trusty-code/`](../../crates/trusty-code/) | library, `tcode` | [crate README](../../crates/trusty-code/README.md), [extended docs](../trusty-code/README.md) |
@@ -34,10 +34,11 @@ versions, publishability, and targets.
 | `trusty-connectors` | [`crates/trusty-connectors/`](../../crates/trusty-connectors/) | library, `okf-adapter-gmail`, `okf-adapter-gdocs`; `publish = false`; the trusty-okf import adapter programs, which hold the Google credential (#10746) | [`CHANGELOG.md`](../../crates/trusty-connectors/CHANGELOG.md) |
 | `trusty-console` | [`crates/trusty-console/`](../../crates/trusty-console/) | library, `trusty-console` | [crate README](../../crates/trusty-console/README.md), [extended docs](../trusty-console/README.md) |
 | `trusty-crate-contracts` | [`crates/trusty-crate-contracts/`](../../crates/trusty-crate-contracts/) | test-only, never published — the home for tests spanning two production crates (#8341) | [crate README](../../crates/trusty-crate-contracts/README.md) |
-| `trusty-cto-db` | [`crates/trusty-cto-db/`](../../crates/trusty-cto-db/) | library | [crate README](../../crates/trusty-cto-db/README.md), [extended docs](../trusty-cto-db/README.md) |
+| `trusty-daemon-common` | [`crates/trusty-daemon-common/`](../../crates/trusty-daemon-common/) | library — peer uid check, owner-only files, Developer ID signing, launchd plist and audit-log rotation shared by `trusty-browser` and `trusty-computer` (#11692) | [crate README](../../crates/trusty-daemon-common/README.md) |
+| `trusty-delegation-guard` | [`crates/trusty-delegation-guard/`](../../crates/trusty-delegation-guard/) | library (`types` feature only) — wire types for the SHADOW delegation guard (#10892) | [crate README](../../crates/trusty-delegation-guard/README.md) |
 | `trusty-embedderd` | [`crates/trusty-embedderd/`](../../crates/trusty-embedderd/) | library; bundled binary target is owned by `trusty-search` | [crate README](../../crates/trusty-embedderd/README.md), [extended docs](../trusty-embedderd/README.md) |
 | `trusty-embedderd-py` | [`crates/trusty-embedderd-py/`](../../crates/trusty-embedderd-py/) | library; launcher binary target is owned by `trusty-search` | [crate README](../../crates/trusty-embedderd-py/README.md) |
-| `trusty-events` | [`crates/trusty-events/`](../../crates/trusty-events/) | library, `trusty-events` daemon binary — internal 0.x with no stability promise for its Rust API; no other crate links it; the wire contract lives in `trusty-common::control_bus`; launchd supervision follows in #10042 ([ADR-0065](../adr/0065-trusty-events-process-placement.md)) | [crate README](../../crates/trusty-events/README.md), [ADR-0065](../adr/0065-trusty-events-process-placement.md) |
+| `trusty-events` | [`crates/trusty-events/`](../../crates/trusty-events/) | library, `trusty-events` daemon binary — internal 0.x with no stability promise for its Rust API; no other crate links it; the wire contract lives in `trusty-common::control_bus`; not published to crates.io, so `tctl install` and `tctl upgrade` skip it (#10130); `tctl start trusty-events` writes its LaunchAgent (#10042) ([ADR-0065](../adr/0065-trusty-events-process-placement.md)) | [crate README](../../crates/trusty-events/README.md), [ADR-0065](../adr/0065-trusty-events-process-placement.md) |
 | `trusty-gworkspace` | [`crates/trusty-gworkspace/`](../../crates/trusty-gworkspace/) | library, `trusty-gworkspace-mcp` | [crate README](../../crates/trusty-gworkspace/README.md), [extended docs](../trusty-gworkspace/README.md) |
 | `trusty-installer` | [`crates/trusty-installer/`](../../crates/trusty-installer/) | library, `trusty-installer`, `tctl` | [crate README](../../crates/trusty-installer/README.md) |
 | `trusty-mcp` | [`crates/trusty-mcp/`](../../crates/trusty-mcp/) | library | [crate README](../../crates/trusty-mcp/README.md) |
@@ -50,15 +51,6 @@ versions, publishability, and targets.
 | `trusty-search` | [`crates/trusty-search/`](../../crates/trusty-search/) | library, `trusty-search`, bundled `trusty-embedderd` and `trusty-embedderd-py` | [crate README](../../crates/trusty-search/README.md), [extended docs](../trusty-search/README.md) |
 | `trusty-secrets` | [`crates/trusty-secrets/`](../../crates/trusty-secrets/) | library, `trusty-secrets` (on-demand socket server) | [crate README](../../crates/trusty-secrets/README.md), [extended docs](../trusty-secrets/README.md) |
 | `trusty-sld-lint` | [`crates/trusty-sld-lint/`](../../crates/trusty-sld-lint/) | library, `sld-lint` | [crate README](../../crates/trusty-sld-lint/README.md) |
-
-## Nested workspace packages
-
-The root manifest explicitly includes these packages because `crates/*` does
-not reach nested Tauri manifests.
-
-| Package | Code | Primary target | Documentation |
-|---|---|---|---|
-| `trusty-agents-ui` | [`crates/trusty-agents/ui/src-tauri/`](../../crates/trusty-agents/ui/src-tauri/) | `trusty-agents-ui` | [UI README](../../crates/trusty-agents/ui/README.md) |
 
 ## External tools
 

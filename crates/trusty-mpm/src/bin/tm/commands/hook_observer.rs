@@ -12,8 +12,12 @@
 //! [`OpportunityRow`] to the bounded opportunity ledger under
 //! `usage/opportunity/` — never to `savings.jsonl`, which the statusline reads
 //! whole on every refresh, so the `💸` figure and its cost are unchanged
-//! (#7867, #10981 review).
-//! Test: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`
+//! (#7867, #10981 review). Each row carries a `skip_reason`: for Bash the
+//! `PreToolUse` decision replayed on the logged call (`hook_bash_decision`),
+//! otherwise `non_bash` or `no_gain`.
+//! Test: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`,
+//! `a_bash_opportunity_row_records_why_no_rewrite_applied`,
+//! `a_non_bash_row_is_non_bash_or_no_gain`
 //! (end to end), `a_bash_result_is_measured_under_its_derived_tool_name`,
 //! `a_huge_result_is_scanned_only_up_to_the_cap`,
 //! `a_subagent_stop_without_a_message_writes_no_row`,
@@ -25,10 +29,15 @@ use std::path::Path;
 use serde_json::Value;
 use trusty_agents_common::compress::compress_tool_output;
 use trusty_mpm::core::savings_opportunity::{
-    OpportunityAppend, OpportunityRow, append_opportunity, opportunity_dir_in, tool_type_of,
+    OpportunityAppend, OpportunityRow, SkipReason, append_opportunity, opportunity_dir_in,
+    tool_type_of,
 };
 
-use super::hook_rewrite::effective_tool_name;
+use trusty_mpm::core::savings_compress_outcome::take_outcome;
+
+use super::hook_bash_decision::{bash_skip_reason, compress_tool_arg};
+use super::hook_chain_shape::{command_shape, dominant_step};
+use super::hook_rewrite::{effective_tool_name, hook_cwd};
 
 /// The most result bytes one hook invocation hands the compressor's dry run.
 ///
@@ -64,9 +73,16 @@ pub(crate) fn observe(event: &str, payload: Option<&Value>, session_id: &str) {
 /// blocked `SubagentStop` delivery (#6556) while recovering nothing.
 /// Test: `an_unwritable_ledger_does_not_fail_the_hook`.
 pub(crate) fn observe_in(root: &Path, event: &str, payload: Option<&Value>, session_id: &str) {
-    let Some(row) = payload.and_then(|p| opportunity_row(event, p, session_id)) else {
+    let Some(mut row) = payload.and_then(|p| opportunity_row(event, p, session_id)) else {
         return;
     };
+    // #11560: the replayed decision says the call was rewritten; the filter's
+    // own outcome says whether it saved anything.
+    if row.skip_reason == SkipReason::Compressed
+        && let Some(p) = payload
+    {
+        row.skip_reason = compressed_outcome(root, p, session_id);
+    }
     // #10981 review: its own bounded ledger, never the statusline's file.
     match append_opportunity(root, &row) {
         Ok(OpportunityAppend::Written | OpportunityAppend::DayFull) => {}
@@ -80,6 +96,25 @@ pub(crate) fn observe_in(root: &Path, event: &str, payload: Option<&Value>, sess
             "trusty-mpm: #10973 opportunity row not written under {}: {e}",
             opportunity_dir_in(root).display()
         ),
+    }
+}
+
+/// `Compressed`, or `CompressedNoGain` when `tm compress` saved nothing (#11560).
+///
+/// Why: the opportunity row is written here, after the call, but the replayed
+/// `PreToolUse` decision only knows the call was rewritten. The filter leaves
+/// its outcome in `savings_compress_outcome`, keyed by session and `--tool`.
+/// What: joins and consumes that outcome; no outcome (no session id in the
+/// filter, an older `tm`, a lost race) keeps `Compressed`.
+/// Test: `a_zero_saving_compress_row_reads_compressed_no_gain`.
+fn compressed_outcome(root: &Path, payload: &Value, session_id: &str) -> SkipReason {
+    let cwd = hook_cwd(Some(payload));
+    let Some(tool) = compress_tool_arg(payload.get("tool_input"), cwd.as_deref()) else {
+        return SkipReason::Compressed;
+    };
+    match take_outcome(root, session_id, &tool) {
+        Some(false) => SkipReason::CompressedNoGain,
+        _ => SkipReason::Compressed,
     }
 }
 
@@ -97,14 +132,25 @@ pub(crate) fn opportunity_row(
     payload: &Value,
     session_id: &str,
 ) -> Option<OpportunityRow> {
-    let (tool_type, dispatch, result) = match event {
+    // #10973: `bash` is `Some(reason)` for a Bash call — the hook's own decision.
+    let mut shape = None;
+    let (tool_type, dispatch, result, bash) = match event {
         "PostToolUse" => {
             let tool = payload.get("tool_name")?.as_str()?;
             let dispatch = match payload["tool_input"]["command"].as_str() {
-                Some(cmd) if tool == "Bash" => effective_tool_name(cmd.trim()),
+                // #11507: a chain is named by its dominant step, never `cd`.
+                Some(cmd) if tool == "Bash" => {
+                    shape = command_shape(cmd.trim());
+                    dominant_step(cmd.trim()).unwrap_or_else(|| effective_tool_name(cmd.trim()))
+                }
                 _ => tool.to_string(),
             };
-            (tool_type_of(tool), dispatch, payload.get("tool_response")?)
+            let bash = (tool == "Bash").then(|| {
+                let cwd = hook_cwd(Some(payload));
+                bash_skip_reason(payload.get("tool_input"), cwd.as_deref())
+            });
+            let result = payload.get("tool_response")?;
+            (tool_type_of(tool), dispatch, result, bash)
         }
         "SubagentStop" => {
             let message = payload.get("last_assistant_message")?;
@@ -112,6 +158,7 @@ pub(crate) fn opportunity_row(
                 tool_type_of("SubagentStop"),
                 "SubagentStop".to_string(),
                 message,
+                None,
             )
         }
         _ => return None,
@@ -123,15 +170,37 @@ pub(crate) fn opportunity_row(
     }
     let scanned = text.len() as u64;
     let compressed = compress_tool_output(&dispatch, &text).len() as u64;
-    Some(OpportunityRow::new(
-        event,
-        session_id,
-        &tool_type,
-        &dispatch,
-        returned,
-        scanned,
-        compressed + (returned - scanned),
-    ))
+    let would_compress = compressed + (returned - scanned);
+    Some(
+        OpportunityRow::new(
+            event,
+            session_id,
+            &tool_type,
+            &dispatch,
+            returned,
+            scanned,
+            would_compress,
+        )
+        .with_skip_reason(skip_reason(bash, would_compress < returned))
+        .with_command_shape(shape),
+    )
+}
+
+/// The row's [`SkipReason`] from the Bash decision, if any, and the measured gain.
+///
+/// Why (#10973): a Bash call had a decision, and that decision is the reason
+/// whatever the gain — a `git diff | head` row is `Chained` even when its dry
+/// run finds nothing. Nothing compresses a
+/// non-Bash result, so there the informative split is by gain.
+/// What: `Some(reason)` → `reason`; `None` → `NonBash` with a gain, else `NoGain`.
+/// Test: `a_non_bash_row_is_non_bash_or_no_gain`,
+/// `a_bash_opportunity_row_records_why_no_rewrite_applied`.
+fn skip_reason(bash: Option<SkipReason>, gains: bool) -> SkipReason {
+    match bash {
+        Some(reason) => reason,
+        None if gains => SkipReason::NonBash,
+        None => SkipReason::NoGain,
+    }
 }
 
 /// Total bytes of every string leaf in `value`; the first `cap` of them into `out`.
@@ -189,6 +258,19 @@ mod tests {
         assert_eq!(row.session_id, "s1");
         assert_eq!(row.bytes_returned, out.len() as u64);
         assert!(row.would_compress_bytes < row.bytes_returned, "{row:?}");
+    }
+
+    /// #11507: on the pre-fix commit this row was named `cd` with no shape.
+    #[test]
+    fn a_chained_bash_row_names_the_dominant_step_and_its_shape() {
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /private/dir && cargo build && cargo test -p x"},
+            "tool_response": {"stdout": cargo_output(), "stderr": ""},
+        });
+        let row = opportunity_row("PostToolUse", &payload, "s1").expect("a row");
+        assert_eq!(row.tool_name, "cargo test");
+        assert_eq!(row.command_shape.as_deref(), Some("cd && cargo && cargo"));
     }
 
     #[test]

@@ -11,6 +11,11 @@
 
 pub mod agent_deny;
 mod backend;
+// #10524: the Keychain backend's calls over the one vault blob item.
+mod blob_keychain;
+// #10524: `secrets.migrate` — per-item Keychain items into the blob and back.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) mod blob_migrate;
 // #7520: the server's per-session cache of CLI-backed values; only the
 // server builds one, so without `server` it is never constructed.
 #[cfg_attr(
@@ -18,6 +23,17 @@ mod backend;
     allow(dead_code, reason = "only the server's `State` builds a cache")
 )]
 mod cache;
+// #10524: the unlock grant's values, in locked pages; server only.
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "only the server's `State` opens a grant")
+)]
+pub(crate) mod grant_cache;
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+mod locked;
+// #10524: the Keychain backend answered from the grant's held blob.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+mod held_keychain;
 // #7524 P2-M1: the per-request deadline the server sets and the runner reads.
 #[cfg(any(feature = "server", feature = "cli-backends"))]
 pub(crate) mod deadline;
@@ -44,8 +60,14 @@ mod index;
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod keeper;
 mod keychain;
+// #10998: a named copy's read of any Keychain item; only the server copies.
+#[cfg(feature = "server")]
+pub(crate) mod keychain_item;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
+// #10524: the in-memory item store every blob test uses.
+#[cfg(test)]
+pub(crate) mod mem_items;
 // #7519: the 1Password backend; spawns `op` through `cli`.
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod onepassword;
@@ -57,10 +79,21 @@ pub(crate) mod program;
 pub mod resolve;
 mod scope;
 mod secret_store;
-// #7524 P2-L7: the time limit on every Keychain call.
-mod time_limit;
+// #7524 P2-L7: the time limit on every Keychain call. #11215: crate-visible
+// so the server's tests wrap a fake hung backend in it.
+pub(crate) mod time_limit;
+// #11215: the last time-out's wait, read by the server's reply and audit row.
+pub(crate) mod timeout_note;
+// #10524: every trusty Keychain item in one Keychain item.
+pub(crate) mod vault_blob;
 
-pub use agent_deny::{AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit};
+pub use agent_deny::{
+    AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit, is_push_only,
+};
+#[cfg(test)]
+pub(crate) use blob_keychain::BlobKeychain;
+#[cfg(feature = "server")]
+pub(crate) use held_keychain::HeldKeychain;
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;
@@ -91,6 +124,8 @@ pub use scope::{
     parse_remote_identity,
 };
 pub use secret_store::SecretStore;
+// #11738: named on an audit record when a read fell back from a corrupt blob.
+pub use vault_blob::BlobFallback;
 
 #[cfg(test)]
 #[path = "config_scope_tests.rs"]

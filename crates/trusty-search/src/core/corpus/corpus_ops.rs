@@ -458,6 +458,65 @@ impl CorpusStore {
         Ok(())
     }
 
+    /// Delete one file's chunk rows and its file-hash row in one write
+    /// transaction (#11096).
+    ///
+    /// Why: a delete in two transactions could leave the chunks gone and the
+    /// hash kept. The next reindex then skips the unchanged file as unchanged,
+    /// and it never comes back.
+    /// What: removes each id from `CHUNKS_TABLE` and `file` from
+    /// `FILE_HASHES_TABLE`, then commits once. Unknown ids or an unknown path
+    /// are a no-op. Any error before the commit aborts the transaction, so
+    /// neither table changes.
+    /// Test: `delete_file_rows_removes_chunks_and_hash_together_11096`,
+    /// `delete_file_rows_fault_before_commit_changes_neither_table_11096`.
+    pub fn delete_file_rows(&self, ids: &[String], file: &str) -> Result<()> {
+        self.delete_file_rows_txn(ids, file, false)
+    }
+
+    /// [`Self::delete_file_rows`] that fails after both removes and before
+    /// the commit: the #11096 fault seam.
+    #[cfg(test)]
+    pub(crate) fn delete_file_rows_failing_before_commit(
+        &self,
+        ids: &[String],
+        file: &str,
+    ) -> Result<()> {
+        self.delete_file_rows_txn(ids, file, true)
+    }
+
+    fn delete_file_rows_txn(
+        &self,
+        ids: &[String],
+        file: &str,
+        fail_before_commit: bool,
+    ) -> Result<()> {
+        let txn = self
+            .db
+            .begin_write()
+            .context("begin file rows delete txn")?;
+        {
+            let mut chunks = txn.open_table(CHUNKS_TABLE)?;
+            for id in ids {
+                chunks
+                    .remove(id.as_str())
+                    .with_context(|| format!("delete chunk {id}"))?;
+            }
+            let mut hashes = txn
+                .open_table(FILE_HASHES_TABLE)
+                .context("open file_hashes table for delete")?;
+            hashes
+                .remove(file)
+                .with_context(|| format!("delete file hash entry for {file}"))?;
+        }
+        if fail_before_commit {
+            txn.abort().context("abort file rows delete txn")?;
+            anyhow::bail!("injected file-hash delete failure before commit (#11096 test seam)");
+        }
+        txn.commit().context("commit file rows delete txn")?;
+        Ok(())
+    }
+
     /// Delete a per-file entity list. Idempotent.
     ///
     /// Why: `remove_file` drops the file's entities; the durable store must

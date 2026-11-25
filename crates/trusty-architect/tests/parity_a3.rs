@@ -7,6 +7,8 @@
 //! for byte. Regenerate with the command in `tests/fixtures/a3/README.md`;
 //! never edit the goldens by hand. Every file a case writes lives in a tempdir.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -15,6 +17,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
+use trusty_architect::SelfCtxError;
 use trusty_architect::classify::{Alert, alert};
 use trusty_architect::poller::{
     BandConfig, Config, DiskUsage, HostProbe, TranscriptCtx, append_alerts, band_alerts,
@@ -36,18 +39,7 @@ fn corpus() -> Result<Value, Box<dyn std::error::Error>> {
 
 /// Compares `rows` with the golden file line by line, naming the first diff.
 fn assert_golden(name: &str, rows: &[String]) -> TestResult {
-    let golden = fs::read_to_string(fixture_dir().join(name))?;
-    let got: String = rows.iter().map(|r| format!("{r}\n")).collect();
-    for (i, (g, r)) in golden.lines().zip(got.lines()).enumerate() {
-        assert_eq!(
-            r,
-            g,
-            "{name} line {}: Rust (left) differs from Python (right)",
-            i + 1
-        );
-    }
-    assert_eq!(got, golden, "{name}: row count or trailing bytes differ");
-    Ok(())
+    common::assert_golden_in(&fixture_dir(), name, rows)
 }
 
 fn arr(v: &Value) -> &[Value] {
@@ -226,6 +218,9 @@ impl HostProbe for FakeProbe<'_> {
     fn mem_free_pct(&self) -> Option<f64> {
         self.0["mem"].as_f64()
     }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(self.0["activity"].as_u64().unwrap_or(0))
+    }
 }
 
 #[derive(Serialize)]
@@ -369,8 +364,16 @@ fn materialize(dir: &Path, files: &[Value]) -> io::Result<()> {
 #[derive(Serialize)]
 struct SelfCtxRow<'a> {
     case: &'a str,
-    alerts: Vec<Alert>,
+    alerts: SelfCtxResult,
     logged: bool,
+}
+
+/// The alerts, or the prototype's raise (df-T7i P1b ruling row).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum SelfCtxResult {
+    Alerts(Vec<Alert>),
+    Raise { raises: &'static str },
 }
 
 #[test]
@@ -399,9 +402,17 @@ fn self_ctx_alerts_match_python_goldens() -> TestResult {
         // the config, switches the sensor off and lists the value in
         // `problems` for the caller to log.
         let cfg = config(dir.path(), &vars)?;
+        // df-T7i P1b ruling: a window of 0 is an error the cycle logs; the
+        // prototype raises ZeroDivisionError (the golden row records the raise).
         let (alerts, logged) = match self_ctx_alerts(&cfg, now) {
-            Ok(a) => (a, !cfg.problems.is_empty()),
-            Err(_) => (Vec::new(), true),
+            Ok(a) => (SelfCtxResult::Alerts(a), !cfg.problems.is_empty()),
+            Err(SelfCtxError::ZeroWindow(_)) => (
+                SelfCtxResult::Raise {
+                    raises: "ZeroDivisionError",
+                },
+                false,
+            ),
+            Err(_) => (SelfCtxResult::Alerts(Vec::new()), true),
         };
         rows.push(to_python_json(
             &SelfCtxRow {

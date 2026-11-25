@@ -94,7 +94,7 @@ pub use metrics::{
 pub use push_client::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 pub use subscribe::{
     EVENTS_SERVICE, HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, METHOD_EVENTS_SUBSCRIBE, SubscribeFilter,
-    SubscribeItem, SubscribeParams, events_socket_path,
+    SubscribeItem, SubscribeParams, events_dial_socket_path, events_socket_path,
 };
 #[cfg(all(unix, feature = "uds"))]
 pub use subscribe_frame::{SubscribeFrameError, SubscribeRequest};

@@ -629,7 +629,8 @@ fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
 /// The closing sentence every deny carries.
 const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `~/.trusty-mpm/architect-launch/`, `~/.trusty-tools/trusty-mpm/config.yaml` and the managed \
-     `claude-config/settings.json` and `settings.local.json` (#8454), and, while any exist, \
+     `claude-config/settings.json` and `settings.local.json` (#8454), `~/.ssh/authorized_keys` \
+     and `~/.trusty-tools/trusty-common/config.yaml` (#11463), and, while any exist, \
      `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session. \
@@ -733,3 +734,7 @@ mod egress_tests;
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_heredoc_tests.rs"]
 mod heredoc_tests;
+
+#[cfg(test)]
+#[path = "pm_guard_trust_anchor_remote_gate_tests.rs"]
+mod remote_gate_tests;

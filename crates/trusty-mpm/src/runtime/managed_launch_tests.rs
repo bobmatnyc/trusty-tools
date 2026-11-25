@@ -720,7 +720,12 @@ impl ManagedTmuxDriver for Recorder {
     fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
         Ok(())
     }
-    fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        // #11270: an unbound Architect delivery kills its session.
+        self.events
+            .lock()
+            .expect("recorder mutex")
+            .push(format!("kill:{name}"));
         Ok(())
     }
     fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
@@ -876,14 +881,66 @@ fn the_daemon_delivery_binds_an_architect_spec_8878() {
         profile: crate::core::session_profile::SessionProfile::Architect,
         ..w.launch()
     };
+    // #11270: under a scratch root; the Architect arm is now an error.
+    let root = dir.path().join(".trusty-mpm");
     for (launch, looks) in [(architect, true), (w.launch(), false)] {
         let spec = spawn_spec(&launch).expect("spec");
         let tmux = Recorder::new(0);
-        deliver_in(&tmux, "tm-sess", Some("%9"), &spec, dir.path()).expect("deliver");
+        let delivered = deliver_at(&tmux, "tm-sess", Some("%9"), &spec, dir.path(), Some(&root));
+        assert_eq!(delivered.is_err(), looks, "{:?}", launch.profile);
         let events = tmux.events();
         let asked = events.iter().any(|e| e == "pid:%9");
         assert_eq!(asked, looks, "{:?}: {events:?}", launch.profile);
     }
+}
+
+/// #11270 (Fail-Open Check): a daemon Architect delivery issues the shim's
+/// grant for the spec it typed; when its `claude` cannot be bound, the
+/// session is killed and the delivery is an error naming `tm fleet relaunch`.
+/// A PM delivery is granted nothing and stays `Ok`.
+#[test]
+fn a_daemon_architect_delivery_is_granted_and_an_unbound_one_is_killed_11270() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join(".trusty-mpm");
+    let w = Worst::new();
+    let architect = ManagedLaunch {
+        profile: crate::core::session_profile::SessionProfile::Architect,
+        ..w.launch()
+    };
+    let spec = spawn_spec(&architect).expect("spec");
+    let tmux = Recorder::new(0);
+    let err = deliver_at(&tmux, "tm-sess", Some("%9"), &spec, dir.path(), Some(&root))
+        .expect_err("an unbound Architect delivery is an error");
+    assert!(err.to_string().contains("tm fleet relaunch"), "{err}");
+    let events = tmux.events();
+    assert!(events.iter().any(|e| e == "kill:tm-sess"), "{events:?}");
+    let typed = std::fs::read_dir(dir.path())
+        .expect("spec dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("the typed spec");
+    let typed = LaunchSpec::consume(&typed).expect("decodes");
+    assert_eq!(
+        crate::runtime::architect_grant::redeem(&root, &typed),
+        Ok(()),
+        "the typed spec was granted"
+    );
+    let err = deliver_at(
+        &Recorder::new(0),
+        "tm-sess",
+        Some("%9"),
+        &spec,
+        dir.path(),
+        None,
+    )
+    .expect_err("no root, no grant");
+    assert!(err.to_string().contains("granted"), "{err}");
+
+    let pm = spawn_spec(&w.launch()).expect("spec");
+    let tmux = Recorder::new(0);
+    deliver_at(&tmux, "tm-pm", Some("%9"), &pm, dir.path(), Some(&root)).expect("a PM delivery");
+    assert!(!tmux.events().iter().any(|e| e.starts_with("kill:")));
 }
 
 /// #2456: the reset must land on the RECORD's pane, not on whichever pane tmux

@@ -224,6 +224,25 @@ impl DaemonClient {
         let dir = std::path::Path::new(workdir);
         let host = crate::session_manager::launch_server::cli_launch_server(dir);
         let server = host.as_ref().map(|(server, _)| server.as_str());
+        let has_session = |name: &str| {
+            let probe = crate::core::tmux::TmuxCommand::HasSession {
+                name: name.to_owned(),
+            };
+            crate::core::tmux::run_tmux_on(
+                &crate::core::tmux::resolve_tmux_binary_or_bare(),
+                server,
+                &probe,
+            )
+            .is_ok_and(|o| o.status.success())
+        };
+        // #11270: an Architect into a running session is refused before the
+        // registration, and is created exclusively below.
+        let architect = crate::runtime::architect_bind::spec_is_architect(spec);
+        let requested = crate::core::names::name_from_dir(dir);
+        if has_session(&requested) {
+            crate::runtime::architect_bind::refuse_reused(architect, &requested)
+                .map_err(anyhow::Error::msg)?;
+        }
         #[derive(serde::Deserialize)]
         struct Body {
             #[serde(default)]
@@ -235,7 +254,7 @@ impl DaemonClient {
             .json(&serde_json::json!({
                 "project": workdir,
                 "project_path": workdir,
-                "name": crate::core::names::name_from_dir(dir),
+                "name": requested,
                 "tmux_socket": host.as_ref().map(|(_, socket)| socket),
             }))
             .send()
@@ -244,19 +263,20 @@ impl DaemonClient {
             .json()
             .await?;
         let name = body.name;
-        let probe = crate::core::tmux::TmuxCommand::HasSession { name: name.clone() };
-        let already_running = crate::core::tmux::run_tmux_on(
-            &crate::core::tmux::resolve_tmux_binary_or_bare(),
-            server,
-            &probe,
-        )
-        .is_ok_and(|o| o.status.success());
+        let already_running = has_session(&name);
         // A registration for a session that already ran is kept, as in `tm connect`.
         let registered =
             super::launch_claim::Registered::new(self, body.id.filter(|_| !already_running));
         // #2398: the crate's single session-creation choke point.
-        match crate::core::tmux::create_managed_session_on(None, server, &name, Some(workdir), true)
-        {
+        // #11270: an Architect never attaches to a session it did not make.
+        let idempotent = !architect || already_running;
+        match crate::core::tmux::create_managed_session_on(
+            None,
+            server,
+            &name,
+            Some(workdir),
+            idempotent,
+        ) {
             // #3386 review: operator-visible through the tracing channel.
             Ok(outcome) if outcome.output.status.success() => {
                 crate::core::tmux::warn_if_options_unverified(&outcome, &name);
@@ -287,10 +307,13 @@ impl DaemonClient {
     /// Write `spec` under this client's home and start `claude` in `session`
     /// on `server` (#8308, #10101).
     ///
-    /// What: [`crate::runtime::cli_launch::send_spec_launch`] into the spec
+    /// What: [`crate::runtime::cli_launch::send_spec_launch_at`] into the spec
     /// directory under the pinned home (#8545) or the process home; the error
-    /// names the session and the step that failed.
-    fn send_client_spec(
+    /// names the session and the step that failed. #11270: an Architect it
+    /// could not bind is killed and is an error
+    /// ([`crate::runtime::architect_bind::require_bound`]).
+    /// Test: `a_tui_architect_left_unbound_is_killed_and_errors_11270`.
+    pub(crate) fn send_client_spec(
         &self,
         server: Option<&str>,
         session: &str,
@@ -300,18 +323,40 @@ impl DaemonClient {
         let spec_dir = crate::runtime::cli_launch::spec_dir(home.as_deref()).ok_or_else(|| {
             anyhow::anyhow!("tmux session {session} created but no home holds its launch spec")
         })?;
-        let binding =
-            crate::runtime::cli_launch::send_spec_launch(server, session, spec, &spec_dir)
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "tmux session {session} created but failed to start claude: {e}"
-                    )
-                })?;
-        // #8878: an Architect `claude` this launch could not bind is reported.
-        if let Some(warning) = binding.warning(session) {
-            eprintln!("{warning}");
-        }
-        Ok(())
+        // #11270: the grant and the record live under the same home.
+        let root = home
+            .filter(|home| home.is_absolute())
+            .map(|home| home.join(".trusty-mpm"));
+        let binding = crate::runtime::cli_launch::send_spec_launch_at(
+            root.as_deref(),
+            server,
+            session,
+            spec,
+            &spec_dir,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("tmux session {session} created but failed to start claude: {e}")
+        })?;
+        let stop = || {
+            let kill = crate::core::tmux::TmuxCommand::KillSession {
+                name: session.to_owned(),
+            };
+            crate::core::tmux::run_tmux_on(
+                &crate::core::tmux::resolve_tmux_binary_or_bare(),
+                server,
+                &kill,
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|o| {
+                o.status
+                    .success()
+                    .then_some(())
+                    .ok_or_else(|| String::from_utf8_lossy(&o.stderr).trim().to_owned())
+            })
+        };
+        crate::runtime::architect_bind::require_bound(binding, session, stop)
+            .map(drop)
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -378,7 +423,8 @@ fn client_prompt_spec_as(
         .extend(crate::core::pm_tool_trim::trim_args(profile));
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
     // #8992: the same profile decides whether the skill and tool parts apply.
-    let settings = crate::core::launch_policy::provision_settings_default(project, None, profile);
+    // #11821: a broken install.toml refuses the launch (df-D1w).
+    let settings = crate::core::launch_policy::provision_settings_default(project, None, profile)?;
     // #10127: the owner file and an Architect's deny as ONE `--settings`.
     crate::core::architect_lockdown::Lockdown::PRODUCTION.apply_to_spec(
         profile,
@@ -533,3 +579,8 @@ mod renderer_tests {
         }
     }
 }
+
+// #11270: a fresh Architect the TUI step could not bind is killed.
+#[cfg(test)]
+#[path = "session_connect_11270_tests.rs"]
+mod architect_bind_tests;

@@ -1,15 +1,14 @@
 //! Which tmux server a fresh PM launch creates its session on (#10101, step 6
 //! of #8928).
 //!
-//! Why: a PM on the default server shares it with the Architect's pane, and
-//! its sandbox grant would reach that pane. Each workspace gets a server of
-//! its own (#8928's owner ruling of 2026-09-30).
+//! Why: a fresh PM launches on the default tmux server. The per-workspace
+//! server of #8928/#10101 is opt-in: the owner ruling of 2026-11-18
+//! supersedes the 2026-09-30 per-workspace default on this host.
 //! What: [`launch_target`] answers the driver for the workspace's server and
-//! the socket path the record stores, or `None` for the default server: when
-//! [`WORKSPACE_TMUX_ENV`] is `0` (the one-release opt-out, ruling Q4), or when
-//! the driver has no socket directory or cannot reach a named server (a test
-//! fake). Existing records are never moved (ruling Q3): only a create calls
-//! this.
+//! the socket path the record stores only when [`WORKSPACE_TMUX_ENV`] is `1`
+//! and the driver has a socket directory and reaches a named server; else
+//! `None`, the default server. Only a create calls this; a resume
+//! moves a stopped record in `resume_server` (#10101).
 //! Test: `launch_server_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -17,44 +16,47 @@ use std::sync::Arc;
 
 use super::manager::ManagedTmuxDriver;
 
-/// `TM_WORKSPACE_TMUX=0` launches fresh PMs on the default server, as before
-/// #10101. Any other value, or none, uses the workspace's server.
+/// `TM_WORKSPACE_TMUX=1` launches fresh PMs on the workspace's own server.
+/// Any other value, or none, uses the default server (#10101, owner ruling
+/// 2026-11-18).
 pub const WORKSPACE_TMUX_ENV: &str = "TM_WORKSPACE_TMUX";
 
-/// Whether `value` (the opt-out variable's value) keeps the default server.
-/// Test: `the_opt_out_keeps_the_default_server`.
-fn opted_out(value: Option<&str>) -> bool {
-    value.is_some_and(|v| v.trim() == "0")
+/// Whether `value` (the opt-in variable's value) asks for the workspace server.
+/// Test: `with_no_env_a_launch_stays_on_the_default_server`.
+// #10101: opt-in, not opt-out — owner ruling 2026-11-18.
+pub(crate) fn opted_in(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim() == "1")
 }
 
 /// The driver on `workspace`'s server and that server's socket path, or `None`
 /// to launch on the default server.
 ///
-/// What: `None` when [`WORKSPACE_TMUX_ENV`] is `0`, `tmux` has no socket
+/// What: `None` unless [`WORKSPACE_TMUX_ENV`] is `1`, or when `tmux` has no socket
 /// directory, or `tmux` cannot reach a named server. Otherwise the server is
 /// [`crate::core::tmux_server::workspace_server_name`] for the project root
 /// that owns `workspace` ([`server_workspace`]) and the
 /// socket is that name in `tmux`'s socket directory, the path the routing
 /// accepts (`tmux_route::route`).
-/// Test: `a_fresh_launch_creates_its_session_on_the_workspace_server`,
-/// `the_opt_out_keeps_the_default_server`,
+/// Test: `with_no_env_a_launch_stays_on_the_default_server`,
+/// `a_fresh_launch_creates_its_session_on_the_workspace_server`,
+/// `only_the_opt_in_reaches_the_workspace_server`,
 /// `two_worktrees_of_one_project_share_one_server`.
 pub(crate) fn launch_target(
     tmux: &dyn ManagedTmuxDriver,
     workspace: &Path,
 ) -> Option<(Arc<dyn ManagedTmuxDriver>, PathBuf)> {
-    let opt_out = std::env::var(WORKSPACE_TMUX_ENV).ok();
-    launch_target_with(tmux, workspace, opt_out.as_deref())
+    let opt_in = std::env::var(WORKSPACE_TMUX_ENV).ok();
+    launch_target_with(tmux, workspace, opt_in.as_deref())
 }
 
-/// [`launch_target`] with the opt-out variable's value passed in, so a test
+/// [`launch_target`] with the opt-in variable's value passed in, so a test
 /// never sets process-global environment.
 fn launch_target_with(
     tmux: &dyn ManagedTmuxDriver,
     workspace: &Path,
-    opt_out: Option<&str>,
+    opt_in: Option<&str>,
 ) -> Option<(Arc<dyn ManagedTmuxDriver>, PathBuf)> {
-    if opted_out(opt_out) {
+    if !opted_in(opt_in) {
         return None;
     }
     let dir = tmux.socket_dir()?;
@@ -76,22 +78,22 @@ fn launch_target_with(
 /// process environment and tmux's socket directory for this process
 /// ([`crate::core::tmux_server::ambient_socket_dir`]).
 /// Test: `a_cli_launch_names_the_daemons_workspace_server`,
-/// `the_cli_opt_out_keeps_the_default_server`.
+/// `the_cli_needs_the_opt_in_for_the_workspace_server`.
 pub fn cli_launch_server(workspace: &Path) -> Option<(String, PathBuf)> {
-    let opt_out = std::env::var(WORKSPACE_TMUX_ENV).ok();
+    let opt_in = std::env::var(WORKSPACE_TMUX_ENV).ok();
     let dir = crate::core::tmux_server::ambient_socket_dir();
-    cli_launch_server_with(workspace, opt_out.as_deref(), &dir)
+    cli_launch_server_with(workspace, opt_in.as_deref(), &dir)
 }
 
-/// [`cli_launch_server`] with the opt-out value and socket directory passed
-/// in: `None` when opted out, else [`server_name_for`] `workspace` and its
+/// [`cli_launch_server`] with the opt-in value and socket directory passed
+/// in: `None` unless opted in, else [`server_name_for`] `workspace` and its
 /// socket in `socket_dir`.
 fn cli_launch_server_with(
     workspace: &Path,
-    opt_out: Option<&str>,
+    opt_in: Option<&str>,
     socket_dir: &Path,
 ) -> Option<(String, PathBuf)> {
-    if opted_out(opt_out) {
+    if !opted_in(opt_in) {
         return None;
     }
     let name = server_name_for(workspace);

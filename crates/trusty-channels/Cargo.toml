@@ -1,6 +1,6 @@
 [package]
 name = "trusty-channels"
-version = "0.2.0"
+version = "0.3.1"
 # ADR-0029 lists this crate as an explicit opt-down to 2021.
 edition = "2021"
 rust-version.workspace = true
@@ -61,6 +61,10 @@ required-features = ["unrouted-slack-mcp"]
 name = "canvas_push_http"
 required-features = ["unrouted-slack-mcp"]
 
+[[test]]
+name = "canvas_access_http"
+required-features = ["unrouted-slack-mcp"]
+
 [dependencies]
 # #8454 S2b: crate-config locates the host config.yaml.
 trusty-common = { workspace = true, features = ["credentials", "crate-config"] }
@@ -101,3 +105,7 @@ aws-lc-rs = "1"
 # gchat-mcp poller test captures the tracing output it logs (#9448 S2b).
 # Already in the graph via trusty-common's tracing init.
 tracing-subscriber = { workspace = true }
+# #11268: `credential-test-sandbox` gives the no-token constructor tests an
+# empty credential environment and temp HOME (#9123); it mutates the process
+# environment, so it stays dev-only.
+trusty-common = { workspace = true, features = ["credential-test-sandbox"] }

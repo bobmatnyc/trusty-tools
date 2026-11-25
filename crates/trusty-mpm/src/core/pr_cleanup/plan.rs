@@ -446,6 +446,15 @@ pub fn agent_branches_at(listing: &str, head_oid: &str) -> Vec<String> {
         .collect()
 }
 
+/// The commit `name` points at in a `%(refname:short) %(objectname)` listing (#11407).
+pub(super) fn branch_tip<'a>(listing: &'a str, name: &str) -> Option<&'a str> {
+    listing.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next()? == name).then_some(())?;
+        parts.next()
+    })
+}
+
 /// The outcome of one cleanup step.
 ///
 /// Why: the owner's ruling is that cleanup is deterministic unless it errors,

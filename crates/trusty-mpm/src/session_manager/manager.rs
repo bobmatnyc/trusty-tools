@@ -257,6 +257,18 @@ pub enum ManagedError {
     ForeignActiveWorkspaceClaim(ManagedSessionId, ManagedSessionId),
 }
 
+/// A broken `install.toml` as an `InvalidData` [`ManagedError::Io`] (#11821).
+///
+/// Why: decommission resolves its removal guard's root with
+/// `try_workspace_root` and must refuse, not guess, when that fails (df-D1t).
+/// The `Io` shape matches `crate_config`'s mapping of the same error.
+/// Test: `decommission_refuses_on_a_broken_install_file` (env_serial).
+impl From<trusty_common::install_paths::InstallPathsError> for ManagedError {
+    fn from(err: trusty_common::install_paths::InstallPathsError) -> Self {
+        Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    }
+}
+
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the
 // trait's default-impl doc comments alone were ~130 lines, which pushed this
 // file over the 500-SLOC production cap once the serial-numbered naming
@@ -374,6 +386,9 @@ pub struct SessionManager {
     /// #9167 AC5: where each delivered inject is recorded. Installed by a
     /// process with a bus producer only; see `inject_record.rs`.
     pub(crate) inject_recorder: std::sync::OnceLock<Arc<dyn super::inject_record::InjectRecorder>>,
+    /// #10989: a test's trusty-search stand-in for the post-start restore.
+    #[cfg(test)]
+    pub(crate) index_restore_socket: std::sync::OnceLock<PathBuf>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -423,6 +438,8 @@ impl SessionManager {
             taint_dir: std::sync::OnceLock::new(),
             removal_recorder: std::sync::OnceLock::new(),
             inject_recorder: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            index_restore_socket: std::sync::OnceLock::new(),
         })
     }
 
@@ -500,7 +517,7 @@ impl SessionManager {
         }
         let pane = self.owned_pane(id, &record)?;
         let claimed = self.claim_decision(id, claim).await?;
-        self.deliver_answer(id, &record.tmux_name, Ok(pane), answer, claimed)
+        self.deliver_answer(id, &record, Ok(pane), answer, claimed)
             .await
     }
 
@@ -1052,6 +1069,9 @@ impl SessionManager {
         }
         // #8942: the Architect is relaunched by `tm fleet init`, never here.
         super::architect::refuse_protected(&record, super::architect::ProtectedVerb::Resume)?;
+        // #10101: a stopped record on a dead workspace server is recreated on
+        // the default server unless `TM_WORKSPACE_TMUX=1` (ruling 2026-11-18).
+        super::resume_server::rehome_to_default(self.tmux.as_ref(), &mut record)?;
 
         // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
         // below (`session_exists_checked`'s `list-sessions` probe), so a cold
@@ -1276,7 +1296,8 @@ impl SessionManager {
     /// `capture_pane_refuses_when_stored_pane_gone`,
     /// `capture_pane_refuses_a_legacy_record_without_pane_id` in
     /// `pane_scoped_tests.rs`;
-    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`.
+    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`,
+    /// `capturing_a_named_server_record_reads_its_own_server_10101`.
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
@@ -1284,9 +1305,46 @@ impl SessionManager {
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
         let pane = self.owned_pane(id, &record)?;
-        self.tmux
+        // #10101: read the pane on the server `owned_pane` proved it on.
+        super::tmux_route::route(self.tmux.as_ref(), &record)?
             .capture_pane(&record.tmux_name, &pane, lines)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Classify the input box of the record's own pane (#8407).
+    ///
+    /// Why: a supervisor reading a managed pane must know whether the box holds
+    /// a human's draft without parsing escape codes itself.
+    /// What: proves the pane with [`Self::owned_pane`], captures its last
+    /// 30 rows with escape codes on the record's own
+    /// server, and runs
+    /// [`classify_input_box`](crate::core::input_box::classify_input_box). Any
+    /// refusal or capture failure is `None` (unknown), logged at debug — never
+    /// a guessed `Empty`.
+    /// Test: `managed_output_classifies_the_input_box_8407`,
+    /// `managed_output_unreadable_pane_is_unknown_8407`.
+    pub async fn input_box(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Option<crate::core::input_box::InputBox> {
+        // The box and its footer sit at the pane's bottom (as `TmuxService`).
+        const INPUT_BOX_PROBE_LINES: usize = 30;
+        let read = async {
+            let record = self.get(id).await?;
+            let pane = self.owned_pane(id, &record)?;
+            super::tmux_route::route(self.tmux.as_ref(), &record)?.capture_pane_escaped(
+                &record.tmux_name,
+                &pane,
+                INPUT_BOX_PROBE_LINES,
+            )
+        };
+        match read.await {
+            Ok(capture) => crate::core::input_box::classify_input_box(&capture),
+            Err(e) => {
+                tracing::debug!("#8407: input box of {id} unreadable: {e}");
+                None
+            }
+        }
     }
 
     /// Capture the recorded harness pane for the LIVE managed session whose tmux

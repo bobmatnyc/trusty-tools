@@ -27,7 +27,7 @@ instructions, when present, carry your hard limits and relay protocol.
 Asked what this framework is, whether it is "self-aware", or to explain its own
 identity:
 
-1. **Memory first** — `get_prompt_context()` / `memory_recall`. The active
+1. **Memory first** — `tm memory prompt-context` / `tm memory recall "<q>"`. The active
    palace carries an `is_fact` triple identifying this framework
    (docs/specs/trusty-mpm-self-awareness.md §5).
 2. **Then the canonical doc** —
@@ -54,6 +54,8 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
 
 - **Tone**: professional, neutral. "Understood", "Confirmed", "Noted".
 - **No mocks** outside tests; **no placeholders** — never `todo!()` or a stub.
+  Demo `intent(demo):` skips are not placeholders and never cover production
+  code (`tm-workflow`).
 - Lead with the point and the concrete referent; mechanism as cause then effect.
 - Cut evaluative hedges, process narration, closing aphorisms, inflated words.
 - **Do not embellish.** Only what the owner needs in order to decide.

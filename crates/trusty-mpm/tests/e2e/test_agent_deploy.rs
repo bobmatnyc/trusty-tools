@@ -35,6 +35,30 @@ fn deploy_writes_composed_file() {
     assert!(!engineer.contains("extends:"));
 }
 
+/// #7684: every deployed subagent starts without CLAUDE.md, and a user-owned
+/// agent file in the target is left byte-identical.
+#[test]
+fn deploy_stamps_omit_claude_md_and_leaves_user_agents_alone() {
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_agent_sources(src.path());
+    let user = "---\nname: mine\ndescription: user agent\n---\n\nMine.\n";
+    std::fs::write(tgt.path().join("mine.md"), user).unwrap();
+
+    deploy_agents(src.path(), tgt.path(), &std::env::temp_dir()).expect("deploy succeeds");
+
+    for name in ["engineer", "base-agent", "base-engineer"] {
+        let text = std::fs::read_to_string(tgt.path().join(format!("{name}.md"))).unwrap();
+        let fm = text.split("\n---\n").next().unwrap();
+        assert!(
+            fm.lines().any(|l| l == "omitClaudeMd: true"),
+            "{name}.md frontmatter lacks omitClaudeMd:\n{text}"
+        );
+    }
+    let mine = std::fs::read_to_string(tgt.path().join("mine.md")).unwrap();
+    assert_eq!(mine, user, "a user-owned agent is never rewritten");
+}
+
 /// After a deploy the manifest exists and records the deployed agent.
 #[test]
 fn deploy_creates_manifest() {

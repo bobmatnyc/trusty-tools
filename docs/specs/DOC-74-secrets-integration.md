@@ -290,9 +290,11 @@ secrets:
 ```
 
 A machine `project_vaults` entry for the checkout's `<owner>/<repo>` wins over
-the project file's `secrets.vault`. A checkout with no `origin` remote has no
-owner to check an override against, so its scope is undetermined whatever
-either file says.
+the project file's `secrets.vault`. A checkout with no `origin` remote takes
+its `<owner>/<repo>` from `git config --local trusty.secrets.repo` (#11346);
+only `.git/config` is read, the same file as the remote. With neither there
+is no owner to check an override against, so its scope is undetermined
+whatever either file says, and the error names the key.
 
 ### 6.2 Backend-specific settings
 
@@ -726,6 +728,14 @@ tm secrets copy --from <backend> --to <backend> [KEY...]
                                                # for the ACTIVE project; reads each value in-process and writes it to the destination
                                                # backend without ever printing it — the owner's "copy vars between stores" requirement
                                                # a key not copied (absent from the source, refused by the destination) is named; exits non-zero
+tm secrets copy --from keychain --from-service <S> --from-account <A> --to <backend> KEY
+tm secrets copy --from <backend> --from-vault <VAULT> --from-key <K> --to <backend> KEY
+                                               # #10998: copies ONE value from a named source into the project scope as KEY:
+                                               # any Keychain item (service S, account A), or key K of any trusty vault on
+                                               # --from (the owner vault, another project's vault). The value moves inside
+                                               # the server only; tm sends and prints names. A Keychain service starting
+                                               # `trusty` is refused — name a trusty key with --from-vault, so its agent deny
+                                               # is checked. Unknown or unreadable source: a typed error, exit non-zero
 tm secrets doctor                              # calls secrets.doctor (§7), renders the table with each unavailable backend's reason and fix
                                                # exits non-zero when the selected backend is unavailable; when the server refused the
                                                # project (the machine default's report is still printed); and, under CI=true (or CI=1),
@@ -1120,6 +1130,20 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    project-trust boundary) and is not requested here.
    **Resolved 2026-09-23** ([#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517#issuecomment-5802789914)):
    `copy` stays in-project.
+   **Relaxed 2026-11-10 for the source side** (owner ruling 22:22Z,
+   [#10998](https://github.com/bobmatnyc/trusty-tools/issues/10998)): "We're
+   operating on the assumption of unitary machine. A user has access to all
+   the secrets on their machine. So copying a secret between one another is a
+   user allowable action, does not require agents to look at the secret."
+   The destination stays the caller's own project vault. A `secrets.copy`
+   with `source` reads one key from any Keychain item (service, account) or
+   any trusty vault key — the owner vault or another project's — and writes
+   it under the one destination key named. v1 is a copy, never a reference:
+   a `secret://` reference to a foreign store in a tracked file would reopen
+   ruling 06 R1, and the `secret://` grammar is unchanged. The per-key agent
+   deny (§15.8) still binds agent callers on both sides. A named copy to a
+   sync target is `unsupported` in v1: copy into the project vault, then
+   push.
 
 ---
 
@@ -1212,7 +1236,7 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.list` | Lists keys in one scope | Name, length, `updated_at`, `agents_may_use` (no agent deny, #10386) — never a value |
 | `secrets.set` | Upserts one key | `new` or `updated`, plus `mask_secret` output, once |
 | `secrets.delete` | Removes one key | Confirmation |
-| `secrets.copy` | Copies keys between backends inside one project (§13 Q6) | Names copied, names failed |
+| `secrets.copy` | Copies keys between backends inside one project (§13 Q6); with `source`, one key from a named Keychain item or trusty vault key into the project vault (#10998) | Names copied, names failed; a named copy that fails is its typed error |
 | `secrets.doctor` | Runs `detect_backends` (§7) | The detection table |
 | `secrets.grant` | Registers an exec grant for a child process (§15.8, S8) | The grant token, its expiry and TTL |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
@@ -1342,11 +1366,27 @@ reached only through `secrets.copy` with `to_backend` set to
 `github-actions` or `vercel`; there is no `push` method. The rules:
 
 - The key list is required; an empty list is `invalid_params`.
-- A caller with a Claude Code ancestor is refused with `agent_use_refused`,
-  whether or not the key is denied to agents (#10386 Q3); a bridge call is
-  judged on the console's verdict. A pushed value is readable by any workflow
-  or deployment a repository writer adds, a wider release than §15.8's
-  agent use.
+- ~~A caller with a Claude Code ancestor is refused with `agent_use_refused`,
+  whether or not the key is denied to agents (#10386 Q3).~~ Superseded for
+  agent callers on 2026-11-10 (#10999; owner ruling, Bob 22:22Z: a single-user
+  machine, cross-store copy is a user-allowable action, and agents need not
+  see the value; Architect decision E). A caller with a Claude Code ancestor
+  may push a key that is not denied to agents. The caller's ancestry is still
+  judged, and an unreadable one is `grant_refused`; a bridge call is judged
+  on the console's verdict. For an agent caller, a key denied to agents fails
+  with `agent_key_denied` before its value is read, and the other keys still
+  run (Architect F). A key marked push-only for agents (§15.9, #10998) is
+  pushed: only a deny refuses, and a deny wins over the mark. A failed lookup
+  of the deny or the mark fails the key, never admits it. The launched
+  Architect gets no exemption here. The value
+  goes from the server to the CLI's stdin only, never to the caller's reply,
+  argv, environment, errors or audit. Each key leaves one audit record naming
+  the target, the key, the caller's pid and `agent_parent`, never the value
+  (Architect G).
+- Residual risk, accepted (#10999, Architect E): a pushed value is readable by
+  any workflow or deployment a repository writer adds, a wider release than
+  §15.8's agent use. Under the single-user-machine premise, an agent that may
+  use a key may also push it there.
 - The destination comes from the checkout's `origin` remote
   (`github.com/<owner>/<repo>`), never from a vault name. A Vercel project
   mapping lives only in the account's machine config, keyed by
@@ -1366,12 +1406,70 @@ reached only through `secrets.copy` with `to_backend` set to
   always (D3, D4). It pushes `production` then `preview`; a failing target
   fails the key. An existing variable is overwritten in place with `--force`, never removed
   and re-added; because a listing is presence only, such a key is reported
-  failed until the live check shows how to prove an update (D9).
+  failed until the live check shows how to prove an update (D9). Its reason
+  says the new value may already be set and that a retry reports the same
+  failure (#10999), so an agent does not retry it.
 - A sync target is never a configured backend, never read back, never swept
   by `delete`, and never written to the names-only index. A sandboxed server
   opens none.
 - Deferred: owner-scope pushes (GitHub org secrets, Vercel team shared
   environment) and Vercel `development`.
+
+**Named copy source (amendment 2026-11-10, #10998, §13 Q6).** `secrets.copy`
+takes an optional `source`: `{"keychain_item": {"service", "account"}}`, read
+with `from_backend: keychain`, or `{"vault": {"vault", "key"}}`, read on
+`from_backend`; `keys` is then exactly the one destination key in the
+caller's project vault. The rules:
+
+- The value is read and written inside the server. It is never in argv,
+  the environment, a reply, a log, an error or the audit record.
+- A Keychain item is any item, under the same 60 s Keychain time limit; a
+  service starting `trusty` (a vault or a control item) is `invalid_params`,
+  so a trusty key is named as a `vault` source and keeps its deny. A
+  sandboxed server opens no Keychain, so it refuses the item too.
+- An agent caller is `agent_key_denied` when the vault source key or the
+  destination key is denied, before any value is read. A person's copy of a
+  denied vault key carries the deny to the destination key's name first.
+- An agent's copy of a Keychain item lands **push-only for agents**, a
+  per-key mark beside the agent deny (Architect decision 2026-11-11 02:35Z,
+  confidence MEDIUM). The mark is written, with a write-ahead
+  `secrets.set_agents_may_use` record (`agents_allowed: false`), before the
+  value; a destination that cannot hold it is `unsupported`. It is stored
+  like the deny — Keychain service `trusty-secrets.agents-push-only`,
+  account `<vault>/<key>`; the file backend's `push-only/` directory — so it
+  survives restarts, and `secrets.list` reports it as `agents_push_only`
+  (`tm secrets list` suffixes the key `(push-only for agents)`), never a
+  value.
+  - For a caller under Claude Code a push-only key is denied on every
+    value-yielding path: `grant` (so `tm secrets exec`), `resolve`, a local
+    `copy` with it as the source, a named `copy` with it as the vault
+    source, and an agent `set` over it (`agent_key_denied`). The console
+    bridge reaches the same checks. A lookup failure refuses.
+  - A person's own use is unaffected. `set_agents_may_use` `allowed: true`
+    lifts the mark and any deny; `delete` removes it.
+  - Why: code-critic HIGH on the first #10998 cut — an item an agent
+    copied open could be granted, resolved or piped through
+    `tm secrets exec` by the same agent, so any login-Keychain item was one
+    copy from an agent transcript; the exec scrubber redacts only the
+    literal value. A full deny would also block the owner's trigger case,
+    an agent copying a token so it can push it to a sync target; the mark
+    keeps that case agent-only. The push side honours the mark (#10999,
+    §15.4 "Push"): an agent may push a push-only key, and a failed mark
+    lookup refuses the push.
+  - Every other copy keeps its rule: a denied source's deny is carried as a
+    deny, and an agent's copy of an undenied trusty vault key stays open, as
+    that key already was. An agent may not copy over a push-only key; a
+    person may.
+- A deny carried for a person's copy stays on the destination key if the
+  value read then fails; it fails closed and is lifted the same way.
+- While a timed-out read of a Keychain item still runs, a new read of that
+  item answers `backend_timeout` at once and starts no second read or
+  prompt.
+- A missing item or key is `not_found`; an unreadable one its backend kind
+  (`backend_failed`, `backend_timeout`). The copy's one record per key
+  carries `copy_source` (source backend and locator) beside the destination
+  backend, vault, key, caller pid and `agent_parent`.
+- A sync target on either side is `unsupported` in v1.
 
 ### 15.5 Lazy resolution
 
@@ -1573,9 +1671,11 @@ whose own parent chain includes Claude Code may write a deny but not remove
 one (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
 record with its kind, so no deny change exists without a record.
-`secrets.delete`, removing a deny and `secrets.copy` to a sync target are
-operator-only: the server refuses a caller with a Claude Code ancestor
-(`agent_use_refused`, Architect Q2, Q3). Amendment 2026-10-29 (#10459, Bob:
+`secrets.delete` and removing a deny are operator-only: the server refuses a
+caller with a Claude Code ancestor (`agent_use_refused`, Architect Q2).
+Amendment 2026-11-10 (#10999, owner ruling and Architect E, superseding Q3
+and D63 D3 for agents): such a caller may `secrets.copy` a key with no deny
+to a sync target; a denied key fails with `agent_key_denied` (§15.4 "Push"). Amendment 2026-10-29 (#10459, Bob:
 "fix the guard, it is too restrictive"; reverses Q2 for `set`): such a
 caller may `secrets.set` (so `tm secrets import`) and locally `secrets.copy`
 a key with no deny in its project or owner scope. The deny is checked under

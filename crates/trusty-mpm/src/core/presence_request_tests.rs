@@ -131,6 +131,7 @@ fn the_rate_window_holds_at_the_ttl_floor_8878() {
     let (_d, root) = root();
     let floor = crate::core::presence_config::PresenceConfig {
         request_ttl_minutes: 0,
+        ..Default::default()
     }
     .request_ttl();
     create(&root, &key(), new_for(ARCHITECT), floor, NOW).expect("first");

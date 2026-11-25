@@ -20,27 +20,17 @@
 #   features  optional: `--features` the target's build needs (empty default set).
 # A module row covers every test in it, including ones added later; a test
 # row covers only that test. Prefer a test row in a large, slow module.
-trusty-agents	lib	agents::bundled	reads repo_tree / repo_tree_files (content/agents/trusty-agents) through fake checkouts (#9014)
-trusty-agents	lib	agents::claude_code_runner::tests::dispatcher_errors_when_claude_code_requested_but_unwired	runtime: TAGENT_CONFIG_DIR points at content/agents/trusty-agents/agents (#9014)
-trusty-agents	lib	agents::registry::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
-trusty-agents	lib	agents::skill_floor::skill_floor_tests	reads literal 'content/instructions/architect/skills' (#8436, #9132)
-trusty-agents	lib	agents::tests::loading	runtime: resolves bundled agents and persona.md from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
-trusty-agents	lib	agents::tests::provider_policy	reads repo_tree and the bundled templates under content/agents/trusty-agents/agents (#9014)
-trusty-agents	lib	api::server::agent_stores::unit_tests::agent_name_allowlist_accepts_every_bundled_agent	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
-trusty-agents	lib	ctrl::pm_task::dispatch::persona::tests	runtime: resolves the bundled assistant packages from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
-trusty-agents	lib	inspection::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
-trusty-agents	lib	repl::tests::handle_agent_command_activates_bundled_assistant_package	runtime: agents_dir points at content/agents/trusty-agents/agents (#9014)
-trusty-agents	lib	repl::tests::list_assistant_agents_into_surfaces_directory_package	runtime: agents_dir points at content/agents/trusty-agents/agents (#9014)
-trusty-agents	lib	runtime::startup_provision::tests	reads repo_tree (content/agents/trusty-agents) to deploy into a temp home (#10940)
-trusty-agents	lib	runtime::tool_registry::registry_tests::deployed_assistant_config_survives_scoping_with_delegate_to_agent	reads repo_tree (content/agents/trusty-agents/agents) (#9014)
-trusty-agents	lib	skills::manifest::tests::agent_roster_grants_only_tools_that_have_a_skill	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
-trusty-agents	lib	workflow::engine::executor::tests::relocate::qa_receives_correct_path_for_claude_code_runner	runtime: TAGENT_CONFIG_DIR points at content/agents/trusty-agents/agents (#9014)
-trusty-agents	test:cli_project	*	runtime: the spawned tagent reads the bundled agents and workflows copied from content/agents/trusty-agents (#9014)
-trusty-agents	test:plain_cli_repl	plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier	runtime: the spawned tagent deploys the roster from content staged into its HOME (#9014)
+trusty-assistants	lib	agents::registry::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
+trusty-assistants	lib	agents::tests::loading	runtime: resolves bundled agents and persona.md from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
+trusty-assistants	lib	agents::tests::provider_policy	reads repo_tree and the bundled templates under content/agents/trusty-agents/agents (#9014)
+trusty-assistants	lib	assistants::tests::instance_provision_tests::each_instance_searches_its_own_index_by_default	runtime: reads content/agents/trusty-agents/agents via test_env::bundled_agents_dir (#11649)
+trusty-assistants	lib	operations::agent_names::tests::agent_name_allowlist_accepts_every_bundled_agent	runtime: walks content/agents/trusty-agents/agents via test_env::bundled_agents_dir (#9014, moved by #11632)
+trusty-assistants	lib	skills::manifest::tests::agent_roster_grants_only_tools_that_have_a_skill	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoster::load, literal 'content/agents' (#9011)
 trusty-agents-common	lib	agents::deployer::tests::stock_tcode_roster_deploys_every_frontmatter_key	reads literal 'content/agents'
 trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/agents), literal '../../content/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)
+trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_stamps_omit_claude_md	reads repo_roster (content/agents) (#7684)
 trusty-agents-common	lib	harness_doc::tests	reads HarnessDoc::load over the checkout content (#9011)
 trusty-code	lib	agents::deploy::deploy_tests	runtime: stages load_tm_agent_sources (content/agents via the cwd checkout) and composes the roster
 trusty-code	lib	agents::md_loader::tests::embedded_agent_skill_pointers_open_with_read_file	runtime: composes rust-engineer from trusty-agents-common .md, asserts its skill pointers
@@ -70,6 +60,7 @@ trusty-mpm	bin:tm	commands::pm_guard_kuzu_store::tests	names content/skills/tm-m
 trusty-mpm	bin:tm	commands::pm_guard_dispatch::tests	reads r (install::test_roster_ref) — the dispatch classifier's roster (#9011)
 trusty-mpm	bin:tm	commands::pm_guard_dispatch_type::tests	reads r (install::test_roster_ref) (#9011)
 trusty-mpm	bin:tm	commands::pm_guard_worktree_grant::tests	reads r (install::test_roster_ref) (#9011)
+trusty-mpm	bin:tm	commands::pm_guard_accounts::tests	reads r (install::test_roster_ref) — the ops-dispatch account block is composed over the roster (#11390)
 trusty-mpm	bin:tm	commands::pr::tests::body_headings_are_named_verbatim_in_the_assets	reads install::test_roster_ref (content/agents/version-control.md)
 trusty-mpm	bin:tm	commands::session::start::tests::inplace_prompt_file_stamps_the_profile_it_composed_for	reads install::test_content_ref (#9012)
 trusty-mpm	bin:tm	generate	reads SKILLS_ASSET_REL, run_capabilities_in, install::test_roster_ref (#7776, #9011)
@@ -87,6 +78,7 @@ trusty-mpm	bin:tm	tests_behavior_rust_build_performance::rust_delivery_workflow_
 trusty-mpm	bin:tm	tests_behavior_skill_tiers	reads test_roster (#9011)
 trusty-mpm	lib	client::catalog::sm_tools::tests::sm_tools_md_matches_catalog_render	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_managed_workspace_resolves_the_cache_once_a_bundle_lands	reads AgentRoster::load over a stale trusty-tools clone (#9396)
+trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_session_outside_any_checkout_uses_the_installed_content	reads content::find_dev_checkout, the checkout's content lookup (#11499)
 trusty-mpm	lib	content::compat_matrix_tests	reads the checkout's content: run_matrix packages content/ and loads it through AgentRoster::load / FrameworkContent::load (#8390)
 trusty-mpm	lib	core::agent_orphans::tests	reads test_support::repo_roster and the checkout roster files (#8992)
 trusty-mpm	lib	core::agent_skill_codeploy::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
@@ -125,6 +117,7 @@ trusty-mpm	lib	core::output_style_deployer::tests	reads the checkout's content: 
 trusty-mpm	lib	core::pm_prompt_golden_tests	reads test_support::rc — the committed PM prompt goldens (#9012)
 trusty-mpm	lib	core::pm_prompt_golden_tests::golden_bundled_fallback_prompt	reads compose_bundled_fallback_with_overrides
 trusty-mpm	lib	core::pm_prompt_golden_tests::the_memory_section_claims_no_per_prompt_context_hook	reads compose_bundled_fallback_with_overrides
+trusty-mpm	lib	core::project_skill_tier::architect_agents::tests	reads test_support::rc for the five Architect agents and pins their hashes (#10161)
 trusty-mpm	lib	core::project_skill_tier::architect_seed::tests	reads FrameworkContent::load and test_support::rc for the Architect seed files (#9132)
 trusty-mpm	lib	core::project_skill_tier::architect_skills::tests	reads the Architect skills from content through architect_seed::test_support (#9540, #9132)
 trusty-mpm	lib	core::prompt_self_improvement::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
@@ -167,6 +160,8 @@ trusty-mpm	lib	daemon::doctor::doctor_instruction_fold::tests	reads test_support
 trusty-mpm	lib	daemon::doctor::doctor_output_style::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	daemon::doctor::doctor_scaffold_tracking::tests::regenerated_paths_includes_all_output_styles	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	daemon::doctor::doctor_session_profile::tests::an_agents_md_carrying_a_dropped_core_marker_does_not_hide_it	reads test_support::rc — composes the Architect prompt over the checkout (#8436)
+trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_session_with_nothing_installed_uses_the_cwd_checkout_before_a_fetch	reads content::find_dev_checkout — the cwd checkout serves a session with nothing installed (#11499)
+trusty-mpm	lib	daemon::managed_routes::managed_checkout::tests::a_worktree_of_the_managed_checkout_composes_from_its_own_content	reads literal 'content/instructions/sections/identity.md' from a worktree's own content (#11499)
 trusty-mpm	lib	daemon::managed_routes::lifecycle::tests::ensure_deployment_complete_ok_when_already_complete	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	test:env_serial	standalone_isolation::output_styles_deploy_to_config_dir_not_home	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	test:integration	tm_hook_pm_guard	reads common::stage_repo_content — the spawned guard classifies against it (#9011)
@@ -174,6 +169,7 @@ trusty-mpm	test:integration	tm_hook_pm_guard_build_lease	reads common::stage_rep
 trusty-mpm	test:integration	tm_sessions_instructions_diagnostics::instructions_reports_section_status_and_project_style	reads FrameworkContent::load over the checkout (#9012)
 trusty-mpm	lib	daemon::doctor_content::tests::content_row_fails_when_the_pm_package_does_not_parse	reads the checkout's content: fake_checkout_with_package stages a PM package the doctor row parses (#9012)
 trusty-mpm	lib	daemon::doctor_content_requires::tests	reads the checkout's content: copies content/ and reads it through checkout_content, AgentRoster::load and FrameworkContent::load (#8390)
+trusty-mpm	lib	core::architect_lockdown::tests::the_unused_agent_list_names_bundled_agents_and_both_spellings	reads literal '../../content/agents' to check each name in ARCHITECT_UNUSED_AGENTS is a bundled agent file (MB159a)
 trusty-review	lib	pipeline::mapreduce::map::tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	lib	pipeline::mapreduce::synthesis::tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	lib	pipeline::prompt::sections_tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)

@@ -529,6 +529,8 @@ async fn run_doctor_produces_eighty_checks() {
         // #7867: what the 💸 segment itself measures — the `compress` and
         // `divert` rows it folds, and when the last one landed.
         "tool_output_compression",
+        // #11033: compress rows per day.
+        "compress_rows_per_day",
         // #7617: whether the 💸 segment can render at all — the `statusLine`
         // entry in each settings tier, its two inputs' readability, and the
         // render rule itself.

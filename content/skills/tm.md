@@ -3,7 +3,7 @@ name: tm
 description: trusty-mpm orchestration model overview — agents, skills, delegation
 user-invocable: true
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: pm-reference
 tags: [overview, orchestration, framework]
 effort: low
@@ -63,18 +63,18 @@ skill's description and whether it is user-invocable, see `tm-capabilities`'s
 
 ## Memory System
 
-`mcp__trusty-memory__*` provides persistent cross-session context —
-`memory_recall`/`memory_recall_deep` to read, `memory_remember`/`memory_note`
-to write, `task_add`/`task_list`/`task_complete` for durable task tracking.
-Not a per-agent file on disk (unlike claude-mpm) — a live MCP-backed memory
-palace. Check before research or delegation, per `tm-tool-usage-guide`.
+trusty-memory provides persistent cross-session context — `tm memory recall`
+to read, `tm memory remember` / `tm memory note` to write. MCP adapters are for
+non-mpm callers only. `tm memory recall-deep` and `task add|list|complete`
+cover deep recall and durable task tracking. Not a per-agent file on disk (unlike claude-mpm) — a
+live daemon-backed memory palace. Check before research or delegation, per `tm-tool-usage-guide`.
 
 ## Health and Diagnostics
 
 ```bash
 tm doctor                              # full stack diagnostic (see tm-doctor)
 mcp__trusty-mpm__supervisor_status     # fleet-level health
-mcp__trusty-search__search_health      # trusty-search liveness
+trusty-search health                   # trusty-search liveness
 ```
 
 No dashboard on `:8765` — that's claude-mpm's Socket.IO monitor, which does

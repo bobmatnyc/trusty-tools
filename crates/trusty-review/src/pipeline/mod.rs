@@ -25,6 +25,8 @@
 //! Test: each submodule carries its own unit tests.
 
 pub mod absence_claim;
+// #10758: per-review author intent — prompt rule + as-is carry-over gate.
+pub mod author_intent;
 // Why: keeps the raw structured reviewer payload out of `review_body`, which
 // consumers read (and post) as the human-readable review (#4999).
 pub(crate) mod body_render;
@@ -34,6 +36,8 @@ pub mod caller_preamble;
 pub mod citation_check;
 // #8905: checks each finding's cited line holds the code it describes.
 pub mod citation_gate;
+// #10964: tells a quote of the cited file from a labelled payload or fix.
+pub(crate) mod citation_payload;
 // Why: the grounding guard for package-registry / version-existence claims
 // (#4081) — kept separate from `finding_hygiene` (self-admission markers) and
 // `citation_check` (path/content verification) because it keys on a different
@@ -52,6 +56,7 @@ pub mod evidence_admission;
 // `citation_check` (path/content verification, #4042) since the two concerns
 // have independent marker sets and independent test surfaces.
 pub mod finding_hygiene;
+pub mod finding_yield;
 pub mod grade;
 // Why: reconciles the grade embedded in the raw `review_body` JSON with the
 // authoritative top-level grade so the two can never disagree (issue #1886).
@@ -82,6 +87,7 @@ pub mod verify_batch;
 pub mod verify_liveness;
 pub mod verify_posted;
 pub mod verify_prompt;
+pub mod verify_security;
 // Why: the narrative summary is written before the verification round on both
 // pipeline paths and nothing revisits it, so a refuted finding kept being cited
 // as a merge blocker (#4044).  Kept separate from `grade_reconcile` (which

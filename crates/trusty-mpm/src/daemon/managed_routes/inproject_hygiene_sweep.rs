@@ -79,7 +79,15 @@ pub(crate) fn spawn_if_enabled(state: Arc<DaemonState>) {
         info!("inproject-hygiene disabled via {ENV_ENABLED}");
         return;
     }
-    let repos_root = super::inproject::repos_root();
+    // #11821: a broken install.toml skips the sweep; it never fetches into
+    // clones under the default root.
+    let repos_root = match super::inproject::try_repos_root() {
+        Ok(root) => root,
+        Err(e) => {
+            warn!("inproject-hygiene skipped — repos root unresolved: {e}");
+            return;
+        }
+    };
     // #5784: `repos_root()` is only $HOME-scoped when nothing overrode it.
     // Precedence is TRUSTY_MPM_REPOS_ROOT > TRUSTY_MPM_WORKSPACE_ROOT / config >
     // $HOME-derived, and a scratch daemon launched from the operator's shell

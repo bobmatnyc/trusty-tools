@@ -229,7 +229,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "## Memory Protocol (Context-First)\n\nCall `memory_recall` for targeted recall BEFORE any research or delegation, never after, and store durable findings with `memory_remember` / `memory_note` as you learn them. The trusty-memory palace is the memory; this protocol stays in force under any project override."
+        "text": "## Memory Protocol (Context-First)\n\nRun `tm memory recall \"<q>\"` for targeted recall BEFORE any research or delegation, never after; store findings with `tm memory remember` / `tm memory note` when learned. MCP adapters are for non-mpm callers only. The palace is the memory; this protocol stays in force under any project override."
       },
       "pinned": true
     },

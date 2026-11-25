@@ -109,6 +109,8 @@ fn a_tagged_compress_row_still_folds_as_a_saving() {
         row: &row,
         tool_type: TOOL_TYPE_BASH,
         tool_name: "git diff",
+        chain_shape: None,
+        steps: None,
     };
     append_row(&ledger, &tagged).expect("append");
     assert_eq!(fold_session_per_call(&ledger, "s1").tokens_saved, 900);
@@ -179,4 +181,24 @@ fn drop_counters_are_pruned_with_their_day_files() {
     append_opportunity_bounded(&ledger, &row_on("2026-11-01"), 1_000, 1).expect("append");
     assert!(!ledger.join("2026-10-01.dropped").exists());
     assert!(!ledger.join("2026-10-01.jsonl").exists());
+}
+
+/// #11563: verbs survive, paths, flags and patterns do not.
+#[test]
+fn ledger_tool_name_keeps_verbs_and_drops_paths_and_patterns() {
+    for (raw, want) in [
+        ("git log", "git log"),
+        ("cargo test", "cargo test"),
+        ("/usr/bin/git diff", "git diff"),
+        ("ls /Users/x/p", "ls"),
+        ("grep -n", "grep"),
+        ("cat notes.txt", "cat"),
+        ("find .", "find"),
+        ("git /tmp/x", "git"),
+        ("Read", "Read"),
+        ("mcp__trusty-search__search", "mcp__trusty-search__search"),
+        ("", ""),
+    ] {
+        assert_eq!(ledger_tool_name(raw), want, "{raw}");
+    }
 }

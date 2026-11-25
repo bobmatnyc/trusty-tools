@@ -39,10 +39,13 @@ impl MemoryService {
     ///
     /// Why: the chat `recall_memories` tool and the chat context injection
     /// called the retrieval layer directly and so skipped demotion (#8246).
-    /// What: opens the palace, runs the shallow or deep vector recall and the
+    /// What: opens the palace with the bounded recall open (#11255: past the
+    /// open wait it fails with `ServiceError::PalaceOpening`), runs the
+    /// shallow or deep vector recall and the
     /// optional BM25 lane over a [`ranking_window`] of candidates, RRF-fuses
     /// them, demotes stale snapshots, and cuts to `top_k`.
-    /// Test: `demotion_applies_on_every_recall_surface`.
+    /// Test: `demotion_applies_on_every_recall_surface`,
+    /// `chat_recall_memories_answers_palace_opening_for_a_stalled_open`.
     pub async fn recall_ranked(
         &self,
         id: &str,
@@ -50,7 +53,10 @@ impl MemoryService {
         top_k: usize,
         deep: bool,
     ) -> ServiceResult<Vec<RecallResult>> {
-        let handle = self.open_handle(id)?;
+        // #11255: a cold open runs off the worker, bounded by the open wait.
+        let handle = crate::tools::recall_open::open_for_recall(&self.state, id)
+            .await
+            .map_err(|e| super::core_kg::open_failure(id, &e))?;
         // #8246: fetch past `top_k` so demotion can lift a hit over the cut.
         let window = ranking_window(top_k, None);
         let mut results = if deep {

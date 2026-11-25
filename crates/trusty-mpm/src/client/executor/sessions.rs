@@ -233,14 +233,23 @@ impl CommandExecutor {
     /// project by path; that does not fit the pure `TrustyCommand` shape (the
     /// path is keyboard callback data), so the bot adapter calls this directly.
     /// What: calls `POST /projects`; returns a confirmation via the registered
-    /// path. Returns an `Error` when the daemon is unreachable.
-    /// Test: `register_project_succeeds`.
+    /// path. Returns an `Error` carrying the daemon's message when it refuses
+    /// (#10586: no `origin` remote), or the transport error when unreachable.
+    /// #10586: `ProjectKept` when the daemon kept an existing record instead.
+    /// Test: `register_project_succeeds`,
+    /// `register_project_without_origin_shows_the_daemon_message_10586`,
+    /// `register_project_reports_the_kept_record_10586`.
     pub async fn register_project(&self, path: &str) -> CommandResult {
         match self.client().register_project(path).await {
-            Ok(()) => CommandResult::ProjectRegistered {
+            Ok(None) => CommandResult::ProjectRegistered {
                 path: path.to_string(),
             },
-            Err(e) => CommandResult::Error(format!("daemon unreachable: {e}")),
+            Ok(Some(kept)) => CommandResult::ProjectKept {
+                path: path.to_string(),
+                kept,
+            },
+            // #10586: not always "unreachable" — a 400 is the daemon's refusal.
+            Err(e) => CommandResult::Error(format!("could not register {path}: {e}")),
         }
     }
 

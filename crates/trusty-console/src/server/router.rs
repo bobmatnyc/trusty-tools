@@ -80,6 +80,53 @@ pub fn build_router_with_self_origins(
     build_router_inner(state, self_origins, None)
 }
 
+/// Wrap `router` in the loopback listener's Host/Origin guard for `listener`,
+/// exactly as `tailnet_peer::serve_listeners` serves a loopback address.
+///
+/// Why: #11748 — the assistants routes answer only a request a gated listener
+/// admitted, so a test or an embedder that serves the router on loopback
+/// needs the production guard, not a forged marker. The guard admits by
+/// `Host`/`Origin` only, so it must never wrap a non-loopback socket: that
+/// would grant `AdmittedBy::Loopback` to remote peers (#11748 review).
+/// What: reads `listener`'s bound address; refuses a non-loopback one with
+/// `InvalidInput`; otherwise `guard_loopback` with no MagicDNS name: `Host`
+/// must be that address or `localhost:<port>`, and any `Origin` `http://<Host>`.
+///
+/// # Errors
+///
+/// `InvalidInput` when `listener` is not bound to a loopback address; any
+/// error reading its local address.
+/// Test: `loopback_bind_decision` (the address rule, unit);
+/// `tests/assistants_routes.rs`, `tests/assistants_ask.rs` (the guarded router).
+pub fn guard_loopback_listener(
+    router: Router,
+    listener: &tokio::net::TcpListener,
+) -> std::io::Result<Router> {
+    let listen = listener.local_addr()?;
+    if !is_loopback_bind(listen) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the loopback guard cannot serve a non-loopback socket ({listen})"),
+        ));
+    }
+    Ok(crate::tailnet_peer::guard_loopback(
+        router,
+        listen,
+        crate::tailnet_peer::OwnMagicDns::default(),
+    ))
+}
+
+/// Whether the loopback guard may wrap a socket bound to `addr` (#11748 review).
+///
+/// What: true only for a loopback IP as `serve_listeners` judges it
+/// (`IpAddr::is_loopback`). A wildcard is refused, and so is an IPv4-mapped
+/// `::ffff:127.0.0.1`, which `serve_listeners` would also serve behind the
+/// peer gate rather than as loopback.
+/// Test: `loopback_bind_decision`.
+fn is_loopback_bind(addr: std::net::SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
 /// The one router definition both public builders delegate to, so the mounted
 /// route set cannot drift between them.
 fn build_router_inner(
@@ -92,6 +139,8 @@ fn build_router_inner(
     let secrets = state.secrets();
     #[cfg(not(unix))]
     let secrets = ();
+    // #10907: taken before `with_state` consumes the state.
+    let request_metrics = state.request_metrics();
     let core = Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
@@ -249,6 +298,11 @@ fn build_router_inner(
             post(crate::routes::cleanup::compact_palace_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
+        // #11747/#11748: the Trusty Assistants routes, refused on an ungated
+        // listener; the ask POST also needs a same-origin `Origin`.
+        .merge(crate::assistants_uds::ask_route::router(
+            self_origins.clone(),
+        ))
         .route(
             "/api/console/metrics/analyze/indexes",
             get(analyze_indexes_handler),
@@ -361,6 +415,22 @@ fn build_router_inner(
                 crate::tools_ui::secrets_page_guard,
             )),
         )
+        // #11749: the Trusty Assistants page, served under /tools/assistants/.
+        // Its calls go to /api/console/assistants*, the gated routes merged
+        // above. No loopback-only layer: the page is for tailnet devices too,
+        // and the per-listener guards already cover every route.
+        .route(
+            "/tools/assistants",
+            get(crate::tools_ui::assistants_ui_redirect),
+        )
+        .route(
+            "/tools/assistants/",
+            get(crate::tools_ui::assistants_ui_index),
+        )
+        .route(
+            "/tools/assistants/{*path}",
+            get(crate::tools_ui::assistants_ui_asset),
+        )
         // #9979 (D96): the mpm chat page, moved from the daemon's `/web`. One
         // embedded HTML file, so no asset wildcard; loopback-only, unframeable.
         .route(
@@ -442,6 +512,13 @@ fn build_router_inner(
         // #9066 A6: merged after the write-origin guard, so it does not apply
         // to `/api/secrets/*`; the bridge has its own.
         .merge(secrets_routes(secrets))
+        // #10907: counts every request, merged sub-routers and the 404
+        // fallback included; `Router::layer` runs after routing, so the
+        // matched template is visible to it.
+        .layer(axum::middleware::from_fn_with_state(
+            request_metrics,
+            crate::request_metrics::record_requests,
+        ))
         .layer(TraceLayer::new_for_http())
 }
 
@@ -465,4 +542,25 @@ fn secrets_routes((): ()) -> Router {
         .route("/api/secrets", any(unsupported))
         .route("/api/secrets/", any(unsupported))
         .route("/api/secrets/{*rest}", any(unsupported))
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::is_loopback_bind;
+
+    /// #11748 review: the loopback guard's address rule, with no socket bound.
+    #[test]
+    fn loopback_bind_decision() {
+        for (addr, loopback) in [
+            ("0.0.0.0:7070", false),
+            ("[::]:7070", false),
+            ("[::ffff:127.0.0.1]:7070", false),
+            ("192.0.2.1:7070", false),
+            ("127.0.0.1:7070", true),
+            ("[::1]:7070", true),
+        ] {
+            let parsed = addr.parse().expect("socket addr");
+            assert_eq!(is_loopback_bind(parsed), loopback, "{addr}");
+        }
+    }
 }

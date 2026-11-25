@@ -369,6 +369,7 @@ pub async fn merged_roster() -> ProjectRoster {
         &trusty_common::mpm_rpc::mpm_socket(),
         super::roster::list_projects(),
         // #5203: the same resolver `roster::list_projects` scans with.
+        // #11821: defaulting resolver kept — a read-only project listing.
         Some(trusty_common::workspace_layout::workspace_root().as_path()),
     )
     .await

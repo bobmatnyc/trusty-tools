@@ -232,17 +232,24 @@ const fn residual(script: &'static str, reason: &'static str, issue: &'static st
 // #10599: the verdicts on #10571's P1 squash (7bad523a3c) with #10599 applied.
 // self-clear.sh, datg.py, datg-hook.sh, dashboard-db.py, dashboard-serve.py,
 // dashboard_media.py, fleet-poll.py and pm-notify.sh now pass.
+// #10641: dashboard_http.py, dashboard_page.py, dashboard_store.py,
+// dashboard_viz.py and datg_store.py pass after their behaviour-neutral edits.
 const RESIDUALS: &[Residual] = &[
     residual("dashboard_docs.py", FILE, OWNED_BY_10571),
     residual("dashboard_harness.py", FILE, OWNED_BY_10571),
-    residual("dashboard_http.py", FILE, OWNED_BY_10571),
-    residual("dashboard_page.py", CRED, OWNED_BY_10571),
     residual("dashboard_projects.py", FILE, OWNED_BY_10571),
-    residual("dashboard_store.py", CRED, OWNED_BY_10571),
-    residual("dashboard_viz.py", FILE, OWNED_BY_10571),
     residual("datg_ops.py", CRED, OWNED_BY_10571),
-    residual("datg_store.py", CRED, OWNED_BY_10571),
+    // #10571 S2: the `{"op": "remind_fire"}` and `{"op": "remind_done"}` ledger ops it writes
+    // read as a 1Password `op` call, as datg_ops.py's `unknown op` does (#10598).
+    residual("il_remind.py", CRED, GUARD_FP_10598),
+    // #10571 S1: its state, rollup and threshold files are named `token-*.json[l]`, which
+    // the guard reads as token files; the Rust watcher shares those names (#11629).
+    residual("token_watch.py", FILE, GUARD_FP_10598),
 ];
+
+/// Owner of a guard false positive the seeded script cannot avoid without
+/// renaming a file another reader shares.
+const GUARD_FP_10598: &str = "#10598 owns this guard false positive";
 
 /// 🔴 RATCHET (#10599): every seeded script, run relative from the Architect
 /// directory and by its absolute path in a non-default Architect, either

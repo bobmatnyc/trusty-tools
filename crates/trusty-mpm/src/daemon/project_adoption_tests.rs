@@ -149,7 +149,9 @@ async fn register_project_op_backfills_pre_existing_worktrees_7588() {
     fx.add_worktree("pre-two");
 
     let state = isolated_state().await;
-    crate::daemon::rpc::registry::projects::register_project_op(&state, fx.repo.clone());
+    crate::daemon::rpc::registry::projects::register_project_op(&state, fx.repo.clone())
+        .await
+        .expect("the fixture has an origin remote");
 
     let rows = adopted(&state);
     let trees: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
@@ -178,7 +180,9 @@ async fn register_project_op_adopts_under_the_owning_projects_name_7588() {
     register_project_registry_op(&state, register_body("gnomish", checkout))
         .await
         .expect("registry B registers");
-    crate::daemon::rpc::registry::projects::register_project_op(&state, fx.repo.clone());
+    crate::daemon::rpc::registry::projects::register_project_op(&state, fx.repo.clone())
+        .await
+        .expect("the fixture has an origin remote");
 
     let rows = adopted(&state);
     assert_eq!(rows, vec![("gnomish".to_string(), "pre-one".to_string())]);

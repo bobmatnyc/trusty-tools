@@ -1,0 +1,41 @@
+# public_leak_patterns.txt — the public-content denylist.
+#
+# Read by `scripts/check_content.py public-leaks` through the same loader as
+# scripts/architect_leak_patterns.txt, so the line format is identical:
+#   CLASS <TAB> FLAGS <TAB> MATCH <TAB> ALLOW
+# CLASS is the pattern id recorded in scripts/public_leak_baseline.tsv.
+#
+# Every pattern here is GENERIC: committing it names no person, employer or
+# machine. A name that would itself leak (an employer org, a personal account,
+# a host or rig nickname, the owner's first name in "X said" phrasing) goes in
+# the out-of-tree file named by PUBLIC_LEAK_PRIVATE_NAMES_FILE, one name per
+# line, matched inside any alphanumeric run (class PRIVATE_NAME). CI writes it
+# from the PUBLIC_LEAK_PRIVATE_NAMES secret and fails without it; locally an
+# absent file is skipped.
+#
+# Class 1 — rig facts (machines, paths, networks)
+OPERATOR_PATH	-	/Users/[A-Za-z][A-Za-z0-9._-]*|/home/[a-z][a-z0-9._-]*|-Users-[A-Za-z]	/(Users|home)/(alice|bob|x|me|test|dev|admin|agent|someone|ada|example|user|runner|you|name|username)|-Users-(alice|bob|x|me|test|dev|admin|agent|someone|ada|example|user)
+GH_CONFIG_DIR	-	\.config/gh-[A-Za-z0-9_.-]+	\.config/gh-(example|acme)
+TAILNET_IP	-	(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+([^0-9]|$)
+HOSTNAME	i	[A-Za-z0-9][A-Za-z0-9-]*\.(local(domain)?|lan|internal|ts\.net)(\.[A-Za-z0-9]+)?_*([^A-Za-z0-9_]|$)	.*\.local\.[A-Za-z0-9]+_*.?|threading\.local.?
+RIG_SPEC	i	Mac Studio|Mac1[0-9],[0-9]|M[0-9] (Max|Ultra)
+# Class 2 — internal thinking (briefs, sessions, dashboard ids, dated rulings)
+ARCH_ID	-	(^|[^A-Za-z0-9_-])ar-[A-Z][0-9A-Za-z]{1,3}([^A-Za-z0-9]|$)
+RULING_DATED	i	(owner|the owner)[ ,:(]*(ruling|decision|said)?[ ,:(]*20[0-9]{2}-[0-9]{2}-[0-9]{2}|ruling 20[0-9]{2}-[0-9]{2}-[0-9]{2}
+BRIEF_PATH	-	docs/briefs/|architect/local|\.trusty-mpm/sessions/
+# Class 3 — personalized processes (the private build host)
+EVO_HOST	-	evo-linux|instance-evo|evo-gate-log|(^|[^A-Za-z])EVO([^A-Za-z]|$)
+# Class 4 — employer / personal accounts. The org NAME itself lives in the
+# out-of-tree deny file; these catch the shapes a second account leaves.
+ORG_ALIAS	-	git@github-[A-Za-z0-9_.-]+:
+EMAIL	i	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}	.*@([A-Za-z0-9-]+\.)*(example\.(com|org|net)|users\.noreply\.github\.com)
+SLACK_ID	-	(^|[^A-Za-z0-9])[UWCDT][A-Z0-9]{8,10}([^A-Za-z0-9]|$)	.?[UWCDT][A-Z]+.?
+# Class 5 — internal coordination ids and authority cites (#11720). A PUB_*
+# class binds published paths only (PUBLISHED_PREFIXES in
+# scripts/public_leaks.py: docs/, website/src/content/): ledger task and goal
+# ids (`<code>-<letter><hex>`), dashboard decision ids cited as rulings, and
+# owner-ruling wording used as a decision's authority. Cite the public reason,
+# issue, ADR or PR instead.
+PUB_IL_ID	-	(^|[^A-Za-z0-9_-])[a-z]{2}-[A-Z]([0-9][0-9a-f]{1,2}|[a-f][0-9][0-9a-f]?)([^A-Za-z0-9]|$)
+PUB_DECISION_ID	-	([Rr]ul(ing|ed)|RULED|[Oo]wner|[Dd]ashboard)[^.;|(/]{0,25}?(?<![A-Za-z0-9_/-])D[0-9][0-9a-f]{0,2}(?![A-Za-z0-9_])
+PUB_OWNER_RULING	-	[Oo]wner[- ]([Rr]ul(ing|ed)|[Dd]ecision|[Aa]nswer|[Dd]irection|[Cc]hoice)s?|OWNER DECISION|[Oo]wner's (ruling|decision|call|choice)|[Pp]er the owner

@@ -24,6 +24,8 @@ mod architect_turn_active_chain_10571;
 mod catalog_sync_idempotent;
 mod commit_stats_hook_budget;
 mod config_mount;
+// #10153: `dbatg` MCP writes are bound to the bridge's PM session.
+mod dbatg_bridge_owner_10153;
 // #8985: `disk_survey` through a built daemon's `/rpc`.
 mod disk_survey_mcp_smoke;
 #[cfg(feature = "daemon")]
@@ -34,6 +36,8 @@ mod manager_cli_client;
 mod manager_inference;
 mod manager_routes;
 mod manager_routing;
+// #11625: the MCP-only memory tools as `tm memory` verbs.
+mod memory_tool_verbs_socket;
 mod memory_verbs_socket;
 mod meta_demo_e2e;
 mod no_content_single_error;
@@ -41,6 +45,8 @@ mod orphan_gc_sweep;
 mod pid_registry_sweep;
 mod project_registry_routes;
 mod project_status_route;
+// #10592: `tm project unadopt` edits the adoption ledger only.
+mod project_unadopt_10592;
 mod projects_json_concurrency;
 mod proxy_routes;
 mod push_guard_hook;
@@ -77,12 +83,16 @@ mod tm_architect_verbs;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #10735: the claude.ai connectors pass the egress guard; the rest stays.
+mod connectors_allowed_10735;
 // #8454 S2: the trust anchors through the egress hook, pm-guard off.
 mod tm_hook_egress_anchor_8454;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 mod tm_hook_egress_guard_8454;
 // #10387: the per-project read-only Slack allowlist through the binary.
 mod tm_hook_egress_slack_read_10387;
+// #11194: a PM main thread's Slack send to the owner's DM, and nothing else.
+mod tm_hook_egress_pm_dm_11194;
 // #9923: the egress guard taints a hook-less id under a live mark.
 mod tm_hook_egress_lazy_taint_9923;
 mod tm_hook_idle_parking;
@@ -94,10 +104,15 @@ mod tm_hook_pm_guard;
 mod tm_hook_pm_guard_absolute_write_7228;
 mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
+mod tm_hook_pm_guard_binary_operands_10672;
 mod tm_hook_pm_guard_build_lease;
+// #10574: the stale-copy guard, fixture F2.
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+mod tm_hook_pm_guard_stale_copy_10574;
+// #11353: GP-051 on the live `Agent` dispatch path.
+mod tm_hook_pm_guard_fable_11353;
 // #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.
 mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
@@ -129,10 +144,20 @@ mod tm_hook_pm_guard_unquoted_heredoc_expansion;
 // #10973: a compression-opportunity row per tool result.
 mod tm_hook_opportunity_10973;
 mod tm_hook_pretooluse_rewrite;
+// #7684: the project-rules carrier under each bypass and with pm-guard off.
+mod tm_hook_rules_carrier_7684;
 mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 // #8433 P0 (D09): a tainted session's new id reads tainted at SessionStart.
 mod tm_hook_session_start_taint_8433;
+// #10960: the Architect's standing-rules block, per turn and at resume.
+mod tm_hook_standing_rules_10960;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg.
+mod tm_hook_turn_task_11398;
+// #10575: the warn-only completion-evidence Stop check.
+mod tm_hook_completion_evidence_10575;
+// #11431: the shadow minimal pm-guard never blocks.
+mod tm_hook_pm_guard_shadow_11431;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

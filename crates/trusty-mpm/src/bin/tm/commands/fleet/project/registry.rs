@@ -104,6 +104,18 @@ impl Registry {
             })
     }
 
+    /// Every registered project, in registry order.
+    pub(crate) fn projects(&self) -> &[Project] {
+        &self.projects
+    }
+
+    /// The name `project`'s tmux sessions derive from: its alias, else its key.
+    // #11012: one stem rule for `list` counts and `init`'s session mapping.
+    pub(crate) fn session_alias<'a>(&'a self, project: &'a Project) -> &'a str {
+        self.alias_for(project)
+            .map_or(project.name.as_str(), |a| a.alias.as_str())
+    }
+
     /// The key equal to `name`, else equal ignoring ASCII case.
     pub(crate) fn key_named(&self, name: &str) -> Option<&str> {
         self.get(name)

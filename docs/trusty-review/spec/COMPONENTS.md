@@ -157,12 +157,15 @@ Each role may use a different provider (e.g. reviewer on Bedrock, summarizer on 
 | Verifier / Summarizer | `us.anthropic.claude-haiku-4-5-20251001-v1:0` (date-versioned; the short form `us.anthropic.claude-haiku-4-5` produces HTTP 400) |
 | Compare Sonnet 4.5 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (confirmed available) |
 
-**Default compare-set** (`COMPARE_CANDIDATE_MODELS`, all `bedrock/`-prefixed):
-1. `bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0` (cheapest)
-2. `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0` (mid-tier)
-3. `bedrock/us.anthropic.claude-sonnet-4-6` (reviewer default)
+**Default compare-set** (`COMPARE_CANDIDATE_MODELS`, all `bedrock/`-prefixed),
+ordered by tier then generation: Haiku 4.5, Sonnet 4.6, Sonnet 5.5, Opus 5.5.
+Haiku 5.5 (`us.anthropic.claude-haiku-5-5`) is in the model table and priced,
+but not in the default set. The list in `llm/models.rs` is the source of truth.
 
-Opus is intentionally excluded (not access-granted in the target account).
+Model access is not recorded in source (#10757). An operator declares the
+models the account may invoke with `[models] authorized = [...]` or
+`TRUSTY_REVIEW_AUTHORIZED_MODELS` (comma-separated); when set, that list
+replaces the default compare-set.
 
 ### 4.4 OpenRouterProvider
 
@@ -252,7 +255,7 @@ JSON schema is additively versioned via `review_version`. Existing field names a
 
 ### 6.1 GitHub client (`integrations/github/`)
 
-**Auth** (`auth.rs`): GitHub App preferred (JWT minted via `jsonwebtoken`, exchanged for short-lived installation token), PAT fallback. Multi-org: `resolve_token(owner)` selects installation token by case-insensitive owner match (`duettoresearch` vs `hotstats`), falling back to `GITHUB_TOKEN`.
+**Auth** (`auth.rs`): GitHub App preferred (JWT minted via `jsonwebtoken`, exchanged for short-lived installation token), PAT fallback. Multi-org: `resolve_token(owner)` selects installation token by case-insensitive owner match (`acme` vs `hotstats`), falling back to `GITHUB_TOKEN`.
 
 **Push firewall** (`firewall.rs`): Hard-coded `GH_ALLOW_PUSH = false`. `assert_no_push_operation()` panics/errors on any git-write attempt. Not configurable by env or per-repo config.
 
@@ -267,7 +270,8 @@ JSON schema is additively versioned via `review_version`. Existing field names a
 | `GITHUB_APP_ID` | App numeric ID |
 | `GITHUB_APP_CLIENT_ID` | App OAuth client ID |
 | `GITHUB_APP_PRIVATE_KEY` | RSA PEM (`\n`-escaped newlines) |
-| `GITHUB_INSTALLATION_ID_DUETTORESEARCH` | duettoresearch org installation |
+| `GITHUB_INSTALLATION_ID_DEFAULT_ORG` | default org installation id |
+| `GITHUB_INSTALLATION_DEFAULT_ORG` | org (repo owner) the default installation id belongs to |
 | `GITHUB_INSTALLATION_ID_HOTSTATS` | hotstats org installation |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `X-Hub-Signature-256` |
 | `GITHUB_TOKEN` | PAT fallback |
@@ -594,7 +598,7 @@ contains the full design. Status per phase:
 
 ---
 
-## 13. Best-practice & Duetto-alignment component requirements (epic #1413)
+## 13. Best-practice & Acme-alignment component requirements (epic #1413)
 
 This section maps the normative requirements from PRD.md §9 to the specific
 components they affect. See PRD.md §9 for the full rationale and MUST/SHOULD

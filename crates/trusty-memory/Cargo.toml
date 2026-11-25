@@ -68,7 +68,8 @@ name = "trusty-memory"
 # 0.32.1 (Refs #9544): patch by owner ruling (VERSIONING 2026-09-26) — palace_rename; DaemonEvent gains PalaceRenamed and #[non_exhaustive], a SemVer break for exhaustive matchers outside the crate.
 # 0.35.0 (Refs #9275): minor by owner ruling Dfa — palace format 2; trusty-common floor moves 0.60 -> 0.61; 0.34.0 skipped on purpose and never published (0.33.0 is live on crates.io).
 # 0.36.0 (Refs #9271): minor — owns the engine (`trusty_memory::engine` is a module, no longer a re-export of `trusty_common::memory_core`); trusty-common floor moves 0.63 -> 0.64; adds `embedder-test-support` and `memory-core-test-support`; subsumes the unpublished 0.35.1 (0.35.0 is live on crates.io).
-version = "0.36.7"
+# 1.0.0: stability release (owner ruling Dnx); replaces the 0.36.9 line.
+version = "1.0.2"
 edition.workspace = true
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -85,7 +86,7 @@ exclude = [".fastembed_cache/"]
 
 [lib]
 # Why: Explicit `rlib` keeps the crate linkable as a Rust library from
-#      host processes (trusty-agents) that want to register `MemoryMcpService`
+#      host processes (trusty-assistants) that want to register `MemoryMcpService`
 #      directly via the shared `ServiceDescriptor` trait, rather than
 #      spawning a separate MCP stdio child. Matches the rest of the
 #      trusty-* ecosystem (see trusty-mcp-core) for consistency.
@@ -104,7 +105,7 @@ path = "src/main.rs"
 # Why: `serve` / `start` bind the daemon's socket, so the binary needs the
 #      `server` feature compiled in. Listing it here keeps a
 #      `--no-default-features` library build (the engine-only build, and the
-#      trusty-agents `mcp-schema` linker) from trying to build this binary
+#      trusty-assistants `mcp-schema` linker) from trying to build this binary
 #      without the serving surface and failing to link `serve`.
 # #9269: `server` (default) replaces `daemon`, which stays as its alias.
 required-features = ["server"]
@@ -144,7 +145,7 @@ required-features = ["server"]
 [dependencies]
 # `bm25` (#5329) replaces the retired `bm25-client`: the lexical lane now links
 # the index itself rather than a UDS client for a subprocess that holds it.
-# `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
+# `uds-supervisor` is NOT dropped — trusty-console and trusty-assistants still
 # depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
 # JSON-RPC / MCP primitives (ADR-0040, #5803). #6316: `daemon-bridge-json-rpc`
 # compiles the shared stdio<->UDS forwarder `commands::serve_stdio_bridge` runs
@@ -159,7 +160,7 @@ trusty-mcp = { workspace = true, optional = true }
 # serving surface needs is switched on by `server` below (`config-cli` is what
 # pulls in clap). #9271: the engine moved here from trusty-common's
 # `memory-core`, so this names the trusty-common features it used to imply.
-trusty-common = { path = "../trusty-common", version = "0.69", default-features = false, features = [
+trusty-common = { path = "../trusty-common", version = "0.70.2", default-features = false, features = [
     "embedder",
     "embedder-bundled-ort",
     "credentials",
@@ -279,7 +280,7 @@ git2 = { workspace = true }
 # of this migration are proven to agree.
 # #9271: `test-support` exposes the trusty-common test helpers the engine's
 # tests share (`capture_logs`, `ReadOnlyDir`, `EnvVarGuard`).
-trusty-common = { path = "../trusty-common", version = "0.69", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
+trusty-common = { path = "../trusty-common", version = "0.70", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
 # #9271: this crate's own test-support features, for `tests/*`. A path-only
 # self dev-dependency: Cargo turns the features on for test builds only, and
 # `cargo publish` strips the entry. `default-features = false` keeps it from
@@ -305,7 +306,7 @@ chrono = { workspace = true }
 #      of `server` for all of 1.x (#6286 renamed `axum-server` to it).
 #      `mcp-schema` compiles only the MCP tool schema and `MemoryMcpService`,
 #      for a host that merges the schema into its own `rpc.discover` without
-#      linking the daemon — trusty-agents is that host.
+#      linking the daemon — trusty-assistants is that host.
 # Test: `tests/feature_gate.rs` (the manifest wiring) plus
 #      `cargo check -p trusty-memory --no-default-features` and
 #      `--no-default-features --features mcp-schema`.

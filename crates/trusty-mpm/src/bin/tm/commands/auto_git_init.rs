@@ -17,8 +17,8 @@
 //! #7749: the upward probe is not enough. A directory with a repository BENEATH
 //! it is a workspace parent, and a `.git` written here becomes an ancestor
 //! repository for every project under it, so the guards also run the downward
-//! [`trusty_mpm::core::child_repo_scan::scan_for_child_repo`] — the same scan
-//! the `CLAUDE.md` seed guard uses — and refuse on a child repository or on a
+//! [`trusty_mpm::core::child_repo_scan::scan_for_child_repo_within`] — the same
+//! scan and budget the `CLAUDE.md` seed guard uses (#10461) — and refuse on a child repository or on a
 //! scan that could not finish.
 //! #9495: git's "no repository" wording is corroborated by an ancestor-`.git`
 //! witness before it counts as absence; see [`classify_rev_parse_failure`].
@@ -26,7 +26,9 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, scan_for_child_repo};
+use trusty_mpm::core::child_repo_scan::{
+    ChildRepoScan, PROJECT_SCAN_BUDGET, ScanIncomplete, scan_for_child_repo_within,
+};
 
 /// The git executable this module drives.
 const GIT_PROGRAM: &str = "git";
@@ -194,9 +196,9 @@ pub(crate) fn initialized_message(dir: &Path) -> String {
 /// #7749 review: they also carry their OWN remedy. "Run tm from a project
 /// directory" is right for `$HOME` and `/`, and wrong for a scan arm — tm was
 /// run from a directory the operator considers a project, and
-/// [`trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET`] is 256
-/// directories, so a sizeable plain directory hits
-/// [`AutoInitRefusal::ScanIncomplete`] routinely. Both scan arms give the
+/// a very large plain directory can exhaust
+/// [`trusty_mpm::core::child_repo_scan::PROJECT_SCAN_BUDGET`] and hit
+/// [`AutoInitRefusal::ScanIncomplete`]. Both scan arms give the
 /// remedy `SeedRefusal::ScanIncomplete` gives.
 /// Test: `refusal_message_names_the_home_directory`,
 /// `refusal_message_names_the_filesystem_root`,
@@ -353,13 +355,15 @@ fn classify_rev_parse_failure(dir: &Path, stderr: &str) -> anyhow::Result<RepoCo
 /// What: probes with [`repo_context`], decides with [`plan_auto_init`], runs
 /// `git init` and prints [`initialized_message`] for the `Init` arm, prints
 /// [`refusal_message`] for the `Refuse` arm. #7749: the `scan` seam
-/// [`plan_auto_init`] consults is [`scan_for_child_repo`] over `dir` itself,
+/// [`plan_auto_init`] consults is [`scan_for_child_repo_within`] over `dir`
+/// itself with [`PROJECT_SCAN_BUDGET`] (#10461),
 /// evaluated only when no cheaper guard already decided. Errors only when `git`
 /// is missing (see [`missing_git_error`]), when git's verdict is unreadable, or
 /// when `git init` itself fails.
 /// Test: `auto_init_initializes_a_plain_directory`,
 /// `auto_init_refuses_a_workspace_parent_with_a_deep_child_repository`,
-/// `auto_init_refuses_when_the_downward_scan_cannot_finish`, and the rest of
+/// `auto_init_refuses_when_the_downward_scan_cannot_finish`,
+/// `auto_init_initializes_a_project_wider_than_the_workspace_budget`, and the rest of
 /// `auto_git_init_tests.rs`.
 pub(crate) fn ensure_git_repo(dir: &Path) -> anyhow::Result<AutoInitOutcome> {
     ensure_git_repo_with(dir, dirs::home_dir().as_deref(), GIT_PROGRAM)
@@ -389,7 +393,8 @@ pub(crate) fn ensure_git_repo_with(
     // #7749: the downward scan is the last guard consulted, so it runs only for
     // a directory git already reported as having no repository at all.
     match plan_auto_init(&canonical, home_canonical.as_deref(), context, || {
-        scan_for_child_repo(dir)
+        // #10461: the project budget; exhaustion still refuses.
+        scan_for_child_repo_within(dir, None, PROJECT_SCAN_BUDGET)
     }) {
         AutoInitPlan::AlreadyGit => Ok(AutoInitOutcome::AlreadyGit),
         AutoInitPlan::Refuse(refusal) => {

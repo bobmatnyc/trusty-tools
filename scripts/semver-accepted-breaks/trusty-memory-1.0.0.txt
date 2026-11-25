@@ -1,0 +1,6 @@
+# Computed against the latest published release, trusty-memory 0.36.8 (0.36.9 is not on crates.io).
+crate   trusty-memory
+version 1.0.0
+reason  Owner ruling Dnx: 1.0.0 stability release replaces 0.36.9. A major bump permits the break: RecallCoverage gains the public fields deadline_exceeded and deadline_not_reached (Refs #11255).
+accept  constructible_struct_adds_field  RecallCoverage deadline_exceeded
+accept  constructible_struct_adds_field  RecallCoverage deadline_not_reached

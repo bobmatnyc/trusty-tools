@@ -117,7 +117,7 @@ fn retired_services_are_not_installed() {
     let members: Vec<&str> = RETIRED_SERVICES.iter().map(|s| s.member).collect();
     assert_eq!(
         members,
-        vec!["trusty-review", "trusty-analyze"],
+        vec!["trusty-review", "trusty-analyze", "trusty-assistants"],
         "adding a retirement is a deliberate act — update this pin with it"
     );
 }
@@ -174,7 +174,22 @@ fn pre_fix_labels_are_recorded_as_legacy() {
 /// the full binary name on purpose — renaming one invalidates the binary's
 /// designated requirement and re-triggers macOS TCC prompts (#2558). It must
 /// not be normalised onto the launchd convention.
-const SCAN_EXEMPT_PATHS: &[&str] = &["trusty-installer/src/commands/macos_signing"];
+///
+/// The three `trusty-browser` files name the same `com.trusty.browser` string in
+/// three non-launchd namespaces, each fixed by state a Python install already
+/// left on disk (#11440): `codesign.rs` the codesign identifier and designated
+/// requirement (#2558), `install_host.rs` the Chrome native-messaging host name
+/// (the manifest file Chrome reads), and `vault.rs` the Keychain service of the
+/// wrapping key (renaming it orphans every pairing). The browser's launchd label
+/// itself comes from [`BROWSER`](crate::launchd_labels::BROWSER).
+const SCAN_EXEMPT_PATHS: &[&str] = &[
+    "trusty-installer/src/commands/macos_signing",
+    "trusty-browser/src/codesign.rs",
+    "trusty-browser/src/install_host.rs",
+    "trusty-browser/src/vault.rs",
+    // #9171 A1: trusty-architect is a leaf; cannot depend on trusty-common
+    "trusty-architect/src/sched/plist.rs",
+];
 
 /// Why (#4919, and #2827 before it): every re-fix so far corrected one literal
 /// and left the mechanism that mints them intact, so a new divergent literal
@@ -1328,4 +1343,23 @@ fn identifier_convention_violations_accept_the_repaired_shape() {
                 # local narrated=\"com.trusty.trusty-memory\"\n";
     let found = identifier_convention_violations("scripts/install-fixture-signed.sh", body);
     assert!(found.is_empty(), "expected no violations, got: {found:?}");
+}
+
+/// Why (#11632): `tagent --slack` no longer exists, so nothing may install
+/// `com.trusty.agents.slack`, but hosts that ran it still have the unit loaded
+/// and an upgrade must be able to boot it out.
+/// What: the label is in no `SERVICES` row, and is the one label
+/// `retired_labels_for_member("trusty-assistants")` returns.
+/// Test: this is the test.
+#[test]
+fn retired_agents_slack_is_evicted_not_registered() {
+    assert!(
+        !SERVICES.iter().any(|s| s.label == AGENTS_SLACK),
+        "the cut Slack gateway must not be installed"
+    );
+    assert_eq!(
+        retired_labels_for_member("trusty-assistants"),
+        vec![AGENTS_SLACK],
+        "the retired gateway must stay evictable"
+    );
 }

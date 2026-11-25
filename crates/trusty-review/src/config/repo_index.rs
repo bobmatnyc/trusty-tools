@@ -20,7 +20,7 @@
 
 use std::cmp::Reverse;
 
-use tracing::warn;
+use tracing::{info, warn};
 use trusty_common::github_path::{UNKNOWN_OWNER, parse_owner_repo};
 use trusty_common::repo_identity::RepoIdentity;
 
@@ -30,9 +30,9 @@ use crate::integrations::search_client::{IndexIdentity, SearchClient, SearchClie
 ///
 /// Why: a missing index is a caller-fixable condition, not an outage; the
 /// message must say which repo and which index id were looked up.
-/// What: one variant per failure; each `Display` names the repo. `Registry`
-/// is the only variant `review_pr` may degrade on (search not required).
-/// Test: `missing_index_error_names_the_repo_and_the_index_id`,
+/// What: one variant per failure; each `Display` names the repo. `review_pr`
+/// may degrade on `Registry` and, #11409, on `NoIndex` (search not required).
+/// Test: `missing_index_is_an_error_when_search_is_required`,
 /// `registry_failure_is_an_error_when_search_is_required`.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoIndexError {
@@ -57,11 +57,13 @@ pub enum RepoIndexError {
         /// The listing failure.
         source: SearchClientError,
     },
-    /// No registered index belongs to the repo.
+    /// No live registered index belongs to the repo.
+    ///
+    /// `detail` ends with the remedy, `trusty-search index <path>`; #11545: a
+    /// parked id resolves instead of landing here.
     #[error(
         "no trusty-search index for {repo}: looked up index {index_id:?} and repo_identity \
-         {repo:?} across {registered} registered index(es); {detail}. Index a checkout of \
-         {repo} with `trusty-search index <path>`, then retry"
+         {repo:?} across {registered} registered index(es); {detail}"
     )]
     NoIndex {
         /// Canonical `owner/repo`.
@@ -70,7 +72,7 @@ pub enum RepoIndexError {
         index_id: String,
         /// How many indexes the daemon listed.
         registered: usize,
-        /// Why the looked-up id did not qualify.
+        /// Why the looked-up id did not qualify, and what to do about it.
         detail: String,
     },
     /// #8651: an operator-pinned index is recorded for another repository.
@@ -270,11 +272,13 @@ pub(crate) fn check_pin(
 /// the repo.
 ///
 /// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`,
-/// `missing_index_error_names_the_repo_and_the_index_id`,
+/// `missing_index_is_an_error_when_search_is_required`,
 /// `registry_failure_is_an_error_when_search_is_required`,
 /// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`,
 /// `owner_named_unknown_owner_sentinel_is_invalid`,
-/// `filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one`.
+/// `filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one`,
+/// `review_pr_resolves_an_index_listed_only_as_parked`,
+/// `review_pr_refuses_a_parked_index_of_another_owner`.
 pub(crate) async fn resolve_repo_index(
     client: &dyn SearchClient,
     owner: &str,
@@ -297,13 +301,32 @@ pub(crate) async fn resolve_repo_index(
         return Ok(id);
     }
     let indexes = client.list_index_identities(None).await.map_err(registry)?;
-    select_repo_index(&indexes, &repo_key, &index_id, pinned).map_err(|detail| {
-        RepoIndexError::NoIndex {
-            repo: repo_key.clone(),
-            index_id: index_id.clone(),
-            registered: indexes.len(),
-            detail,
-        }
+    let detail = match select_repo_index(&indexes, &repo_key, &index_id, pinned) {
+        Ok(id) => return Ok(id),
+        Err(detail) => detail,
+    };
+    // #11545: a parked id is registered, only not resident — it is present.
+    // The context gate wakes it with one search before reviewing. Only a row
+    // the daemon files under this repo's identity counts, the parked analogue
+    // of the ForeignPin refusal: a bare id match would take acme/widget's
+    // parked `widget` index for bobmatnyc/widget.
+    let parked = client
+        .list_parked_index_ids(Some(&repo_key))
+        .await
+        .inspect_err(|e| warn!(repo = %repo_key, "review_pr: parked indexes unreadable: {e}"))
+        .unwrap_or_default();
+    if parked.contains(&index_id) {
+        info!(repo = %repo_key, index = %index_id, "review_pr: resolved a parked index");
+        return Ok(index_id);
+    }
+    Err(RepoIndexError::NoIndex {
+        repo: repo_key.clone(),
+        index_id: index_id.clone(),
+        registered: indexes.len(),
+        detail: format!(
+            "{detail}. Index a checkout of {repo_key} with `trusty-search index <path>`, then \
+             retry"
+        ),
     })
 }
 
@@ -414,3 +437,7 @@ pub(crate) fn select_repo_index(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "repo_index_parked_tests.rs"]
+mod repo_index_parked_tests;

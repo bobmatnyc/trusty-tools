@@ -358,3 +358,46 @@ fn index_file_status_decodes_present_absent_and_unreadable_identity() {
     assert_eq!(absent.content_sha256, None);
     assert_eq!(absent.identity, None);
 }
+
+/// #11667: both arms (shared data dir and `TRUSTY_DATA_DIR`) resolve the bind
+/// path and create nothing.
+#[test]
+fn search_dial_socket_matches_and_creates_nothing() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let isolated = tmp.path().join("isolated");
+    let saved_dir = std::env::var_os("TRUSTY_DATA_DIR");
+    let saved_socket = std::env::var_os(TRUSTY_SEARCH_SOCKET_ENV);
+    // SAFETY: guarded by ENV_LOCK; every variable is restored below.
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::remove_var(TRUSTY_SEARCH_SOCKET_ENV);
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, tmp.path());
+    }
+    let shared_dial = search_dial_socket();
+    let shared_created = tmp.path().join(SEARCH_APP_NAME).exists();
+    let shared_bind = search_socket();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", &isolated) };
+    let isolated_dial = search_dial_socket();
+    let isolated_created = isolated.exists();
+    let isolated_bind = search_socket();
+    unsafe {
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        match saved_dir {
+            Some(v) => std::env::set_var("TRUSTY_DATA_DIR", v),
+            None => std::env::remove_var("TRUSTY_DATA_DIR"),
+        }
+        if let Some(v) = saved_socket {
+            std::env::set_var(TRUSTY_SEARCH_SOCKET_ENV, v);
+        }
+    }
+    assert!(
+        !shared_created,
+        "shared-arm dial lookup created the data dir"
+    );
+    assert!(!isolated_created, "TRUSTY_DATA_DIR dial lookup created it");
+    assert_eq!(shared_dial.expect("dial"), shared_bind.expect("bind"));
+    assert_eq!(isolated_dial.expect("dial"), isolated_bind.expect("bind"));
+}

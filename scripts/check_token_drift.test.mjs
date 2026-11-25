@@ -184,7 +184,7 @@ test("checkCrate throws when a mapped canonical token doesn't exist", () => {
 // ---------------------------------------------------------------------------
 
 test("every ENFORCED crate compares >0 real tokens against canonical", () => {
-  // Covers all 6 UI crates (epic #3486): trusty-agents, trusty-code-gui
+  // Covers every UI crate (epic #3486): trusty-code-gui
   // (rgb-triple) + trusty-console, trusty-analyze,
   // trusty-search, trusty-memory (hex). Running the REAL comparison against
   // the REAL canonical file is the strongest form of "at least one token is
@@ -192,7 +192,9 @@ test("every ENFORCED crate compares >0 real tokens against canonical", () => {
   // mis-configured path/selector), so a bare doesNotThrow here would already
   // catch that; we additionally assert the returned comparedCount is > 0 and
   // that no crate has drifted, making this the CI regression for the flip.
-  // #9067: the console's Secrets page is the seventh.
+  // #9067: the console's Secrets page is the seventh. #11632: the
+  // trusty-agents UI was deleted, leaving six. #11749: the Assistants page
+  // makes seven.
   assert.ok(ENFORCED.length === 7, `expected 7 enforced crates, got ${ENFORCED.length}`);
   const canonical = parseCanonical(TOKENS_CSS_PATH);
   for (const crate of ENFORCED) {

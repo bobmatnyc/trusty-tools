@@ -576,7 +576,9 @@ mod tests {
     /// Why: Ambiguous auto-abbrevs must be dropped; unique ones must fire.
     /// trusty-code (#639) made `tc` collide with trusty-common — must suppress.
     /// `tc→trusty-common` stays via explicit alias table, not auto-generation.
-    /// trusty-agents (#831) made `ta` collide with trusty-analyze — must suppress.
+    /// trusty-agents (#831, now trusty-assistants after #11632) made `ta`
+    /// collide with trusty-analyze — must suppress. #11632: `ta` is the
+    /// trusty-assistants binary, so it resolves through its binary alias.
     /// `tr→trusty-review` is a stable unambiguous example. All shorts unique.
     /// Test: this test itself.
     #[test]
@@ -589,11 +591,17 @@ mod tests {
                 .all(|x| !(x.short == "tc" && x.source == DiscoverySource::FirstLetterAbbrev)),
             "ambiguous `tc` must not appear; got: {d:?}"
         );
-        // Ambiguous `ta` (trusty-agents vs trusty-analyze, since #831) must be suppressed.
+        // Ambiguous `ta` (trusty-assistants vs trusty-analyze, since #831) must be suppressed.
         assert!(
             d.iter()
                 .all(|x| !(x.short == "ta" && x.source == DiscoverySource::FirstLetterAbbrev)),
             "ambiguous `ta` must not appear; got: {d:?}"
+        );
+        // #11632: `ta` is the trusty-assistants binary, so it still resolves.
+        assert!(
+            d.iter()
+                .any(|x| x.short == "ta" && x.full == "trusty-assistants"),
+            "expected ta→trusty-assistants from its binary name; got: {d:?}"
         );
         // An unambiguous abbrev must still fire — happy-path guard.
         assert!(

@@ -1,27 +1,27 @@
 # SPEC-OKF-01 — trusty-okf: building and maintaining OKF bundles
 
-**Status:** Accepted r7.1 — owner accepted as written, 2026-11-03 09:16Z (Bob). Pre-implementation filings in progress; no implementation yet.
+**Status:** Accepted r7.1 — accepted as written, 2026-11-03. Pre-implementation filings in progress; no implementation yet.
 **Date:** 2026-11-03
-**Author:** trusty-mpm documentation agent, from the Architect's brief (goal ar-G01)
-**Owner:** Bob
+**Author:** trusty-mpm documentation agent
+**Owner:** trusty-tools maintainers
 **Spec ID:** `SPEC-OKF-01~draft`
 **DOC-N claim:** `DOC-89`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). No other `DOC-89` on `origin/main` at 2026-11-09. Renumbered from `DOC-87`, which `DOC-87-typed-owner-constraints.md` already held (#10743, review of #10811).
-**Related:** ADR-0022, ADR-0024, ADR-0026, ADR-0029, ADR-0040, ADR-0041, DOC-45, DOC-55, DOC-63 (all in `bobmatnyc/trusty-tools`, `docs/adr/` and `docs/specs/`); the Xberg assessment (ar-T05, `docs/briefs/2026-11-03-xberg-assessment.md` in trusty-tools worktree `f93609dd`); proposal [ADR-OKF-0001](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) (filed as ADR-0075)
+**Related:** ADR-0022, ADR-0024, ADR-0026, ADR-0029, ADR-0040, ADR-0041, DOC-45, DOC-55, DOC-63 (all in `bobmatnyc/trusty-tools`, `docs/adr/` and `docs/specs/`); the Xberg assessment (an unpublished fit assessment, cited as `xberg-assessment.md:<line>`); proposal [ADR-OKF-0001](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) (filed as ADR-0075)
 **Evidence read at:** trusty-tools `c1eed98441`; OKF spec repo `ad30107c31c06aec8a7d5636e0d1058118604e6f`; wmahfoudh/okf `7d6286ba112177394f08bf7b79e56f54a1fd22ec`
-**Filed in trusty-tools:** 2026-11-03 under [#10743](https://github.com/bobmatnyc/trusty-tools/issues/10743), unchanged except for this line and the ADR-OKF-0001 links, which now point at [ADR-0075](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md). ADR-0075 also records the §3 (e) feed-loop amendment that §6.1 item 9 names. Paths below such as `docs/specs/SPEC-OKF-01-review.md` refer to the trusty-okf project, which keeps the review, the acceptance reconciliation, the owner-choices list and the readback beside its copy of this spec; they are not copied here.
+**Filed in trusty-tools:** 2026-11-03 under [#10743](https://github.com/bobmatnyc/trusty-tools/issues/10743), unchanged except for this line and the ADR-OKF-0001 links, which now point at [ADR-0075](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md). ADR-0075 also records the §3 (e) feed-loop amendment that §6.1 item 9 names. Paths below such as `docs/specs/SPEC-OKF-01-review.md` refer to the trusty-okf project, which keeps the review, the acceptance reconciliation, the open-choices list and the readback beside its copy of this spec; they are not copied here.
 
-This spec proposes what the trusty-okf crate does. Bob decided §3 (a) on 2026-11-03. Bob also approved four inputs on 2026-11-03: state separation, document-tree import, email and Google Docs import, and the Xberg extraction worker (§1). On 2026-11-03 at 06:58Z Bob decided every remaining question in §3 and §7, and every other owner choice, as recommended (§1.5). No code exists yet.
+This spec proposes what the trusty-okf crate does. §3 (a) was decided on 2026-11-03. Four inputs were approved on 2026-11-03: state separation, document-tree import, email and Google Docs import, and the Xberg extraction worker (§1). Later on 2026-11-03 every remaining question in §3 and §7, and every other open choice, was decided as recommended (§1.5). No code exists yet.
 
-**Amendments of 2026-11-05 (owner rulings, Bob; #10746).** D14 drops `convert` from §2.7.2 and §4.1. D19 pins the extraction worker to `xberg =1.3.10` in §2.16. D4b amends §2.7.2 for the local constants slice S4 uses and records that the advisory lock (§4.4) is built in slice S5. D4b items 1, 4 and 5 amend §4.3 (`put` and `verify` return `(PutOutcome, Vec<Finding>)`), §4.2 (`VerificationEvent.hash` is optional, with a `reason` such as `legacy_unbound`) and §2.3 (the root `index.md` marker is read from the first line after the frontmatter). The D14 leftovers remove the `convert.rs` references from §1.2 requirement 17, §2.8, §2.9, §2.11, §2.13 and the Appendix source list. Each change carries an inline `(Amended 2026-11-05, …)` note.
+**Amendments of 2026-11-05 (#10746).** The `convert` drop removes `convert` from §2.7.2 and §4.1. The xberg pin fixes the extraction worker at `xberg =1.3.10` in §2.16. The S3–S5 amendment changes §2.7.2 for the local constants slice S4 uses and records that the advisory lock (§4.4) is built in slice S5. Its items 1, 4 and 5 amend §4.3 (`put` and `verify` return `(PutOutcome, Vec<Finding>)`), §4.2 (`VerificationEvent.hash` is optional, with a `reason` such as `legacy_unbound`) and §2.3 (the root `index.md` marker is read from the first line after the frontmatter). The `convert` drop leftovers remove the `convert.rs` references from §1.2 requirement 17, §2.8, §2.9, §2.11, §2.13 and the Appendix source list. Each change carries an inline `(Amended 2026-11-05, …)` note.
 
-**Revision r7.2 (2026-11-10; #10746).** Brings the spec in line with the merged slices S3 to S12 and with the owner rulings of 2026-11-05. Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR".
+**Revision r7.2 (2026-11-10; #10746).** Brings the spec in line with the merged slices S3 to S12 and with the amendments of 2026-11-05. Confirmed on 2026-11-10 for merge.
 
-1. **S3 amendments 1, 4 and 5 (§4.3 tuple, §4.2 optional hash, §2.3 marker). Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (text reconstructed from merged S3 code).** Bob approved the three amendments on 2026-11-05 at 00:47-49Z, but the approved text was lost. Each passage now describes what `crates/trusty-okf` does on `origin/main`, and carries a confirmation note.
-2. **D14, drop `convert`.** No `convert` reference remains in §1.2 requirement 17, §2.8, §2.9, §2.11, §2.12 and §2.13 or in the §2.7.2 module map, and §4.1 lists no `bundle::convert`. The `conversion-log.md` rows stay, because the bundle format keeps that file. PR #10927 applied this change. r7.2 changes no text for it.
-3. **§2.7.2 module map. Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR".** S11 kept `store.rs`, `okg/mod.rs` and `tests/okg_artifacts.rs` in trusty-agents. S12 replaced `okg/index_journal.rs` with `trusty_okf::state`. The map now names those locations. The map in r7.1 sent all four to trusty-okf.
-4. **D14, D19, D4b ports.** The 97babdf amendments (D14 in §2.7.2 and §4.1, D19 `xberg =1.3.10` in §2.16, D4b S4 constants in §2.7.2, D4b advisory lock in S5 at §4.4) are already in this file through #10927. r7.2 adds the S5 note that the lock is `bundle/lock.rs`.
+1. **S3 amendments 1, 4 and 5 (§4.3 tuple, §4.2 optional hash, §2.3 marker). Confirmed on 2026-11-10 for merge (text reconstructed from merged S3 code).** The three amendments were approved on 2026-11-05, but the approved text was lost. Each passage now describes what `crates/trusty-okf` does on `origin/main`, and carries a confirmation note.
+2. **The `convert` drop.** No `convert` reference remains in §1.2 requirement 17, §2.8, §2.9, §2.11, §2.12 and §2.13 or in the §2.7.2 module map, and §4.1 lists no `bundle::convert`. The `conversion-log.md` rows stay, because the bundle format keeps that file. PR #10927 applied this change. r7.2 changes no text for it.
+3. **§2.7.2 module map. Confirmed on 2026-11-10 for merge.** S11 kept `store.rs`, `okg/mod.rs` and `tests/okg_artifacts.rs` in trusty-agents. S12 replaced `okg/index_journal.rs` with `trusty_okf::state`. The map now names those locations. The map in r7.1 sent all four to trusty-okf.
+4. **#10746 amendment ports.** The 97babdf amendments (the `convert` drop in §2.7.2 and §4.1, the `xberg =1.3.10` pin in §2.16, the S4 constants in §2.7.2, the advisory lock in S5 at §4.4) are already in this file through #10927. r7.2 adds the S5 note that the lock is `bundle/lock.rs`.
 
-**Revision r7.1 (2026-11-03).** Applies the four fixes and two MINORs of the delta review of r7 (`docs/specs/SPEC-OKF-01-review.md`, "Delta review of r7"). No owner decision changes.
+**Revision r7.1 (2026-11-03).** Applies the four fixes and two MINORs of the delta review of r7 (`docs/specs/SPEC-OKF-01-review.md`, "Delta review of r7"). No decision changes.
 
 1. `adopt` takes `(ConceptId, ByteHash)` pairs and refuses a concept whose bytes changed since the review. It needs a `Human` actor with explicit confirmation, and its refusal reasons are named ([§4.5](#SPEC-OKF-01-4-5) "Adopt"; §4.2; §4.3; criterion 142).
 2. The OS sandbox check rests on the host's own spawn evidence. The worker's `hello` `sandbox` field is a cross-check, and a mismatch is `worker_incompatible` ([§2.16](#SPEC-OKF-01-2-16); Appendix B; criterion 145).
@@ -30,17 +30,17 @@ This spec proposes what the trusty-okf crate does. Bob decided §3 (a) on 2026-1
 5. Criterion 144 tests exit code 2 through the library's error-to-exit-code mapping.
 6. `Verification` gains an optional `stale_after`, so a `verify` can extend `stale_after` in the same operation (§2.4; §4.2; criterion 146).
 
-**Revision r7 (2026-11-03).** Records the owner ruling of 06:58Z, "all recommended", on the 26 items of `docs/specs/SPEC-OKF-01-owner-choices.md` (§1.5).
+**Revision r7 (2026-11-03).** Records the decision "all recommended" on the 26 items of the open-choices list (§1.5).
 
-1. Each §3 question (b)–(r), sub-question (c2) and §7 reads "Decided 2026-11-03 (owner)". Rejected options stay visible, marked "Not chosen" or "Ruled out by r6".
+1. Each §3 question (b)–(r), sub-question (c2) and §7 reads "Decided 2026-11-03". Rejected options stay visible, marked "Not chosen" or "Ruled out by r6".
 2. Every "depends on 3x" passage now states the decided behaviour.
 3. The eight decisions without a §3 question are recorded where they apply: `verified[]` on a content change (§2.10), `stale_after` extension (§2.4), extraction provenance in the content hash (§2.10), stale-revision hits (§5.2), the worker OS sandbox (§2.16), native-Doc export review (§2.15), sub-agent imports and ADR-0024 (§2.12, §2.15), and the acceptance scope (§6.1 item 3).
-4. Items 19–26 of the owner-choices list are decided as recommended and stay revisitable at implementation. A change to one of them does not reopen acceptance (§1.5, §6.1 item 3).
+4. Items 19–26 of the open-choices list are decided as recommended and stay revisitable at implementation. A change to one of them does not reopen acceptance (§1.5, §6.1 item 3).
 5. D2 and D3 follow the delta review of r6 (`docs/specs/SPEC-OKF-01-review.md`, "Delta review of r6"). D2 adds `include_paths` and `path_filter` to `search.index.config.get`, or a per-path admission query. D3 also requires the binding to admit every concept path (§5.3.1, §5.6).
 6. §6.1 marks which acceptance items are satisfied and adds the pre-implementation filings that the decisions need (items 13–16).
 7. New criteria 144–147 test the decisions that r6 had no criterion for. Criterion 41 is withdrawn, because 3c B was not chosen.
 
-The delta review also suggests treating D1 as a release gate for `--feed`. No owner-choice item covers that, so r7 does not adopt it.
+The delta review also suggests treating D1 as a release gate for `--feed`. No open-choices item covers that, so r7 does not adopt it.
 
 **Revision r6 (2026-11-03).** Resolves the 12 rows that `docs/specs/SPEC-OKF-01-acceptance-reconciliation.md` classes BLOCKS ACCEPTANCE. Each fix states what must be true and adds criteria 128–143 (§6.2, "Acceptance-reconciliation fixes (r6)"). r6 decides no §3 question and does not decide §7. Where a fix constrains an open option, the text says so. r6 adds three external dependencies, D1–D3 (§5.6). The OWNER CHOICE and RECORDED rows are unchanged.
 
@@ -59,7 +59,7 @@ The delta review also suggests treating D1 as a release gate for `--feed`. No ow
 | 14 | A tombstone's frontmatter stays within 64 KiB | [§4.8](#SPEC-OKF-01-4-8) "Tombstone detection contract"; §2.10 | 141 |
 | 17 | An event with no hash is history | [§2.10](#SPEC-OKF-01-2-10) "Events with no hash"; §4.9 Axis 3 | 142, 143 |
 
-**Revision r5.1 (2026-11-03).** Fixes N2 from the delta review of r5 (Architect ruling 04:10Z): the pre-image check does not apply during roll back or `Bundle::recover`, and `recover` clears its conflict marker (§4.11; criterion 127).
+**Revision r5.1 (2026-11-03).** Fixes N2 from the delta review of r5 (review decision): the pre-image check does not apply during roll back or `Bundle::recover`, and `recover` clears its conflict marker (§4.11; criterion 127).
 
 **Revision r5 (2026-11-03).** Closes the two open items of the delta review of r4 (`docs/specs/SPEC-OKF-01-review.md`, "Delta review of r4"). MAJOR findings and open decisions are unchanged.
 
@@ -81,11 +81,11 @@ The delta review also suggests treating D1 as a release gate for `--feed`. No ow
 
 r4 adds open questions §3 (q) and (r).
 
-**Revision r3 (2026-11-03).** Records the four owner inputs as separate §1 entries. Adds the state separation model (§4.9), which replaces r2's single "Synced" claim (§4.6, §5.4). Adds import (§2.13–§2.16, §4.10): one common import interface, document-tree import, email and Google Docs import, and the optional extraction worker. Adds open questions §3 (k)–(p). Adds acceptance criteria §6.2 items 60–105. Moves detail tables into Appendices A–C.
+**Revision r3 (2026-11-03).** Records the four approved inputs as separate §1 entries. Adds the state separation model (§4.9), which replaces r2's single "Synced" claim (§4.6, §5.4). Adds import (§2.13–§2.16, §4.10): one common import interface, document-tree import, email and Google Docs import, and the optional extraction worker. Adds open questions §3 (k)–(p). Adds acceptance criteria §6.2 items 60–105. Moves detail tables into Appendices A–C.
 
-**Revision r2 (2026-11-03).** Records the §3 (a) ruling. Adds the consolidation mapping and the agent-glue boundary rule (§2.7). Adds v0.2 field mapping (§2.8), lossless migration (§2.9), verification invalidation (§2.10), path confinement (§2.11), ADR boundaries (§2.12), the correction and tombstone lifecycle (§4.8) and index reconciliation failures (§5.4). Rewrites the acceptance criteria (§6).
+**Revision r2 (2026-11-03).** Records the §3 (a) decision. Adds the consolidation mapping and the agent-glue boundary rule (§2.7). Adds v0.2 field mapping (§2.8), lossless migration (§2.9), verification invalidation (§2.10), path confinement (§2.11), ADR boundaries (§2.12), the correction and tombstone lifecycle (§4.8) and index reconciliation failures (§5.4). Rewrites the acceptance criteria (§6).
 
-**Reading rule.** Text marked "Decided 2026-11-03 (owner)" records an owner pick (§1.5). r7 replaces every r6 "depends on 3x" marker with the decided behaviour. Text marked "proposal" is a design proposal that Bob has not ruled on. Text marked "inference" is a conclusion the cited evidence does not state directly.
+**Reading rule.** Text marked "Decided 2026-11-03" records an accepted choice (§1.5). r7 replaces every r6 "depends on 3x" marker with the decided behaviour. Text marked "proposal" is a design proposal that is not yet decided. Text marked "inference" is a conclusion the cited evidence does not state directly.
 
 ## Glossary
 
@@ -116,7 +116,7 @@ Note on usage. trusty-kb and ADR-0041 call the OKG tree itself a "store" (`KbSto
 
 ## 1. Confirmed requirements {#SPEC-OKF-01-1}
 
-From Bob, 2026-11-03:
+Confirmed 2026-11-03:
 
 1. trusty-okf is a separate project inside Trusty. It is a separate Rust crate named `trusty-okf`. It runs in its own session.
 2. trusty-okf owns building and maintaining OKF repositories: the repository and content lifecycle.
@@ -125,17 +125,17 @@ From Bob, 2026-11-03:
 5. Wider document stores and repos come later, as an investigation only. They are out of first scope.
 6. "Move OKF into a separate crate." This spec finds the existing OKF code in trusty-tools and says where each part goes (§2.7).
 
-Owner ruling, 2026-11-03 03:06Z (§3 (a), option A):
+Decided 2026-11-03 (§3 (a), option A):
 
 7. Generic trusty-kb functionality consolidates under trusty-okf.
 8. trusty-okf supersedes the planned `trusty-okg` crate name from ADR-0041.
 9. The agent-glue boundary stays. Agent-specific and assistant-specific code stays in trusty-agents.
 
-This ruling decides only §3 (a). It authorizes design and review, not implementation or installation.
+This decision covers only §3 (a). It authorizes design and review, not implementation or installation.
 
-### 1.1 Owner requirement, 2026-11-03 03:11Z: state separation (approved MUST-HAVE) {#SPEC-OKF-01-1-1}
+### 1.1 Requirement, 2026-11-03: state separation (approved MUST-HAVE) {#SPEC-OKF-01-1-1}
 
-Bob approved this as a must-have before implementation starts. It is separate from the §3 (a) ruling.
+This is approved as a must-have before implementation starts. It is separate from the §3 (a) decision.
 
 **Approved.**
 
@@ -145,26 +145,26 @@ Bob approved this as a must-have before implementation starts. It is separate fr
 13. An index acknowledgement alone is not proof of retrieval.
 14. The canonical OKF advisory trust tier may stay distinct from current-revision verification.
 
-Bob's confirmation, in substance: failed search updates and historical reviews must not imply current verification or "done".
+The confirmation, in substance: failed search updates and historical reviews must not imply current verification or "done".
 
-**Proposals under this input (not owner-approved).** The state model, its storage, the retrieval probe and the operation table in §4.9.
+**Proposals under this input (not yet approved).** The state model, its storage, the retrieval probe and the operation table in §4.9.
 
-### 1.2 Owner requirement, 2026-11-03 03:13Z: document-tree import (approved as scope) {#SPEC-OKF-01-1-2}
+### 1.2 Requirement, 2026-11-03: document-tree import (approved as scope) {#SPEC-OKF-01-1-2}
 
-Bob: "Let's also include an import function to import document trees into OKF."
+Scope: an import function that imports document trees into OKF.
 
 **Approved.**
 
 15. trusty-okf has an import function that imports a document tree into an OKF bundle.
 16. It has an import API and an import CLI.
-17. It reuses DOC-55 instead of duplicating it. (Amended 2026-11-05, #10746 D14: `convert.rs` is not reused; it has no caller.)
+17. It reuses DOC-55 instead of duplicating it. (Amended 2026-11-05, #10746, the `convert` drop: `convert.rs` is not reused; it has no caller.)
 18. The import expands first scope to existing document trees. It does not make trusty-okf a general document-store or search service.
 
-**Proposals under this input (not owner-approved).** Every detail in §2.14 and §4.10: hierarchy and provenance preservation, an unchanged source tree, preview, deterministic IDs and collisions, repeat-import behaviour, unsupported-format reports, exclusions and symlink confinement, interrupted-import recovery, no automatic human verification, the report categories and the adapter boundary.
+**Proposals under this input (not yet approved).** Every detail in §2.14 and §4.10: hierarchy and provenance preservation, an unchanged source tree, preview, deterministic IDs and collisions, repeat-import behaviour, unsupported-format reports, exclusions and symlink confinement, interrupted-import recovery, no automatic human verification, the report categories and the adapter boundary.
 
-### 1.3 Owner requirement, 2026-11-03 03:15Z: email and Google Docs import (approved as required scope) {#SPEC-OKF-01-1-3}
+### 1.3 Requirement, 2026-11-03: email and Google Docs import (approved as required scope) {#SPEC-OKF-01-1-3}
 
-Bob rejected limiting email ingestion to prepared summaries: "No, let's include email, Google Docs, common ways of document importation."
+Email ingestion is not limited to prepared summaries: the scope includes email, Google Docs and the common ways of importing documents.
 
 **Approved.**
 
@@ -175,23 +175,23 @@ Bob rejected limiting email ingestion to prepared summaries: "No, let's include 
 23. The public import API and CLI support these sources end to end.
 24. Saved, indexed and current-revision verified stay distinct for imported content.
 25. The default never silently forces summaries-only. The default never copies whole raw mailboxes.
-26. The content policy is configurable. Its default is an open owner choice (§3 (k)). r7: decided 2026-11-03, §3 (k) option A (§1.5).
+26. The content policy is configurable. Its default is an open choice (§3 (k)). r7: decided 2026-11-03, §3 (k) option A (§1.5).
 
 This is design authorization only. It grants no account access, no bulk import, no implementation and no publishing.
 
-**Proposals under this input (not owner-approved).** The format and platform matrix (Appendix C) and the proposed acceptance in §2.15: explicit account and source selection, complete pagination, immutable source IDs, revisions and dates, incremental import and dedup, email thread context, Docs structure and export fidelity, reported format failures and deletions, and resumability.
+**Proposals under this input (not yet approved).** The format and platform matrix (Appendix C) and the proposed acceptance in §2.15: explicit account and source selection, complete pagination, immutable source IDs, revisions and dates, incremental import and dedup, email thread context, Docs structure and export fidelity, reported format failures and deletions, and resumability.
 
-**Constraints that still hold.** The new scope does not lift these rulings.
+**Constraints that still hold.** The new scope does not lift these constraints.
 
-- A credential grant does not survive delegation. A sub-agent must hold its own grant (owner 2026-08-01; ADR-0026, `docs/adr/0026-credential-grants-do-not-survive-delegation.md:1-7@c1eed98441`; DOC-45 `SPEC-CREDAUTH-04`, `docs/specs/DOC-45-credential-authority-model.md:378-386@c1eed98441`).
-- Trust labels and chunk-level fencing land before the connector grants [#4546](https://github.com/bobmatnyc/trusty-tools/issues/4546)–[#4549](https://github.com/bobmatnyc/trusty-tools/issues/4549) (owner 2026-08-01; DOC-63 Q2 resolution, `docs/specs/DOC-63-okg-sources.md:1655-1660@c1eed98441`).
-- Gmail import is SENT-only in the prior OKG source spec (owner 2026-08-01, as relayed by the PM). DOC-63 states it as normative S-3.3: the constraint sits in the connector's `list`, at the query (`docs/specs/DOC-63-okg-sources.md:601`, `:643-648@c1eed98441`). DOC-63 records it as spec text; this spec found no separate owner quote for it.
+- A credential grant does not survive delegation. A sub-agent must hold its own grant (2026-08-01; ADR-0026, `docs/adr/0026-credential-grants-do-not-survive-delegation.md:1-7@c1eed98441`; DOC-45 `SPEC-CREDAUTH-04`, `docs/specs/DOC-45-credential-authority-model.md:378-386@c1eed98441`).
+- Trust labels and chunk-level fencing land before the connector grants [#4546](https://github.com/bobmatnyc/trusty-tools/issues/4546)–[#4549](https://github.com/bobmatnyc/trusty-tools/issues/4549) (2026-08-01; DOC-63 Q2 resolution, `docs/specs/DOC-63-okg-sources.md:1655-1660@c1eed98441`).
+- Gmail import is SENT-only in the prior OKG source spec (2026-08-01). DOC-63 states it as normative S-3.3: the constraint sits in the connector's `list`, at the query (`docs/specs/DOC-63-okg-sources.md:601`, `:643-648@c1eed98441`). DOC-63 records it as spec text; this spec found no separate source for it.
 
-§3 (l) and §3 (m) recorded where the new scope seemed to conflict with these rulings. The 06:58Z ruling settles both (§1.5). SENT-only now binds the automated OKG refresh only (§3 (l)). A sub-agent gets the in-process tier only, so ADR-0024 stays unchanged (§3 (m)). The other two constraints stand as written.
+§3 (l) and §3 (m) recorded where the new scope seemed to conflict with these constraints. The §1.5 decision settles both. SENT-only now binds the automated OKG refresh only (§3 (l)). A sub-agent gets the in-process tier only, so ADR-0024 stays unchanged (§3 (m)). The other two constraints stand as written.
 
-### 1.4 Owner design choice, 2026-11-03 03:17Z: Xberg as a separate worker (approved) {#SPEC-OKF-01-1-4}
+### 1.4 Design choice, 2026-11-03: Xberg as a separate worker (approved) {#SPEC-OKF-01-1-4}
 
-Bob, after the separate-worker recommendation: "Yeah, let's do that."
+The separate-worker recommendation is accepted.
 
 **Approved.**
 
@@ -201,13 +201,13 @@ Bob, after the separate-worker recommendation: "Yeah, let's do that."
 
 This approves the design choice only. It does not accept the whole spec, and it does not authorize bulk import of accounts.
 
-**Proposals under this input (not owner-approved).** Every detail in §2.16 and Appendix B: limits, cancellation and reaping, local-only configuration, provenance and errors, the handshake, absent-worker behaviour and fixtures. Process isolation alone is not a permission sandbox (Xberg assessment, `docs/briefs/2026-11-03-xberg-assessment.md:269`).
+**Proposals under this input (not yet approved).** Every detail in §2.16 and Appendix B: limits, cancellation and reaping, local-only configuration, provenance and errors, the handshake, absent-worker behaviour and fixtures. Process isolation alone is not a permission sandbox (Xberg assessment, `xberg-assessment.md:269`).
 
-### 1.5 Owner ruling 2026-11-03 06:58Z: all recommended {#SPEC-OKF-01-1-5}
+### 1.5 Decision 2026-11-03: all recommended {#SPEC-OKF-01-1-5}
 
-Bob, via the dashboard: "All recommended", on all 26 items in `docs/specs/SPEC-OKF-01-owner-choices.md`. Each item resolves to its "Recommended" option. This entry is separate from the rulings in §1 and §1.1–§1.4.
+"All recommended", on all 26 items in the open-choices list. Each item resolves to its "Recommended" option. This entry is separate from the decisions in §1 and §1.1–§1.4.
 
-Scope of the ruling (item 1 A). Items 1–18 are decided for acceptance. Items 19–26 are also decided as recommended. Each of items 19–26 is revisitable at implementation, and a change to one of them does not reopen acceptance. The ruling decides design. It grants no account access, no credential grant, no bulk import and no implementation start.
+Scope of the decision (item 1 A). Items 1–18 are decided for acceptance. Items 19–26 are also decided as recommended. Each of items 19–26 is revisitable at implementation, and a change to one of them does not reopen acceptance. The decision covers design. It grants no account access, no credential grant, no bulk import and no implementation start.
 
 | Item | Reference in this spec | Decision |
 |---|---|---|
@@ -240,9 +240,9 @@ Scope of the ruling (item 1 A). Items 1–18 are decided for acceptance. Items 1
 
 Decisions that need another document amended are listed as pre-implementation filings in §6.1 items 9 and 13–16.
 
-### 1.6 Owner decisions already in force
+### 1.6 Decisions already in force
 
-These are owner decisions of 2026-08-01 / 2026-08-03, recorded in DOC-63 §14:
+These are decisions of 2026-08-01 / 2026-08-03, recorded in DOC-63 §14:
 
 - Each agent has exactly one canonical OKG.
 - The OKG is internal, built (derived and rebuildable) and indexed by trusty-search.
@@ -252,7 +252,7 @@ These are owner decisions of 2026-08-01 / 2026-08-03, recorded in DOC-63 §14:
 - Trust labels and chunk-level fencing land before the connector grants ([#4546](https://github.com/bobmatnyc/trusty-tools/issues/4546)–[#4549](https://github.com/bobmatnyc/trusty-tools/issues/4549)).
 - Scheduled refresh uses its own runner ([#4538](https://github.com/bobmatnyc/trusty-tools/issues/4538)).
 
-The SENT-only rule of §1.3 is not in this list. The 06:58Z ruling narrows it to the automated OKG refresh (§1.5 item 2, §3 (l)).
+The SENT-only rule of §1.3 is not in this list. The §1.5 decision narrows it to the automated OKG refresh (§1.5 item 2, §3 (l)).
 
 ## 2. Proposals: what trusty-okf owns and does not own {#SPEC-OKF-01-2}
 
@@ -300,7 +300,7 @@ Criteria 113–115 and 125 test this section.
 - trusty-okf creates, updates and moves concepts.
 - It refuses a concept named `index.md` or `log.md`. OKF §3.1 reserves those names. §2.11 gives the full ID rule.
 - It regenerates `index.md` files from concept frontmatter. Each entry uses the linked concept's `description` (OKF §8). Only the bundle-root `index.md` carries frontmatter, and only `okf_version`.
-- It overwrites an `index.md` only when the file's first line is a generator marker that trusty-okf or trusty-kb wrote. For the root `index.md`, which carries `okf_version` frontmatter, the marker is read from the first line after the frontmatter block. Any other root `index.md` is hand-written. (Amended 2026-11-05, #10746 D4b, Bob: "approve S3 amendments 1, 4, 5". **Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (text reconstructed from merged S3 code):** `is_generated` in `crates/trusty-okf/src/bundle/index_md.rs` splits the frontmatter with `split_raw` for the root file only. A non-root `index.md` is checked on its first line. Both markers count: `GENERATED_MARKER` (trusty-okf) and `TRUSTY_KB_MARKER`.) trusty-kb's marker is `structure.rs:22@c1eed98441`. A hand-written `index.md` stays unchanged, and trusty-okf reports an info finding (proposal). trusty-kb today rewrites any `index.md` whose content differs (`crates/trusty-kb/src/structure.rs:84-99@c1eed98441`).
+- It overwrites an `index.md` only when the file's first line is a generator marker that trusty-okf or trusty-kb wrote. For the root `index.md`, which carries `okf_version` frontmatter, the marker is read from the first line after the frontmatter block. Any other root `index.md` is hand-written. (Amended 2026-11-05, #10746, the S3–S5 amendment: "approve S3 amendments 1, 4, 5". **Confirmed on 2026-11-10 for merge (text reconstructed from merged S3 code):** `is_generated` in `crates/trusty-okf/src/bundle/index_md.rs` splits the frontmatter with `split_raw` for the root file only. A non-root `index.md` is checked on its first line. Both markers count: `GENERATED_MARKER` (trusty-okf) and `TRUSTY_KB_MARKER`.) trusty-kb's marker is `structure.rs:22@c1eed98441`. A hand-written `index.md` stays unchanged, and trusty-okf reports an info finding (proposal). trusty-kb today rewrites any `index.md` whose content differs (`crates/trusty-kb/src/structure.rs:84-99@c1eed98441`).
 - It appends to `log.md` for every lifecycle event. Date headings use ISO 8601 `YYYY-MM-DD`, newest first (OKF §9).
 - A concept ID is its path, so a move changes the ID. trusty-okf rewrites every link to the old ID across the bundle in the same operation. It records the move in `log.md`.
 - A write that changes nothing writes no bytes. trusty-kb's `write_entity_at` already compares before writing (`crates/trusty-kb/src/store.rs:129-141@c1eed98441`).
@@ -319,7 +319,7 @@ trusty-okf derives the OKF trust tier and never stores it (OKF §5.3). It treats
 
 trusty-okf writes a `human:` actor into `verified` only when the caller passes an explicit human confirmation. A model-driven write never self-verifies as human. This adopts the wmahfoudh rule ([DESIGN.md:258](https://github.com/wmahfoudh/okf/blob/7d6286ba112177394f08bf7b79e56f54a1fd22ec/DESIGN.md#L258)).
 
-**Extending `stale_after`. — Decided 2026-11-03 (owner): owner-choices item 19 B; revisitable at implementation.** A concept is human-reviewed when its current revision is Verified with a `human:` event (§4.9). On such a concept, a write that moves `stale_after` later is accepted only from a `human:` actor with explicit confirmation, or in the same operation as a `verify` of the current revision. r7.1: that `verify` carries the new value in `Verification.stale_after` (§4.2). The `verify` checks `seen` against the current revision, records the event and moves `stale_after` in one write. The value is not projected into the `verified[]` event. Any other writer's extension is refused with `Conflict { reason: "stale_after_extension" }`, and the file stays unchanged. Any writer may move `stale_after` earlier. Option A, any writer may extend it, was not chosen. An automated process does not extend a person's review. Criterion 146 tests this.
+**Extending `stale_after`. — Decided 2026-11-03: open-choices item 19 B; revisitable at implementation.** A concept is human-reviewed when its current revision is Verified with a `human:` event (§4.9). On such a concept, a write that moves `stale_after` later is accepted only from a `human:` actor with explicit confirmation, or in the same operation as a `verify` of the current revision. r7.1: that `verify` carries the new value in `Verification.stale_after` (§4.2). The `verify` checks `seen` against the current revision, records the event and moves `stale_after` in one write. The value is not projected into the `verified[]` event. Any other writer's extension is refused with `Conflict { reason: "stale_after_extension" }`, and the file stays unchanged. Any writer may move `stale_after` earlier. Option A, any writer may extend it, was not chosen. An automated process does not extend a person's review. Criterion 146 tests this.
 
 The trust label is separate from the OKF trust tier. The ingest engine derives the trust label from the store registration at write time. A connector cannot set its own label (`crates/trusty-kb/src/okg/ingest.rs:279-291@c1eed98441`). At retrieval, the label is read back from the concept file, and an unreadable label reads as `UntrustedExternal` (`crates/trusty-kb/src/okg/trust.rs:174-195@c1eed98441`). A hand edit of the `trust` key therefore changes the label that retrieval sees (inference from those two sites). §2.12 lists this under DOC-63. The verification record outside frontmatter is authoritative, and frontmatter holds a bounded copy of it (§3 (d), decided C; §2.10). The trust label stays a frontmatter key, as today.
 
@@ -329,7 +329,7 @@ The trust label is separate from the OKF trust tier. The ingest engine derives t
 
 OKF v0.2 does not define supersession. It has only `status: deprecated` and a log convention (external report §2). The Google sample records a correction in prose only ([acme_retail/log.md:18](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/ad30107c31c06aec8a7d5636e0d1058118604e6f/bundles/acme_retail/log.md#L18)). Today trusty-kb has no correction model beyond last-record-wins in the ledger and source tombstones (survey headline 5).
 
-**Decided 2026-11-03 (owner): §3 (c) option A.** The model below is 3c A. §4.8 gives its state transitions and keeps the rejected options B and C for reference.
+**Decided 2026-11-03: §3 (c) option A.** The model below is 3c A. §4.8 gives its state transitions and keeps the rejected options B and C for reference.
 
 1. **Deprecate, never delete.** A published concept is never deleted. It gets `status: deprecated` and stays at its path for links and history. wmahfoudh uses the same rule ([DESIGN.md:273](https://github.com/wmahfoudh/okf/blob/7d6286ba112177394f08bf7b79e56f54a1fd22ec/DESIGN.md#L273)).
 2. **Supersede.** The old concept gets `superseded_by: /<new-id>.md`. The new concept gets `supersedes: /<old-id>.md`. Both are bundle-absolute links (OKF §6.1). Both use extension keys that OKF §4.1 allows.
@@ -344,7 +344,7 @@ The feed pushes concept files to trusty-search and withdraws them. trusty-okf re
 
 ### 2.7 Consolidation: module mapping and the agent-glue boundary
 
-**Decided 2026-11-03 (owner): §3 (a) option A.** Generic trusty-kb code moves into trusty-okf. Agent glue stays in trusty-agents. trusty-kb retires after the cut-over. [ADR-OKF-0001](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) (filed as ADR-0075) records this as a proposed amendment to ADR-0041.
+**Decided 2026-11-03: §3 (a) option A.** Generic trusty-kb code moves into trusty-okf. Agent glue stays in trusty-agents. trusty-kb retires after the cut-over. [ADR-OKF-0001](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) (filed as ADR-0075) records this as a proposed amendment to ADR-0041.
 
 The existing OKF code is one crate, `crates/trusty-kb` (8,545 source lines, `publish = false`, v0.1.0, never released). A thin agent-side layer sits in `crates/trusty-agents`. Nothing OKF-specific lives in trusty-search, trusty-memory, trusty-mpm or trusty-mcp (survey headline 1).
 
@@ -365,7 +365,7 @@ A reviewer checks each rule against the trusty-okf crate. A breach of any rule f
 | B9 (r3, proposal) | trusty-okf never links xberg. Extraction beyond the built-in tier goes through the worker protocol (§2.16). The worker client sits behind the cargo feature `extract-worker`. | `cargo tree -p trusty-okf -e normal,dev,build --all-features` lists no `xberg`, `ort` or `candle-core`. |
 | B10 (r3, proposal; r6 scope) | trusty-okf adds no credential, token or account secret to the environment, arguments or input of any child process. The extraction worker starts with a cleared environment plus the §2.16 allow-list and no network setting. An acquisition adapter process (3m, decided A) starts with exactly the environment list its caller supplies, and trusty-okf adds no variable to it (§2.16). | No credential type in the worker client or the adapter spawn API. A test reads each child's environment: the worker holds only the allow-listed variables, and an adapter holds exactly the caller-supplied list (criterion 139). |
 
-**r3 changes to the boundary (import scope).** Rules B1–B8 stay unchanged. Bob's import scope keeps the boundary (§1.3 item 22).
+**r3 changes to the boundary (import scope).** Rules B1–B8 stay unchanged. The approved import scope keeps the boundary (§1.3 item 22).
 
 - **B6 is clarified, not changed.** trusty-okf defines the common import interface and the worker protocol. It implements one source adapter, the local `docstore` reader, which needs no credential. It implements no authenticated source adapter. Gmail and Google Docs adapters stay outside trusty-okf.
 - **B9 and B10 are new.** They follow from the approved worker design (§1.4).
@@ -382,26 +382,26 @@ Destinations name trusty-okf modules from §4.1. Each row cites the source at `@
 | `crates/trusty-kb/src/entity.rs` | `trusty_okf::format::concept` | `Entity` becomes `Concept`. `slugify`, `deep_merge`, `wiki_links` and `link_values` move with it. |
 | `crates/trusty-kb/src/schema.rs`, container rules (`RESERVED_FILES` at `:56`, type-only required, unknown-key preservation) | `trusty_okf::format::container` | Pure format rules. |
 | `crates/trusty-kb/src/schema.rs`, `Profile`, `CollectionSpec`, `EDGE_PAIRS`, `inverse_edge` | `trusty_okf::profile` | Pluggable. The personal-KB profile (people, organizations, places, …, `:217-248`) ships as one profile, not as the container default (proposal). It names no agent, so it passes B3 and B4. |
-| `crates/trusty-kb/src/store.rs` | `trusty_okf::bundle` (`Bundle`) and `trusty_agents::kb::store` (`KbStore`) | `Bundle` takes the bundle root and holds the generic code. S11 kept `KbStore` in trusty-agents as agent glue: one tree root plus its profile, with the confined entity paths the OKG tools read (`crates/trusty-agents/src/kb/store.rs`). **Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (module map as merged on `origin/main`, 2026-11-10).** |
+| `crates/trusty-kb/src/store.rs` | `trusty_okf::bundle` (`Bundle`) and `trusty_agents::kb::store` (`KbStore`) | `Bundle` takes the bundle root and holds the generic code. S11 kept `KbStore` in trusty-agents as agent glue: one tree root plus its profile, with the confined entity paths the OKG tools read (`crates/trusty-agents/src/kb/store.rs`). **Confirmed on 2026-11-10 for merge (module map as merged on `origin/main`, 2026-11-10).** |
 | `crates/trusty-kb/src/put.rs` | `trusty_okf::bundle::put` | Writes v0.2 fields per §2.8 and applies §2.10. |
 | `crates/trusty-kb/src/reconcile.rs` | `trusty_okf::profile::reconcile` | Inverse edges come from the profile. |
 | `crates/trusty-kb/src/structure.rs` | `trusty_okf::bundle::index_md` | Becomes the OKF §8 `index.md` regenerator, with the marker rule in §2.3. |
 | `crates/trusty-kb/src/validate.rs` | `trusty_okf::format::validate` | Gains the error/warning/info levels in §2.2. |
-| `crates/trusty-kb/src/convert.rs` | **Dropped; does not move to trusty-okf** | trusty-okf has no `bundle::convert`. The lossless trusty-kb-to-v0.2 path is `bundle::migrate` (§2.9). Import takes its plan-then-apply shape from §2.13, not from this module. (Amended 2026-11-05, #10746 D14, Bob: "Amend §2.7.2 and §4.1 to drop convert.") |
+| `crates/trusty-kb/src/convert.rs` | **Dropped; does not move to trusty-okf** | trusty-okf has no `bundle::convert`. The lossless trusty-kb-to-v0.2 path is `bundle::migrate` (§2.9). Import takes its plan-then-apply shape from §2.13, not from this module. (Amended 2026-11-05, #10746, the `convert` drop: "Amend §2.7.2 and §4.1 to drop convert.") |
 | `crates/trusty-kb/src/roots.rs`, `confine`, `assert_within` | `trusty_okf::bundle::paths` | Generic. Strengthened per §2.11. |
 | `crates/trusty-kb/src/roots.rs`, `Roots`, `resolve`, `tree_path` | **Stays in trusty-agents** | Maps an agent name to `<knowledge_dir>/<slug>` (`:25-65`). Agent home layout, so B3 and B4 exclude it. |
 | `crates/trusty-kb/src/mcp.rs`, `tooldefs.rs`, `main.rs` | **Does not move to trusty-okf** | The `kb_*` MCP stdio server. B7 excludes it. ADR-0041 Decision 4 re-homes the agent-consumed tools in a trusty-mcp-services service, which is unbuilt. `kb_ensure_structure` and `kb_validate` become trusty-okf library calls. The binary is registered nowhere today (ADR-0040, ADR-0041 `:30`). |
 | `crates/trusty-kb/tests/dispatch_tests.rs` | Follows `mcp.rs` | MCP dispatch tests. |
-| `crates/trusty-kb/tests/okg_artifacts.rs` | `crates/trusty-agents/tests/kb_okg_artifacts.rs` | S11 moved it to trusty-agents. It drives `KbStore` and pins the registry and ledger text. **Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (module map as merged on `origin/main`, 2026-11-10).** |
-| `crates/trusty-kb/src/okg/mod.rs` | `trusty_agents::kb::okg` | S11 kept the `KbStore` entry points `okg_register_source`, `okg_sources`, `okg_index_coverage` and `okg_ingest_docstore` in trusty-agents, with the `okg_` prefix. They call the engine in `trusty_okf::build` (`crates/trusty-agents/src/kb/okg/mod.rs`). **Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (module map as merged on `origin/main`, 2026-11-10).** |
+| `crates/trusty-kb/tests/okg_artifacts.rs` | `crates/trusty-agents/tests/kb_okg_artifacts.rs` | S11 moved it to trusty-agents. It drives `KbStore` and pins the registry and ledger text. **Confirmed on 2026-11-10 for merge (module map as merged on `origin/main`, 2026-11-10).** |
+| `crates/trusty-kb/src/okg/mod.rs` | `trusty_agents::kb::okg` | S11 kept the `KbStore` entry points `okg_register_source`, `okg_sources`, `okg_index_coverage` and `okg_ingest_docstore` in trusty-agents, with the `okg_` prefix. They call the engine in `trusty_okf::build` (`crates/trusty-agents/src/kb/okg/mod.rs`). **Confirmed on 2026-11-10 for merge (module map as merged on `origin/main`, 2026-11-10).** |
 | `crates/trusty-kb/src/okg/registry.rs` | `trusty_okf::build::registry` | `Locator` keeps `DocStore`. `Gmail` and `Drive` (`:60-80`) leave trusty-okf through the open variant DOC-55 §5.3 proposes (`Connector { kind, params }`). trusty-agents owns the `gmail` and `drive` kinds. §2.9 requires that existing `registry.toml` rows still parse. |
 | `crates/trusty-kb/src/okg/ledger.rs`, `jsonl.rs` | `trusty_okf::build::ledger`, `build::jsonl` | Append-only and torn-line tolerant. Unchanged on-disk format. |
 | `crates/trusty-kb/src/okg/ingest.rs` | `trusty_okf::build::ingest` | Fetcher-agnostic engine. Changes per §2.9: it preserves editorial and verification keys across a re-ingest. |
 | `crates/trusty-kb/src/okg/docstore.rs` | `trusty_okf::build::docstore` | Filesystem fetcher. Takes an explicit directory. |
 | `crates/trusty-kb/src/okg/policy.rs` | `trusty_okf::build::policy` | Read-side allow-list. `home_default` takes the user home as an argument (`:70`), not the agent home. |
 | `crates/trusty-kb/src/okg/trust.rs` | `trusty_okf::build::trust` | Label derivation and fail-closed read. |
-| `crates/trusty-kb/src/okg/index_journal.rs` | `trusty_okf::state` (`state/backlog.rs`, `state/index.rs`) | The diff of tree against journal is `Bundle::index_backlog`, widened to cover every concept per §5.4. The journal is the machine-local `IndexJournal` (§4.9.1). There is no `build::index_journal` module. S11 first moved the old file to trusty-agents. S12 deleted it and added `trusty_agents::kb::okg::legacy_journal`, which migrates the in-tree `_sources/<id>.index.jsonl` files into the machine-local journal. **Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (module map as merged on `origin/main`, 2026-11-10).** |
-| `crates/trusty-common/src/knowledge_document.rs` | **Stays in trusty-common** | trusty-search depends on it (`crates/trusty-search/src/core/indexer/ingest/mod.rs:425@c1eed98441`). The trusty-okf core does not depend on it (B8). `build::ingest` keeps local constants for `source_status` and `deleted`, and `format::tombstone` keeps a local copy of the tombstone rule, kept in step with it by a test. (Amended 2026-11-05, #10746 D4b, Bob: "Accept S4 local constants and amend §2.7.2.") |
+| `crates/trusty-kb/src/okg/index_journal.rs` | `trusty_okf::state` (`state/backlog.rs`, `state/index.rs`) | The diff of tree against journal is `Bundle::index_backlog`, widened to cover every concept per §5.4. The journal is the machine-local `IndexJournal` (§4.9.1). There is no `build::index_journal` module. S11 first moved the old file to trusty-agents. S12 deleted it and added `trusty_agents::kb::okg::legacy_journal`, which migrates the in-tree `_sources/<id>.index.jsonl` files into the machine-local journal. **Confirmed on 2026-11-10 for merge (module map as merged on `origin/main`, 2026-11-10).** |
+| `crates/trusty-common/src/knowledge_document.rs` | **Stays in trusty-common** | trusty-search depends on it (`crates/trusty-search/src/core/indexer/ingest/mod.rs:425@c1eed98441`). The trusty-okf core does not depend on it (B8). `build::ingest` keeps local constants for `source_status` and `deleted`, and `format::tombstone` keeps a local copy of the tombstone rule, kept in step with it by a test. (Amended 2026-11-05, #10746, the S3–S5 amendment: "Accept S4 local constants and amend §2.7.2.") |
 | `crates/trusty-agents/src/stores/index_feed.rs` (`IndexFeed`, `covers`, `feed_source`) | `trusty_okf::feed` (3e, decided A) | Generic: it imports only trusty-kb types (`:62-64`). Behind the cargo feature `search-feed`. Not chosen: 3e B (stays in trusty-agents) and 3e C (trusty-search absorbs it). |
 | `crates/trusty-agents/src/stores/index_feed_rpc.rs` (`RpcIndexFeed`) | `trusty_okf::feed` | Follows `index_feed.rs`. |
 | `crates/trusty-agents/src/stores/index_feed_tests.rs` | trusty-okf tests | Follows `index_feed.rs`. |
@@ -438,7 +438,7 @@ The table is the conversion rule. trusty-okf writes v0.2 and reads v0.1 through 
 | Body `# Citations` (foreign v0.1 bundles) | not written by trusty-kb | `sources[]` | OKF §13 read fallback. The body is never edited; the derived `sources[]` entries are added (proposal). |
 | Per-folder `index.md` as a name/summary table with `GENERATED_MARKER` | `structure.rs:22`, `:136`, `:163` | OKF §8 `index.md` | Regenerated, because it is a derived file. A hand-written `index.md` stays (§2.3). |
 | Root `index.md` without `okf_version` | `structure.rs:163` | Root `index.md` with `okf_version: "0.2"` | Added on regeneration. |
-| `_state/conversion-log.md` | — | Kept, plus `log.md` | Kept unchanged. No trusty-okf module writes it (Amended 2026-11-05, #10746 D14). trusty-kb writes no `log.md` today (grep at `@c1eed98441`). |
+| `_state/conversion-log.md` | — | Kept, plus `log.md` | Kept unchanged. No trusty-okf module writes it (Amended 2026-11-05, #10746, the `convert` drop). trusty-kb writes no `log.md` today (grep at `@c1eed98441`). |
 
 DOC-63 S-4.3 lists `ingested_at` as an existing frontmatter field. `write_item` does not write it (`okg/ingest.rs:276-294@c1eed98441`); the value lives in the ledger record (`okg/ledger.rs:59`). The mapping therefore has no `ingested_at` row.
 
@@ -461,7 +461,7 @@ A migration takes an existing trusty-kb tree to the v0.2 form in §2.8. Under §
 
 **How a migration detects loss.** A migration runs in two phases (proposal).
 
-1. **Plan.** It reads the tree and writes nothing. It returns the exact list of per-file changes. (#10746 D14: no `convert_tree` precedent.)
+1. **Plan.** It reads the tree and writes nothing. It returns the exact list of per-file changes. (#10746, the `convert` drop: no `convert_tree` precedent.)
 2. **Apply.** A migration is an operation of kind `migrate` in the operation journal (§4.11). Before its first write, it stores a full backup of every file it will change (r4). Each backup is the complete old bytes, body included, stored content-addressed at `_sources/migrations/<run-id>/blobs/sha256-<hex>`. The manifest `_sources/migrations/<run-id>.jsonl` holds one line per changed file: the path, the SHA-256 of the old bytes, the backup blob name and the SHA-256 of the new bytes. Backups and manifest are synced to disk before the intent record. Then the migration writes each file atomically (§4.4).
 3. **Audit.** After the apply phase, it compares the old inventory with the new one. It checks: equal concept ID sets; equal body bytes; every old key present with an equal value, or mapped by a §2.8 row whose inverse yields the old value; every old `sources` value present as a `resource`; equal verification event multisets; ledger, registry and journal files equal or only appended; and each old log file present as one contiguous substring of the new file.
 4. **Failure.** Any audit failure restores every changed file from its backup blob. Restore writes the blob atomically, then checks that the restored file's SHA-256 equals the manifest's old hash. The migration then returns `OkfError::MigrationLoss` with every failing item. A restore whose check fails adds a `restore_failed` item, and the blob stays in place. The migration reports no partial success.
@@ -495,7 +495,7 @@ The migration audit still reports any concept path that two ledger item IDs clai
 
 A verification event attests one revision of a concept. When the content changes, the attestation no longer covers it.
 
-**Decided 2026-11-03 (owner): owner-choices item 8 A. This is a trusty policy, not an OKF requirement.** OKF §5.2 says `verified` is independent of `generated.at`, so OKF lets a writer keep `verified` entries across a content change. OKF §5.3 derives the tier from `verified` alone. If trusty-okf kept the entries, other OKF readers would show an old review on new content. So trusty-okf removes them from frontmatter on every content change, and keeps the old review as history in the verification record. Option B, keep the entries and change only trusty's own verification state, was not chosen.
+**Decided 2026-11-03: open-choices item 8 A. This is a trusty policy, not an OKF requirement.** OKF §5.2 says `verified` is independent of `generated.at`, so OKF lets a writer keep `verified` entries across a content change. OKF §5.3 derives the tier from `verified` alone. If trusty-okf kept the entries, other OKF readers would show an old review on new content. So trusty-okf removes them from frontmatter on every content change, and keeps the old review as history in the verification record. Option B, keep the entries and change only trusty's own verification state, was not chosen.
 
 **Content hash.** The content hash is SHA-256 over a canonical rendering of two parts:
 
@@ -504,7 +504,7 @@ A verification event attests one revision of a concept. When the content changes
 
 The lifecycle set holds keys that describe the concept's state, not its claims: `generated`, `verified`, `stale_after`, `status`, `supersedes`, `superseded_by`, `trust`, `source_id`, `source_kind`, `source_item_id`, `source_timestamp`, `source_status`, `tombstoned`, `created`, `updated`, `legacy_verified`, `legacy_generated` (§2.2.1, r5), the extraction provenance keys (r7, below), and the verification-record keys. Every other key is content, including unknown keys and `sources[]`. trusty-kb's `content_signature` already excludes `created` and `updated` the same way (`crates/trusty-kb/src/put.rs:194-203@c1eed98441`).
 
-**Extraction provenance. — Decided 2026-11-03 (owner): owner-choices item 21 B; revisitable at implementation.** The extraction provenance keys of §2.14 rule 5 and §2.16 are in the lifecycle set: `extracted_by`, `extract_protocol`, `xberg_version`, `extract_config` and the input SHA-256 key. So a worker upgrade that yields the same text keeps the content hash and the review. A worker upgrade that yields different text changes the body, and §2.10 applies. Source fields such as the sender, the recipients and the subject stay content. Option A, extraction keys count as content, was not chosen. Criterion 147 tests this.
+**Extraction provenance. — Decided 2026-11-03: open-choices item 21 B; revisitable at implementation.** The extraction provenance keys of §2.14 rule 5 and §2.16 are in the lifecycle set: `extracted_by`, `extract_protocol`, `xberg_version`, `extract_config` and the input SHA-256 key. So a worker upgrade that yields the same text keeps the content hash and the review. A worker upgrade that yields different text changes the body, and §2.10 applies. Source fields such as the sender, the recipients and the subject stay content. Option A, extraction keys count as content, was not chosen. Criterion 147 tests this.
 
 **What a content change does.** When a write changes the content hash, trusty-okf does five things in the same write.
 
@@ -520,13 +520,13 @@ A write that changes only lifecycle keys does none of this. `deprecate`, a tombs
 
 **Out-of-band edits.** A hand edit, a git sync merge (ADR-0022) or another tool can change content without trusty-okf. On the next read, trusty-okf compares the current hash with the hash stored for the frontmatter events. On a mismatch, it reports the verification state as Unverified, with a warning finding. The OKF trust tier stays derived from the raw frontmatter (§4.9). The next trusty-okf write applies the five steps above. Until then, a non-trusty consumer that reads the raw frontmatter still sees the old events. That is residual risk.
 
-**Where the record lives. — Decided 2026-11-03 (owner): §3 (d) option C.** The verification record is a ledger-side file at `_sources/verification/<id>.jsonl`, and it is authoritative. (Amended 2026-11-05, #10746 D4b item 4: the S3 code writes this path, `record_rel` in `crates/trusty-okf/src/bundle/record.rs`.) Frontmatter holds a bounded copy: current `verified[]` events plus a bounded history projection. Only events in the record count toward Verified (§4.9 Axis 3). An event that appears only in frontmatter never counts as Verified, though the OKF trust tier still reads it (§4.9). Ruling D64 (#10873): a frontmatter-only event with no `hash` key does count in `history`, as "Events with no hash" states. A `rebuild` rewrites frontmatter and re-projects it from the record, so a human verification survives the rebuild. Not chosen: 3d B, the record only with no `verified` in frontmatter. Ruled out by r6: 3d A as written, the whole record in frontmatter.
+**Where the record lives. — Decided 2026-11-03: §3 (d) option C.** The verification record is a ledger-side file at `_sources/verification/<id>.jsonl`, and it is authoritative. (Amended 2026-11-05, #10746, the S3–S5 amendment item 4: the S3 code writes this path, `record_rel` in `crates/trusty-okf/src/bundle/record.rs`.) Frontmatter holds a bounded copy: current `verified[]` events plus a bounded history projection. Only events in the record count toward Verified (§4.9 Axis 3). An event that appears only in frontmatter never counts as Verified, though the OKF trust tier still reads it (§4.9). #10873: a frontmatter-only event with no `hash` key does count in `history`, as "Events with no hash" states. A `rebuild` rewrites frontmatter and re-projects it from the record, so a human verification survives the rebuild. Not chosen: 3d B, the record only with no `verified` in frontmatter. Ruled out by r6: 3d A as written, the whole record in frontmatter.
 
 **Bounded frontmatter (r6, reconciliation row 14).** The verification events in frontmatter are a bounded projection. The projection holds the current events and at most the 10 newest history events, and at most 16 KiB of rendered entries (proposal). Every event beyond the bound lives only in the verification record, and Axis 3 reads that record (§4.9). Under the decided 3d C the record holds the overflow. The rejected 3d A had no place for it. §4.8 states the 64 KiB tombstone bound that this rule serves.
 
 **Events with no hash (r6, reconciliation row 17).** Every verification event written before r3 carries no content hash. What must be true:
 
-1. An event with no hash is history. It never counts as Verified. Ruling D64 (#10873): this holds wherever the event lives. A frontmatter `verified[]` entry with no `hash` key whose `(by, at)` pair no folded record line shares is counted in `history`, once per distinct pair, even when the record does not hold it. It cannot make the state Verified and cannot raise a `VerificationMismatch` finding. An entry with a `hash` key, or without a string `by` or `at`, adds nothing. The code is `counted_events` in `crates/trusty-okf/src/bundle/record.rs`.
+1. An event with no hash is history. It never counts as Verified. #10873: this holds wherever the event lives. A frontmatter `verified[]` entry with no `hash` key whose `(by, at)` pair no folded record line shares is counted in `history`, once per distinct pair, even when the record does not hold it. It cannot make the state Verified and cannot raise a `VerificationMismatch` finding. An entry with a `hash` key, or without a string `by` or `at`, adds nothing. The code is `counted_events` in `crates/trusty-okf/src/bundle/record.rs`.
 2. No operation assigns a hash to such an event. That covers `Bundle::open`, `migrate`, `rebuild`, recovery and `adopt`. §3 (q) is decided C: the equality proof runs first, then `adopt`. Neither may bind a legacy event to the current hash. Each proves byte ownership only.
 3. The next content change moves every hashless event from frontmatter into the verification record, as step 2 above does, with the reason `legacy_unbound`.
 4. A lifecycle-only write, a migration and a tombstone leave hashless events where they are.
@@ -547,7 +547,7 @@ Every trusty-okf write stays under the bundle root. The rules apply to concept f
 4. Any segment contains `:`. This rejects Windows drive forms such as `C:` and `C:foo` on every platform.
 5. It contains NUL or a control character.
 6. Its last segment equals `index` or `log`, compared case-insensitively. macOS file systems are case-insensitive by default, so `Index.md` would collide with `index.md` (inference).
-7. Its first segment starts with `_` or `.`. `_`-prefixed directories hold build machinery (#10746 D14: `convert.rs` cite removed), and `.`-prefixed segments hold `.git` and other tool state.
+7. Its first segment starts with `_` or `.`. `_`-prefixed directories hold build machinery (#10746, the `convert` drop: `convert.rs` cite removed), and `.`-prefixed segments hold `.git` and other tool state.
 8. It ends in `.md`. The ID never includes the suffix.
 
 This is stricter than today's `confine`. On Unix, `Path::components` returns `C:\x` as one `Normal` component, so `confine` accepts it (`crates/trusty-kb/src/roots.rs:75-89@c1eed98441`). Rule 4 closes that gap.
@@ -590,11 +590,11 @@ Criterion 140 tests this rule.
 | ADR-0041, as amended by ADR-OKF-0001 | Kept: the crate stays native (Decision 1, minus the name); trusty-search owns OKF indexing (Decision 2); each OKG store is a distinct named search index (Decision 3); a trusty-mcp-services service fronts agent reads and depends on the native crate (Decision 4); `kb_put_entity` stays unresolved. Replaced: the `trusty-okg` name and the single-crate rename path. | B7 follows from Decision 4. 3e is decided A, which contradicts Decision 2 for the feed loop. A further ADR-0041 amendment must move feed-loop ownership to trusty-okf, while trusty-search keeps chunking, embedding and ranking (§6.1 item 9). The rejected 3g C would have conflicted with Decision 4; the decided 3g B does not. |
 | ADR-0022 | Tree content syncs through optional per-store git repos (`sync_remote`), with auto-commit on ingest. | trusty-okf does not sync. A sync merge is an out-of-band edit (§2.10). The lock file and temporary files must stay out of sync commits. Which ignore list carries that is ADR-0022's sync machinery (inference). r4: the operation journal directory `_sources/ops/` stays out of sync commits too, and a sync commit must not run while the bundle lock is held (§4.11). The index journal lives outside the synced tree (§4.9.1). The `trusty-kb-<tree>` repo name is stale prose (ADR-0041 `:116`). |
 | DOC-55 (Draft) | The `Connector` contract and the open `Locator` variant (§5.3). The `Extractor` contract, E1–E5 and the extractor-version fingerprint (§4.2, §4.5). SPEC-OKGIMPORT-06: the ledger never waits on the index (§7.2.4). | §2.7.2 uses the open variant to move Gmail and Drive out. §5 keeps the ledger independent of the feed. Import adopts `Connector` and `Extractor` as its two adapter contracts (§2.13). The worker needs a DOC-55 amendment: DOC-55 §8 item 3 forbids "shelling out to an external converter" (`docs/specs/okg-universal-importer.md:603-606@c1eed98441`), and §3.3 excludes OCR (`:132-135`). §2.16 lists the exact changes. r7: 3p is decided A, so §3.3 stays unchanged. The §8 item 3 amendment is still needed and is a pre-implementation filing (§6.1 item 6). |
-| ADR-0024 (Accepted, amended by 0058) | A sub-agent is an in-process leaf. It "never talks out-of-process" (`docs/adr/0024-…md:61-63@c1eed98441`). DOC-63 reads it as "must not be given an out-of-process ingestion path" (`DOC-63-okg-sources.md:1714`). | Import spawns the extraction worker and, under the decided 3m A, an acquisition adapter process. **Decided 2026-11-03 (owner): owner-choices item 3 A.** A sub-agent gets the in-process tier only: text and Markdown from a local tree, with no worker and no adapter process (§2.15 "Sub-agent imports"). ADR-0024 stays unchanged, so no amendment is filed. Not chosen: item 3 B (amend ADR-0024 for the worker and adapters) and item 3 C (no import at all for a sub-agent). |
-| ADR-0026 / DOC-45 §6 (owner 2026-08-01) | A credential grant does not survive delegation. A sub-agent holds its own grant. | trusty-okf holds no grant (B6, B10). Whoever runs an authenticated source adapter holds its own grant under its own principal (§2.15). |
+| ADR-0024 (Accepted, amended by 0058) | A sub-agent is an in-process leaf. It "never talks out-of-process" (`docs/adr/0024-…md:61-63@c1eed98441`). DOC-63 reads it as "must not be given an out-of-process ingestion path" (`DOC-63-okg-sources.md:1714`). | Import spawns the extraction worker and, under the decided 3m A, an acquisition adapter process. **Decided 2026-11-03: open-choices item 3 A.** A sub-agent gets the in-process tier only: text and Markdown from a local tree, with no worker and no adapter process (§2.15 "Sub-agent imports"). ADR-0024 stays unchanged, so no amendment is filed. Not chosen: item 3 B (amend ADR-0024 for the worker and adapters) and item 3 C (no import at all for a sub-agent). |
+| ADR-0026 / DOC-45 §6 (2026-08-01) | A credential grant does not survive delegation. A sub-agent holds its own grant. | trusty-okf holds no grant (B6, B10). Whoever runs an authenticated source adapter holds its own grant under its own principal (§2.15). |
 | ADR-0029 | Workspace MSRV 1.94. | xberg needs Rust 1.98 (Xberg assessment `:22`). The worker cannot build inside the 1.94 workspace build. §3 (n) is decided B: the worker builds in a trusty-tools directory that the workspace excludes, with its own toolchain file, and the workspace MSRV stays 1.94. Before implementation, a check confirms that the exclusion keeps the 1.94 workspace build clean, and ADR-0029 records the excluded directory as outside its policy (§6.1 item 15). |
-| Xberg assessment (ar-T05, 2026-11-03) | A fit assessment, not a decision. It recommended "no addition" and an in-process plugin framework first (`:5`, `:314`). | The 03:17Z owner choice supersedes that recommendation for import. The 06:58Z ruling settles the assessment's open points: worker location (3n B), built-in tier (3o A), OCR off (3p A) and an OS sandbox before email or Drive content (item 9 B). §2.16 records the reconciliation item by item. |
-| DOC-63 (Accepted) | One canonical OKG per agent at `<home>/<agent>/okg` (§2.2). Trust labels: engine-written (S-4.3), carried to chunks (S-4.4, unbuilt), fenced (S-4.5), fail-closed (S-4.6). Idempotency and watermarks (§8). Scheduled refresh (§9). Push feed as the correctness path and the daemon watcher as a backstop (S-8.1). One index per store (S-8.2). System-created store index (S-8.4). | trusty-agents owns the layout, the binding and index creation (B3–B5). trusty-okf owns S-4.3 at write and S-4.6 at read. S-4.4 stays a trusty-search gap (§5.5). The watcher can re-index a withdrawn concept, so the decided 3i A re-checks withdrawn paths on every feed pass (§5.4 F9). r7: S-3.3 (SENT-only) is amended to scope it to the automated OKG refresh (§3 (l), §6.1 item 13; owner item 2 C; amended in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810) under [#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742)). |
+| Xberg assessment (2026-11-03) | A fit assessment, not a decision. It recommended "no addition" and an in-process plugin framework first (`:5`, `:314`). | The §1.4 design choice supersedes that recommendation for import. The §1.5 decision settles the assessment's open points: worker location (3n B), built-in tier (3o A), OCR off (3p A) and an OS sandbox before email or Drive content (item 9 B). §2.16 records the reconciliation item by item. |
+| DOC-63 (Accepted) | One canonical OKG per agent at `<home>/<agent>/okg` (§2.2). Trust labels: engine-written (S-4.3), carried to chunks (S-4.4, unbuilt), fenced (S-4.5), fail-closed (S-4.6). Idempotency and watermarks (§8). Scheduled refresh (§9). Push feed as the correctness path and the daemon watcher as a backstop (S-8.1). One index per store (S-8.2). System-created store index (S-8.4). | trusty-agents owns the layout, the binding and index creation (B3–B5). trusty-okf owns S-4.3 at write and S-4.6 at read. S-4.4 stays a trusty-search gap (§5.5). The watcher can re-index a withdrawn concept, so the decided 3i A re-checks withdrawn paths on every feed pass (§5.4 F9). r7: S-3.3 (SENT-only) is amended to scope it to the automated OKG refresh (§3 (l), §6.1 item 13; open-choices item 2 C; amended in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810) under [#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742)). |
 
 ### 2.13 Import: one engine, two adapter contracts {#SPEC-OKF-01-2-13}
 
@@ -672,7 +672,7 @@ A document-tree import reads one local root and writes one bundle. The local roo
    - **One source file yields one concept (r6, reconciliation row 7).** The docstore fetcher splits a file over 20,000 characters into items `<rel>#<n>` (`crates/trusty-kb/src/okg/docstore.rs:179-186@c1eed98441`). Under the one-path-one-ID rule, those parts would collide, and every large file would be refused. What must be true: import calls the docstore reader with part splitting disabled. Each source file becomes exactly one ledger item, with the source-relative path as its item ID, and one concept that holds the whole extracted text. The 8 MiB input cap (§2.16) still bounds the file. A vanished source file tombstones the one concept it produced. Criterion 137 tests this.
 4. **Collisions are refused, not guessed.** Two source paths can still map to one ID, for example names that differ only in case on a case-insensitive file system (§2.11 fold rule). The plan lists every collision. Import writes neither colliding item and reports both as failed with reason `collision`. A ledger record pins an assigned ID, so a later source file cannot take over an existing concept's ID. r6: the same rule binds `build` and `rebuild` (§2.9 "Path collisions").
 5. **Provenance is recorded.** Each concept gets `sources[]` with `{resource: <source-relative path>}`, and the top-level keys `source_id`, `source_kind: docstore`, `source_item_id` (the source-relative path) and `source_timestamp` (the file's modification time). A non-text source also gets `extracted_by: <extractor-id>@<version>`, which DOC-55 Q3 recommends (`okg-universal-importer.md:656`). Import writes no absolute path into the bundle. The registry row holds the root.
-6. **Preview writes nothing.** `plan_import` returns the full plan: each item's ID, action, extractor and every refusal. It writes no byte. (#10746 D14: no `convert_tree` precedent.)
+6. **Preview writes nothing.** `plan_import` returns the full plan: each item's ID, action, extractor and every refusal. It writes no byte. (#10746, the `convert` drop: no `convert_tree` precedent.)
 7. **Repeat import is idempotent.** An unchanged item (same fingerprint) is skipped. A changed item updates its concept, keeps the editorial keys (§2.9) and moves verification to history (§2.10). A concept that was hand-edited since its last import is refused with `Conflict` and reported, as `rebuild` does (§4.5). The hand-edit test is the §4.5 ownership proof, so a trusty-okf write is never a hand edit (r6). A vanished item is tombstoned only when the run's `deletion_safe` is true (§2.13 "Listing completeness", r6). A renamed source file is a tombstone plus a new concept. The report flags a pair with equal fingerprints as a possible move.
 8. **Unsupported formats are reported.** Each skipped item carries one reason: `excluded`, `hidden`, `symlink`, `too_large`, `binary_no_extractor`, `unsupported_format`, `worker_absent`, `worker_incompatible`, `policy_refused`, `sandbox_required` (r7, §2.16) or `collision`. No item disappears from the report.
 9. **Exclusions and symlink confinement.** The caller passes include and exclude globs. Built-in exclusions are hidden segments (`policy.rs`), VCS directories and the bundle root. Import canonicalizes the source root once and never follows a link below it. A link is reported as `symlink` and is not read. The bundle side keeps §2.11.
@@ -692,19 +692,19 @@ Scope is approved (§1.3). The rules below are proposals. Appendix C gives the p
 
 **Credentials.** trusty-okf receives no credential, token or account secret (B6, B10). The adapter process holds its own grant under its own principal (ADR-0026).
 
-**Sub-agent imports. — Decided 2026-11-03 (owner): owner-choices item 3 A.** A sub-agent gets the in-process tier only: UTF-8 text and Markdown from a local tree (§2.16 "Tiers"). It starts no extraction worker and no adapter process, so ADR-0024 stays unchanged. trusty-okf knows nothing about agents (B3), so the caller states the limit. The `ImportSpec` field `child_processes: false` makes the run start no child process (proposal). Under it, an item that needs the worker is skipped with `policy_refused`, and a run over an authenticated source is refused with `policy_refused` before any write. trusty-agents sets the field for every sub-agent run. Criterion 144 tests this.
+**Sub-agent imports. — Decided 2026-11-03: open-choices item 3 A.** A sub-agent gets the in-process tier only: UTF-8 text and Markdown from a local tree (§2.16 "Tiers"). It starts no extraction worker and no adapter process, so ADR-0024 stays unchanged. trusty-okf knows nothing about agents (B3), so the caller states the limit. The `ImportSpec` field `child_processes: false` makes the run start no child process (proposal). Under it, an item that needs the worker is skipped with `policy_refused`, and a run over an authenticated source is refused with `policy_refused` before any write. trusty-agents sets the field for every sub-agent run. Criterion 144 tests this.
 
-**Inbound email. — Decided 2026-11-03 (owner): owner-choices item 2 C.**
+**Inbound email. — Decided 2026-11-03: open-choices item 2 C.**
 
 - SENT-only binds the automated OKG refresh: every run of the scheduled refresh runner (#4538) and every OKG build that no operator started. In those runs, the `gmail` adapter adds `in:sent` to the listing query, and a store query cannot remove it.
 - An operator may start an explicit import with a named query that reads inbound mail. The run must be operator-initiated, and the CLI or caller marks it so. The mark reaches the adapter as `operator_initiated: true` in the `acquire` request (r7.1, Appendix B). A sub-agent cannot start one (item 3 A).
 - Such an import is allowed only after the capability-grant review that DOC-63 requires for a new source type (Q2 resolution, `docs/specs/DOC-63-okg-sources.md:1655-1660@c1eed98441`). DOC-63 places that review after Phase A, so inbound import also waits for S-4.4. Until the review passes, the adapter refuses an inbound query.
 - Every inbound concept carries the trust label `UntrustedExternal`.
-- DOC-63 S-3.3 is amended to state this scope (§6.1 item 13; owner item 2 C; [#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742), merged in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810)).
+- DOC-63 S-3.3 is amended to state this scope (§6.1 item 13; open-choices item 2 C; [#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742), merged in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810)).
 
-**Native-Doc export. — Decided 2026-11-03 (owner): owner-choices item 10 B.** Native Google Doc export is a new source type, not the existing `drive` source. It goes through the capability-grant review before any import against a real account. DOC-63 places that review after Phase A. Option A, treating `gdocs` as the existing `drive` source, was not chosen.
+**Native-Doc export. — Decided 2026-11-03: open-choices item 10 B.** Native Google Doc export is a new source type, not the existing `drive` source. It goes through the capability-grant review before any import against a real account. DOC-63 places that review after Phase A. Option A, treating `gdocs` as the existing `drive` source, was not chosen.
 
-**Proposed acceptance for these sources (not owner-approved).**
+**Proposed acceptance for these sources (not yet approved).**
 
 1. **Explicit selection.** The caller names the account label and the source: a Gmail query and window, or a Drive folder ID or document IDs. No default account exists. A missing selection is refused.
 2. **Complete pagination.** The adapter follows every page token to the end. A run that stops at a ceiling reports `pagination_exhausted: false` and the remaining cursor. It never enables deletion detection (C4). r6: the engine sets `pagination_exhausted` and `deletion_safe` itself, whatever the adapter's flag says (§2.13 "Listing completeness"). Today `gmail_list_ids` returns at the ceiling with no truncation flag (`gapi.rs:135-137@c1eed98441`). The tool reports `listed` and `max_messages`, so a caller can infer truncation but is not told (`gmail.rs:224-232`).
@@ -723,13 +723,13 @@ Scope is approved (§1.3). The rules below are proposals. Appendix C gives the p
 
 The design choice is approved (§1.4). Every rule below is a proposal. Appendix B gives the protocol messages and default limits.
 
-**Shape.** The worker is a separate binary, proposed name `trusty-okf-xberg-worker`. It depends on xberg at an exact version (`xberg = "=1.3.10"`; Amended 2026-11-05, #10746 D19, Bob: "Amend §2.16 to =1.3.10." The assessment named 1.4.0 at `xberg-assessment.md:579`) with a committed lockfile. trusty-okf implements one `Extractor`, `WorkerExtractor`, that forwards each item to the worker. trusty-okf never links xberg (B9). The worker is optional: trusty-okf builds and imports without it.
+**Shape.** The worker is a separate binary, proposed name `trusty-okf-xberg-worker`. It depends on xberg at an exact version (`xberg = "=1.3.10"`; Amended 2026-11-05, #10746, the xberg pin: "Amend §2.16 to =1.3.10." The assessment named 1.4.0 at `xberg-assessment.md:579`) with a committed lockfile. trusty-okf implements one `Extractor`, `WorkerExtractor`, that forwards each item to the worker. trusty-okf never links xberg (B9). The worker is optional: trusty-okf builds and imports without it.
 
-**Tiers. — Decided 2026-11-03 (owner): §3 (o) option A; revisitable at implementation.** The built-in tier handles UTF-8 text and Markdown, which is today's floor (DOC-55 §4.3). Every other format goes to the worker. Not chosen: 3o B (pure-Rust extractors also in process) and 3o C (3o B through a shared crate with trusty-search).
+**Tiers. — Decided 2026-11-03: §3 (o) option A; revisitable at implementation.** The built-in tier handles UTF-8 text and Markdown, which is today's floor (DOC-55 §4.3). Every other format goes to the worker. Not chosen: 3o B (pure-Rust extractors also in process) and 3o C (3o B through a shared crate with trusty-search).
 
 **Process isolation is not a sandbox.** The worker runs as the same user. Without an OS sandbox it can read any file and open any socket that user can (Xberg assessment `:269`). The limits below reduce exposure. They do not confine the worker.
 
-**OS sandbox. — Decided 2026-11-03 (owner): owner-choices item 9 B.** The worker runs under an OS sandbox before it parses email or Drive content. The sandbox allows no network and no file access beyond the worker's empty working directory. The mechanism is per platform, for example Linux landlock with seccomp, or the macOS sandbox (proposal). r7.1: the host applies the sandbox in its own spawn path, before the worker binary runs, and records whether that step succeeded. That record is the host's spawn evidence, and only it decides whether the worker is sandboxed. The host never trusts the worker to report it, as for the limits below. The worker's `hello` reply reports the sandbox in the `sandbox` field (Appendix B), which the host uses only as a cross-check. When the field disagrees with the spawn evidence, the run fails with `worker_incompatible`. The host sends an item from a `gmail`, `drive` or `gdocs` store only to a worker whose spawn evidence shows the sandbox. Otherwise the item is skipped with `sandbox_required`. Local-tree extraction may ship before the sandbox. Option A, sandbox as later hardening, was not chosen. Criterion 145 tests this.
+**OS sandbox. — Decided 2026-11-03: open-choices item 9 B.** The worker runs under an OS sandbox before it parses email or Drive content. The sandbox allows no network and no file access beyond the worker's empty working directory. The mechanism is per platform, for example Linux landlock with seccomp, or the macOS sandbox (proposal). r7.1: the host applies the sandbox in its own spawn path, before the worker binary runs, and records whether that step succeeded. That record is the host's spawn evidence, and only it decides whether the worker is sandboxed. The host never trusts the worker to report it, as for the limits below. The worker's `hello` reply reports the sandbox in the `sandbox` field (Appendix B), which the host uses only as a cross-check. When the field disagrees with the spawn evidence, the run fails with `worker_incompatible`. The host sends an item from a `gmail`, `drive` or `gdocs` store only to a worker whose spawn evidence shows the sandbox. Otherwise the item is skipped with `sandbox_required`. Local-tree extraction may ship before the sandbox. Option A, sandbox as later hardening, was not chosen. Criterion 145 tests this.
 
 **Limits.** The host enforces every limit. It never trusts the worker to.
 
@@ -780,13 +780,13 @@ The caller's item ceiling bounds the count per run, as `MAX_*_CEILING` does toda
 - E1, purity: the worker meets it on the input side (bytes only) and by the determinism test. It does not meet it on the process side, because a process can do I/O. The OS sandbox (item 9 B) bounds that I/O for email and Drive content. Local-tree extraction before the sandbox keeps this residual risk.
 - r7: the amendment also states the OS sandbox condition above. The filing checks whether DOC-55 §8 item 3 also covers the 3m A adapter processes, which are connectors and not converters (inference).
 
-**Reconciliation with the Xberg assessment (ar-T05).**
+**Reconciliation with the Xberg assessment.**
 
-| Assessment item (`docs/briefs/2026-11-03-xberg-assessment.md`) | r3 disposition |
+| Assessment item (`xberg-assessment.md`) | r3 disposition |
 |---|---|
-| Recommendation C, no addition now (`:5`) | Superseded for import by the 03:17Z owner choice. |
+| Recommendation C, no addition now (`:5`) | Superseded for import by the §1.4 design choice. |
 | "OKF does NOT own extraction (stays in trusty-agents connectors)" (`:171`) | Superseded by §1.2–§1.4. trusty-okf owns the extraction call for imports. It still owns no authenticated acquisition. |
-| In-process plugin first (`:314`, `:483`) | Not adopted. Bob chose the separate worker. B9 forbids linking xberg. |
+| In-process plugin first (`:314`, `:483`) | Not adopted. §1.4 chose the separate worker. B9 forbids linking xberg. |
 | MSRV 1.98 versus 1.94 is a blocker for in-process use (`:22`) | The process boundary removes it for trusty-okf. The worker builds in an excluded trusty-tools directory with its own toolchain (3n, decided B). |
 | `DocumentExtractor` trait in trusty-common and a plugin registry in trusty-search (`:105-160`) | Not adopted. DOC-55's `Extractor` is the one contract. Whether trusty-search later uses the same worker is outside this spec. |
 | TOML manifest with a `[permissions]` table (`:176-212`) | The limits and `network = false` shape is reused for worker configuration. The permission fields enforce nothing (`:224-225`), so this spec does not call them permissions. |
@@ -796,21 +796,19 @@ The caller's item ceiling bounds the count per run, as `MAX_*_CEILING` does toda
 | Process isolation is not a sandbox (`:269`) | r7: an OS sandbox is required before the worker parses email or Drive content (item 9 B). |
 | Acceptance routes `POST /indexes/...` (`:523`) | Stale. HTTP was retired in #9214 (§5.1). |
 
-The brief also names "ar-Tff" for reconciliation. This spec found no document with that identifier, so it reconciles only ar-T05.
+## 3. Design decisions (all decided) {#SPEC-OKF-01-3}
 
-## 3. Owner decisions (all decided) {#SPEC-OKF-01-3}
+Each question lists its options. (a) and every other question were decided on 2026-11-03, each as recommended (§1.5). The chosen option is marked **Chosen**. Every other option stays visible, marked "Not chosen", or "Ruled out by r6" where r6 found it incompatible with a requirement. Questions (f), (h), (n), (o) and (p) are open-choices items 19–26: decided, and revisitable at implementation without reopening acceptance. The four approved inputs in §1.1–§1.4 are requirements, not §3 questions.
 
-Each question lists its options. Bob decided (a) at 03:06Z and every other question at 06:58Z on 2026-11-03, each as recommended (§1.5). The chosen option is marked **Chosen**. Every other option stays visible, marked "Not chosen", or "Ruled out by r6" where r6 found it incompatible with a requirement. Questions (f), (h), (n), (o) and (p) are owner-choices items 19–26: decided, and revisitable at implementation without reopening acceptance. The four approved inputs in §1.1–§1.4 are requirements, not §3 questions.
+**Noted consumer (2026-11-03).** Trusty Agents' assistant knowledge store will use trusty-okf. This records a consumer only. It decides no §3 question and changes no requirement.
 
-**Noted consumer (owner FYI 2026-11-03 04:13Z).** Trusty Agents' assistant knowledge store will use trusty-okf. This records a consumer only. It decides no §3 question and changes no requirement.
-
-**(a) Crate name and ADR-0041. — Decided 2026-11-03 (owner): A.** Proposal: [ADR-OKF-0001](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) (filed as ADR-0075).
+**(a) Crate name and ADR-0041. — Decided 2026-11-03: A.** Proposal: [ADR-OKF-0001](../adr/0075-trusty-okf-consolidates-trusty-kb-and-owns-the-index-feed-loop.md) (filed as ADR-0075).
 - A. trusty-okf replaces the rename. trusty-kb's generic code moves into trusty-okf, its agent glue moves to trusty-agents, and trusty-kb retires. A new ADR amends ADR-0041's naming. **Chosen.**
 - B. trusty-okf is the format crate. trusty-okg is the agent build crate on top (stores, ledger, ingest, trust labels, feed).
 - C. Keep ADR-0041 and drop trusty-okf.
-- Ruling: "consolidate generic trusty-kb functionality under trusty-okf, superseding planned trusty-okg naming; preserve agent glue boundary" (Bob, 2026-11-03 03:06Z). §2.7 gives the mapping and the boundary rule.
+- Decision: consolidate generic trusty-kb functionality under trusty-okf, superseding the planned trusty-okg name, and keep the agent-glue boundary (2026-11-03). §2.7 gives the mapping and the boundary rule.
 
-**(b) OKF version target. — Decided 2026-11-03 (owner): B.** Owner-choices item 13.
+**(b) OKF version target. — Decided 2026-11-03: B.** Open-choices item 13.
 - A. v0.2 only. Not chosen.
 - B. Write v0.2. Read v0.1 through the §13 fallbacks, and migrate an OKG by rebuilding it. **Chosen.**
 - C. Write both v0.1 and v0.2. Not chosen.
@@ -818,34 +816,34 @@ Each question lists its options. Bob decided (a) at 03:06Z and every other quest
 - Note: B is lossless only under the revised §4.5, which never deletes a concept the ledger does not own (§2.9). §2.8 applies to every migration path.
 - Note (r4, r7): B regenerates a legacy concept only after it proves engine ownership, by the §3 (q) C proof. `migrate` covers hand-owned concepts (§2.9).
 
-**(c) Supersession and correction model. — Decided 2026-11-03 (owner): A.** Owner-choices item 12.
+**(c) Supersession and correction model. — Decided 2026-11-03: A.** Open-choices item 12.
 - A. Deprecate in place, add `superseded_by` and `supersedes` keys, record in `log.md` (§2.5). **Chosen.**
 - B. The Google sample pattern: move the old concept to a `-legacy` path, and the new concept takes the old ID. Not chosen.
 - C. Replace in place. History lives only in `log.md` and git. Not chosen.
 - Reason: A keeps every concept ID stable, so ledger and search-index paths stay valid. The keys make supersession machine-readable, which OKF v0.2 lacks.
-- Sub-question (c2): a store item changes after a curator deprecated its concept. **Decided 2026-11-03 (owner): (i).** Owner-choices item 11, listed there as A. (i) Ingest writes the new source content and keeps the editorial keys. **Chosen.** (ii) Ingest refuses with `Conflict` and reports the item on every run. Not chosen. Reason: the tree follows the source, and §2.9 keeps the curator's decision. §4.5 and §4.8 apply (i).
+- Sub-question (c2): a store item changes after a curator deprecated its concept. **Decided 2026-11-03: (i).** Open-choices item 11, listed there as A. (i) Ingest writes the new source content and keeps the editorial keys. **Chosen.** (ii) Ingest refuses with `Conflict` and reports the item on every run. Not chosen. Reason: the tree follows the source, and §2.9 keeps the curator's decision. §4.5 and §4.8 apply (i).
 
-**(d) Where trust and verification fields live. — Decided 2026-11-03 (owner): C.** Owner-choices item 5.
+**(d) Where trust and verification fields live. — Decided 2026-11-03: C.** Open-choices item 5.
 - A. OKF frontmatter only. Ruled out by r6 as written: the whole record in frontmatter breaks the bounded projection of §2.10 and the 64 KiB tombstone bound of §4.8, unless the overflow lives outside frontmatter, which makes it option C.
 - B. A sidecar ledger only. Not chosen.
 - C. Both. The record outside frontmatter is authoritative. The build projects a bounded copy into frontmatter. **Chosen.**
-- Reason: a rebuild regenerates frontmatter, so human `verified` events must survive outside it. Only events in the record count as Verified; D64 (#10873) adds hashless frontmatter-only events to `history` only (§2.10 "Events with no hash"). Frontmatter keeps each bundle self-describing per OKF §5.2. §2.10 places the record.
+- Reason: a rebuild regenerates frontmatter, so human `verified` events must survive outside it. Only events in the record count as Verified; #10873 adds hashless frontmatter-only events to `history` only (§2.10 "Events with no hash"). Frontmatter keeps each bundle self-describing per OKF §5.2. §2.10 places the record.
 - Note (r6): under C, `verify` changes concept bytes, so it records `written_bytes` (§4.5).
 
-**(e) Owner of the feed loop to trusty-search. — Decided 2026-11-03 (owner): A.** Owner-choices item 14.
+**(e) Owner of the feed loop to trusty-search. — Decided 2026-11-03: A.** Open-choices item 14.
 - A. trusty-okf, in a feature-gated module moved from `trusty-agents/src/stores/index_feed.rs`. **Chosen.**
 - B. trusty-agents keeps it. Not chosen.
 - C. trusty-search absorbs OKF indexing, per ADR-0041 Decision 2. Not chosen.
 - Reason: the loop is generic, and ADR-0041 already wants it out of trusty-agents. C depends on trusty-search work that is not built (§5.5).
 - Note: ADR-0041 Decision 2 still stands after ADR-OKF-0001. A contradicts it for the feed loop, so a further ADR-0041 amendment is a pre-implementation filing (§6.1 item 9). §5 binds trusty-okf as the feed owner.
 
-**(f) Default strictness on write. — Decided 2026-11-03 (owner): B; revisitable at implementation.** Owner-choices item 23.
+**(f) Default strictness on write. — Decided 2026-11-03: B; revisitable at implementation.** Open-choices item 23.
 - A. Lenient: report findings, block nothing. Not chosen.
 - B. Strict on errors: block any write that breaks OKF §11 conformance; report warnings and infos. **Chosen.**
 - C. Strict on errors and warnings. Not chosen.
 - Reason: a non-conformant write must never land. OKF §11 calls everything else soft guidance.
 
-**(g) Public surface. — Decided 2026-11-03 (owner): B.** Owner-choices item 15. ADR-0040 sets the rule: agent-consumed tools go to MCP, framework-consumed tools stay native.
+**(g) Public surface. — Decided 2026-11-03: B.** Open-choices item 15. ADR-0040 sets the rule: agent-consumed tools go to MCP, framework-consumed tools stay native.
 - A. Library only. Not chosen.
 - B. Library plus a CLI: `validate`, `regen`, `build`, `migrate` and `feed` (3e is A), plus the `import` verbs that §1.2 item 16 requires (§4.10). **Chosen.**
 - C. Library, CLI and an MCP server. Not chosen. It conflicts with ADR-0041 Decision 4 and boundary rule B7.
@@ -853,48 +851,48 @@ Each question lists its options. Bob decided (a) at 03:06Z and every other quest
 - Note (r3, r7): §1.2 item 16 and §1.3 item 23 require an import CLI. Under B it is the trusty-okf CLI. Its authenticated sources run as adapter processes (3m A).
 - Note (r6, r7): the adapter environment list of §2.7.1 B10 stays a library parameter. The trusty-okf CLI supplies it, and any other host binary supplies its own.
 
-**(h) crates.io publishing. — Decided 2026-11-03 (owner): A; revisitable at implementation.** Owner-choices item 24.
+**(h) crates.io publishing. — Decided 2026-11-03: A; revisitable at implementation.** Open-choices item 24.
 - A. `publish = false` now. **Chosen.**
 - B. Publish to crates.io now. Not chosen.
 - Reason: OKF is at v0.2 and still changing, and publishing would pin the schema. trusty-kb withheld publishing for this reason (`crates/trusty-kb/Cargo.toml:17-36@c1eed98441`). §7 is decided A, so nothing forces publishing.
 
-**(i) Deprecated concepts in the search index. — Decided 2026-11-03 (owner): A.** Owner-choices item 16.
+**(i) Deprecated concepts in the search index. — Decided 2026-11-03: A.** Open-choices item 16.
 - A. Withdraw deprecated and tombstoned concepts from the search index. Re-check on every feed pass. **Chosen.**
 - B. Keep them indexed. Not chosen.
 - Reason: hits carry no metadata, so a caller cannot filter deprecated concepts out (§5.5).
 - Note: trusty-search recognizes tombstones (`ingest/mod.rs:425`) but not `status: deprecated`. Its watcher re-indexes changed files under the index root (DOC-63 S-8.1), and a full reindex walks the whole root. Either path can return a withdrawn deprecated concept to the index (inference). So every feed pass re-checks withdrawn paths and removes any that came back (§5.4 F9). A trusty-search that learns `status: deprecated` would only make F9 rarer.
 
-**(j) Where the crate lives. — Decided 2026-11-03 (owner): A.** Owner-choices item 18. See §7.
+**(j) Where the crate lives. — Decided 2026-11-03: A.** Open-choices item 18. See §7.
 
-Questions (k)–(p) are new in r3. They come from the four 2026-11-03 owner inputs (§1.1–§1.4).
+Questions (k)–(p) are new in r3. They come from the four approved 2026-11-03 inputs (§1.1–§1.4).
 
-**(k) Default content policy for email and Google Docs import. — Decided 2026-11-03 (owner): A.** Owner-choices item 17. Bob requires a configurable policy, never a silent summaries-only default and never a whole raw mailbox by default (§1.3). Every option below is a default; a caller can pick another option per store.
+**(k) Default content policy for email and Google Docs import. — Decided 2026-11-03: A.** Open-choices item 17. §1.3 requires a configurable policy, never a silent summaries-only default and never a whole raw mailbox by default (§1.3). Every option below is a default; a caller can pick another option per store.
 - A. Full body text of each selected message or document, with thread context. Quoted and forwarded text stays, marked as quoted. Attachments are listed by name, type and size, but not extracted. **Chosen.**
 - B. Option A, plus attachment extraction through the extraction layer, under the same limits. Not chosen as the default.
 - C. Full body text with quoted and forwarded text removed. Not chosen as the default.
 - D. No default. An import refuses until the caller names a policy. Not chosen.
 - Summaries-only is available only as an explicit per-store choice.
-- Reason: A imports the real content Bob asked for. It keeps thread meaning, which quote-stripping loses; DOC-63 calls quote-stripping "lossy and itself unreliable" (`DOC-63-okg-sources.md:834-838@c1eed98441`). It leaves third-party attachment bytes out by default (DOC-63 §6.4 item 2, `:840`).
+- Reason: A imports the real content §1.3 asks for. It keeps thread meaning, which quote-stripping loses; DOC-63 calls quote-stripping "lossy and itself unreliable" (`DOC-63-okg-sources.md:834-838@c1eed98441`). It leaves third-party attachment bytes out by default (DOC-63 §6.4 item 2, `:840`).
 - Note: for Gmail, a selected message is a SENT message in an automated refresh, and may be an inbound message in an operator-initiated import after the grant review (3l C).
 
-**(l) Email scope versus the SENT-only ruling. — Decided 2026-11-03 (owner): C, as worded in the owner-choices list.** Owner-choices item 2. Bob's 03:15Z scope says "include email" and rejects summaries-only. The prior ruling makes Gmail import SENT-only, enforced at the query (DOC-63 §5.1 row b, S-3.3). DOC-63 also requires every new source type to be reviewed as a capability grant, after Phase A lands (Q2 resolution, `:1655-1660`). Phase A includes the chunk-level label carrier S-4.4, which is not built (§5.5).
+**(l) Email scope versus the SENT-only rule. — Decided 2026-11-03: C, as worded in the open-choices list.** Open-choices item 2. The §1.3 scope includes email and rejects summaries-only. The prior constraint makes Gmail import SENT-only, enforced at the query (DOC-63 §5.1 row b, S-3.3). DOC-63 also requires every new source type to be reviewed as a capability grant, after Phase A lands (Q2 resolution, `:1655-1660`). Phase A includes the chunk-level label carrier S-4.4, which is not built (§5.5).
 - A. Keep SENT-only for every Gmail import. "Email import" means full-fidelity import of the SENT corpus. Not chosen.
-- B. Add inbound mail as a new store kind, for example `gmail-inbox`. It is reviewed as a capability grant and stays blocked until Phase A lands. `gmail` stays SENT-only. Not chosen. r6 recommended B; the owner-choices list recommended C.
+- B. Add inbound mail as a new store kind, for example `gmail-inbox`. It is reviewed as a capability grant and stays blocked until Phase A lands. `gmail` stays SENT-only. Not chosen. r6 recommended B; the open-choices list recommended C.
 - C. SENT-only binds the automated OKG refresh only. An operator can run an explicit import with a named query that reads inbound mail. Such an import is labelled `UntrustedExternal` and is allowed only after the capability-grant review. **Chosen.** §2.15 "Inbound email" gives the rule.
-- r6 option C, "Lift SENT-only for the `gmail` store kind" with no other condition, was replaced by the owner-choices wording above before the ruling. It is not chosen.
+- r6 option C, "Lift SENT-only for the `gmail` store kind" with no other condition, was replaced by the open-choices wording above before the decision. It is not chosen.
 - Reason: C delivers inbound email, keeps the automated refresh SENT-only, and keeps the grant review DOC-63 requires.
-- Note: C narrows a standing owner ruling, S-3.3. The narrowing is recorded with its date in §1.5, and DOC-63 S-3.3 carries the matching amendment (§6.1 item 13; owner item 2 C; [#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742), merged in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810)). DOC-63 places the grant review after Phase A, so inbound import still waits for S-4.4.
+- Note: C narrows a standing decision, S-3.3. The narrowing is recorded with its date in §1.5, and DOC-63 S-3.3 carries the matching amendment (§6.1 item 13; open-choices item 2 C; [#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742), merged in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810)). DOC-63 places the grant review after Phase A, so inbound import still waits for S-4.4.
 - Note: the shipped Gmail tool does not enforce SENT-only today. It accepts any Gmail query, and its schema offers `from:board@example.com` as an example (`crates/trusty-agents/src/tools/okg/gmail.rs:78@c1eed98441`). `gmail_query` adds only date operators (`gapi.rs:64-76`). Under C, the automated refresh must add `in:sent`. This is a gap to close in trusty-agents.
 
-**(m) Where authenticated acquisition runs for the public import CLI. — Decided 2026-11-03 (owner): A.** Owner-choices item 4. §1.3 item 23 requires the public CLI to import email and Google Docs end to end. B1 and B6 keep connector code out of trusty-okf.
+**(m) Where authenticated acquisition runs for the public import CLI. — Decided 2026-11-03: A.** Open-choices item 4. §1.3 item 23 requires the public CLI to import email and Google Docs end to end. B1 and B6 keep connector code out of trusty-okf.
 - A. Source adapter processes. trusty-agents (or a connector crate) ships one adapter binary per source kind. The trusty-okf CLI spawns it and speaks the same versioned process protocol as the extraction worker (§2.16), in an `acquire` role. The adapter holds its own grant from #4040. **Chosen.**
 - B. Split CLI. The trusty-okf CLI imports local trees. `tagent okg import` imports email and Docs through the same trusty-okf library calls. Not chosen.
 - C. trusty-okf links the Google adapters behind a cargo feature. Ruled out by r6: it links Google code into trusty-okf, so the B10 environment rule has no process boundary to bind, and it breaks B1 and B6.
 - Reason: A gives one import CLI, one protocol for both process roles, and no B-rule change.
-- Note (ADR-0024, settled): ADR-0024 says a sub-agent "never talks out-of-process" (`docs/adr/0024-…md:61-63@c1eed98441`), and DOC-63 reads it as "must not be given an out-of-process ingestion path" (`:1714`). The adapter processes and the extraction worker start child processes. **Decided 2026-11-03 (owner): owner-choices item 3 A.** A sub-agent gets the in-process tier only, so ADR-0024 stays unchanged (§2.15 "Sub-agent imports"). ADR-0026 applies: the process that acquires holds its own grant.
+- Note (ADR-0024, settled): ADR-0024 says a sub-agent "never talks out-of-process" (`docs/adr/0024-…md:61-63@c1eed98441`), and DOC-63 reads it as "must not be given an out-of-process ingestion path" (`:1714`). The adapter processes and the extraction worker start child processes. **Decided 2026-11-03: open-choices item 3 A.** A sub-agent gets the in-process tier only, so ADR-0024 stays unchanged (§2.15 "Sub-agent imports"). ADR-0026 applies: the process that acquires holds its own grant.
 - Note (r6): A needs the B10 scope rule of §2.7.1, under which an adapter process gets exactly its caller's environment list.
 
-**(n) Where the extraction worker crate lives. — Decided 2026-11-03 (owner): B; revisitable at implementation.** Owner-choices item 20. xberg needs Rust 1.98; the workspace pins 1.94 (ADR-0029; Xberg assessment `:22`).
+**(n) Where the extraction worker crate lives. — Decided 2026-11-03: B; revisitable at implementation.** Open-choices item 20. xberg needs Rust 1.98; the workspace pins 1.94 (ADR-0029; Xberg assessment `:22`).
 - A. Its own repo, released as a binary. Not chosen.
 - B. A directory in the trusty-tools repo that the workspace excludes (`[workspace] exclude`), with its own lockfile and `rust-toolchain.toml`. **Chosen.**
 - C. A workspace member, after an ADR-0029 MSRV bump to 1.98. Not chosen.
@@ -902,28 +900,28 @@ Questions (k)–(p) are new in r3. They come from the four 2026-11-03 owner inpu
 - Note: B rests on an inference about Cargo `exclude` behaviour. Before implementation, a check confirms that the exclusion keeps the 1.94 workspace build clean, and ADR-0029 records the excluded directory (§6.1 item 15). If the check fails, 3n is revisited at implementation.
 - Note: this question is separate from §7, which places trusty-okf itself.
 
-**(o) Built-in extraction tier. — Decided 2026-11-03 (owner): A; revisitable at implementation.** Owner-choices item 25.
+**(o) Built-in extraction tier. — Decided 2026-11-03: A; revisitable at implementation.** Open-choices item 25.
 - A. trusty-okf handles UTF-8 text and Markdown in process. Every other format goes to the worker. Without the worker, other formats are reported `worker_absent`. **Chosen.**
 - B. trusty-okf also runs DOC-55's first-wave pure-Rust extractors (`html`, `docx`, `xlsx`, `pdf`) in process, and the worker covers the rest. Not chosen.
 - C. Option B, reusing trusty-search's extractors (`crates/trusty-search/src/core/extract/`, Xberg assessment `:26-48`) by moving them to a shared crate. Not chosen.
 - Reason: A keeps one extraction path for binary formats and does not add a third set of PDF and Office parsers beside trusty-search's and xberg's.
 - Note: Google Docs exported as HTML need an HTML-to-text step. That step runs in the worker, so a native-Doc import also needs the OS sandbox (§2.16).
 
-**(p) OCR and ML models in the worker. — Decided 2026-11-03 (owner): A; revisitable at implementation.** Owner-choices item 26.
+**(p) OCR and ML models in the worker. — Decided 2026-11-03: A; revisitable at implementation.** Open-choices item 26.
 - A. Off. The worker builds without model download or OCR features. A scanned PDF yields empty text and a `no_text_layer` note, as DOC-55 §3.3 says today. **Chosen.**
 - B. Opt-in per store, with models in a local directory the operator fills. No download at run time. Not chosen.
 - Reason: DOC-55 §3.3 excludes OCR because it is neither pure nor deterministic (`okg-universal-importer.md:132-135`). B would need a DOC-55 amendment and a determinism exception.
 
-Questions (q) and (r) are new in r4. They come from the review-blocker fixes, not from a new owner input.
+Questions (q) and (r) are new in r4. They come from the review-blocker fixes, not from a new approved input.
 
-**(q) How a legacy ledger-owned concept proves engine ownership. — Decided 2026-11-03 (owner): C.** Owner-choices item 6. r4 lets `rebuild` overwrite a ledger-owned concept only when stored proof shows the disk bytes are what the engine last wrote (§4.5). Records written before r4 carry no written hash (`crates/trusty-kb/src/okg/ledger.rs:47-65@c1eed98441`). Without a proof rule, 3b B ("migrate an OKG by rebuilding it") would regenerate no legacy concept.
+**(q) How a legacy ledger-owned concept proves engine ownership. — Decided 2026-11-03: C.** Open-choices item 6. r4 lets `rebuild` overwrite a ledger-owned concept only when stored proof shows the disk bytes are what the engine last wrote (§4.5). Records written before r4 carry no written hash (`crates/trusty-kb/src/okg/ledger.rs:47-65@c1eed98441`). Without a proof rule, 3b B ("migrate an OKG by rebuilding it") would regenerate no legacy concept.
 - A. Equality proof. `rebuild` re-renders each legacy item with the trusty-kb v0.1 renderer. When the result equals the disk bytes, no hand edit exists, and `rebuild` records the hash. Every unequal concept stays preserved and reported. Not chosen alone.
 - B. Operator adoption. An explicit `adopt` call, given a reviewed list of concept IDs, records their current bytes as engine-written. Not chosen alone.
 - C. Both: A first, then B for the concepts A cannot prove. **Chosen.**
 - Reason: A proves most generated concepts without a human step. B handles the remainder by explicit choice, never by default.
 - Note (r6): the proof covers byte ownership only. Neither the equality proof nor `adopt` may give a hash to a legacy verification event (§2.10 "Events with no hash"). A trusty-okf write over unproven bytes records `proven: false`, so an ordinary write never creates proof (§4.5).
 
-**(r) Where the machine-local index state lives. — Decided 2026-11-03 (owner): A.** Owner-choices item 7. §4.9.1 makes index state machine-local. That rule derives from §1.1. The location was the choice. B3 forbids trusty-okf to derive it from a home directory or an environment variable.
+**(r) Where the machine-local index state lives. — Decided 2026-11-03: A.** Open-choices item 7. §4.9.1 makes index state machine-local. That rule derives from §1.1. The location was the choice. B3 forbids trusty-okf to derive it from a home directory or an environment variable.
 - A. The caller passes an index state directory. trusty-agents passes a directory in its machine-local data area, outside every per-store tree that ADR-0022 syncs. **Chosen.**
 - B. trusty-search stores the journal beside its own index data and answers a state query. Not chosen. It would need a trusty-search change.
 - C. A directory inside the bundle that every sync ignore list must exclude. Ruled out by r6: it contradicts §4.9.1 rule 1 and `StateDirInBundle`, and a synced copy would show another machine's state. The index identity of §4.9.2 does not remove that conflict.
@@ -935,10 +933,10 @@ Questions (q) and (r) are new in r4. They come from the review-blocker fixes, no
 
 - `trusty_okf::format`: concept types, frontmatter, container rules, parse, render, validate, content hash. No I/O beyond files. No async.
 - `trusty_okf::profile`: pluggable collection profiles and inverse-edge reconciliation.
-- `trusty_okf::bundle`: open, create, put, move, verify, supersede, deprecate, `index.md` and `log.md` regeneration, paths, graph read, migrate. (Amended 2026-11-05, #10746 D14, Bob: `convert` dropped.)
+- `trusty_okf::bundle`: open, create, put, move, verify, supersede, deprecate, `index.md` and `log.md` regeneration, paths, graph read, migrate. (Amended 2026-11-05, #10746, the `convert` drop: `convert` dropped.)
 - `trusty_okf::build`: registry, ledger, ingest, docstore fetcher, read policy, trust labels, index journal, rebuild.
 - `trusty_okf::feed` (cargo feature `search-feed`): the push loop (3e, decided A).
-- `trusty_okf::retrieve` (cargo feature `search-feed`): `search.query` plus hit enrichment. Bob's requirement 3 puts retrieval in trusty-okf.
+- `trusty_okf::retrieve` (cargo feature `search-feed`): `search.query` plus hit enrichment. Requirement 3 puts retrieval in trusty-okf.
 - `trusty_okf::state` (r3): the revision journal and the three-state read model (§4.9). No I/O beyond bundle files.
 - `trusty_okf::import` (r3): the common import interface, `plan_import`, `import`, the ID rule and the import report (§2.13–§2.15, §4.10). The `docstore` source adapter lives here or in `build::docstore`.
 - `trusty_okf::extract` (r3): DOC-55's `Extractor` trait, type-hint resolution and the built-in text tier.
@@ -970,7 +968,7 @@ pub struct Frontmatter {
 pub struct Source { pub resource: String, pub id: Option<String>, pub title: Option<String>, /* author, usage_count, last_modified */ }
 pub struct Generated { pub by: Actor, pub at: Option<DateTime<FixedOffset>> }   // r4: OKF requires only `by`
 pub struct Verification { pub by: Actor, pub at: DateTime<FixedOffset>, pub stale_after: Option<DateTime<FixedOffset>> }   // r7.1: `verify` only; a new `stale_after` set in the same write (§2.4), not projected into `verified[]`
-pub struct VerificationEvent { pub v: Verification, pub hash: Option<ContentHash>, pub invalidated_at: Option<DateTime<FixedOffset>>, pub invalidated_by_hash: Option<ContentHash>, pub reason: Option<String> }   // #10746 D4b (2026-11-05, Bob): `hash` is `None` for a legacy event, which moves to history with `reason` `legacy_unbound` (§2.10). Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (text reconstructed from merged S3 code): `crates/trusty-okf/src/bundle/record.rs` sets `reason` to `legacy_unbound` exactly when `hash` is `None`; `reason` is also the field for any other non-content move to history
+pub struct VerificationEvent { pub v: Verification, pub hash: Option<ContentHash>, pub invalidated_at: Option<DateTime<FixedOffset>>, pub invalidated_by_hash: Option<ContentHash>, pub reason: Option<String> }   // #10746, the S3–S5 amendment (2026-11-05): `hash` is `None` for a legacy event, which moves to history with `reason` `legacy_unbound` (§2.10). Confirmed on 2026-11-10 for merge (text reconstructed from merged S3 code): `crates/trusty-okf/src/bundle/record.rs` sets `reason` to `legacy_unbound` exactly when `hash` is `None`; `reason` is also the field for any other non-content move to history
 pub enum Actor { Producer { name: String, version: String }, Human(String), Process(String), Other(String) }
 pub enum Status { Draft, Stable, Deprecated, Other(String) }   // r4: an unknown value is kept
 pub enum TrustTier { Unverified, MachineConfirmed, HumanReviewed }   // derived only
@@ -1025,9 +1023,9 @@ impl Bundle {
     pub fn create(root: &Path, okf_version: &str) -> Result<Bundle, OkfError>;
     pub fn validate(&self) -> Vec<Finding>;
     pub fn get(&self, id: &ConceptId) -> Result<Concept, OkfError>;
-    pub fn put(&mut self, c: Concept, by: Actor, mode: WriteMode, now: DateTime<FixedOffset>) -> Result<(PutOutcome, Vec<Finding>), OkfError>;   // #10746 D4b (2026-11-05, Bob): returns the write's findings, so criterion 125's `legacy_value_moved` warnings have a channel. Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (text reconstructed from merged S3 code): `put_confirmed` has the same return type. A refused write returns `Err` and no findings
+    pub fn put(&mut self, c: Concept, by: Actor, mode: WriteMode, now: DateTime<FixedOffset>) -> Result<(PutOutcome, Vec<Finding>), OkfError>;   // #10746, the S3–S5 amendment (2026-11-05): returns the write's findings, so criterion 125's `legacy_value_moved` warnings have a channel. Confirmed on 2026-11-10 for merge (text reconstructed from merged S3 code): `put_confirmed` has the same return type. A refused write returns `Err` and no findings
     pub fn move_concept(&mut self, from: &ConceptId, to: &ConceptId, now: DateTime<FixedOffset>) -> Result<MoveReport, OkfError>;
-    pub fn verify(&mut self, id: &ConceptId, v: Verification, seen: &ContentHash) -> Result<(PutOutcome, Vec<Finding>), OkfError>;   // #10746 D4b (2026-11-05, Bob): returns findings as `put` does. Confirmed by Bob on 2026-11-10: "Confirm both; merge the spec PR" (text reconstructed from merged S3 code): `verify_confirmed` has the same return type
+    pub fn verify(&mut self, id: &ConceptId, v: Verification, seen: &ContentHash) -> Result<(PutOutcome, Vec<Finding>), OkfError>;   // #10746, the S3–S5 amendment (2026-11-05): returns findings as `put` does. Confirmed on 2026-11-10 for merge (text reconstructed from merged S3 code): `verify_confirmed` has the same return type
     pub fn supersede(&mut self, old: &ConceptId, new: Concept, reason: &str, by: Actor, now: DateTime<FixedOffset>) -> Result<(), OkfError>;   // 3c A: deprecate old in place, create new (§2.5)
     pub fn adopt(&mut self, reviewed: &[(ConceptId, ByteHash)], by: Actor, confirmed: bool, now: DateTime<FixedOffset>) -> Result<AdoptReport, OkfError>;   // r7, 3q C: records reviewed bytes as engine-written; never hashes an event. r7.1: each pair names the bytes the person reviewed, as `verify` takes `seen`; `Human` actor and `confirmed` required (§4.5 "Adopt")
     pub fn deprecate(&mut self, id: &ConceptId, reason: &str, by: Actor, now: DateTime<FixedOffset>) -> Result<(), OkfError>;
@@ -1089,11 +1087,11 @@ pub enum OkfError {
 - No public function panics on malformed input.
 - A read never fails on a finding of any severity. Only I/O failure or unparseable YAML in the target concept fails a read.
 - A refused write changes no file. Each file write is atomic: a `create_new` temporary file in the same directory, then a rename (§2.11). An operation that writes more than one file is atomic as a set through the operation journal (§4.11, r4).
-- One writer works on a bundle at a time. trusty-okf takes an advisory lock file under `_sources/` (proposal). ADR-0022 sync must not commit it (§2.12). The lock is built in slice S5 of the #10746 plan. (Amended 2026-11-05, #10746 D4b, Bob: "lock goes in S5." As built: an exclusive `flock` on `_sources/okf.lock`, in `crates/trusty-okf/src/bundle/lock.rs`.)
+- One writer works on a bundle at a time. trusty-okf takes an advisory lock file under `_sources/` (proposal). ADR-0022 sync must not commit it (§2.12). The lock is built in slice S5 of the #10746 plan. (Amended 2026-11-05, #10746, the S3–S5 amendment: "lock goes in S5." As built: an exclusive `flock` on `_sources/okf.lock`, in `crates/trusty-okf/src/bundle/lock.rs`.)
 
 ### 4.5 Idempotency and rebuild guarantee {#SPEC-OKF-01-4-5}
 
-A concept is **ledger-owned** when a ledger record names its path. Every other concept is **hand-owned**: a bundle `put`, a migrated file (#10746 D14: was "a converted file"), or a file a user created.
+A concept is **ledger-owned** when a ledger record names its path. Every other concept is **hand-owned**: a bundle `put`, a migrated file (#10746, the `convert` drop: was "a converted file"), or a file a user created.
 
 - `put` of identical content returns `Unchanged` and writes no bytes.
 - `regenerate_indexes` run twice writes no bytes the second time.
@@ -1213,7 +1211,7 @@ Criterion 141 tests this.
 
 A tombstone does not change the content hash, so it keeps `verified[]` (§2.10). A tombstoned concept that is also deprecated stays withdrawn, because both the tombstone and 3i A withdraw it.
 
-**Transitions by 3c option.** **Decided 2026-11-03 (owner): 3c A.** The 3c B and 3c C columns are kept for reference only. Neither applies.
+**Transitions by 3c option.** **Decided 2026-11-03: 3c A.** The 3c B and 3c C columns are kept for reference only. Neither applies.
 
 | Event | 3c A (deprecate in place) — **Chosen** | 3c B (`-legacy` move) — Not chosen | 3c C (replace in place) — Not chosen |
 |---|---|---|---|
@@ -1267,10 +1265,10 @@ A stale-chunk hit fails the probe, so F6 is also caught here. The withdrawal pro
 **Axis 3: verification state.**
 
 - **Verified.** At least one non-invalidated event in the verification record carries the current content hash. The state reports whether any such event has a `human:` actor.
-- **Unverified.** No event carries the current content hash. The state reports how many history events exist, including hashless frontmatter-only events (D64, #10873).
+- **Unverified.** No event carries the current content hash. The state reports how many history events exist, including hashless frontmatter-only events (#10873).
 - Events bound to other hashes are history. They never count toward the current revision (§1.1 item 12).
 - r6: an event with no hash is history too. No operation gives it a hash (§2.10 "Events with no hash").
-- The verification record lives outside frontmatter and is authoritative (§3 (d), decided C; §2.10). Axis 3 reads the record for Verified and for `VerificationMismatch`. Ruling D64 (#10873): for the `history` count it also reads frontmatter `verified[]` entries that have no `hash` key and whose `(by, at)` no folded record line shares. Such an event is history, never Verified, and never a mismatch (§2.10 "Events with no hash").
+- The verification record lives outside frontmatter and is authoritative (§3 (d), decided C; §2.10). Axis 3 reads the record for Verified and for `VerificationMismatch`. #10873: for the `history` count it also reads frontmatter `verified[]` entries that have no `hash` key and whose `(by, at)` no folded record line shares. Such an event is history, never Verified, and never a mismatch (§2.10 "Events with no hash").
 
 **OKF trust tier, kept distinct.** The OKF trust tier stays as OKF §5.3 defines it: derived from frontmatter `verified[]`, advisory, and visible to every OKF consumer. trusty-okf reports it beside the verification state, never in place of it. The two agree while trusty-okf maintains the frontmatter. After an out-of-band edit they can differ: raw frontmatter may still show old events (§2.10 residual risk), while the verification state is Unverified. Any trusty surface that says "verified" uses the verification state.
 
@@ -1328,7 +1326,7 @@ A stale-chunk hit fails the probe, so F6 is also caught here. The withdrawal pro
 
 r4 fixes review BLOCKER 5.
 
-**Derivation.** §1.1 is approved. Item 11 makes a failed index update read as pending-index, and item 13 says an acknowledgement alone is not retrieval proof. Bob's confirmation adds that a failed or absent search update must not imply "done". An acknowledgement and a probe therefore describe the daemon that answered them. Each machine runs its own trusty-search daemon. So the index state that one machine reports must come from its own daemon. This rule follows from §1.1; it is not a new proposal.
+**Derivation.** §1.1 is approved. Item 11 makes a failed index update read as pending-index, and item 13 says an acknowledgement alone is not retrieval proof. The §1.1 confirmation adds that a failed or absent search update must not imply "done". An acknowledgement and a probe therefore describe the daemon that answered them. Each machine runs its own trusty-search daemon. So the index state that one machine reports must come from its own daemon. This rule follows from §1.1; it is not a new proposal.
 
 **The defect in r3.** The index journal was `_sources/<id>.index.jsonl`, inside the bundle. ADR-0022 syncs the whole tree, `_sources/*.jsonl` included, through a per-store git repo with union merge (`docs/adr/0022-knowledge-tree-sync-model.md:87-90`, `:108@c1eed98441`). Machine B then pulled machine A's journal and read Acknowledged or Searchable for content its own daemon never received.
 
@@ -1472,7 +1470,7 @@ trusty-okf's `retrieve` sends `search.query`, scoped by `path_prefix` to the bun
 
 r3 (proposal, from §1.1): a hit can carry text from an older revision. `retrieve` attaches the verification state only when the hit's content occurs in the current file. A historical review never makes stale text look verified.
 
-**Stale-revision hits. — Decided 2026-11-03 (owner): owner-choices item 22 B; revisitable at implementation.** A hit whose content does not occur in the current file is returned, flagged `stale_revision` and reported as Unverified. A hit for a tombstoned concept, or for a concept whose index state is WithdrawPending or Withdrawn, is dropped. Option A, drop every stale-revision hit, was not chosen. Criterion 69 tests this.
+**Stale-revision hits. — Decided 2026-11-03: open-choices item 22 B; revisitable at implementation.** A hit whose content does not occur in the current file is returned, flagged `stale_revision` and reported as Unverified. A hit for a tombstoned concept, or for a concept whose index state is WithdrawPending or Withdrawn, is dropped. Option A, drop every stale-revision hit, was not chosen. Criterion 69 tests this.
 
 The tree write is the truth. The ledger never waits on a push (DOC-55 SPEC-OKGIMPORT-06 §7.2.4). The index journal records a push only after the daemon confirms it (§5.4).
 
@@ -1567,23 +1565,23 @@ trusty-okf does not build these. Another crate owns each one. §6.1 item 11 requ
 Each item ends with its state at r7. "Satisfied" means the spec text meets the item. "Open" means an action outside this file remains.
 
 1. §3 (a) is recorded as decided, with its date and the ADR-OKF-0001 pointer. **Satisfied (r2).**
-2. The four 2026-11-03 owner inputs are recorded in §1.1–§1.4, each with its date, its approved text and its proposal list. **Satisfied (r3).**
-3. r7, narrowed by owner-choices item 1 A: Bob has decided owner-choices items 1–18, which cover §3 (b)–(e), (g), (i)–(m), (q), (r), sub-question (c2), §7 and five choices without a §3 question. Items 19–26, which cover §3 (f), (h), (n), (o), (p) and three choices without a §3 question, are decided (recommended), revisitable at implementation. A change to one of items 19–26 does not reopen acceptance. **Satisfied (r7, §1.5).**
-4. Bob has accepted or changed the proposals listed under §1.1–§1.4. **Satisfied (r7.1).** The 06:58Z ruling decided the 26 listed choices, not the proposal lists. Owner acceptance of the spec as written, 2026-11-03 09:16Z (Status line), settles this item (#10743).
-5. Bob has settled the §3 (l) and §3 (m) conflicts with standing rulings, and any changed ruling is recorded with its date. **Satisfied (r7).** §3 (l) is decided C, which narrows SENT-only to the automated refresh, recorded in §1.5. The §3 (m) conflict with ADR-0024 is settled by item 3 A, which changes no ruling. The DOC-63 amendment is item 13.
-6. The DOC-55 amendments in §2.16 are filed in trusty-tools, or Bob records that they are not needed. **Open (pre-implementation filing).** 3p A keeps DOC-55 §3.3 unchanged. The §8 item 3 amendment for the worker, with the OS sandbox condition of item 9 B, is still needed.
+2. The four approved 2026-11-03 inputs are recorded in §1.1–§1.4, each with its date, its approved text and its proposal list. **Satisfied (r3).**
+3. r7, narrowed by open-choices item 1 A: open-choices items 1–18 are decided, which cover §3 (b)–(e), (g), (i)–(m), (q), (r), sub-question (c2), §7 and five choices without a §3 question. Items 19–26, which cover §3 (f), (h), (n), (o), (p) and three choices without a §3 question, are decided (recommended), revisitable at implementation. A change to one of items 19–26 does not reopen acceptance. **Satisfied (r7, §1.5).**
+4. The proposals listed under §1.1–§1.4 are accepted or changed. **Satisfied (r7.1).** The §1.5 decision covered the 26 listed choices, not the proposal lists. Acceptance of the spec as written, 2026-11-03 (Status line), settles this item (#10743).
+5. The §3 (l) and §3 (m) conflicts with standing decisions are settled, and any changed decision is recorded with its date. **Satisfied (r7).** §3 (l) is decided C, which narrows SENT-only to the automated refresh, recorded in §1.5. The §3 (m) conflict with ADR-0024 is settled by item 3 A, which changes no decision. The DOC-63 amendment is item 13.
+6. The DOC-55 amendments in §2.16 are filed in trusty-tools, or the spec records that they are not needed. **Open (pre-implementation filing).** 3p A keeps DOC-55 §3.3 unchanged. The §8 item 3 amendment for the worker, with the OS sandbox condition of item 9 B, is still needed.
 7. The sync rule of §2.12 and §4.11 is filed against ADR-0022 / DOC-56 Phase 2 in trusty-tools before implementation starts. The rule: ADR-0022 sync excludes `_sources/ops/`, and it never commits while the bundle lock is held. The filing gives the dependency an owner. (r5) **Open (pre-implementation filing).**
 8. Each pick is written into this file with its date, and every "depends on 3x" passage is resolved to the chosen option. **Satisfied (r7).**
 9. ADR-OKF-0001 is filed in trusty-tools `docs/adr/`. Where a later pick changes ADR-0041 again, a further amendment is named. r7: 3e A changes ADR-0041 Decision 2. The named amendment moves feed-loop ownership to trusty-okf's `feed` module, while trusty-search keeps chunking, embedding and ranking. It may be a revision of ADR-OKF-0001 or a separate ADR. 3g B needs no amendment. **Naming satisfied (r7). Filing open (pre-implementation filing).**
-10. No section contradicts the 2026-08-01 / 2026-08-03 owner decisions, unless a decision records the change. **Satisfied (r7).** The one change, SENT-only narrowed to the automated refresh, is recorded in §1.5 and §3 (l). Trust labels before connector grants and the grant review for new source types stand (§2.15).
+10. No section contradicts the 2026-08-01 / 2026-08-03 decisions, unless a decision records the change. **Satisfied (r7).** The one change, SENT-only narrowed to the automated refresh, is recorded in §1.5 and §3 (l). Trust labels before connector grants and the grant review for new source types stand (§2.15).
 11. The external dependencies of §5.6 are filed before implementation starts (r6; r7 corrections). D1, the index identity and per-file content hash, is filed against trusty-search. D2 is filed against trusty-search as `include_paths` and `path_filter` in `search.index.config.get`, or as a per-path admission query. D3 is filed against trusty-agents (r7.1): the binding admits every path except `_sources/**` and `_state/**`, stated as those two literal `exclude_globs` entries. Each filing names the §5.6 interface and gives the dependency an owner. trusty-okf builds none of them. **Open (pre-implementation filing).**
-12. The Status line reads "Accepted". **Satisfied (r7.1).** The Status line reads "Accepted r7.1", owner acceptance 2026-11-03 09:16Z (#10743).
+12. The Status line reads "Accepted". **Satisfied (r7.1).** The Status line reads "Accepted r7.1", accepted 2026-11-03 (#10743).
 13. (r7) DOC-63 S-3.3 is amended in trusty-tools so SENT-only binds the automated OKG refresh only, and an operator-initiated inbound import needs the capability-grant review first (§3 (l), item 2 C). **Satisfied ([#10742](https://github.com/bobmatnyc/trusty-tools/issues/10742), merged in [#10810](https://github.com/bobmatnyc/trusty-tools/pull/10810)).**
 14. (r7) The capability-grant reviews that DOC-63 Q2 requires are scheduled for inbound Gmail (item 2 C) and native Google Doc export (item 10 B). They gate the first import against a real account, not implementation. DOC-63 places them after Phase A. **Open (gates first real-account use).**
-15. (r7) Before the worker is built, a check confirms that a `[workspace] exclude` directory with its own `rust-toolchain.toml` keeps the 1.94 workspace build clean (§3 (n), item 20 B). ADR-0029 records the excluded worker directory as outside the workspace MSRV, or its owner records that no note is needed. **Open (pre-implementation filing).**
+15. (r7) Before the worker is built, a check confirms that a `[workspace] exclude` directory with its own `rust-toolchain.toml` keeps the 1.94 workspace build clean (§3 (n), item 20 B). ADR-0029 records the excluded worker directory as outside the workspace MSRV, or the crate records that no note is needed. **Open (pre-implementation filing).**
 16. (r7) No ADR-0024 amendment is filed. Item 3 A keeps sub-agents to the in-process tier (§2.15). **Satisfied (r7).**
 
-**Summary at r7.** Satisfied: items 1, 2, 3, 4, 5, 8, 10, 12, 13 and 16, and the naming half of item 9. Open before acceptance: none; owner acceptance settled items 4 and 12 on 2026-11-03 09:16Z, and item 13 merged in #10810 (#10743). Open before implementation: items 6, 7, 9 (filing), 11 and 15. Open before the first real-account import: item 14.
+**Summary at r7.** Satisfied: items 1, 2, 3, 4, 5, 8, 10, 12, 13 and 16, and the naming half of item 9. Open before acceptance: none; acceptance settled items 4 and 12 on 2026-11-03, and item 13 merged in #10810 (#10743). Open before implementation: items 6, 7, 9 (filing), 11 and 15. Open before the first real-account import: item 14.
 
 ### 6.2 First implementation milestone
 
@@ -1798,7 +1796,7 @@ Scope: the `format`, `profile`, `bundle`, `build`, `state`, `import` and `extrac
 142. Row 17, case 2. A legacy bundle holds concepts with human `verified` events that carry no hash. After `Bundle::open`, `migrate`, `adopt` (3q C; r7.1: a `Human` actor, `confirmed: true` and each concept's current byte hash) and `rebuild` with its equality proof (3q C), in turn, `revision_state` returns Unverified with `history ≥ 1` after each step. No event in frontmatter or in the verification record has gained a hash. A `verify` with the current hash then returns Verified. r7.1: on a second legacy bundle, `adopt` with a `Process` actor returns `AdoptRefused { reason: "not_human" }`, and with `confirmed: false` returns `AdoptRefused { reason: "not_confirmed" }`. A concept edited after its byte hash was taken is listed in `refused` with `byte_hash_mismatch`, and the next `rebuild` leaves it byte-identical with `Conflict { reason: "no_written_hash" }`. In each refused case no file or ledger record changes.
 143. Row 17. On a legacy concept with hashless events, a content-changing `put` moves every hashless event from frontmatter into the verification record with reason `legacy_unbound`. On a second legacy concept, `deprecate` and a `stale_after` renewal leave the hashless events byte-identical in frontmatter.
 
-**Owner decisions without a §3 question (r7)** — fake worker, fake adapters and a scripted fake daemon.
+**Decisions without a §3 question (r7)** — fake worker, fake adapters and a scripted fake daemon.
 
 144. Item 3 A. An import with `child_processes: false` over a local tree holding `a.md`, `b.txt` and `c.pdf` imports `a` and `b.txt` and skips `c.pdf` with `policy_refused`. A process-spawn hook records no child process. The same setting with a `gmail` store is refused with `policy_refused` before any write. r7.1: the library's error-to-exit-code mapping (§4.10) maps that refusal to exit code 2. No CLI flag sets `child_processes`, so the test does not run the CLI.
 145. Item 9 B (r7.1). The host decides from its own spawn evidence, never from the worker's report. When that evidence shows no applied sandbox and the worker's `hello` reports `sandbox: none`, items from a `gmail`, `drive` or `gdocs` store are skipped with `sandbox_required`, and local-tree items still extract. A test-double worker that reports a sandbox the spawn evidence does not show gives `worker_incompatible` for the run, and the host sends it no item. A worker spawned under the sandbox that reports `sandbox: none` also gives `worker_incompatible`. When the spawn evidence shows the sandbox, a test-double worker that tries to open a socket and to read a file outside its working directory fails both attempts.
@@ -1807,7 +1805,7 @@ Scope: the `format`, `profile`, `bundle`, `build`, `state`, `import` and `extrac
 
 ## 7. Where the crate lives {#SPEC-OKF-01-7}
 
-**Decided 2026-11-03 (owner): A.** Owner-choices item 18. The §3 (a) ruling did not decide this. ADR-OKF-0001 holds under every option below.
+**Decided 2026-11-03: A.** Open-choices item 18. The §3 (a) decision did not cover this. ADR-OKF-0001 holds under every option below.
 
 **Question.** Where does the `trusty-okf` crate live?
 - A. A crate in the trusty-tools workspace (`crates/trusty-okf`). This project directory keeps the spec and session notes. **Chosen.**
@@ -1826,7 +1824,7 @@ Scope: the `format`, `profile`, `bundle`, `build`, `state`, `import` and `extrac
 - **Session.** This session runs in a separate project directory. With A, code work happens in a trusty-tools worktree, and this directory holds only the spec. With B, this directory becomes the repo.
 - **Workspace mechanics.** Adding a directory under `crates/` joins the workspace automatically. `default-members` needs a manual entry.
 
-**Reason for A.** Bob's requirements fix a separate crate and a separate session, not a separate repo (inference). A keeps path deps, `publish = false` (§3 (h) A) and one-PR cross-crate changes, while every consumer lives in the workspace. Code work happens in a trusty-tools worktree.
+**Reason for A.** The §1 requirements fix a separate crate and a separate session, not a separate repo (inference). A keeps path deps, `publish = false` (§3 (h) A) and one-PR cross-crate changes, while every consumer lives in the workspace. Code work happens in a trusty-tools worktree.
 
 ## Out of scope
 
@@ -1866,9 +1864,9 @@ trusty-tools (`@c1eed98441`, read-only):
 - r6: `crates/trusty-search/src/service/walker.rs`, `crates/trusty-search/src/service/index_admission.rs`, `crates/trusty-search/src/service/server/status.rs`, `crates/trusty-agents/src/api/server/knowledge_pipeline/indexing.rs`
 
 trusty-tools worktree, not at `c1eed98441`:
-- Xberg assessment (ar-T05): `docs/briefs/2026-11-03-xberg-assessment.md` in `.worktrees/f93609dd-53b5-4b85-ae0b-d8b0cd20ae7b`. It states it is based on `main@bcbea788` (`:580`). Its line numbers are cited as `xberg-assessment.md:<line>`.
+- Xberg assessment: an unpublished file, `xberg-assessment.md`. It states it is based on `main@bcbea788` (`:580`). Its line numbers are cited as `xberg-assessment.md:<line>`.
 
-Research notes (local, not committed): `/tmp/okf-research/external-okf-report.md`, `/tmp/okf-research/trusty-tools-okf-survey.md`; brief `architect/local/briefs/2026-11-03-trusty-okf-spec-brief.md` (sections from "Bob MUST-HAVE (via Codex 03:11Z)" to the end).
+Research notes (local, not committed): `/tmp/okf-research/external-okf-report.md`, `/tmp/okf-research/trusty-tools-okf-survey.md`; the unpublished spec brief.
 
 ## Appendix A. Import report (proposal) {#SPEC-OKF-01-A}
 

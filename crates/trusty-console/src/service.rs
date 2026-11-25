@@ -311,11 +311,20 @@ mod tests {
 
     /// Why: the launchd agent must start the dashboard HTTP daemon, i.e.
     /// `trusty-console serve`.
-    /// What: asserts the embedded args are exactly `["serve"]`.
+    /// What: parses the embedded args with the console's own CLI and asserts
+    /// they select the `serve` subcommand (#11268: it used to compare them to
+    /// their own literal).
     /// Test: this is the test.
     #[test]
     fn serve_args_are_serve() {
-        assert_eq!(serve_args(), vec!["serve".to_string()]);
+        use clap::Parser as _;
+        let argv = std::iter::once("trusty-console".to_string()).chain(serve_args());
+        let cli = crate::Cli::try_parse_from(argv).expect("the launchd args must parse");
+        assert!(
+            matches!(cli.command, crate::Commands::Serve(_)),
+            "the launchd agent must start `serve`, got {:?}",
+            cli.command
+        );
     }
 
     /// Cross-crate port-uniqueness contract (#2566, extended by #2573).
@@ -354,13 +363,8 @@ mod tests {
             // #6289: no trusty-embedderd row. Its `--http` mode is retired
             // (ADR-0032); it serves stdio and a Unix socket only, so 7890 is
             // free and a guard naming it would refuse a value nothing holds.
-            (
-                // #3331: trusty-agents joined the proxied-sibling set; its API
-                // server default port must not collide with the console's.
-                "trusty-agents",
-                8080,
-                "trusty-agents/src/runtime/mode_dispatch.rs (--port default 8080)",
-            ),
+            // #11632: trusty-agents has NO ROW. Its HTTP API (`--port`,
+            // default 8080, #3331) was cut; it binds no TCP port.
             // #6288: trusty-mpm's supervisor has NO ROW. It stopped binding
             // 7881 for a `/metrics` + `/health` listener nothing read and
             // publishes to `~/.trusty-mpm/supervisor-metrics.json` instead, so

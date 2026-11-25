@@ -117,6 +117,14 @@ pub(crate) struct Gate<'a> {
     architect: bool,
     // #10459: why the Architect check refused an agent caller.
     architect_refusal: Option<super::architect::ArchitectRefusal>,
+    // #10998: a named copy's source, on each of its records.
+    copy_source: Option<super::copy_source::CopySourceAudit>,
+    // #11464: a remote-gate call's host, label and project.
+    remote: Option<super::remote::RemoteAudit>,
+    // #10524: the unlock grant's drop reason and a read made under it.
+    grant_drop: Option<crate::store::grant_cache::DropReason>,
+    served_from: Option<super::audit::ServedFrom>,
+    migration: Option<super::audit::MigrationAudit>,
     admitted: Option<Admitted>,
 }
 
@@ -156,6 +164,11 @@ pub(crate) fn audited(
         default_policy: false,
         architect: false,
         architect_refusal: None,
+        copy_source: None,
+        remote: None,
+        grant_drop: None,
+        served_from: None,
+        migration: None,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -239,6 +252,32 @@ impl Gate<'_> {
     /// `architect::check_architect`; allow and deny records both carry it.
     pub(crate) fn architect(&mut self) {
         self.architect = true;
+    }
+
+    /// Name a named copy's source on every record of this call (#10998).
+    pub(crate) fn copy_source(&mut self, source: super::copy_source::CopySourceAudit) {
+        self.copy_source = Some(source);
+    }
+
+    /// Name a remote-gate call's host, label and project on every record
+    /// of this call (#11464).
+    pub(crate) fn remote(&mut self, remote: super::remote::RemoteAudit) {
+        self.remote = Some(remote);
+    }
+
+    /// Name why the unlock grant ended on this call's records (#10524).
+    pub(crate) fn grant_drop(&mut self, reason: crate::store::grant_cache::DropReason) {
+        self.grant_drop = Some(reason);
+    }
+
+    /// Name a `secrets.migrate` call's step and counts on its record (#10524).
+    pub(crate) fn migration(&mut self, migration: super::audit::MigrationAudit) {
+        self.migration = Some(migration);
+    }
+
+    /// Mark this call's records as read under a live unlock grant (#10524).
+    pub(crate) fn served_from_grant(&mut self) {
+        self.served_from = Some(super::audit::ServedFrom::Grant);
     }
 
     /// Record why the Architect check refused this agent caller (#10459).
@@ -370,6 +409,26 @@ impl Gate<'_> {
         // #10459 P1: the Architect exemption is visible on every record.
         record.architect = self.architect.then_some(true);
         record.architect_refusal = self.architect_refusal;
+        record.copy_source = self.copy_source.clone();
+        record.grant_drop = self.grant_drop;
+        record.served_from = self.served_from;
+        record.migration = self.migration.clone();
+        // #11464: `host` only once the gate was verified; the label is never
+        // trusted and says so.
+        if let Some(remote) = &self.remote {
+            record.host = remote.host.clone();
+            record.remote_agent = remote.agent.clone();
+            record.remote_project = remote.project.clone();
+        }
+        // #11215: a time-out row says how long the call waited, or that it
+        // was refused at once for a still-hung item.
+        // #11429: a Keychain time-out has its own kind, with the same note.
+        if matches!(
+            denied,
+            Some(ErrorKind::BackendTimeout | ErrorKind::KeychainAccessPrompt)
+        ) {
+            record.backend_wait = crate::store::timeout_note::last().map(Into::into);
+        }
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());
@@ -382,7 +441,13 @@ impl Gate<'_> {
     ///
     /// Test: `gate_finish_asserts_an_allowed_once_call_admitted`,
     /// `gate_finish_asserts_an_allowed_write_ahead_call_wrote_ahead`.
-    fn finish(mut self, result: Result<Value, ErrorKind>) -> Result<Value, ErrorKind> {
+    fn finish(self, result: Result<Value, ErrorKind>) -> Result<Value, ErrorKind> {
+        // #11786: no blob-fallback record; a corrupt blob read fails closed.
+        self.settle(result)
+    }
+
+    /// Write the call's outstanding record; see [`audited`].
+    fn settle(mut self, result: Result<Value, ErrorKind>) -> Result<Value, ErrorKind> {
         // #9621: a `Once` body that returns Ok without `admit`, or a
         // `WriteAhead` body without `write_ahead`, would leave no allow
         // record. No body does; this keeps it so in debug builds.

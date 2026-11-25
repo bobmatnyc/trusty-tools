@@ -473,9 +473,7 @@ impl CodeIndexer {
             // #8959: `purge_file_with` stamps the durable stale mark. Fail
             // closed, or a failed redb delete answered `SopsEncrypted` and the
             // plaintext chunks came back at the next boot.
-            let removed = self
-                .purge_file_with(&id, file_path, super::RedbChunkDelete::FailClosed)
-                .await?;
+            let removed = self.purge_file_with(&id, file_path).await?;
             tracing::warn!(
                 index_id = %self.index_id,
                 file = %file_path,

@@ -137,6 +137,10 @@ fn gitignored_dir_is_still_pruned() {
 /// pin below states an independent expectation instead of restating the
 /// production constant back to itself.
 const EXPECTED_UNINDEXED_SEGMENTS: &[&str] = &[
+    // #11093: vendored third-party source (e.g. `workers/okf-extract/vendor/
+    // calamine`) is not this project's code; the walker prunes `vendor` at any
+    // depth by design.
+    "vendor",
     "fixtures",
     "__fixtures__",
     "testdata",

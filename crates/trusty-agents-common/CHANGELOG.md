@@ -6,6 +6,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.11.2] — 2026-11-24
+
+### Fixed
+
+- `agents_dial_socket` resolves the tagent health socket for a dialer without creating the data directory at 0755 (#11667).
+
+### Changed
+
+- Patch release (0.11.2) to restore publish-version parity (#3366); no code change.
+
+## [0.11.1] — 2026-11-23
+
+### Added
+
+- `health` module: `agents_socket()`, `METHOD_AGENTS_HEALTH` and `AgentsHealth`, the one path and method tagent serves and `tm tui` probes (#11550).
+
+### Documentation
+
+- The crate description names `trusty-assistants`, the new name of `trusty-agents` (#11632).
+
+## [0.11.0] — 2026-11-20
+
+### Added
+
+- Framework-deployed agents carry `omitClaudeMd: true`, so a dispatched subagent starts without the CLAUDE.md hierarchy; untracked files written before the stamp stay adoptable. Needs Claude Code v2.1.271+ (#7684).
+
+## [0.10.0] — 2026-11-20
+
+### Breaking
+
+- `AgentContentError::BelowMinimum` sits before `Write`, so the implicit discriminants of `Write` and later variants change (`enum_no_repr_variant_discriminant_changed`); bumped to 0.10.0 (#11470).
+
+### Added
+
+- `AgentContentError::BelowMinimum`: the pinned content release is older than the oldest one the harness reads; the harness supplies the remedy (#11470).
+
+### Documentation
+
+- Doc comments no longer name a removed persona crate or org-specific skills.
+
+## [0.9.6] — 2026-11-13
+
+### Changed
+
+- The `web-qa` entry in the roster tools fixture (`roster_tools_tests.rs`) now lists `mcp__trusty-browser`, matching the enrolled-browser web-QA agent; no API change (#11181).
+
+## [0.9.5] — 2026-11-10
+
+### Changed
+
+- Bus events set the new `HarnessEvent.project` field to `None`; no producer here names a project yet (#10906).
+
 ## [0.9.4] — 2026-10-30
 
 ### Changed

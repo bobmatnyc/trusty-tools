@@ -36,9 +36,8 @@ pub(crate) async fn run_sm_serve(action: CoordinatorAction) -> Result<()> {
     // idempotent across test binaries and a no-op if a subscriber already exists.
     use tracing_subscriber::util::SubscriberInitExt as _;
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        // #8948: the `bedrock` SM provider builds an AWS client in this process.
+        .with_env_filter(crate::tracing_setup::env_filter("info"))
         .with_writer(std::io::stderr)
         .finish()
         .try_init();

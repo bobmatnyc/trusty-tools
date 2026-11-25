@@ -311,13 +311,18 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// the provisioning itself is covered in `core::managed_config`;
 /// `prepare_managed_config_writes_no_mcp_json` and
 /// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
-fn prepare_managed_config(fw: &FrameworkPaths, tmux_name: &str, cwd: &Path) -> std::path::PathBuf {
+fn prepare_managed_config(
+    fw: &FrameworkPaths,
+    tmux_name: &str,
+    cwd: &Path,
+) -> Result<std::path::PathBuf, RuntimeError> {
     prepare_managed_config_with_exe(fw, tmux_name, cwd, None)
 }
 
 /// #8988: the owner `--settings` file for a managed launch under `fw`, whose
 /// `claude` reads `config_dir/.claude.json`. #8992: `profile` decides whether
-/// the skill and tool parts apply.
+/// the skill and tool parts apply. #11821: a broken `install.toml` is a
+/// spawn error (df-D1w).
 /// Test: `a_managed_spawn_under_an_owner_file_denies_the_unallowed_user_scope_servers`,
 /// `an_inplace_relaunch_under_an_owner_file_carries_the_settings`,
 /// `an_architect_spawn_gets_the_mcp_part_but_no_tools_or_skills`.
@@ -326,9 +331,11 @@ fn owner_settings(
     cwd: &Path,
     config_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
-) -> crate::core::launch_policy::LaunchSettings {
+) -> Result<crate::core::launch_policy::LaunchSettings, RuntimeError> {
     let root = fw.crate_config_root();
+    // #11821: df-D1w — refuse the spawn rather than launch without the policy.
     crate::core::launch_policy::provision_settings(&root, cwd, Some(config_dir), profile)
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))
 }
 
 /// [`prepare_managed_config`] with the hook binary pinned by the caller.
@@ -346,7 +353,7 @@ fn prepare_managed_config_with_exe(
     tmux_name: &str,
     cwd: &Path,
     hook_exe: Option<&Path>,
-) -> std::path::PathBuf {
+) -> Result<std::path::PathBuf, RuntimeError> {
     // #8233: the layout the caller named, never `dirs::home_dir()`.
     let config_dir = fw.managed_claude_config_dir();
 
@@ -380,8 +387,15 @@ fn prepare_managed_config_with_exe(
     // The message is terse and the "non-fatal" framing lives in the comment
     // above: this file sits one line under the 500-SLOC cap, and a wrapped
     // `tracing::warn!` costs four more.
-    if let Err(e) = crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
-        tracing::warn!(session = %tmux_name, cwd = %cwd.display(), "hook merge failed: {e}");
+    // #10612: an Architect's failed merge refuses the spawn; any other is logged.
+    match crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
+        Err(e @ crate::core::session_launch::PrepError::ArchitectHooks { .. }) => {
+            return Err(RuntimeError::Spawn(e.to_string()));
+        }
+        Err(e) => {
+            tracing::warn!(session = %tmux_name, cwd = %cwd.display(), "hook merge failed: {e}")
+        }
+        Ok(()) => {}
     }
 
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
@@ -395,7 +409,7 @@ fn prepare_managed_config_with_exe(
         );
     }
 
-    config_dir
+    Ok(config_dir)
 }
 
 /// Owned pieces of an in-place `claude` relaunch command, built for direct
@@ -584,7 +598,7 @@ fn build_inplace_resume_command_with(
     cwd: &Path,
     claude_session_id: Option<&str>,
 ) -> Result<InPlaceResumeCommand, RuntimeError> {
-    let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd);
+    let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd)?;
     // #7422: compose the session-scoped MCP file BEFORE anything else, so the
     // fail-closed gate does not depend on a binary lookup succeeding first. A
     // failure here abandons the relaunch rather than dropping the flag, which
@@ -615,7 +629,7 @@ fn build_inplace_resume_command_with(
         Some(prompt_file.as_path()),
     );
     // #8988: the owner MCP policy provisioned for this relaunch under `fw`.
-    let owner = owner_settings(fw, cwd, &config_dir, profile);
+    let owner = owner_settings(fw, cwd, &config_dir, profile)?;
     args.extend(inplace_tail_args(profile, owner.file.as_deref())?);
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     // #4181: same per-project MCP pins the tmux-pane paths export.
@@ -823,7 +837,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // present, and `user` is the tier it relocates. The older comment here
         // claimed the project layer under `project,local`; see
         // `prepare_managed_config`. Non-fatal throughout (closes #1696).
-        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
+        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd)?;
         // #7422: compose this session's MCP config before anything else, so the
         // fail-closed gate does not depend on a binary lookup succeeding first.
         // Fatal by design — the only fallback is a spawn with no
@@ -879,7 +893,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             None,
         );
         // #8988: the owner MCP policy, under the same named state home.
-        let settings = owner_settings(&self.fw, cwd, &config_dir, profile);
+        let settings = owner_settings(&self.fw, cwd, &config_dir, profile)?;
         // #2997: `claude_bin` is passed UNWRAPPED — the shim is now the process
         // that reads the spec, so it `posix_spawn`s `claude` itself, disclaimed,
         // with one hop less than the old `env`-as-program shape.
@@ -975,7 +989,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     ) -> Result<(), RuntimeError> {
         // #8405: same config read as `spawn` — a restart is where #8405 was seen.
         let alternate_screen = self.configured_alternate_screen();
-        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
+        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd)?;
         // #7422: same fail-closed MCP composition as `spawn`, in the same
         // position — a resumed pane must not be the one path that still loads
         // every shared server. #8233: under the same named state home.
@@ -1058,7 +1072,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // `posix_spawn`s `claude` disclaimed itself, so every resumed /
         // guided-resume / crash-recovery pane keeps the same TCC contract.
         // #8988: a resume carries the owner MCP policy exactly as `spawn` does.
-        let settings = owner_settings(&self.fw, cwd, &config_dir, profile);
+        let settings = owner_settings(&self.fw, cwd, &config_dir, profile)?;
         let launch = ManagedLaunch {
             cwd,
             claude_bin: &claude_bin,

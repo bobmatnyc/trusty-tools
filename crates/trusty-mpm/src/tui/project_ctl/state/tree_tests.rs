@@ -438,7 +438,7 @@ fn poll_into(
 fn all_rows_open(rows: &[TreeRow]) -> bool {
     rows.iter().all(|r| match r.kind {
         TreeRowKind::Owner { expanded, .. } => expanded,
-        TreeRowKind::Project { .. } => true,
+        TreeRowKind::Project { .. } | TreeRowKind::Architect { .. } => true,
     })
 }
 
@@ -548,5 +548,44 @@ fn node_added_on_a_later_poll_starts_expanded() {
     assert!(
         !state.tree.is_expanded(&owner("zeta")),
         "a closed id stays closed when it returns"
+    );
+}
+
+/// #11554: the Architect is a top-level privileged row above every owner,
+/// and `(local)` no longer holds it.
+#[test]
+fn architect_is_a_top_level_privileged_row_not_under_local() {
+    let (mut projects, mut sessions) = fixture();
+    projects.push(project(
+        ARCHITECT_PROJECT,
+        "/Users/me/trusty-mpm-projects/architect",
+    ));
+    sessions.insert(
+        ARCHITECT_PROJECT.to_string(),
+        vec![session("ar", "tm-architect", "active", None)],
+    );
+    let rows = build_tree(&projects, &sessions, &BTreeSet::new(), &aliases());
+    let top = proj(TOP_LEVEL_OWNER, ARCHITECT_PROJECT);
+    assert_eq!(rows[0].id, top, "{:?}", ids(&rows));
+    assert_eq!(
+        rows[0].kind,
+        TreeRowKind::Architect {
+            name: ARCHITECT_PROJECT.to_string(),
+            total: 1,
+            live: 1,
+        }
+    );
+    assert_eq!(top.parent(), None);
+    assert!(
+        rows.iter()
+            .all(|r| r.id != proj(LOCAL_OWNER, ARCHITECT_PROJECT)),
+        "{:?}",
+        ids(&rows)
+    );
+    let local = rows.iter().find(|r| r.id == owner(LOCAL_OWNER)).unwrap();
+    assert!(
+        matches!(local.kind, TreeRowKind::Owner { projects: 1, .. }),
+        "{:?}",
+        local.kind
     );
 }

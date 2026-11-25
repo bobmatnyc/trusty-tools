@@ -1,0 +1,23 @@
+{
+  "case_id": "c04-beta-scope-lost",
+  "project_id": "beta",
+  "boundary": "contract",
+  "description": "Tidy the codebase",
+  "subagent_type": "engineer",
+  "model": null,
+  "run_in_background": false,
+  "prompt": "Rename helpers across src/ and update every caller.",
+  "rules": [
+    {
+      "rule_id": "beta-scope-1",
+      "source_kind": "ledger",
+      "source_ref": "ledger/beta/0004",
+      "span_start": 0,
+      "text": "Child agents work only inside the docs/ directory of project beta.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [],
+  "worker_state": null
+}

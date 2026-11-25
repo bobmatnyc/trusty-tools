@@ -29,11 +29,13 @@ Cargo crate** (`crates/<name>/`), so a component label names a crate or one of
 the subsystem labels below. Resolve abbreviations against `CLAUDE.md`'s
 "Abbreviations & Aliases" table first.
 
-Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
-`trusty-agents-ui`, `trusty-analyze`,
+Crate labels: `trusty-agents` (the trusty-assistants crate; #11632 renamed the
+crate, and the GitHub label keeps the old name until it is renamed),
+`trusty-agents-common`, `trusty-agents-local`,
+`trusty-analyze`,
 `trusty-bm25-daemon`, `trusty-channels`, `trusty-code`, `trusty-code-gui`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
-`trusty-crate-contracts`, `trusty-cto-db`, `trusty-embedderd`,
+`trusty-crate-contracts`, `trusty-embedderd`,
 `trusty-embedderd-py`, `trusty-gworkspace`, `trusty-installer`,
 `trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-review`,
 `trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-secrets`, `trusty-sld-lint`,
@@ -192,7 +194,7 @@ has all; `publish = false` binary stops at Deployed; docs, CI and scripts stop a
 
 **Crate class comes from Cargo.toml.** A crate with `publish = false` never reaches Published; a crate
 with no binary target never reaches Deployed. Read the manifest at the time; this file holds no copy of the
-table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-contracts`, `trusty-cto-db`,
+table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-contracts`,
 `trusty-okf`, `trusty-publish-guard`.
 
 **Close bar, by test-ladder rung** (`CLAUDE.md`, "Rust Test Ladder"):
@@ -200,6 +202,8 @@ table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-
 - Rung 1-3, docs, CI: close at Merged, `--note "PR #M squash <sha>"`. Docs-only closes on merged-text
   evidence: the squash SHA plus confirmation the text is present on `origin/main` at the cited file/symbol.
 - Rung 4-6: close at Deployed, with the live evidence in the note.
+- At every rung the note lists each acceptance criterion with its evidence and
+  the follow-up issue numbers, or "none" ("Title and body", below).
 - Published is set later, on the already-closed issue, by release tooling. It never reopens an issue.
 - A merged fix that fails live verification stays open, at Merged, until a follow-up PR is open.
 
@@ -208,6 +212,10 @@ single-crate work stays a plain issue. Children are native sub-issues. The epic'
 child Status, at least Groomed once selected, never set by hand. It closes when every child is closed.
 The ticketing agent recomputes it on each child transition. The tracker/phase pattern below applies on top
 of this when the work has a gate between stages.
+
+**Intake.** A factory session takes its next issue with `tm issue next`: an open issue with a ready board Status or a ready
+`status:*` label, acceptance criteria, and no other assignee. Rule, ranking and label mapping:
+[docs/reference/issue-next.md](docs/reference/issue-next.md).
 
 **Labels.** `status:*` labels are retired after the hand-maintained period. `ws/<session>`, type,
 component and priority labels stay. Target commands: `tm issue transition N <Status>` writes the field;
@@ -260,6 +268,7 @@ Every issue body and every comment ends with the attribution line below.
 | `staleness.close_stale_after_days` | `60` |
 | `staleness.exempt_labels` | `keep`, `paused`, `blocked` |
 | `staleness.exempt_when_milestoned` | `true` |
+| `staleness.close_idle_milestoned_backlog_after_days` | `30` — milestoned, Status Backlog, no PR, no activity; closes as not planned (see Staleness) |
 | `staleness.decision_request` | digest — one comment per epic tracker, never a question per issue |
 | `coverage` | every open issue belongs to an epic or to a `Backlog · <area>` milestone |
 
@@ -353,6 +362,14 @@ posts ONE triage comment naming its recommended disposition with evidence:
 At **60 days** it closes with a note, unless the issue is pinned to a milestone
 or carries `keep`, `paused`, or `blocked`.
 
+**Idle milestoned backlog (owner ruling 2026-11-14, Dm5).** A milestoned issue
+closes as not planned at **30 days** when all of these hold: its Status is
+Backlog, it has no linked or open PR, and it has no activity. Activity is a
+comment, a label or state change, or a linked PR by anyone other than an
+automated sweep. The sweep skips issues that carry `keep`, `paused`, `blocked`,
+`epic`, or `status:in-progress`. The closure sets Status to Won't Do and carries
+`closed:sweep`. Anyone may reopen the issue with a comment saying why.
+
 🔴 **A sweep closure carries `closed:sweep`** (owner ruling 2026-09-27) — age,
 staleness, duplicate, or obsolete dispositions all count. A fix closure comes
 from a merged PR and never carries `closed:sweep`.
@@ -410,7 +427,8 @@ may still be filed — search first.
   `fix(trusty-search): watcher misses renames on external volumes`, not "Bug in
   system".
 - **Body:** the defect or outcome, the decisive evidence, and one to four
-  observable closure conditions. Nothing else. No structured headings. Point at
+  acceptance criteria as a labelled `Acceptance criteria:` list (rule below).
+  Nothing else. No structured headings. Point at
   a linked issue, spec, ADR, or PR rather than restating it. Cite file and
   symbol — `agent_source.rs::autodeploy_agents` — never line numbers. Past a
   short screen it is over-written.
@@ -421,6 +439,18 @@ may still be filed — search first.
   (impact, affected versions, disclosure state), and a research or audit issue
   (its evidence inventory).
 - Every reference renders as a clickable markdown link, never a bare number.
+
+**Acceptance criteria.** Every bug, feature, task and epic issue states one to
+four testable acceptance criteria, each a check that can fail for a named
+reason; an epic states them on its phase issues. They set the good-enough bar:
+the issue closes when each criterion has evidence. Anything beyond the bar
+becomes a follow-up issue filed at close, with its own criteria and the
+`stretch` label; it never widens this issue's scope. The closing note lists
+every criterion with its evidence, plus the follow-up issue numbers or "none".
+
+The issue templates carry it as an `## Acceptance criteria` heading. `tm issue
+audit` warns when a body has neither form; it becomes a failure one release
+later (#11469).
 
 ## Symptom Titles and Area Labels (owner decision, 2026-09-27)
 
@@ -445,7 +475,7 @@ may still be filed — search first.
    | `area:memory-daemon` | trusty-memory internals: dream/consolidation, KG, palace locks, drawer loss |
    | `area:memory-import` | kuzu-memory import/export review workflow |
    | `area:search-index` | trusty-search indexing, embedding, reindex, vector integrity, and its own daemon |
-   | `area:agent-platform` | trusty-code / trusty-agents harness and roster |
+   | `area:agent-platform` | trusty-code / trusty-assistants harness and roster |
    | `area:agent-prompts` | Agent briefs, base-agent rules, skill, doc and PM-instruction wording, prompt-feedback rollups |
    | `area:channels` | Slack/Telegram front door and channel routing |
    | `area:other` | Fallback when no area above fits |

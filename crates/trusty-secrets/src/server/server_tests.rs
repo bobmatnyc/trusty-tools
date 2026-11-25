@@ -81,6 +81,7 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         machine_config: tmp.path().join("machine.yaml"),
         idle_timeout,
         cache_max_age: DEFAULT_CACHE_MAX_AGE,
+        unlock_ttl: crate::server::DEFAULT_UNLOCK_TTL,
         // #4567: the audit log stays in the temp dir too.
         audit_log: tmp.path().join("audit").join("audit.jsonl"),
         audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
@@ -160,6 +161,13 @@ impl Fixture {
         state.grants = person_grants();
         // #10459 P1: never the account home's Architect launch records.
         state.architect_records = None;
+        // #10998: never the OS Keychain; a copy test that reads an item
+        // gives its own fake.
+        state.keychain_item_read = |_, _| {
+            Err(SecretsError::UnknownBackend {
+                backend: BackendId::KEYCHAIN.to_string(),
+            })
+        };
         state
     }
 
@@ -237,7 +245,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 39] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 43] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1259,7 +1267,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 39;
+    const ARMS: usize = 43;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1311,6 +1319,14 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::AgentKeyDenied => 37,
             // #10459 PR1: after `AgentKeyDenied`.
             ErrorKind::TicketRefused => 38,
+            // #11464: after `TicketRefused`.
+            ErrorKind::RemoteRefused => 39,
+            // #11464 D3a: after `RemoteRefused`.
+            ErrorKind::GateRefused => 40,
+            // #11429: after `GateRefused`.
+            ErrorKind::KeychainAccessPrompt => 41,
+            // #10589: after `KeychainAccessPrompt`.
+            ErrorKind::KeychainNoSession => 42,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1324,12 +1340,12 @@ fn error_kind_all_lists_every_variant_once() {
 /// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
 /// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
 /// moves a published value.
-/// What: `kind as i32` equals its pinned value for all 39 variants, and the
+/// What: `kind as i32` equals its pinned value for all 41 variants, and the
 /// table names every kind in `ErrorKind::ALL` exactly once.
 /// Test: itself.
 #[test]
 fn error_kind_discriminants_are_pinned() {
-    const PINNED: [(ErrorKind, i32); 39] = [
+    const PINNED: [(ErrorKind, i32); 43] = [
         (ErrorKind::InvalidParams, 0),
         (ErrorKind::ProjectInvalid, 1),
         (ErrorKind::ProjectUnresolved, 2),
@@ -1369,6 +1385,10 @@ fn error_kind_discriminants_are_pinned() {
         (ErrorKind::BridgeRefused, 36),
         (ErrorKind::AgentKeyDenied, 37),
         (ErrorKind::TicketRefused, 38),
+        (ErrorKind::RemoteRefused, 39),
+        (ErrorKind::GateRefused, 40),
+        (ErrorKind::KeychainAccessPrompt, 41),
+        (ErrorKind::KeychainNoSession, 42),
     ];
     for (kind, value) in PINNED {
         assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");

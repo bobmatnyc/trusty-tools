@@ -24,21 +24,27 @@ pub enum ServiceId {
     Review,
     /// trusty-mpm, `mpm.health` on its socket. Enter opens the projects view.
     Mpm,
-    /// trusty-agents; no UDS socket yet, so the TUI does not probe it (#10899).
+    /// trusty-agents, `agents.health` on its well-known socket (#11550).
     Agents,
     /// trusty-events, the bus daemon, `events.health` on its socket.
     Events,
-    /// trusty-console; no UDS listener yet, so the TUI does not probe it (#10899).
+    /// trusty-console, `console.fleet_status` on its socket (#10966, #10902).
     Console,
 }
 
 /// How a tile's health is observed. Every kind uses an existing interface.
+// #11115: crate-internal; no caller outside trusty-mpm, so a new variant is no semver break
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeKind {
+pub(crate) enum ProbeKind {
     /// One JSON-RPC `<method>` frame over the service's Unix socket.
     UdsHealth(&'static str),
-    /// One connect to the service's Unix socket, closed at once.
-    SocketConnect,
+    /// One JSON-RPC `<method>` frame answered with a
+    /// [`ConsoleFleetStatus`](trusty_common::console_rpc::ConsoleFleetStatus);
+    /// the console's own row in it carries the tile's status and version.
+    ///
+    /// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`.
+    UdsFleetStatus(&'static str),
+    // #11115: `SocketConnect` removed; no service used it, found once crate-internal
     /// The service serves no Unix socket the TUI may dial, so it is not probed.
     ///
     /// Why (#10899): `tm tui` uses no native HTTP; services are reached over
@@ -47,11 +53,26 @@ pub enum ProbeKind {
     /// What: carries the operator-facing detail naming the server-side gap.
     /// The probe maps it straight to `TileHealth::NoUdsEndpoint` with no file
     /// read, socket or process spawn.
-    /// Test: `agents_and_console_have_no_uds_endpoint_kind`,
-    /// `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+    /// Test: `no_service_maps_to_no_uds_endpoint`.
+    // #11550: Agents left this kind; no service uses it now. Removing it
+    // touches probe.rs, which a parallel branch (#11547, #11549) edits.
+    #[allow(dead_code)]
     NoUdsEndpoint(&'static str),
     /// No resident daemon: the binary on `PATH` is the whole answer.
     OnDemand,
+}
+
+/// Where a service's `console_metrics` report is fetched from (#10908).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsSource {
+    /// A unary `<method>` on the service's socket that answers the report.
+    Uds(&'static str),
+    /// The `console_metrics` MCP tool, carried by `mpm.mcp.dispatch` on the
+    /// MPM daemon's socket.
+    UdsMcpDispatch,
+    /// Fallback until the service serves the report over UDS: spawn this
+    /// stdio MCP command (binary, args).
+    Stdio(&'static str, &'static [&'static str]),
 }
 
 impl ServiceId {
@@ -107,7 +128,8 @@ impl ServiceId {
 
     /// How this service's health is observed (ported from the console's
     /// `detect/*.rs` connectors).
-    pub fn probe(self) -> ProbeKind {
+    // #11115: crate-internal, as `ProbeKind` is
+    pub(crate) fn probe(self) -> ProbeKind {
         match self {
             ServiceId::Search => ProbeKind::UdsHealth("search.health"),
             ServiceId::Memory => ProbeKind::UdsHealth("memory.health"),
@@ -117,12 +139,14 @@ impl ServiceId {
             ServiceId::Events => {
                 ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH)
             }
-            // See #10899: the TUI sends no HTTP probe; these have no UDS yet.
+            // See #10899: the TUI sends no HTTP probe; agents has no UDS yet.
+            // #11550: tagent's `--api` server serves agents.health.
             ServiceId::Agents => {
-                ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")
+                ProbeKind::UdsHealth(trusty_agents_common::health::METHOD_AGENTS_HEALTH)
             }
+            // #10966: the console's listener (#10902) serves its fleet view.
             ServiceId::Console => {
-                ProbeKind::NoUdsEndpoint("trusty-console has no UDS listener yet (ADR-0035)")
+                ProbeKind::UdsFleetStatus(trusty_common::console_rpc::METHOD_FLEET_STATUS)
             }
             ServiceId::Review => ProbeKind::OnDemand,
         }
@@ -131,9 +155,16 @@ impl ServiceId {
     /// Whether a probe that found nothing listening means "idle on demand",
     /// not "down". trusty-console's analyze connector makes the same call
     /// (#6350, #6416); any other probe failure is still down.
+    ///
+    /// Test: `an_absent_or_refused_console_socket_reads_as_on_demand_or_absent`.
     pub fn not_listening_is_on_demand(self) -> bool {
-        // #10476: analyze is on demand; not listening is idle, not down
-        matches!(self, ServiceId::Analyze)
+        // #10476: analyze is on demand; not listening is idle, not down.
+        // #10966: the console is opened when wanted; a closed one is not down.
+        // #11550: so is tagent's `--api` server.
+        matches!(
+            self,
+            ServiceId::Analyze | ServiceId::Console | ServiceId::Agents
+        )
     }
 
     /// The stdio MCP command trusty-console spawns to call `console_metrics`
@@ -150,18 +181,50 @@ impl ServiceId {
         }
     }
 
+    /// Where this service's `console_metrics` report comes from, or `None`
+    /// when it serves none.
+    ///
+    /// Why (#10908): D95 has the reader pull each report over UDS. Events and
+    /// MPM serve it on their sockets; the rest keep the stdio spawn as a
+    /// marked fallback ([`MetricsSource::Stdio`]). trusty-console answers
+    /// `console.console_metrics` on its socket (#10907).
+    /// Test: `metrics_sources_prefer_uds_for_events_and_mpm`,
+    /// `console_console_metrics_over_uds_yields_a_report`.
+    pub fn metrics_source(self) -> Option<MetricsSource> {
+        match self {
+            ServiceId::Events => Some(MetricsSource::Uds(
+                trusty_common::control_bus::METHOD_EVENTS_CONSOLE_METRICS,
+            )),
+            // #10907: the console's listener serves its own report.
+            ServiceId::Console => Some(MetricsSource::Uds(
+                trusty_common::console_rpc::METHOD_CONSOLE_METRICS,
+            )),
+            ServiceId::Mpm => Some(MetricsSource::UdsMcpDispatch),
+            other => other
+                .metrics_command()
+                .map(|(binary, args)| MetricsSource::Stdio(binary, args)),
+        }
+    }
+
     /// The Unix socket a socket probe dials, resolved the way the service and
     /// the console resolve it. `Err` carries an operator-facing reason.
     pub fn socket(self) -> Result<PathBuf, String> {
         match self {
-            ServiceId::Search => trusty_common::search_rpc::search_socket()
+            // #11667: dial lookup, creates nothing.
+            ServiceId::Search => trusty_common::search_rpc::search_dial_socket()
                 .map_err(|e| format!("search socket unresolved: {e:#}")),
-            ServiceId::Memory => trusty_common::memory_rpc::resolve_memory_socket()
+            // #11667: dial lookup, creates nothing.
+            ServiceId::Memory => trusty_common::memory_rpc::resolve_memory_dial_socket()
                 .map_err(|e| format!("memory socket unresolved: {e:#}")),
             ServiceId::Mpm => Ok(trusty_common::mpm_rpc::mpm_socket()),
-            ServiceId::Events => trusty_common::control_bus::events_socket_path()
+            // #11667: dial lookup, creates nothing.
+            ServiceId::Events => trusty_common::control_bus::events_dial_socket_path()
                 .map_err(|e| format!("events socket unresolved: {e:#}")),
-            other => trusty_common::daemon_socket_path(other.id())
+            // #11550: the one path tagent binds. #11667: dial lookup, creates nothing.
+            ServiceId::Agents => trusty_agents_common::health::agents_dial_socket()
+                .map_err(|e| format!("agents socket unresolved: {e:#}")),
+            // #11667: dial lookup, creates nothing.
+            other => trusty_common::daemon_socket_path_no_create(other.id())
                 .map_err(|e| format!("{} socket unresolved: {e:#}", other.id())),
         }
     }

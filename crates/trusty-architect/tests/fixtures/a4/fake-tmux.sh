@@ -8,10 +8,12 @@
 #   `list-panes` prints list-panes.txt; `capture-pane` prints the file its
 #   target maps to. The target is the one argument that starts with `%` or
 #   `=`. A target with no file exits 1 with tmux's "can't find pane" text on
-#   stderr; any other call exits 1. A leading `-S <socket>` is ignored.
+#   stderr; any other call exits 1. A leading `-u` (#11543) and a leading
+#   `-S <socket>` are ignored.
 # Test: regen_a4.py (Python side), tests/verbs_parity.rs and trusty-mpm's
 #   tests/tm_architect_verbs.rs (Rust side).
 dir="${FAKE_TMUX_PANES:?FAKE_TMUX_PANES is not set}"
+if [ "${1:-}" = "-u" ]; then shift; fi
 if [ "${1:-}" = "-S" ]; then shift 2; fi
 verb="${1:-}"
 [ "$#" -gt 0 ] && shift

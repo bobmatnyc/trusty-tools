@@ -1,8 +1,0 @@
-Added
-- `tm fleet project add <key|dir>`, `remove <key>` and `list [--json]` keep the Architect's watch list in `local/watch.json`. The registry is read from disk, so the commands work with the daemon down; `--dir` picks the Architect and `TRUSTY_MPM_ROOT` the registry (#10895).
-- `add` writes `local/projects/<key>.md` from the record template when it is absent, then adds the project. It refuses a project the registry lacks and writes nothing; a second `add` changes nothing and says so (#10895).
-- `remove` appends `- Watch: removed <time>` under the record's first heading, keeps the record, and drops the project. It refuses a key the list does not hold (#10895).
-- `list --json` prints `key`, `path`, `path_exists`, `registered`, `session_alias`, `alias_mismatch`, `live_sessions` and `record_present` per project (#10895).
-- The first `tm fleet project` command run with no `local/watch.json` imports the `## Watch set` lines of the Architect's `CLAUDE.md` and prints one line per imported or skipped line; `CLAUDE.md` is never edited (#10895).
-- The import reads a `## Watch set` heading in any case and spacing, and a bullet at any indentation with `-`, `*` or `+`; a `CLAUDE.md` with no such section gets one line saying so. With no registry file under the managed root while the section lists a project, the command exits 1, writes nothing, and names the registry path and `TRUSTY_MPM_ROOT` (#10895).
-- The seeded Architect `.gitignore` ignores `local/watch.json.lock`, and the seeded `local/state.md` says the watched projects are listed in `local/watch.json`. `tm fleet init` refreshes an unedited copy of either (#10895).

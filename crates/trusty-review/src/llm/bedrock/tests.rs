@@ -137,13 +137,17 @@ fn priced(model: &str) -> (f64, f64) {
 /// Test: this test itself; no network calls.
 #[test]
 fn bedrock_cost_estimate_matches_price_list_per_profile() {
-    let cases: [(&str, (f64, f64)); 8] = [
+    let cases: [(&str, (f64, f64)); 11] = [
+        // #10757: Haiku 5.5, Price List retrieved 2026-11-22.
+        ("us.anthropic.claude-haiku-5-5", (0.11, 0.55)),
+        ("global.anthropic.claude-haiku-5-5", (0.10, 0.50)),
         ("us.anthropic.claude-sonnet-5-5", (2.20, 11.00)),
         ("global.anthropic.claude-sonnet-5-5", (2.00, 10.00)),
         ("us.anthropic.claude-opus-5-5", (4.40, 22.00)),
         ("global.anthropic.claude-opus-5-5", (4.00, 20.00)),
         ("us.anthropic.claude-sonnet-4-6", (3.30, 16.50)),
         ("global.anthropic.claude-sonnet-4-6", (3.00, 15.00)),
+        ("us.amazon.nova-pro-v1:0", (0.80, 3.20)),
         ("us.anthropic.claude-haiku-4-5-20251001-v1:0", (1.10, 5.50)),
         (
             "global.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -592,6 +596,10 @@ fn forced_tool_choice_capability_per_model_id_shape() {
             true,
         ),
         ("us.anthropic.claude-opus-4-8", true),
+        // #11527: the default verifier; a live Converse call with a forced
+        // `toolChoice` returned a `tool_use` answer.
+        ("us.amazon.nova-pro-v1:0", true),
+        ("bedrock/us.amazon.nova-pro-v1:0", true),
         ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", true),
         // #9292: region prefixes absent from the shared prefix list.
         (
@@ -707,6 +715,8 @@ fn system_blocks_add_the_tool_line_only_for_auto_models() {
 
 /// Sonnet 5.5 and Opus 5.5 ids, in each shape, beyond [`AUTO_MODEL_IDS`].
 const NO_TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-haiku-5-5",
+    "global.anthropic.claude-haiku-5-5",
     "us.anthropic.claude-sonnet-5-5-20260901-v1:0",
     "eu.anthropic.claude-opus-5-5",
     "jp.anthropic.claude-sonnet-5-5-20260901-v1:0",
@@ -752,6 +762,25 @@ fn inference_config_omits_temperature_only_for_claude_5_5() {
         assert_eq!(config.temperature(), Some(0.3), "{model} keeps temperature");
         assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
     }
+}
+
+/// Haiku 5.5 has an id and a price, and its requests omit `temperature`.
+///
+/// Why: #10757 adds Haiku 5.5 to the model table; Bedrock rejects
+/// `temperature` for it ("deprecated for this model", probed 2026-11-22).
+/// What: prices [`HAIKU_5_5_MODEL`] at the `us.` rate and checks the Converse
+/// config drops `temperature` for it.
+/// Test: this test.
+#[test]
+fn haiku_5_5_id_has_a_price() {
+    use crate::llm::models::HAIKU_5_5_MODEL;
+    let cost = super::estimate_bedrock_cost_usd(HAIKU_5_5_MODEL, 1_000_000, 1_000_000);
+    assert!((cost - 0.66).abs() < 1e-9, "Haiku 5.5 us. rate: {cost}");
+    let req = structured_request("reviewer");
+    assert_eq!(
+        super::inference_config(&req, HAIKU_5_5_MODEL).temperature(),
+        None
+    );
 }
 
 /// Every compare-set candidate and the reviewer default has a stated
@@ -1189,4 +1218,121 @@ fn tool_use_reply_with_untitled_findings_parses() {
     assert_eq!(parsed.verdict, Verdict::RequestChanges);
     assert_eq!(parsed.findings.len(), 1);
     assert_eq!(parsed.findings[0].kind, "The retry loop never backs off");
+}
+
+// ── Non-Anthropic reviewer via Converse (#10759) ──────────────────────────
+
+/// Example non-Anthropic Bedrock reviewer id (Qwen3-Coder 480B, on demand).
+const QWEN_CODER: &str = "qwen.qwen3-coder-480b-a35b-v1:0";
+
+/// A non-Anthropic Bedrock model id routes to Bedrock Converse and its reply
+/// parses into the reviewer JSON contract.
+///
+/// Why: the provider refused every id without a `us.`-style profile, an
+/// Anthropic-only rule, so Qwen3-Coder could not run as a second-opinion
+/// reviewer (#10759).
+/// What: the id resolves to Bedrock with and without a `bedrock/` prefix,
+/// builds a provider (no network: the client is lazy), gets `toolChoice =
+/// auto` plus the tool line, and a faked Converse reply in either block kind
+/// goes through `llm_response` and `parse_review_response`. A bare Anthropic
+/// id is still refused.
+/// Test: this test.
+#[test]
+fn non_anthropic_bedrock_reviewer_routes_through_converse_and_parses() {
+    use crate::config::Provider;
+    use crate::llm::resolve_provider_and_model;
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    use aws_sdk_bedrockruntime::types::ToolChoice;
+
+    for (requested, default) in [
+        (QWEN_CODER, Provider::Bedrock),
+        (QWEN_CODER, Provider::OpenRouter),
+        (
+            "bedrock/qwen.qwen3-coder-480b-a35b-v1:0",
+            Provider::OpenRouter,
+        ),
+    ] {
+        let (provider, model) =
+            resolve_provider_and_model(requested, &default).expect("id resolves");
+        assert_eq!(
+            provider,
+            Provider::Bedrock,
+            "{requested} must route to Bedrock"
+        );
+        assert_eq!(model, QWEN_CODER);
+    }
+    let provider = BedrockProvider::new(QWEN_CODER).expect("a Qwen id builds a Converse provider");
+    assert_eq!(provider.name(), "bedrock");
+    assert!(
+        BedrockProvider::new("anthropic.claude-sonnet-4-6").is_err(),
+        "a bare Anthropic id still needs a profile"
+    );
+
+    let config =
+        tool_use::build_tool_config_for_model(QWEN_CODER, "review_output", &review_schema())
+            .expect("config builds");
+    assert!(matches!(config.tool_choice(), Some(ToolChoice::Auto(_))));
+    let req = structured_request("You review code.");
+    assert_eq!(super::system_blocks(&req, QWEN_CODER).len(), 2);
+
+    let finding = serde_json::json!({
+        "verdict": "REQUEST_CHANGES",
+        "summary": "One defect.",
+        "findings": [{
+            "title": "Retry loop never backs off",
+            "body": "The retry loop never backs off. It hammers the API.",
+            "severity": "medium",
+            "confidence": 0.7,
+            "file": "src/client.rs",
+            "line": 40
+        }]
+    });
+    for reply in [
+        reply_with_blocks(vec![tool_use_block(finding.clone())]),
+        text_only_reply(&finding.to_string()),
+    ] {
+        let resp = super::llm_response(&req, QWEN_CODER, &reply, 1, None);
+        assert_eq!(resp.model, QWEN_CODER);
+        let parsed = parse_review_response(&resp.text);
+        assert!(
+            !parsed.is_fail_safe,
+            "reason: {:?}",
+            parsed.fail_safe_reason
+        );
+        assert_eq!(parsed.verdict, Verdict::RequestChanges);
+        assert_eq!(parsed.findings.len(), 1);
+    }
+}
+
+/// The vendor reader handles every id shape the provider accepts (#10759).
+///
+/// What: bare, profiled, prefixed and ARN ids; an application profile and an
+/// unknown vendor name none.
+/// Test: this test.
+#[test]
+fn bedrock_vendor_reads_every_id_shape() {
+    use super::vendor::bedrock_vendor;
+    for (model, expected) in [
+        (QWEN_CODER, Some("qwen")),
+        ("bedrock/qwen.qwen3-coder-480b-a35b-v1:0", Some("qwen")),
+        ("us.mistral.devstral-2", Some("mistral")),
+        ("us.anthropic.claude-sonnet-5-5", Some("anthropic")),
+        ("apac.anthropic.claude-sonnet-4-5", Some("anthropic")),
+        ("us.amazon.nova-pro-v1:0", Some("amazon")),
+        (
+            "arn:aws:bedrock:us-west-2::foundation-model/qwen.qwen3-coder-480b-a35b-v1:0",
+            Some("qwen"),
+        ),
+        (
+            "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+            None,
+        ),
+        ("claude-sonnet-5-5", None),
+        ("us.unknown.model", None),
+    ] {
+        assert_eq!(bedrock_vendor(model), expected, "bedrock_vendor({model})");
+    }
+    assert!(!tool_use::supports_forced_tool_choice(QWEN_CODER));
+    assert!(!tool_use::supports_forced_tool_choice("mistral.devstral-2"));
 }

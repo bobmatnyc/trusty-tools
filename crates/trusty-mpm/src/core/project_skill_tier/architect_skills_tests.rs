@@ -257,30 +257,30 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 17] = [
+    const PINNED: [(&str, &str); 19] = [
         (
             "tm-fleet-check",
-            "b9de2a3d6218fb68e8a99b0c632902d776505d46e4fc4756da45c8929fc9c425",
+            "8e41b332fcb147ddf9d81d95936315986e5768c4efcd9d91a4149f2e3e7b55fd",
         ),
         (
             "tm-context-refresh",
-            "d23af312879f54dad651abffd290af10a7ff62bcdd5148fa2486ae2f1456b8e0",
+            "2a92a066c73c6ebce7b3f07cbf1030936e0aebabf5d4f27d3d3685dc71abce54",
         ),
         (
             "architect-tmux-ops",
-            "e38c80da0581139ce727e1650cf6404594b2172de0e32077a7cea17956b02382",
+            "4be6fa1b350ef09a43d49dde96870f496a74caac95d493c78fe37a44fa2b159d",
         ),
         (
             "architect-operating-rules",
-            "3e4c9ab8d8325d3a052c91e571533c7643508fda3f41a4449137d1eb3b86461e",
+            "cd4130f466da33d8b63baa6a5948d2474b2677862f4b1df4a89d62b5b91dd249",
         ),
         (
             "architect-workflow",
-            "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
+            "dce96874a33465b9a362c53b17e22b54466eee1a4ea3ca0f03ac226e1edb503e",
         ),
         (
             "architect-search-memory",
-            "dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303",
+            "3705f84cf316939df211ec5dded2cba48e5f28cc8636898286c21450962ff1d7",
         ),
         (
             "architect-github",
@@ -288,11 +288,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-strategy",
-            "a6b725c4a34f673741028e6ab772c4b5154aff845fb1e9db846d3e2d1dcb4aae",
+            "b21d4a4b479453cbec8ae3982db27e7364a4e094b014836eabb8acc483aa1e5a",
         ),
         (
             "architect-completion-standard",
-            "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
+            "70343273c49dd1c517cebcb64bf7efe160dfbf09904febee2d0dd26ea904475e",
         ),
         (
             "architect-owner-model",
@@ -308,36 +308,43 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-project-provision",
-            "a4b3d792acb46789bf9d79a1ea7e3c2be455903af48a65bed0560fcca2a37edb",
+            "cbe193f6d533f586cfbed18f7e3c672101236a53783c92e437e2ce9e8a36d599",
         ),
         (
             "architect-macos",
-            "442541a32d8c81f2cdcc4d9e74f0fc3e993ae535f5d94ca9f3223af48487077b",
+            "ecb65835f13999c7be19111fd93681ea23399b1aeba5c6f051ca8d7845d2a77c",
         ),
         (
             "architect-improvements",
-            "b37627e2c31c3118884dd5a5e46cbbde5494d9b8206eb17a1c521a53883b5416",
+            "349ed4105e92fae097bb5b335b96a83070b8ccf0a379a5b7d054e0be2b5ed3ee",
         ),
         (
             "architect-host-admin",
-            "e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e",
+            "7362004b8be5aa0384c1b5c55853e5b427fc4bb29a168a51759f354af977f296",
         ),
         (
             "architect-dashboard",
-            "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
+            // #9457: `fleet init` names when it starts the dashboard on macOS.
+            "908deda6a43c699d7c2d355c3cb0fbfbb64d33d12b6117915aa49e14abc4b0c7",
+        ),
+        (
+            "architect-drift-guard",
+            "228a8d37f9b0a73de888918c4e2fb5bf9b4b3f055f69d5861d1d9b5713c42deb",
+        ),
+        (
+            "architect-improver",
+            "f55bd138d925ae6866d42c8c5dc8cfaf759aef8049012ba6914c48c1a59bf631",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 8] = [
-        "architect-tmux-ops",
-        "architect-search-memory",
+    const FIRST_RELEASE: [&str; 6] = [
         "architect-github",
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
-        "architect-macos",
-        "architect-host-admin",
+        "architect-drift-guard",
+        "architect-improver",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {
@@ -554,4 +561,55 @@ fn architect_skills_never_join_the_bundled_pm_roster() {
             skill.stem
         );
     }
+}
+
+/// Deploy `skills` the way a launch and `sync-assets` do.
+fn refresh(project: &Path, skills: &[ArchitectSkill]) -> DeployReport {
+    deploy_architect_skills(project, &[], skills)
+}
+
+/// #10596 criterion 2: status after a content update.
+///
+/// Why: `tm content update` moves the shipped skills; `tm fleet status` must
+/// read them stale until the refresh deploys, then current. The update's hint
+/// names the refresh command, so the status it promises has to be true.
+/// What: deploys the shipped skills (old pin), moves the shipped text (new
+/// pin), reads `health_with`, runs the deploy `deploy_for_launch` and
+/// `sync-assets` share, reads it again. Scratch project tier only: no HOME,
+/// no daemon.
+#[test]
+fn a_content_update_leaves_skills_stale_until_the_refresh_deploys() {
+    let project = tempdir().unwrap();
+    let old = shipped();
+    // The earlier launch that deployed the old pin.
+    deploy_architect_skills(project.path(), &[], &old);
+    let (ok, detail) = health_with(project.path(), &[], &old);
+    assert!(ok, "{detail}");
+
+    // The content update: every shipped skill's text moves.
+    let new: Vec<ArchitectSkill> = shipped()
+        .into_iter()
+        .map(|mut skill| {
+            skill
+                .contents
+                .push_str("\n<!-- pinned by a content update -->\n");
+            skill
+        })
+        .collect();
+    let (ok, detail) = health_with(project.path(), &[], &new);
+    assert!(!ok, "{detail}");
+    for stem in shipped_stems() {
+        assert!(
+            detail.contains(&format!(
+                "{stem}: stale (the next Architect launch refreshes it)"
+            )),
+            "{detail}"
+        );
+    }
+
+    let report = refresh(project.path(), &new);
+    assert_eq!(report.written.len(), new.len(), "{report:?}");
+    let (ok, detail) = health_with(project.path(), &[], &new);
+    assert!(ok, "{detail}");
+    assert_eq!(detail, format!("{} Architect skills current", new.len()));
 }

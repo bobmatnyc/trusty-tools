@@ -7,6 +7,7 @@
 //! and #6287 deleted trusty-analyze's, leaving each SPA in a crate with no
 //! listener. All three are served here instead.
 //! #9067: the Secrets page is a fourth mount, at `/tools/secrets/`.
+//! #11749: the Trusty Assistants page is a fifth, at `/tools/assistants/`.
 //! What: `rust_embed` embeds three bundles, each the Vite output of one of this
 //! crate's own UI projects — build.rs builds `ui-search/` → `ui-search-dist/`,
 //! `ui-memory/` → `ui-memory-dist/` and `ui-analyze/` → `ui-analyze-dist/`
@@ -76,6 +77,17 @@ struct AnalyzeUiAssets;
 #[folder = "ui-secrets-dist/"]
 struct SecretsUiAssets;
 
+/// The Trusty Assistants page bundle, committed under `ui-assistants-dist/`
+/// (#11749).
+///
+/// Same arrangement as [`SearchUiAssets`], one manifest row over:
+/// `trusty-console-assistants`, rebuilt by `make -C crates/trusty-console
+/// assistants-ui`.
+/// Test: `assistants_index_is_embedded` below.
+#[derive(RustEmbed)]
+#[folder = "ui-assistants-dist/"]
+struct AssistantsUiAssets;
+
 /// One dashboard's mount: where its bytes are and where its API calls go.
 ///
 /// Why a struct rather than two copies of three handlers: the redirect, the
@@ -139,6 +151,18 @@ const SECRETS: SpaMount = SpaMount {
     base_global: "__SECRETS_BASE__",
     api_base: "/api/secrets/",
     remedy: "secrets page assets not bundled — run `make -C crates/trusty-console secrets-ui`.",
+};
+
+/// Where the Trusty Assistants page's API calls go (#11749).
+///
+/// Same shape as [`SEARCH`], over `assistants_uds::ask_route::router`:
+/// `/api/console/assistants` lists instances, `…/{id}/turns` reads history
+/// and `…/{id}/ask` asks. No trailing slash: the list route has none.
+const ASSISTANTS: SpaMount = SpaMount {
+    get: AssistantsUiAssets::get,
+    base_global: "__ASSISTANTS_BASE__",
+    api_base: "/api/console/assistants",
+    remedy: "assistants page assets not bundled — run `make -C crates/trusty-console assistants-ui`.",
 };
 
 /// `GET /tools/search` — redirect to the trailing-slash form.
@@ -235,6 +259,28 @@ pub async fn secrets_ui_index() -> Response {
 /// `tests/secrets_ui_mount.rs`.
 pub async fn secrets_ui_asset(Path(path): Path<String>) -> Response {
     serve_asset(&SECRETS, &path)
+}
+
+/// `GET /tools/assistants` — redirect to the trailing-slash form (#11749).
+///
+/// Same reason as [`search_ui_redirect`]: the bundle's asset refs are relative.
+/// Test: `assistants_ui_bare_path_redirects` in `tests/assistants_ui_mount.rs`.
+pub async fn assistants_ui_redirect() -> Redirect {
+    Redirect::permanent("/tools/assistants/")
+}
+
+/// `GET /tools/assistants/` — the Trusty Assistants page shell (#11749).
+pub async fn assistants_ui_index() -> Response {
+    serve_index(&ASSISTANTS)
+}
+
+/// `GET /tools/assistants/{*path}` — one bundle file, or the shell on a miss.
+///
+/// Test: `assistants_ui_serves_every_asset_the_shell_references` and
+/// `assistants_ui_unknown_path_falls_back_to_the_shell` in
+/// `tests/assistants_ui_mount.rs`.
+pub async fn assistants_ui_asset(Path(path): Path<String>) -> Response {
+    serve_asset(&ASSISTANTS, &path)
 }
 
 /// The page a non-loopback client gets in place of the Secrets page.
@@ -341,7 +387,8 @@ fn serve_index(mount: &SpaMount) -> Response {
 /// anywhere in the document runs before it — position inside `<head>` is not
 /// load-bearing, but it matches how the daemons injected their own boot globals.
 /// Test: `inject_api_base_lands_before_head_close`,
-/// `inject_api_base_without_head`, `inject_api_base_escapes_the_base`.
+/// `inject_api_base_without_head`, `inject_api_base_escapes_the_base`,
+/// `inject_api_base_skips_a_head_close_inside_a_comment`.
 fn inject_api_base(html: &str, global: &str, api_base: &str) -> String {
     let script = format!(
         "<script>\n\
@@ -349,7 +396,7 @@ fn inject_api_base(html: &str, global: &str, api_base: &str) -> String {
          window.{global} = new URL({api_base:?}, document.baseURI).href;\n\
          </script>"
     );
-    match html.find("</head>") {
+    match live_head_close(html) {
         Some(idx) => {
             let mut out = String::with_capacity(html.len() + script.len());
             out.push_str(&html[..idx]);
@@ -358,6 +405,24 @@ fn inject_api_base(html: &str, global: &str, api_base: &str) -> String {
             out
         }
         None => format!("{script}{html}"),
+    }
+}
+
+/// Byte offset of the first `</head>` outside an `<!-- … -->` comment.
+///
+/// #11758: a comment quoting the tag put the injected base inside the comment.
+fn live_head_close(html: &str) -> Option<usize> {
+    let mut from = 0;
+    loop {
+        let rest = &html[from..];
+        let head = rest.find("</head>")?;
+        match rest.find("<!--") {
+            Some(open) if open < head => {
+                let body = from + open + 4;
+                from = body + html[body..].find("-->")? + 3;
+            }
+            _ => return Some(from + head),
+        }
     }
 }
 
@@ -443,6 +508,24 @@ mod tests {
         );
     }
 
+    /// Why: #11749 — the Assistants bundle is built from this crate's
+    /// `ui-assistants/`; embedding another tree would serve a page whose calls
+    /// go to a different bridge at `/tools/assistants/`.
+    /// Test: this is the test.
+    #[test]
+    fn assistants_index_is_embedded() {
+        let index = AssistantsUiAssets::get("index.html").expect("bundle carries index.html");
+        let html = String::from_utf8_lossy(index.data.as_ref());
+        assert!(
+            html.contains("<title>Trusty Assistants</title>"),
+            "wrong bundle embedded"
+        );
+        assert!(
+            html.contains("./assets/"),
+            "bundle must use relative asset refs so the /tools/assistants/ mount resolves them"
+        );
+    }
+
     /// Why: the three mounts must set DIFFERENT globals at different prefixes,
     /// or one dashboard's API calls reach another's daemon.
     /// Test: this is the test.
@@ -453,6 +536,11 @@ mod tests {
         let memory = inject_api_base(html, MEMORY.base_global, MEMORY.api_base);
         let analyze = inject_api_base(html, ANALYZE.base_global, ANALYZE.api_base);
         let secrets = inject_api_base(html, SECRETS.base_global, SECRETS.api_base);
+        let assistants = inject_api_base(html, ASSISTANTS.base_global, ASSISTANTS.api_base);
+        assert!(assistants.contains(
+            r#"window.__ASSISTANTS_BASE__ = new URL("/api/console/assistants", document.baseURI)"#
+        ));
+        assert!(!assistants.contains("__SECRETS_BASE__"));
         assert!(secrets.contains(r#"window.__SECRETS_BASE__ = new URL("/api/secrets/""#));
         assert!(!secrets.contains("__ANALYZE_BASE__"));
         assert!(search.contains(r#"window.__SEARCH_BASE__ = new URL("/api/search/""#));
@@ -460,6 +548,36 @@ mod tests {
         assert!(analyze.contains(r#"window.__ANALYZE_BASE__ = new URL("/api/analyze/""#));
         assert!(!memory.contains("__SEARCH_BASE__"));
         assert!(!analyze.contains("__MEMORY_BASE__"));
+    }
+
+    /// #11758: a head-close tag quoted in a comment is not the real one.
+    #[test]
+    fn inject_api_base_skips_a_head_close_inside_a_comment() {
+        let html = "<head><!-- before </head> --><title>x</title></head><body></body>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        let script = out.find("<script>").expect("script injected");
+        assert!(script > out.find("-->").expect("comment kept"));
+        assert!(script < out.rfind("</head>").expect("head close kept"));
+        assert!(out[script..].starts_with("<script>"));
+        assert!(out.ends_with("</head><body></body>"));
+    }
+
+    /// #11758: an unterminated comment swallows its `</head>`, so the base is prepended live.
+    #[test]
+    fn inject_api_base_prepends_when_an_unterminated_comment_holds_head_close() {
+        let html = "<html><head><!-- oops </head><body></body></html>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        assert!(out.starts_with("<script>"), "base must be live: {out}");
+        assert!(out.ends_with(html), "document must follow unchanged: {out}");
+    }
+
+    /// #11758: a `</head>` that exists only inside a comment is no head close.
+    #[test]
+    fn inject_api_base_prepends_when_head_close_is_only_in_a_comment() {
+        let html = "<html><head><!-- </head> --><body></body></html>";
+        let out = inject_api_base(html, "__SECRETS_BASE__", "/api/secrets/");
+        assert!(out.starts_with("<script>"), "base must be live: {out}");
+        assert!(out.ends_with(html), "document must follow unchanged: {out}");
     }
 
     #[test]

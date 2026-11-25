@@ -1,5 +1,5 @@
 {
-  "created": "2026-10-11T04:00:00Z",
+  "created": "2026-10-21T10:00:00Z",
   "due": "lorem ipsu",
   "goal": "",
   "kind": "question",
@@ -17,6 +17,6 @@
   "session": "pm-2",
   "status": "open",
   "title": "lorem i",
-  "updated": "2026-10-11T04:00:00Z",
+  "updated": "2026-10-21T10:00:00Z",
   "version": 1
 }

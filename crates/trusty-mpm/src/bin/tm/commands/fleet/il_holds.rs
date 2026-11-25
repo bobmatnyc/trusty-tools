@@ -4,8 +4,10 @@
 //! historical one carried by mistake blocks work. The whole file is read, each
 //! entry classified, and anything unclear stops the migration.
 //! What: [`holds_in_state_md`] splits the file into entries (a line and the
-//! indented lines under it) and classifies every entry that names a hold (the
-//! word "hold" in any case): lifted or released, a recorded builder band, or an
+//! indented lines under it) and classifies every entry whose head starts with
+//! a hold format (`HOLD` as its first word, `usage state: HOLD`, `On hold`, any
+//! case; #11480: an entry that only uses the word "hold" or "merge" is neither
+//! a hold nor an error): lifted or released, a recorded builder band, or an
 //! answered or closed item (`D03 (answered ...)`, `QUESTION 17 CLOSED`) is
 //! history and not carried; `usage state: HOLD ...` and `hold: ...` (any case,
 //! `**HOLD**:` too) are the active usage hold; any other entry that names a
@@ -47,11 +49,20 @@ fn entries(text: &str) -> Vec<(usize, Vec<&str>)> {
     out
 }
 
-/// Whether `s` names a hold: the word "hold" in any case (#10579: lowercase
-/// "hold all merges" is a hold too).
-fn names_hold(s: &str) -> bool {
-    s.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("hold"))
+/// Whether the entry's head starts with a hold format: `HOLD` / `hold` as its
+/// first word, `usage state: HOLD`, or `On hold` (#11480).
+fn starts_with_hold_format(h: &str) -> bool {
+    let first = |s: &str| {
+        s.split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("hold"))
+    };
+    let low = h.to_ascii_lowercase();
+    first(h)
+        || low
+            .strip_prefix("usage state:")
+            .is_some_and(|r| first(r.trim_start()))
+        || low.strip_prefix("on ").is_some_and(first)
 }
 
 /// The entry's head with its bullet and emphasis stripped.
@@ -81,7 +92,73 @@ fn historical(first: &str, all: &str) -> bool {
 fn value(first_value: &str, rest: &[&str]) -> String {
     let mut parts = vec![first_value.trim().to_owned()];
     parts.extend(rest.iter().map(|l| head(l).trim().to_owned()));
-    parts.join(" | ").chars().take(HOLD_MAX).collect()
+    parts.join(" | ") // #11498: never shortened
+}
+
+/// The session record's byte limit (`SESSION_MAX` in `datg_store.py`).
+pub(crate) const SESSION_MAX: usize = 8192; // #11498: long holds fit
+
+/// Whether the holds (and the task/next written beside them) fit the ledger
+/// session record `ses` (`Null` for a ledger not created yet). `Err` names the
+/// field, its size and the limit (#11498).
+/// Why: `hold_step` runs after the ledger and hooks exist, so a refused write
+/// there leaves a live ledger without its hold; this check runs first.
+/// What: each hold over [`HOLD_MAX`] characters is refused; then the record
+/// as `datg.py session set` would write it (compact JSON plus `written_at` and
+/// `written_epoch`) must stay within [`SESSION_MAX`] bytes. A field the ledger
+/// already holds is not written, so it is not counted twice.
+/// Test: `a_hold_that_cannot_be_recorded_stops_init_before_the_ledger`,
+/// `a_1000_character_multibyte_hold_is_never_shortened`.
+pub(crate) fn hold_room(
+    ses: &serde_json::Value,
+    holds: &Holds,
+    work: &(Option<String>, Option<String>),
+) -> Result<(), String> {
+    let empty = |key: &str| ses[key].as_str().is_none_or(str::is_empty);
+    let open = |key: &str| {
+        ses[key]
+            .as_str()
+            .is_none_or(|v| v.trim().is_empty() || v.starts_with("needs owner input:"))
+    };
+    let mut probe = ses.as_object().cloned().unwrap_or_default();
+    let mut written = Vec::new();
+    for (field, v) in [("hold", &holds.usage), ("merge_hold", &holds.merge)] {
+        let Some(v) = v.as_deref().filter(|_| empty(field)) else {
+            continue;
+        };
+        let chars = v.chars().count();
+        if chars > HOLD_MAX {
+            return Err(format!(
+                "the {field} from local/state.md is {chars} characters and the Intent Ledger \
+                 `{field}` field holds at most {HOLD_MAX}"
+            ));
+        }
+        written.push((field, v.len()));
+        probe.insert(field.to_owned(), v.into());
+    }
+    if written.is_empty() {
+        return Ok(());
+    }
+    for (field, v) in [("task", &work.0), ("next", &work.1)] {
+        if let Some(v) = v.as_deref().filter(|_| open(field)) {
+            probe.insert(field.to_owned(), v.into());
+        }
+    }
+    probe.insert("written_at".to_owned(), "2026-01-01T00:00Z".into());
+    probe.insert("written_epoch".to_owned(), 1_700_000_000_u64.into());
+    let n = serde_json::to_string(&probe).map_or(usize::MAX, |s| s.len());
+    if n <= SESSION_MAX {
+        return Ok(());
+    }
+    let fields: Vec<String> = written
+        .iter()
+        .map(|(f, b)| format!("{f} is {b} B"))
+        .collect();
+    Err(format!(
+        "the Intent Ledger session record would be {n} B with the holds and its limit is \
+         {SESSION_MAX} B ({})",
+        fields.join(", ")
+    ))
 }
 
 /// The active holds in `local/state.md`; see the module doc.
@@ -89,10 +166,12 @@ pub(crate) fn holds_in_state_md(text: &str) -> Result<Holds, (usize, String)> {
     let mut found = Holds::default();
     for (line, lines) in entries(text) {
         let all = lines.join("\n");
-        if !names_hold(&all) || historical(lines[0], &all) {
+        let h = head(lines[0]);
+        // #11480: only an entry whose head starts with a hold format is a hold;
+        // a note that merely uses the word "hold" or "merge" is neither.
+        if !starts_with_hold_format(h) || historical(lines[0], &all) {
             continue;
         }
-        let h = head(lines[0]);
         let low = h.to_ascii_lowercase();
         let usage = low
             .strip_prefix("usage state:")
@@ -113,10 +192,8 @@ pub(crate) fn holds_in_state_md(text: &str) -> Result<Holds, (usize, String)> {
         if all.to_ascii_lowercase().contains("merge") {
             let entry = value(h, &lines[1..]);
             found.merge = Some(match found.merge.take() {
-                Some(prev) => format!("{prev} || {entry}")
-                    .chars()
-                    .take(HOLD_MAX)
-                    .collect(),
+                // #11498: never shortened; `hold_room` refuses an over-long hold.
+                Some(prev) => format!("{prev} || {entry}"),
                 None => entry,
             });
             continue;

@@ -6,6 +6,134 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.8] — 2026-11-24
+
+### Fixed
+
+- The candle embedder's first-use model download no longer fails with `RelativeUrlWithoutBase`: hf-hub moves to 0.5, which follows HuggingFace's relative 307 redirect. `HF_HOME` is still honoured, and concurrent first-use downloads in one process are serialized (#10866). Candle-only builds now verify TLS against bundled Mozilla roots instead of the system trust store, so custom or corporate CAs are not trusted on that path.
+
+## [0.70.7] — 2026-11-23
+
+### Added
+
+- `StdioMcpClient::spawn_grouped_with_env` spawns an MCP server as the leader of its own process group (unix). Dropping or respawning the client sends `SIGKILL` to the whole group, so a wrapper command's grandchild (`npx`, `uvx`) does not outlive it. Existing spawn constructors are unchanged (#11650).
+
+### Fixed
+
+- The pause sanitizer keeps a JSON key's closing quote (`"token": "[REDACTED]"`), redacts a JWT after a credential key as one value across its dots, and redacts a letter-only value after `=` or `:` (#10595).
+- `resolve_data_dir_no_create`, `daemon_socket_path_no_create`, `search_dial_socket`, `resolve_memory_dial_socket` and `events_dial_socket_path` resolve the same paths as their creating versions and create no directory, for dial-side lookups (#11667).
+
+### Changed
+
+- `catchup::pause::write_pause_snapshot` keeps commit SHAs and message ids in the PM's free text instead of replacing them with `<sha?>`, so a resumed session reads them back exactly. It now redacts only secret-shaped tokens as `[REDACTED]`: a hex word longer than 40 characters (longer than any SHA-1 id) or a word of at least 20 characters opening with a credential prefix such as `ghp_`, `sk-`, `xoxb-` or `AKIA`, or a hex or base64-like value of 16 or more characters after a credential key such as `api_key=`, `token:` or `Bearer` (#10595).
+
+### Removed
+
+- The public `catchup::sha_scrub` module (`scrub_sha_like`, `is_sha_like`, `SHA_PLACEHOLDER`) is removed; use `catchup::secret_scrub` instead. This is a semver break for any caller of the old module (#10595).
+
+## [0.70.6] — 2026-11-23
+
+### Added
+
+- `launchd_labels::ARCHITECT_SCHED` registers `com.trusty.architect-sched`, and the stray-label scan exempts the leaf crate `trusty-architect`'s plist renderer, which cannot import it (#9171 A1).
+- `console_rpc::METHOD_CONSOLE_METRICS` (`console.console_metrics`, #10907), now listed in `console_rpc::METHODS`. It answers a `ConsoleMetricsReport` whose `metrics` follow the `by_*` breakdown convention.
+- `launchd_labels::COMPUTER` constant and `trusty-computer` service entry for the trusty-computer desktop control daemon.
+- The shared memory client (`memory_rpc::call_memory_tool_at_with_timeout`) waits out a `-32007` palace-opening answer: it asks again with a 250 ms to 2 s backoff for up to 30 s (`PALACE_OPENING_WAIT`), then returns the last `-32007` as the error. New `CODE_PALACE_OPENING` and `MemoryRpcError::is_palace_opening` (#11613).
+
+### Fixed
+
+- `uds::server`: a method marked with the new `RpcRouter::mark_read_only` is cancelled when its client hangs up, and `handle_connection` reports `RpcServerError::ClientGone` instead of running the abandoned request to completion. Unmarked methods, including every write, still run to completion (#11256).
+
+### Changed
+
+- `launchd_labels::AGENTS_SLACK` (`com.trusty.agents.slack`) moves to `RETIRED_SERVICES` under member `trusty-assistants`: `tagent --slack` no longer exists, so nothing installs the unit and an upgrade evicts it (#11632).
+- `bin_resolve` maps `trusty-assistants` to its `ta` binary and the one-release `tagent` alias, replacing the `trusty-agents` row (#11632).
+
+## [0.70.5] — 2026-11-20
+
+### Documentation
+
+- Test data in the search monitor TUI tests uses the neutral `dev-acme` project name instead of a real organisation's ([#11519](https://github.com/bobmatnyc/trusty-tools/issues/11519)).
+
+## [0.70.4] — 2026-11-19
+
+### Documentation
+
+- Comments and examples use neutral `acme` org names.
+
+## [0.70.3] — 2026-11-18
+
+### Changed
+
+- Exempt three more paths from the launchd-label source scan in the `launchd_labels` tests (#11440).
+
+## [0.70.2] — 2026-11-16
+
+### Added
+
+- `linux_lifecycle::passthrough::MEMORY_DAEMON` and `SEARCH_DAEMON`: the non-credential variables a Linux-started trusty-memory or trusty-search daemon keeps. Both daemons' descriptors and trusty-console's read them, so a daemon a console bridge auto-starts gets the same settings as one its own `start` spawns (#11085). Both lists carry `RUST_LOG_BUFFER`, the log-buffer filter both daemons read through `tracing_init`.
+- `linux_lifecycle::stop_pid`, `stop_pid_with`, `restart_pid` and `restart_pid_with` stop or restart a daemon the caller identified by pid, such as a trusty-console whose socket bind failed. The pid is pinned with a pidfd and must be proven this instance (binary, `liveness_args`, `instance_env`, `instance_path_args`) before any signal; a pid that is gone falls back to the socket path, and a live pid that is not this instance is the new `LifecycleError::NotThisInstance` (#11085).
+- Before any signal, `stop_pid` and `restart_pid` also refuse: a descriptor with empty `liveness_args` (`InvalidDescriptor`); a pid whose `instance_path_args` flag has no value, or a relative or unresolvable one (the new `LifecycleError::InstanceUndecided`); a socket served by another pid (the new `LifecycleError::ServedByAnother` for `stop_pid`, `RestartBlocked` naming that pid for `restart_pid`); and a socket that cannot be probed (`ProbeInconclusive`). `restart_pid` returns `BinaryMissing` before its stop when the install binary is absent (#11085).
+- `DaemonDescriptor::instance_path_args` declares argv flags, such as `--data-dir`, whose value names the instance's directory. A process that gives such a flag only values naming another path is a sibling and no longer blocks `stop`, `start` or `restart`; a relative or unresolvable value still counts as this instance for that scan. Descriptors that leave it empty behave as before (#11085).
+- `linux_lifecycle::ProcessTable` and `stop_with_table`, `start_with_table`, `restart_with_table`, `stop_pid_with_table` and `restart_pid_with_table`: the liveness scan can read an injected process table instead of `/proc`, so a lifecycle test no longer depends on the host's processes (#11085). The existing entry points scan `/proc` as before, and a stop by pid still reads its pinned process in the real `/proc`.
+
+### Fixed
+
+- `linux_lifecycle::restart` no longer stops a healthy daemon that its start would then refuse to replace. While the daemon serves, another process that the `/proc` scan reads as this instance now fails the restart with the new `LifecycleError::RestartBlocked` before any signal, and the running daemon stays up (#11085).
+- `linux_lifecycle::restart` checks that the install binary exists before it stops anything, so a restart during an upgrade that briefly removed the binary returns `BinaryMissing` and leaves the running daemon up instead of stopping it and starting nothing (#11085).
+
+## [0.70.0] — 2026-11-12
+
+### Added
+
+- `console_token` (behind `daemon-token`): the one loader for the trusty-console token file named by `TRUSTY_CONSOLE_TOKEN_FILE` (#11074). It refuses a missing file, a non-regular file, a file with a group or other permission bit, and a token shorter than 32 bytes, longer than 4 KiB or holding a byte outside visible ASCII. Errors name the path and the problem, never the content. `ConsoleToken` has a redacted `Debug` and compares in constant time.
+- Registered the per-user Trusty Browser LaunchAgent under its canonical service label.
+
+### Fixed
+
+- `running_under_test_harness()` recognises test binaries again under rustc 1.100, whose cargo writes them to `target/<profile>/build/<crate>/<hash>/out/<name>-<hash>` instead of `target/<profile>/deps/`; the daemon guards had stopped skipping, and test processes sent real requests to live daemons (#11138)
+  - detection now fails closed: an unreadable executable path, or a name carrying cargo's 16-hex metadata hash in an unknown layout, counts as a test process; a binary without the hash (`target/<profile>/<name>`, `~/.cargo/bin/<name>`) still counts as production, and `TRUSTY_ALLOW_PRODUCTION_STATE=1` still overrides
+  - a Linux `/proc/self/exe` path ending in ` (deleted)`, left when a concurrent build replaces the running test binary, is read without that suffix and still counts as a test process
+
+## [0.69.3] — 2026-11-12
+
+### Added
+
+- `console_rpc` gains the method names `console.machine_status` and `console.history` (#10942), and a `console_rpc::metrics` submodule, gated on `console-metrics` + `host-metrics`, with their request types `MachineStatusRequest` and `HistoryRequest` and response types `ConsoleMachineStatus` (`ready` plus the `MachineStatus` body) and `HistorySnapshot`. The request types accept absent, `null`, an object or `[]` and refuse anything else.
+- `HistorySnapshot`, `ServiceSample`, `ServiceTransition`, `ServiceState` and `MACHINE_HISTORY_SCHEMA_VERSION` moved here from trusty-console, so a client without a trusty-console dependency can decode the history, including the per-service CPU/RSS rings in `service_samples` (#10943). Every `HistorySnapshot` field now defaults on decode.
+- `ServiceStatus` gains an `Unknown` variant, and an unrecognised `ServiceStatus` or `ServiceState` string now decodes to `Unknown` instead of failing the whole answer, so an older `tm tui` still reads a newer console (#10996).
+
+### Fixed
+
+- A failed git step in `catchup::session_refs` now names the child's exit code, or the signal that killed it, and says when stderr was empty (#10667).
+- `linux_lifecycle::stop`, `start` and `restart` no longer read an unlinked or unanswering socket as "not running": a process of the daemon's binary that carries the descriptor's new `liveness_args` makes them fail with `LifecycleError::RunningUnserved`, so `restart` never starts a second daemon beside a running one (#11098).
+- `linux_lifecycle::start` spawns the daemon in the descriptor's new `working_dir` (default `/`), never the caller's cwd, and with a cleared environment holding only `DaemonDescriptor::BASE_ENV` plus the descriptor's new `env_passthrough` names, so a start from inside a checkout cannot load its `.env.local` or hand the daemon the caller's tokens (#11098).
+- The `linux_lifecycle` liveness scan counts only processes of this daemon instance: the descriptor's new `instance_env` names the variables, and their values, that identify the instance (default: the caller's `TRUSTY_DATA_DIR_OVERRIDE`), and `start` spawns the daemon with exactly those values. A sibling instance with the same binary and argv but another data dir, such as a sandbox, no longer makes `stop`, `start` or `restart` refuse, so `restart` brings the daemon back and a stopped daemon is started (#11098).
+- The scan fails closed: a matching process whose environment cannot be read is the new `LifecycleError::InstanceUnreadable`, and a `/proc` read error other than a vanished process or another uid's hidden entry (for example `EMFILE`), or a `/proc/<pid>/status` that cannot be parsed, is an error instead of "not running" (#11098).
+- The `linux_lifecycle` liveness scan reads `/proc/<pid>/status` as bytes, so a process anywhere on the host whose name is not valid UTF-8 no longer makes `stop`, `start` or `restart` fail for an unrelated daemon (#11098).
+
+## [0.69.1] — 2026-11-12
+
+### Added
+
+- New Linux-only `linux_lifecycle` module (feature `uds`): `stop`, `start` and `restart` for a daemon described by a caller-built `DaemonDescriptor`. `stop` identifies the listener by the socket's `SO_PEERCRED` pid and its `/proc/<pid>/exe` name, signals it through a pidfd (SIGTERM, then SIGKILL after the grace), and returns `Stopped` only once the pid has exited and the descriptor's stopped signal holds; a pid that outlives SIGKILL is a `Survivor` error. `start` spawns `<install dir>/<binary>` detached and succeeds only when the spawned pid serves the socket; when it fails after the spawn it kills and reaps the child, and `NotReady` and `ChildUnpinned` (no pidfd for the child) carry `killed`. `restart` starts only after a `Stopped` or `NotRunning` stop ([#11084](https://github.com/bobmatnyc/trusty-tools/issues/11084))
+
+## [0.69.0] — 2026-11-10
+
+### Added
+
+- `search_rpc::METHOD_INDEX_FILE_STATUS`, `IndexIdentity` and `IndexFileStatus` decode the trusty-search index identity and per-file status replies (#10738).
+- `control_bus::METHOD_EVENTS_HEALTH` (`"events.health"`) with its `EventsHealthParams` request and `EventsHealth` reply (`status`, `service`, `version`, `uptime_secs`, `ingested`, `deduped`, `evicted`, `log_dropped`, `subscribers`, `head_seq`), the health half of the trusty-events socket contract (#10901).
+- New ungated module `console_rpc` (#10902): the method names `console.health` and `console.fleet_status`, their response types `ConsoleHealth` and `ConsoleFleetStatus`, and the per-service row types `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` (moved from trusty-console), so a client without a trusty-console dependency can decode the console socket's answers. No type uses `deny_unknown_fields`.
+- `control_bus::METHOD_EVENTS_CONSOLE_METRICS` (`"events.console_metrics"`), `EventsConsoleMetricsParams`, and the reserved `by_project` keys `UNATTRIBUTED_PROJECT` and `OVERFLOW_PROJECT` (#10906).
+- `console_metrics::by_convention`: the contract note for the `<svc>.console_metrics` UDS method and the `by_*` breakdown convention, with `check_by_convention` to test a payload against it (#10906).
+- `HarnessSource::as_str` and `MessageDirection::as_str`, the wire strings without serialising (#10906).
+
+### Changed
+
+- `HarnessEvent` gains an optional `project` field (`serde(default)`, omitted when `None`), wire-compatible both ways. A struct literal must now name it (#10906).
+- `claude_temperature::accepts_temperature` is now public (behind the `bedrock` or `inference-client` feature), so downstream request builders reuse the Opus/Sonnet 5.5 temperature rule (#10939).
+
 ## [0.67.6] — 2026-11-09
 
 ### Security

@@ -78,11 +78,44 @@ fn print_outcome(outcome: &UpdateOutcome) {
         UpdateAction::AlreadyCurrent => "already pinned and verified:",
     };
     println!("{verb} {} (sha256 {})", outcome.tag, outcome.sha256);
+    if let Some(hint) = skills_refresh_hint(&outcome.action) {
+        println!("{hint}");
+    }
+}
+
+/// The line `tm content update` prints when the pin changed.
+///
+/// Why: #10596 — the Architect's skills deploy at launch, so after a content
+/// update `tm fleet status` reports them stale until a relaunch.
+/// What: `Some` naming the no-relaunch refresh command when new content was
+/// pinned or restored; `None` when the pin was already current. Prints only;
+/// it refreshes nothing, so the update never touches a live session.
+/// Test: `an_update_that_pins_names_the_skills_refresh_command`.
+fn skills_refresh_hint(action: &UpdateAction) -> Option<&'static str> {
+    match action {
+        // #10596: name the exact refresh command; never run it here.
+        UpdateAction::Installed | UpdateAction::Repaired => Some(
+            "Architect skills refresh at the next Architect launch; to refresh them now \
+             without a relaunch, run `tm sessions sync-assets --all`",
+        ),
+        UpdateAction::AlreadyCurrent => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #10596: a pin that changed names the skills refresh command; a
+    /// current pin prints nothing extra.
+    #[test]
+    fn an_update_that_pins_names_the_skills_refresh_command() {
+        for action in [UpdateAction::Installed, UpdateAction::Repaired] {
+            let hint = skills_refresh_hint(&action).expect("a changed pin prints the hint");
+            assert!(hint.contains("`tm sessions sync-assets --all`"), "{hint}");
+        }
+        assert_eq!(skills_refresh_hint(&UpdateAction::AlreadyCurrent), None);
+    }
 
     /// Critic M2 on #8982, after #9012: with nothing installed, `tm content
     /// status` exits non-zero naming the fix. A broken lock never exits 0.

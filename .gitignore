@@ -155,6 +155,9 @@ crates/trusty-console/ui-analyze/node_modules/
 # trusty-console Secrets page (#9067)
 crates/trusty-console/ui-secrets/node_modules/
 
+# trusty-console Trusty Assistants page (#11749)
+crates/trusty-console/ui-assistants/node_modules/
+
 # trusty-console runtime artifacts
 crates/trusty-console/ui/node_modules/
 
@@ -166,6 +169,7 @@ crates/trusty-console/ui/node_modules/
 # Anchored per crate for the #4789 reason spelled out above.
 crates/trusty-console/ui-analyze/package-lock.json
 crates/trusty-console/ui-secrets/package-lock.json
+crates/trusty-console/ui-assistants/package-lock.json
 crates/trusty-console/ui/package-lock.json
 crates/trusty-console/ui-memory/package-lock.json
 crates/trusty-search/ui/package-lock.json
@@ -197,7 +201,8 @@ docs/certificates/*.mobileprovision
 .agents/
 .codex/
 
-# trusty-agents (tagent) local runtime state at the repo root — machine-local, never a deliverable
+# trusty-assistants (`ta`) project-local runtime state at the repo root (the
+# directory keeps its pre-#11632 name) — machine-local, never a deliverable
 .trusty-agents/
 
 # The per-worktree ownership sentinel (#3649, #4311). It is written INTO a
@@ -211,6 +216,7 @@ docs/certificates/*.mobileprovision
 .claude/output-styles/trusty-mpm.md
 .claude/output-styles/trusty-mpm-teacher.md
 .claude/output-styles/trusty-mpm-research.md
+.claude/output-styles/owner-plain.md
 .claude/output-styles/trusty-mpm-supervisor.md
 .claude/output-styles/trusty-mpm-architect.md
 .claude/output-styles/*.tm-floor.md

@@ -1,5 +1,5 @@
 ## Code Search Protocol (Context-First)
 
-Call `search` (`mcp__trusty-search__search`) BEFORE reading code files or
-delegating to Research, so investigation starts from indexed results, not a cold
-grep.
+Run `trusty-search search "<q>" --json` from the repo BEFORE reading code files
+or delegating to Research; elsewhere, `trusty-search query "<q>" -i <index>`.
+MCP adapters are for non-mpm callers only.

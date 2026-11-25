@@ -124,6 +124,12 @@ impl TelegramFormatter {
             CommandResult::ProjectRegistered { path } => {
                 format!("✅ Registered project <code>{path}</code>")
             }
+            // #10586: name the kept record; escaped, as every interpolation is.
+            CommandResult::ProjectKept { path, kept } => format!(
+                "ℹ️ <code>{}</code>: {}",
+                html_escape(path),
+                html_escape(&kept.notice())
+            ),
             CommandResult::ConfigAnalysis {
                 project,
                 recommendations,

@@ -1,0 +1,8 @@
+{
+  "case_id": "c03-beta-scope-kept",
+  "expected_verdict": "allow",
+  "binding_rule_ids": [
+    "beta-scope-1"
+  ],
+  "label_note": "LABEL-ONLY-c03-beta-scope-kept"
+}

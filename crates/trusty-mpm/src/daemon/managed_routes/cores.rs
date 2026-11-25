@@ -101,7 +101,7 @@ pub(crate) async fn spawn_core(state: &Arc<DaemonState>, req: SpawnRequest) -> R
                 branch: final_record.branch.clone(),
                 state: final_record.state.to_string(),
                 created_at: final_record.created_at.to_rfc3339(),
-                attach_cmd: attach_cmd_for(&final_record.tmux_name),
+                attach_cmd: attach_cmd_for(&final_record),
                 runtime: final_record.runtime.as_str().to_owned(),
                 deliverable_id: final_record.deliverable_id.map(|id| id.to_string()),
             };
@@ -148,7 +148,7 @@ pub(crate) async fn adopt_core(
             state: record.state.to_string(),
             cwd: record.cwd.to_string_lossy().to_string(),
             runtime: record.runtime.as_str().to_owned(),
-            attach_cmd: attach_cmd_for(&record.tmux_name),
+            attach_cmd: attach_cmd_for(&record),
         }),
         Err(crate::session_manager::ManagedError::TmuxSessionMissing(msg)) => {
             RouteOutcome::text(404, msg)
@@ -233,11 +233,14 @@ pub(crate) async fn send_core(
         Ok(r) => r.tmux_name,
         Err(_) => return not_found(id_str),
     };
-    match mgr.send_input(&id, &req.text).await {
-        Ok(()) => RouteOutcome::ok(&SendInputResponse {
-            sent: true,
-            tmux_name,
-        }),
+    // #11796: the same input-box gate as MCP `session_send`; a send that was
+    // refused or not delivered is a 409, never `sent: true`.
+    match mgr.send_input_observed(&id, &req.text).await {
+        Ok(submit) => {
+            let body = SendInputResponse::from_submit(submit, tmux_name);
+            let status = if submit.delivered() { 200 } else { 409 };
+            RouteOutcome::json(status, &body)
+        }
         Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
@@ -377,7 +380,7 @@ pub(crate) async fn attach_cmd_core(state: &Arc<DaemonState>, id_str: &str) -> R
     mgr.rebind_stale_panes().await; // #9313
     match mgr.get(&id).await {
         Ok(record) => RouteOutcome::ok(&AttachCmdResponse {
-            attach_cmd: attach_cmd_for(&record.tmux_name),
+            attach_cmd: attach_cmd_for(&record),
         }),
         Err(_) => not_found(id_str),
     }

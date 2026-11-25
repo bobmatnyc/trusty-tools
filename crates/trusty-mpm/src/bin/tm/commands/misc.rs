@@ -9,7 +9,7 @@
 //! Test: `cli_parses_*` parse tests for each command in `tests.rs`.
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
-use crate::commands::hook_rewrite::{build_pretooluse_rewrite_response, hook_cwd};
+use crate::commands::hook_rewrite::hook_cwd;
 use crate::formatters::session::short_id;
 use crate::types::EventRow;
 
@@ -446,26 +446,8 @@ fn pretooluse_bash_rewrite(
     tool_input: Option<&serde_json::Value>,
     cwd: Option<&std::path::Path>,
 ) -> Option<String> {
-    use super::pm_guard_bash::build_lease_rewrite::LeaseRewrite;
-    let cwd = cwd.unwrap_or(std::path::Path::new(""));
-    match super::pm_guard_build_lease::decide_rewrite(cmd, tool_input, cwd) {
-        (LeaseRewrite::Rewrite(new), permission) => Some(
-            super::pm_guard_build_lease::rewrite_response(tool_input, &new, permission),
-        ),
-        (LeaseRewrite::Refuse(_), _) => None,
-        // #10973: inside an isolation worktree the rewrite takes the one-command
-        // shape its classifier accepts (#7477 refused the brace group there).
-        (LeaseRewrite::None, _) => {
-            super::hook_rewrite_isolated::rewrite_bash_command_for_cwd(cmd, Some(cwd)).map(|r| {
-                match r.permission {
-                    None => build_pretooluse_rewrite_response(&r.command).to_string(),
-                    permission => super::pm_guard_build_lease::rewrite_response(
-                        tool_input, &r.command, permission,
-                    ),
-                }
-            })
-        }
-    }
+    // #10973: one decision, shared with the opportunity observer's skip reason.
+    super::hook_bash_decision::pretooluse_bash_decision(cmd, tool_input, cwd).ok()
 }
 
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.
@@ -613,6 +595,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == "PostToolUse" || event == SUBAGENT_STOP_EVENT {
         super::hook_observer::observe(&event, stdin_payload.as_ref(), &session_id);
     }
+    // See G0b IL auto-apply: an IL block in this turn updates this session's ledger.
+    super::il_auto_apply::on_hook(&event, stdin_payload.as_ref(), &session_id);
 
     // #2610: on turn-end events (main agent Stop / delegated SubagentStop),
     // flag a final message that "parks" the agent — one that ends the turn to
@@ -648,6 +632,10 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         super::hook_payload::build_hook_payload(&cwd, stdin_payload.as_ref(), idle_parking);
     // #8392: push a `Notification` to the configured inbox; bounded, never fails the hook.
     super::hook_notify::forward_notification(&event, stdin_payload.as_ref(), &cwd, &mut payload);
+    // #11674: the stop carries its dispatch's tool_use_id for the daemon join.
+    if event == SUBAGENT_STOP_EVENT {
+        super::subagent_task_hook::add_dispatch_key(stdin_payload.as_ref(), &mut payload);
+    }
     let body = serde_json::json!({
         "session_id": session_id,
         "event": event,
@@ -662,6 +650,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == SUBAGENT_STOP_EVENT {
         let outcome = super::hook_post::post_hook_with_retry(url, &body).await;
         super::hook_post::emit_hook_post_log(&outcome);
+        // #11674: judge the handback; prints the hook's stdout JSON.
+        super::subagent_task_hook::on_stop(stdin_payload.as_ref(), outcome.response.as_ref());
         if !outcome.delivered {
             // #6556: a stop neither delivered nor parked fails the hook (exit 1).
             super::hook_post::spool_undelivered_stop(&body)?;

@@ -20,7 +20,7 @@
 # Product Documentation
 
 - [trusty-mpm](./trusty-mpm/README.md)
-- [trusty-agents](./trusty-agents/README.md)
+- [trusty-assistants](./trusty-assistants/README.md)
 - [trusty-code](./trusty-code/README.md)
 - [trusty-search](./trusty-search/README.md)
 - [trusty-memory](./trusty-memory/README.md)
@@ -39,7 +39,6 @@
 
 - [trusty-embedderd](./trusty-embedderd/README.md)
 - [trusty-gworkspace](./trusty-gworkspace/README.md)
-- [trusty-cto-db](./trusty-cto-db/README.md)
 - [tc-services](./tc-services/README.md)
 - [trusty-agents-common](./trusty-agents-common/README.md)
 

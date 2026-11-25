@@ -3,7 +3,7 @@ name: git-workflow
 description: "Essential Git patterns for effective version control, eliminating redundant Git guidance per agent."
 user-invocable: false
 metadata:
-  version: "1.1.1"
+  version: "1.2.0"
 category: agent-reference
 effort: low
 ---
@@ -423,3 +423,31 @@ equivalent prose rule from memory:
 - **Pull before push** - Stay synchronized with team
 - **Use branches** - Keep main stable
 - **Review before commit** - Check what is being committed
+
+## Changelog and doc-comment gates
+
+Every PR that changes a package's source records one bullet per
+user-visible change. A missing entry is a review-gate failure, not optional
+polish — the full gate is in `tm-workflow`, which owns the fragment format,
+validation and placement rules.
+
+- Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`,
+  DIRECTLY in that directory. Its first line IS the category
+  (`Added`/`Fixed`/`Changed`/…) and every later line begins with `- `; a second
+  category word in the body is a gate failure, so two categories mean two files.
+- **A fragment follows the crate whose `src/**` the diff touches**, not the
+  commit's subject — check `git diff --name-only` (#6937). Validate before you
+  commit, via the gate's own `--file <path>` form where it has one; the plain
+  run diffs against the base branch and sees nothing uncommitted.
+- No `changelog.d/` → add the bullet to `CHANGELOG.md` under `## [Unreleased]`,
+  matching the existing style. Docs-only / CI-only PRs may skip.
+
+### Doc-comment gates
+
+In a crate that documents entry points with a Why/What/
+Test pattern, run that project's own doc-comment pointer lint before returning,
+alongside whatever line-cap and changelog gates it defines — a stale `Test:`
+pointer is a review-gate failure, not a warning. Find those gates the same way
+you find any project command: read the project's CLAUDE.md and list its
+`scripts/`. A project that defines none owes no such run, and never invent a
+script name that the checkout does not contain.

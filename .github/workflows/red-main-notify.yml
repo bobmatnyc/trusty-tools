@@ -53,7 +53,7 @@
 #     completion recurses (GitHub caps the chain at three levels).
 #   - Every watched completion creates a run of this workflow, green or not. The
 #     job is skipped on a green one and consumes no runner, but the Actions list
-#     shows the entry. That noise buys a signal for all 21 siblings at once.
+#     shows the entry. That noise buys a signal for all 22 siblings at once.
 name: Red main notifier
 
 on:
@@ -64,15 +64,19 @@ on:
       - "Agent assets" # agent-assets.yml
       - "AL2023 load-dynamic build gate" # al2023-build.yml
       - "Architect sub-project" # architect-subproject.yml
+      - "Trusty Browser" # trusty-browser.yml
       - "build.rs sync" # buildrs-sync.yml
+      - "Architect bundle PR re-check" # bundle-pr-rerun.yml (#11342)
       - "Capabilities drift" # capabilities-drift.yml
       - "Doc numbers" # doc-numbers.yml
       - "Doc paths" # doc-paths.yml
       - "Generation artifact lint" # generation-artifact-lint.yml
       - "Homebrew formula" # homebrew-formula.yml
       - "Line cap" # line-cap.yml
+      - "OKF extract worker" # okf-extract-worker.yml (#11094)
       - "Public docs" # public-docs.yml
       - "SLD lint" # sld-lint.yml
+      - "Summarizer convert worker" # summarizer-convert.yml
       - "Test count" # test-count.yml
       - "Test pointers" # test-pointers.yml
       - "Token drift" # token-drift.yml

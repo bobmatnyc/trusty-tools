@@ -145,6 +145,34 @@ fn cli_parses_presence_local() {
 }
 
 #[test]
+fn cli_parses_presence_device_verbs_8878() {
+    use crate::cli::{DevicesAction, PresenceAction};
+    // #8878 PR2b-1b.
+    let parse = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command.unwrap() {
+        Command::Presence { action } => action,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        parse(&["tm", "presence", "request"]),
+        PresenceAction::Request { .. }
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "wait", "--timeout", "2m", "--request", "ab"]),
+        PresenceAction::Wait { timeout, request: Some(r) } if timeout == "2m" && r == "ab"
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "devices", "add", "iphone"]),
+        PresenceAction::Devices { action: DevicesAction::Add { name } } if name == "iphone"
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "devices", "revoke", "c1"]),
+        PresenceAction::Devices {
+            action: DevicesAction::Revoke { .. }
+        }
+    ));
+}
+
+#[test]
 fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     let fx = Fixture::new();
     let report = fx.init().unwrap();
@@ -321,7 +349,9 @@ fn dir_overrides_the_default() {
     );
     init(&other, fx.home(), false, NO_TMUX).unwrap();
     assert!(other.join(".trusty-mpm.toml").exists());
-    let default = fx.home().join(DEFAULT_DIR);
+    let default = fx
+        .home()
+        .join(trusty_mpm::core::architect_store::DEFAULT_ARCHITECT_DIR);
     assert!(!default.exists(), "the default directory was created");
     assert!(fx.config().contains(&canonical(&other)));
 }
@@ -843,7 +873,8 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         ("scripts/relay.sh", true),
         ("scripts/posted.sh", true),
         ("scripts/relay-marker.py", false),
-        ("scripts/relay_provenance.py", false), // #10780
+        ("scripts/relay_provenance.py", false),   // #10780
+        ("scripts/relay_supersession.py", false), // #10960
         ("docs/architect/voice.md", false),
     ] {
         let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
@@ -1427,10 +1458,11 @@ fn an_uncheckable_stale_dir_is_a_warning() {
     assert!(warning.starts_with("cannot check"), "{warning}");
 }
 
-/// Why: owner ruling D9d lets the Architect edit `AGENTS.md` on the owner's
-/// specific order, so no seeded file may still ban the write outright.
+/// Why: #11117 lets the Architect edit `AGENTS.md` on its own initiative, so
+/// no seeded file may still ban the write or limit it to an owner's order.
 /// What: scans every file `tm fleet init` seeds, line breaks folded, for the
-/// old ban wording, and checks `local/instance.md` states the new rule.
+/// old ban and owner-order wording, and checks `local/instance.md` still keeps
+/// the owner's instructions in `AGENTS.md`.
 /// Test: `seeded_files_carry_no_agents_md_write_ban`.
 #[test]
 fn seeded_files_carry_no_agents_md_write_ban() {
@@ -1439,6 +1471,8 @@ fn seeded_files_carry_no_agents_md_write_ban() {
         "never writes `AGENTS.md`",
         "you never write it",
         "The owner writes it; you never do",
+        // #11117: the owner-order limit is gone too.
+        "only when the owner orders a specific edit",
     ];
     let files = seeded_files();
     for file in &files {
@@ -1461,10 +1495,7 @@ fn seeded_files_carry_no_agents_md_write_ban() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        flat.contains(
-            "The owner's own instructions go in `AGENTS.md`, never here. The Architect \
-             edits `AGENTS.md` only when the owner orders a specific edit."
-        ),
+        flat.contains("The owner's own instructions go in `AGENTS.md`, never here."),
         "{flat}"
     );
 }
@@ -1663,6 +1694,10 @@ fn a_seed_with_one_more_skill_seeds_it() {
 #[path = "seed_refresh_tests.rs"]
 mod seed_refresh_tests;
 
+/// #11058: the wiring list and the `fleet_seed_wiring` doctor row.
+#[path = "seed_wiring_tests.rs"]
+mod seed_wiring_tests;
+
 /// #10571: every seeded script passes the pm-guard credential rules.
 #[path = "seed_guard_tests.rs"]
 mod seed_guard_tests;
@@ -1674,3 +1709,173 @@ mod il_init_tests;
 /// #10571 P1b: the dashboard LaunchAgent, its guard and the takeover.
 #[path = "dashboard_agent_tests.rs"]
 mod dashboard_agent_tests;
+
+/// Copy the tree at `from` to `to`, files and directories only.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), &dest).unwrap();
+        }
+    }
+}
+
+/// #10161 D3c: `tm fleet init` writes the five agents byte-equal into the
+/// Architect project's `.claude/agents/` and into no PM agent tier, and they
+/// are not plain seed rows (they follow the skills' deploy rule).
+#[test]
+fn the_architect_agents_reach_only_the_architect_project() {
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::core::project_skill_tier::architect_agents::{
+        AGENT_RECORD_FILE, SHIPPED_AGENTS,
+    };
+    let fx = Fixture::new();
+    let report = fx.init().unwrap();
+    let dir = fx.dir();
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(seed().agents.len(), SHIPPED_AGENTS.len());
+    for agent in &seed().agents {
+        let rel = format!(".claude/agents/{}.md", agent.stem);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(&rel)).unwrap_or_else(|e| panic!("{rel}: {e}")),
+            agent.contents,
+            "{rel}"
+        );
+        assert!(
+            report
+                .steps
+                .contains(&Step::Changed(format!("wrote {rel}"))),
+            "{rel} not reported:\n{}",
+            report.render()
+        );
+        assert!(!dir.join(".claude/skills").join(agent.stem).exists());
+    }
+    assert!(dir.join(".claude/agents").join(AGENT_RECORD_FILE).is_file());
+    let fw = FrameworkPaths::under(fx.home());
+    for tier in [fw.agent_deploy_dir(), fw.claude_agents_dir()] {
+        for agent in SHIPPED_AGENTS {
+            let stray = tier.join(format!("{}.md", agent.name));
+            assert!(!stray.exists(), "{} reached a PM tier", stray.display());
+        }
+    }
+    assert!(
+        !seeded_files()
+            .iter()
+            .any(|f| f.dest.starts_with(".claude/agents/")),
+        "an agent became a write-when-absent seed row"
+    );
+}
+
+/// #10161 D3c: a re-run keeps an owner's edit, rewrites a deleted agent,
+/// leaves the rest unchanged, and a third run changes nothing.
+#[test]
+fn a_second_init_follows_the_shipped_history_and_keeps_an_edit() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let edited = dir.join(".claude/agents/drift-guard.md");
+    std::fs::write(&edited, "---\nname: drift-guard\n---\nmine\n").unwrap();
+    std::fs::remove_file(dir.join(".claude/agents/runner.md")).unwrap();
+    let report = fx.init().unwrap();
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(
+        std::fs::read_to_string(&edited).unwrap(),
+        "---\nname: drift-guard\n---\nmine\n"
+    );
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Skipped(t)
+            if t.starts_with(".claude/agents/drift-guard.md") && t.contains("left as is"))),
+        "{}",
+        report.render()
+    );
+    assert!(
+        report
+            .steps
+            .contains(&Step::Changed("wrote .claude/agents/runner.md".to_owned())),
+        "{}",
+        report.render()
+    );
+    assert!(
+        report
+            .steps
+            .contains(&Step::Unchanged(".claude/agents/improver.md".to_owned())),
+        "{}",
+        report.render()
+    );
+    let again = fx.init().unwrap();
+    assert!(!again.changed(), "{}", again.render());
+}
+
+/// #10161 D3c: a content source with one blank agent fails the seed load, so
+/// `tm fleet init` writes nothing at all: no project, no config, no agent.
+#[test]
+fn a_blank_agent_source_writes_nothing() {
+    let fx = Fixture::new();
+    let checkout = tempfile::tempdir().unwrap();
+    let repo = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
+    copy_tree(&repo.join("content"), &checkout.path().join("content"));
+    std::fs::create_dir_all(checkout.path().join(".git")).unwrap();
+    std::fs::write(checkout.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    let blank = checkout
+        .path()
+        .join("content/instructions/architect/agents/drift-guard.md");
+    std::fs::write(&blank, " \n\n").unwrap();
+    let root = checkout.path().to_path_buf();
+    let err = init_with_seed(&fx.dir(), fx.home(), false, NO_TMUX, None, |_| {
+        ArchitectSeed::resolve_in(&root, None, None, Fetch::Never)
+    })
+    .expect_err("a blank agent is refused");
+    let text = format!("{err:#}");
+    assert!(text.contains("writes nothing"), "{text}");
+    assert!(text.contains("agents/drift-guard.md"), "{text}");
+    assert!(!fx.dir().exists(), "the project directory was created");
+    assert!(!fx.config_path().exists(), "the user config was written");
+}
+
+/// #10161 D3c, AC1 for agents: every Architect-relative path and every
+/// `architect-*` skill a seeded agent names exists after init.
+/// `scripts/check_architect_paths.sh` is the CI form, with fenced blocks and
+/// command forms too.
+#[test]
+fn every_path_an_architect_agent_names_exists_after_init() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let mut total = 0;
+    for agent in &seed().agents {
+        let name = format!(".claude/agents/{}.md", agent.stem);
+        for raw in agent
+            .contents
+            .split(|c: char| c.is_whitespace() || "`'\"(),".contains(c))
+        {
+            let word = raw.trim_end_matches(['.', ':', ';']);
+            let architect_path = ["scripts/", "local/", ".claude/", "docs/", "templates/"]
+                .iter()
+                .any(|p| word.starts_with(p))
+                || word == "CLAUDE.md";
+            if architect_path {
+                let path = match word.find(['<', '*']) {
+                    Some(i) => dir.join(&word[..i]),
+                    None => dir.join(word),
+                };
+                assert!(path.exists(), "{name}: `{word}` is missing after init");
+                total += 1;
+            }
+            let skill = word.trim_end_matches(['.', ':', ';', '-']);
+            if skill.starts_with("architect-") && skill.len() > "architect-".len() {
+                assert!(
+                    dir.join(".claude/skills")
+                        .join(skill)
+                        .join("SKILL.md")
+                        .is_file(),
+                    "{name}: skill `{skill}` is missing after init"
+                );
+            }
+        }
+    }
+    assert!(total >= 10, "only {total} paths found in the agents");
+}

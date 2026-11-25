@@ -20,6 +20,7 @@ pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 // #9822: `tm architect <verb>`, daemon-less.
 pub(crate) mod architect;
+pub(crate) mod architect_up; // #11364
 // #10063: `tm architect dashboard <verb>`, in-process under the store lock.
 pub(crate) mod architect_dashboard;
 // #9167: the poller's wakes as trusty-events `message` events.
@@ -32,6 +33,7 @@ pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 // #10973: `tm compress -- <cmd>`, the run mode an isolation worktree accepts.
+pub(crate) mod compress_chain;
 pub(crate) mod compress_run;
 pub(crate) mod daemon;
 // #9034: three-state daemon pid identity, read from argv.
@@ -45,6 +47,10 @@ pub(crate) mod dead_addr;
 pub(crate) mod dbatg;
 // #6288: one-connection daemon-socket mocks for the transport tests.
 pub(crate) mod delete;
+// #10991: `tm session archive`.
+pub(crate) mod session_archive;
+// #10992: `tm session delete --project-dir`.
+pub(crate) mod session_delete_dir;
 #[cfg(test)]
 pub(crate) mod socket_mock_tests;
 // #6887: the bulk-read diversion hook and its cheap worker.
@@ -53,11 +59,17 @@ pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 pub(crate) mod egress_guard;
-// #10447: the Architect main-thread allow arm.
+// #10447: the bound Architect's main-thread allow arm and its audit.
 pub(crate) mod egress_guard_architect;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
+// #11273: Bash commands that only mention a family host as inert text.
+pub(crate) mod egress_guard_bash_mention;
 pub(crate) mod egress_guard_families;
+// #11273: a PM or Architect main session's family read.
+pub(crate) mod egress_guard_main_read;
+// #11194: a main thread's Slack send to the owner's DM; #11273: the main-session role.
+pub(crate) mod egress_guard_pm_dm;
 pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
@@ -68,9 +80,12 @@ pub(crate) mod egress_verdict_client;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
+// #8692: the leased command's spawn, wait and compile-to-run flip.
+pub(crate) mod build_lease_spawn;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
 pub(crate) mod build_lease_target;
+pub(crate) mod build_lease_where;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
@@ -130,20 +145,36 @@ pub(crate) mod guided_supervisor_guard;
 // #8454: the `tm hook` mode dispatch, out of `main.rs`.
 pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
+// #10973: the `PreToolUse` Bash rewrite decision, and why it refused.
+pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
+pub(crate) mod il_auto_apply; // See G0b IL auto-apply
+pub(crate) mod il_auto_apply_ilio; // See G0b IL auto-apply
 // #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
 pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
+// #11674: the SubagentStop ledger task round-trip check.
 pub(crate) mod hook_rewrite;
+pub(crate) mod subagent_task_hook;
+// D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
+pub(crate) mod hook_rewrite_cd;
+// #11658: the real-shell legs the rewrite tests run, zsh required under CI.
+#[cfg(test)]
+pub(crate) mod hook_rewrite_shells;
+// #10973: chained commands judged per segment.
+pub(crate) mod hook_chain_shape;
+pub(crate) mod hook_rewrite_chain;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.
 pub(crate) mod hook_stdin;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// See G0b auto-setup: install and register the browser and computer MCP servers.
+pub(crate) mod auto_setup;
 // #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
 // split out of `install` for the 500-SLOC production cap.
 pub(crate) mod install_skills;
@@ -179,6 +210,8 @@ pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
 // own file so the dispatcher stays a translation layer and stays under cap.
 pub(crate) mod memory_verbs;
+// #11625: the MCP-only memory tools as `tm memory` verbs.
+pub(crate) mod memory_tool_verbs;
 pub(crate) mod meta;
 pub(crate) mod misc;
 // #6276: the one decision about a repository's origin remote — a local-only
@@ -206,6 +239,11 @@ pub(crate) mod pm_guard_presence_key;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 pub(crate) mod presence;
+// #8878 PR2b-1b: the daemon client and the device verbs.
+pub(crate) mod presence_client;
+pub(crate) mod presence_devices;
+pub(crate) mod presence_request;
+pub(crate) mod presence_wait;
 // #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
 // #4480 sibling — see its module doc.
 pub(crate) mod pm_guard_build_lease;
@@ -226,6 +264,8 @@ pub(crate) mod repair_delegation_list;
 // #8547: which `subagent_type` names are known, and the refusal for the rest.
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
+// #11353: the Fable cap on the live dispatch path.
+pub(crate) mod pm_guard_fable;
 pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;
@@ -254,6 +294,16 @@ pub(crate) mod pm_guard_secret_file_list;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;
+// #10761: bracket expressions parsed and expanded for the secret-read rule.
+pub(crate) mod pm_guard_secret_brackets;
+// #10761: the linear-time bracket parser, split out to keep the file under cap.
+pub(crate) mod pm_guard_secret_bracket_parse;
+#[cfg(test)]
+mod pm_guard_secret_brackets_tests;
+// #10761: quoted sigils, and a `Grep` glob read by ripgrep's rules.
+#[cfg(test)]
+mod pm_guard_secret_quoting_tests;
+pub(crate) mod pm_guard_secret_rg_glob;
 // #7557: the word-list / ref / text-payload position rules, split out of
 // `pm_guard_secret_read` when the structure check pushed it over the cap.
 pub(crate) mod pm_guard_secret_positions;
@@ -267,6 +317,8 @@ pub(crate) mod pm_guard_secret_consumers;
 pub(crate) mod pm_guard_secret_search_loop;
 // #8093, #8110, #8520, #8660: same-class copies, tokeninfo URLs, refusal hints.
 pub(crate) mod pm_guard_secret_handling;
+// #10685: the inert operands of a command that only prints.
+pub(crate) mod pm_guard_secret_printed_text;
 // #8879: the credential rules over the body of a script a command runs.
 pub(crate) mod pm_guard_secret_script;
 pub(crate) mod pm_guard_secret_script_read;
@@ -276,6 +328,7 @@ pub(crate) mod pm_guard_secret_substitution_read;
 pub(crate) mod pm_guard_protected_hooks;
 pub(crate) mod pm_guard_protected_paths;
 // #8878: the trust-anchor write floor, which the bypass variables do not lift.
+pub(crate) mod pm_guard_accounts;
 pub(crate) mod pm_guard_trust_anchor;
 pub(crate) mod pm_guard_trust_anchor_paths;
 pub(crate) mod pm_guard_worktree_grant;
@@ -298,6 +351,8 @@ pub(crate) mod repair;
 // #7569: `tm repair savings-ledger` — quarantine the ledger rows #7514 let
 // unit tests append to the operator's own savings ledger.
 pub(crate) mod repair_savings_ledger;
+// #11033: `tm savings status`.
+pub(crate) mod savings_status;
 // #5007: `tm repair session-store` — back up and truncate a corrupt
 // `sessions.json` so a wedged store no longer needs a human editing JSON.
 pub(crate) mod repair_session_store;
@@ -321,6 +376,8 @@ pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
 pub(crate) mod session_picker_view;
+// #10368: a session start registers its checkout as a project.
+pub(crate) mod session_project;
 pub(crate) mod session_tui;
 // The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
 pub(crate) mod shell_init;
@@ -330,6 +387,16 @@ pub(crate) mod sm_serve;
 pub(crate) mod socket_dispatch;
 pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
+// #10960: `tm hook --standing-rules`, the Architect's per-turn rules block.
+pub(crate) mod standing_rules_hook;
+// #10575: `tm hook --completion-evidence`, the warn-only Stop check.
+pub(crate) mod completion_evidence_hook;
+// #10574: the stale-copy guard for registered artifacts.
+pub(crate) mod pm_guard_stale_copy;
+// #11398: `tm hook --turn-task`, the PM's per-turn task stamp.
+pub(crate) mod turn_task_hook;
+// #11431: `tm hook --pm-guard-shadow`, the minimal fact-based guard, log-only.
+pub(crate) mod pm_guard_min;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
 // `tm doctor` uses — see its module doc for why the two disagreed.
 pub(crate) mod status_daemon;

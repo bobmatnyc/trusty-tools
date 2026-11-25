@@ -37,17 +37,14 @@ name = "trusty-agents-common"
 # the 0.7.0 baseline (alongside `provenance` and an added enum variant, both
 # already accumulated at 0.7.2 and unpublished). The gate is never advisory
 # (#5050), so this lands where the gate names.
-# 0.8.4 -> 0.8.5 (issue #4421): patch — 0.8.4 is already live on crates.io and
-# open PR #8259 changes `src/**`, so this branch opens the next patch version
-# ahead of that PR's rebase. No public item added, removed, or changed shape
-# on main as of this bump.
-version = "0.9.5"
+# #7684: adds OMIT_CLAUDE_MD_LINE / stamp_omit_claude_md (additive, minor pre-1.0).
+version = "0.11.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Stable agent-plugin surface (ToolExecutor, AgentPlugin, ToolResult) shared by trusty-agents and external agent crates."
+description = "Stable agent-plugin surface (ToolExecutor, AgentPlugin, ToolResult) shared by trusty-assistants and external agent crates."
 readme = "README.md"
 homepage = "https://trustytools.dev"
 keywords = ["agent", "orchestration", "plugin", "rpc", "traits"]

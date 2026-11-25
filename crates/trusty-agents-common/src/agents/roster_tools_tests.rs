@@ -107,7 +107,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
         "local-ops",
         "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm",
     ),
-    ("memory-manager", "Read, Grep, mcp__trusty-memory"),
+    ("memory-manager", "Read, Grep, Bash, mcp__trusty-memory"),
     (
         "mpm-agent-manager",
         "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-mpm",
@@ -185,7 +185,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "web-qa",
-        "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__claude-in-chrome, mcp__trusty-search",
+        "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__trusty-search",
     ),
     (
         "web-ui-engineer",
@@ -326,13 +326,6 @@ const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, Option<&str>, &str)] = &[
         "the rule the agent follows (fetch, never pull) is resident in the same \
          bullet; provisioning is the PM's. A Read path would make trusty-code \
          embed a 42 KB tm-* skill it excludes by design",
-    ),
-    (
-        "*",
-        "tm-workflow",
-        Some("the full gate is in `tm-workflow`"),
-        "the fragment gate an agent must meet is resident in the bullets below \
-         the pointer; the merge-side enforcement is the PM's",
     ),
     (
         "ticketing",

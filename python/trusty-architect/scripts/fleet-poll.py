@@ -90,7 +90,7 @@ LOCK, HOLD = _cfg.LOCK, _cfg.HOLD
 ARCHITECT, POLL_SESSION, SKIP_SESSIONS = _cfg.ARCHITECT, _cfg.POLL_SESSION, _cfg.SKIP_SESSIONS
 SHELLS, EVENT_TYPES = _cfg.SHELLS, _cfg.EVENT_TYPES
 DISK_HIGH, LOAD_FACTOR_DEFAULT = _cfg.DISK_HIGH, _cfg.LOAD_FACTOR_DEFAULT
-QUIET_SESSIONS_FILE, RELAUNCH_SCRIPT = _cfg.QUIET_SESSIONS_FILE, _cfg.RELAUNCH_SCRIPT
+QUIET_SESSIONS_FILE, TM_BIN = _cfg.QUIET_SESSIONS_FILE, _cfg.TM_BIN
 
 # Pure pane parsing and alert evaluation live in fleet-classify.py (#8891).
 # These names stay fleet-poll attributes, as they were before the split.
@@ -108,6 +108,7 @@ alert_triage = alert_dedupe.alert_triage            # #10857: is_urgent, the hol
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
 owner_answers = _load_by_path("owner_answers", "owner_answers.py")  # #10670: the answer store
+fleet_poll_deps = _load_by_path("fleet_poll_deps", "fleet_poll_deps.py")  # PR-B2: dep_degraded
 watchdog = _load_by_path("architect_watchdog", "architect-watchdog.py")
 il_cron = _load_by_path("il_cron", "il-cron.py")
 ctx_watch = il_cron.ctx_watch
@@ -196,6 +197,10 @@ def cycle(state, dry_run=False, now=None):
     if answers is not None:
         state["answers_read"] = True
     candidates += answers or []
+    dep_found, dep_lines = fleet_poll_deps.dep_health_alerts(state, now, alert)  # PR-B2
+    candidates += dep_found
+    for line in dep_lines:
+        log(line, dry_run)
     if failure:
         # #10670: a failed read must reach the Architect; owner_* always wakes (alert_triage).
         # The fingerprint is the error class, so one failure episode alerts once.
@@ -252,11 +257,20 @@ def save_state(state):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Deterministic fleet poller.")
     ap.add_argument("--once", action="store_true", help="run one cycle and exit")
-    ap.add_argument("--interval", type=int, default=60, help="seconds between cycles")
+    ap.add_argument("--interval", type=int, default=None,
+                    help="seconds between cycles (default: poll_interval_s in local/architect.json)")
     ap.add_argument("--dry-run", action="store_true",
                     help="one cycle that captures and classifies only: prints to "
                          "stdout, writes no file, sends no keys")
     args = ap.parse_args(argv)
+    if args.interval is None:
+        # #11369: one cadence for every start path, read from local/architect.json.
+        config = _load_by_path("architect_config", "architect_config.py")
+        try:
+            args.interval = config.load().poll_interval_s
+        except config.ConfigError as err:
+            print(f"fleet-poll: {err}", file=sys.stderr)
+            return 2
     if not args.dry_run:
         os.makedirs(INBOX, exist_ok=True)
         # #10571: a second live poller stops here, before its first log line or state write.

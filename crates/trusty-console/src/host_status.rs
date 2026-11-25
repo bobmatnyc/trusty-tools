@@ -10,7 +10,8 @@
 //! also enter the bounded history ring and one stateful `HostSampler` cannot be
 //! shared by two tasks. The sampler itself lives in
 //! `trusty_common::host_metrics` (the shared, cross-crate capability).
-//! Test: `cache_initialises_empty`, `cache_write_read_roundtrip` in this module.
+//! Test: `cache_initialises_empty` in this module; a written snapshot read
+//! back through the route in `machine_status_route_warm_cache_returns_json`.
 
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use trusty_common::host_metrics::HostMetrics;
 /// Why: the machine-status route reads without blocking; the background task
 /// writes. `None` means no sample has completed yet (first boot).
 /// What: wraps `Arc<RwLock<Option<HostMetrics>>>`.
-/// Test: `cache_initialises_empty`, `cache_write_read_roundtrip`.
+/// Test: `cache_initialises_empty`, `machine_status_route_warm_cache_returns_json`.
 #[derive(Clone, Debug)]
 pub struct HostMetricsCache {
     inner: Arc<RwLock<Option<HostMetrics>>>,
@@ -52,7 +53,7 @@ impl HostMetricsCache {
     ///
     /// Why: the machine-status route calls this to serve without blocking.
     /// What: acquires a read lock, clones the value, releases the lock.
-    /// Test: `cache_write_read_roundtrip`.
+    /// Test: `machine_status_route_warm_cache_returns_json`.
     pub async fn get(&self) -> Option<HostMetrics> {
         self.inner.read().await.clone()
     }
@@ -61,7 +62,7 @@ impl HostMetricsCache {
     ///
     /// Why: the background task calls this after each sample.
     /// What: acquires a write lock, replaces the inner value.
-    /// Test: `cache_write_read_roundtrip`.
+    /// Test: `machine_status_route_warm_cache_returns_json`.
     pub async fn set(&self, metrics: HostMetrics) {
         *self.inner.write().await = Some(metrics);
     }
@@ -70,7 +71,6 @@ impl HostMetricsCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::host_metrics::HostSampler;
 
     /// Why: a fresh cache must return `None` so the route can answer 503 before
     /// the first sample.
@@ -80,19 +80,5 @@ mod tests {
     async fn cache_initialises_empty() {
         let cache = HostMetricsCache::new();
         assert!(cache.get().await.is_none(), "cache must start empty");
-    }
-
-    /// Why: after `set`, `get` must return the written snapshot.
-    /// What: samples a real snapshot, writes it, reads it back, asserts a core
-    /// field matches.
-    /// Test: this test.
-    #[tokio::test]
-    async fn cache_write_read_roundtrip() {
-        let cache = HostMetricsCache::new();
-        let metrics = HostSampler::new().sample();
-        let cores = metrics.cpu.logical_cores;
-        cache.set(metrics).await;
-        let got = cache.get().await.expect("must have a snapshot after set");
-        assert_eq!(got.cpu.logical_cores, cores);
     }
 }

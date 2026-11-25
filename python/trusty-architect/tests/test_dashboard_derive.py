@@ -82,6 +82,14 @@ def test_pending_watch_changes_lists_new_requests_only():
         {"id": "w2", "kind": "watch_change", "at": "2026-11-10T10:05:00Z", "text": "unwatch proj-b", "key": "proj-b", "action": "unwatch"}]
 
 
+def test_an_other_answer_carries_the_typed_answer_note():
+    """#10765: the "answered" entry shows the owner's typed answer_note after the button label."""
+    items = [doc("Q1", status="answered", answer="Other", answer_note="  use the staging bucket "),
+             doc("Q2", status="answered", answer="Yes"), doc("Q3", status="answered", answer="No", answer_note="  ")]
+    got = {e["id"]: e["text"] for e in dv.pending({"items": items}, NOW) if e["kind"] == "answered"}
+    assert got == {"Q1": "Other: use the staging bucket", "Q2": "Yes", "Q3": "No"}
+
+
 def test_ordered_by_rank_then_id():
     docs = [doc("B", rank=2), doc("A", rank=2), doc("Z", rank=1), doc("N")]
     assert [d["id"] for d in dv.ordered(docs)] == ["Z", "A", "B", "N"]
@@ -108,3 +116,19 @@ def test_no_script_reads_store_files_directly():
         if n.endswith((".py", ".sh")) and not n.startswith("test_") and n not in allowed:
             bad += [f"{n}: {l.strip()}" for l in open(os.path.join(SCRIPTS, n), encoding="utf-8") if pat.search(l)]
     assert bad == []
+
+
+@pytest.mark.parametrize("extra,relayed", [
+    ({"relayed": True}, True),
+    ({"relayed": "2026-10-11T11:00Z"}, True),
+    ({"relayed_at": "2026-10-11T11:00Z"}, True),
+    ({"relayed": False}, False),
+    ({"relayed": "  "}, False),
+    ({"relayed_at": " "}, False),
+    ({"relayed": None, "relayed_at": None}, False),
+    ({}, False),
+])
+def test_relayed_accepts_bool_string_and_relayed_at(extra, relayed):
+    # Architect ruling: relayed is `relayed is True`, a non-blank `relayed` string, or a non-blank `relayed_at`.
+    items = [doc("q1", status="answered", answer="Yes", answered_at="2026-10-11T10:00Z", **extra)]
+    assert (dv.pending_items(items, NOW) == []) is relayed

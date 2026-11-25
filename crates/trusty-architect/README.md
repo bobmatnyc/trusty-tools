@@ -75,6 +75,27 @@ assert!(matches!(refused, Err(SendError::Refused { .. })));
 assert!(tmux.calls().is_empty());
 ```
 
+## Intent Ledger (`il`, `trusty-architect-il`)
+
+The Intent Ledger reads and writes of `datg.py` and `ilio.py`, on the same
+files (`.trusty-mpm/datg/[<session>/]state.json`, `log.jsonl`, `archive.jsonl`,
+`.lock`), so going back to the Python is running it. This is the live `datg`
+format, not the DOC-82 `dbatg` format of `ledger`.
+
+```text
+trusty-architect-il datg --project P digest --no-log
+trusty-architect-il datg --project P add T --title X --goal G --done-when Y
+echo "$BLOCK" | ILIO_PROJECT=P trusty-architect-il ilio apply
+```
+
+One writer at a time (the Python's `.lock`, 10 s wait), atomic writes,
+schema validation before every write, one `write` per log append. A refused or
+failed write exits 2 with the ledger unchanged. `apply` writes the ledger only;
+the dashboard store and steering log stay in Python. `hook`, `check-dispatch`
+and `stamp` are not ported. `tests/il_golden.rs` replays a scripted session
+against the Python's output; `tests/il_parity.rs` (ignored) does the same on
+copies of the live ledgers.
+
 ## Dependency rule
 
 The crate depends only on std, `serde`, `serde_json`, `thiserror`,
@@ -82,6 +103,24 @@ The crate depends only on std, `serde`, `serde_json`, `thiserror`,
 by hand to stay inside that list. `trusty-mpm` calls
 it, so it must never depend on `trusty-mpm` or on any crate that does;
 `tests/dependency_boundary.rs` enforces this.
+
+## Scheduler parity
+
+`trusty-architect-sched parity [--since 2h] [--min-cycles N] [--min-match-pct P]`
+joins the shadow dry runs (`inbox/shadow-wakes.jsonl`) to the live poller's
+`alerts.jsonl` and `poll.log`. It prints the counts, the alert match percent,
+the wake match percent and a verdict: PASS needs at least `--min-cycles`
+joined cycles (default 120) and both percentages at or above
+`--min-match-pct` (default 95). FAIL exits 1; `cutover` applies the same
+verdict. A wake is a cycle whose triage woke (`woken` > 0), never the dry
+run's `would send` phrase, which repeats a backlog a dry run cannot clear.
+
+The poll cycle ports `pm_intake.py` (`pm_message`) and `alert_triage.py`'s
+rules; `runtime_selftest.py` stays a Python job the poller only reads
+(`selftest_fail`). A shadow reads those queues from the live inbox
+(`ARCHITECT_READ_INBOX_DIR`) and writes nothing there. Alerts the prototype
+sends to its Haiku gate wake in the port, as they do in a Python dry run, so
+those wakes can differ from live (MB1595).
 
 ## License
 

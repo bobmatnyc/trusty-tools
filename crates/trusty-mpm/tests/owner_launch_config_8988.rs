@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use trusty_mpm::core::standalone::hooks::TEST_HOOK_EXE_ENV;
 use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
 use trusty_mpm::session_manager::{ManagedError, ManagedTmuxDriver};
 
@@ -73,7 +74,8 @@ impl ManagedTmuxDriver for Recorder {
     }
 }
 
-/// Restores `HOME`, `PATH` and `TRUSTY_MPM_REPOS_ROOT` when a case ends.
+/// Restores `HOME`, `PATH`, `TRUSTY_MPM_REPOS_ROOT` and the #10612 hook-exe
+/// seam when a case ends.
 ///
 /// `env_serial` runs one test at a time, so no other test observes the rewrite.
 struct EnvGuard {
@@ -82,18 +84,20 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn install(home: &Path, bin: &Path, repos_root: &Path) -> Self {
-        let names = ["HOME", "PATH", "TRUSTY_MPM_REPOS_ROOT"];
+        let names = ["HOME", "PATH", "TRUSTY_MPM_REPOS_ROOT", TEST_HOOK_EXE_ENV];
         let saved = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
         let mut entries = vec![bin.to_path_buf()];
         if let Some(p) = std::env::var_os("PATH") {
             entries.extend(std::env::split_paths(&p));
         }
         let path = std::env::join_paths(entries).expect("join PATH");
-        // SAFETY: `env_serial` forces one test thread; Drop restores all three.
+        // SAFETY: `env_serial` forces one test thread; Drop restores all four.
         unsafe {
             std::env::set_var("HOME", home);
             std::env::set_var("PATH", path);
             std::env::set_var("TRUSTY_MPM_REPOS_ROOT", repos_root);
+            // #10612: a stable hook exe on a runner with no installed `tm`.
+            std::env::set_var(TEST_HOOK_EXE_ENV, "/usr/local/bin/tm");
         }
         Self { saved }
     }
@@ -189,36 +193,60 @@ impl Fixture {
         .expect("write user config");
     }
 
+    /// Whether [`Self::make_architect`] ran for this fixture.
+    fn is_architect(&self) -> bool {
+        self.project.join(".trusty-mpm.toml").exists()
+    }
+
+    /// Settle one launch `result` and read back the argv `tmux` typed.
+    ///
+    /// #11270: the recorder runs no `claude`, so an Architect launch is typed
+    /// and then fails its bind and is killed, naming `tm fleet relaunch`. A PM
+    /// launch must succeed.
+    fn settle<T, E: std::fmt::Debug>(
+        &self,
+        result: Result<T, E>,
+        path: &str,
+        tmux: &Recorder,
+    ) -> Vec<String> {
+        if self.is_architect() {
+            let err = result.err().unwrap_or_else(|| {
+                panic!("the {path} path bound an Architect with no claude running")
+            });
+            assert!(format!("{err:?}").contains("tm fleet relaunch"), "{err:?}");
+        } else {
+            result
+                .unwrap_or_else(|e| panic!("the {path} path must run with claude on PATH: {e:?}"));
+        }
+        launched_args(tmux)
+    }
+
     /// The argv of one fresh spawn in the project.
     fn spawn_args(&self) -> Vec<String> {
         let tmux = Arc::new(Recorder::default());
-        self.adapter(&tmux)
-            .spawn(
-                "tm-acme-01",
-                &self.project,
-                "t",
-                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
-                &[],
-            )
-            .expect("the spawn path must run with claude on PATH");
-        launched_args(&tmux)
+        let result = self.adapter(&tmux).spawn(
+            "tm-acme-01",
+            &self.project,
+            "t",
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        );
+        self.settle(result, "spawn", &tmux)
     }
 
     /// The argv of one resume in the project.
     fn resume_args(&self) -> Vec<String> {
         let tmux = Arc::new(Recorder::default());
-        self.adapter(&tmux)
-            .spawn_resume(
-                "tm-acme-01",
-                Some("%7"),
-                &self.project,
-                "t",
-                None,
-                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
-                &[],
-            )
-            .expect("the resume path must run with claude on PATH");
-        launched_args(&tmux)
+        let result = self.adapter(&tmux).spawn_resume(
+            "tm-acme-01",
+            Some("%7"),
+            &self.project,
+            "t",
+            None,
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        );
+        self.settle(result, "resume", &tmux)
     }
 
     /// The argv of one in-place relaunch in the project.
@@ -282,7 +310,7 @@ fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
 }
 
 /// #10127: an Architect's ONE `--settings` is inline JSON — the owner file's
-/// `[mcp]` part merged with the lockdown deny and the connector switch.
+/// `[mcp]` part merged with the lockdown deny; #10735: no connector switch.
 fn assert_architect_payload(args: &[String]) {
     use trusty_mpm::core::architect_lockdown::{ARCHITECT_DENY_GLOBS, capitalised};
     let values: Vec<&String> = args
@@ -296,7 +324,7 @@ fn assert_architect_payload(args: &[String]) {
         body["deniedMcpServers"],
         serde_json::json!([{"serverName": "heygen"}])
     );
-    assert_eq!(body["disableClaudeAiConnectors"], true);
+    assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}"); // #10735
     assert!(body.get("skillOverrides").is_none(), "{body}");
     let mut want: Vec<String> = ARCHITECT_DENY_GLOBS
         .iter()
@@ -304,6 +332,10 @@ fn assert_architect_payload(args: &[String]) {
         .collect();
     want.sort();
     want.dedup();
+    // MB159a: the roster cut follows the sorted tool globs, in list order.
+    want.extend(trusty_mpm::core::architect_agent_scope::deny_rules(
+        &trusty_mpm::core::architect_agent_scope::ARCHITECT_UNUSED_AGENTS,
+    ));
     assert_eq!(
         body["permissions"]["deny"],
         serde_json::json!(want),
