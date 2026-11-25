@@ -118,16 +118,22 @@ fn resolve_tm_binary_fallback() {
     assert!(!p.to_string_lossy().contains("__"), "placeholder in path");
 }
 
-/// Why: `resolve_uid` must return a sensible UID (non-zero in typical CI).
-/// What: Calls it and asserts the value is parseable (we get an integer back).
+/// Why: `launchctl bootstrap gui/<uid>` targets the domain `resolve_uid`
+/// names; a wrong UID (or the 501 fallback on a host whose user is not 501)
+/// bootstraps into another user's domain or fails.
+/// What: Creates a file and asserts `resolve_uid` equals the file's owner,
+/// which the kernel sets to the process's effective UID — an oracle
+/// independent of the `id -u` call under test.
 /// Test: This is the test.
+#[cfg(unix)]
 #[test]
-fn resolve_uid_returns_nonzero_on_real_system() {
-    // On macOS and Linux the UID of the test runner is always non-zero in CI
-    // (root-as-UID-0 can run but is unusual in CI; we just assert it is a u32).
-    let uid = resolve_uid();
-    // uid is always a valid u32 — the function never panics.
-    let _ = uid; // just confirm it compiled and ran without panic
+fn resolve_uid_matches_the_owner_of_a_file_this_process_creates() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let probe = dir.path().join("uid-probe");
+    std::fs::write(&probe, b"").expect("write probe");
+    let owner = std::fs::metadata(&probe).expect("stat probe").uid();
+    assert_eq!(resolve_uid(), owner);
 }
 
 // ── decide_downgrade (#3527) ─────────────────────────────────────────────
