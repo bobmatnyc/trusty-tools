@@ -118,6 +118,8 @@ async fn an_unheld_live_corpus_is_promotable() {
         CorpusStore::open(&live).is_err(),
         "#7991: the guard must hold the lock, not merely have taken it"
     );
+    // #11872: the guard's Drop unlocks, so a descriptor a concurrent spawn
+    // inherited cannot keep the lock past this line.
     drop(guard);
     CorpusStore::open(&live).expect("the lock must be released with the guard");
 }
