@@ -144,6 +144,7 @@ fn looks_like_remote_url(s: &str) -> bool {
 /// `tests::a_degenerate_registered_root_is_never_a_containment_root`.
 fn registered_local_root(project: &Project, config: &TrustyToolsConfig) -> Option<PathBuf> {
     let declared = if looks_like_remote_url(&project.repo_url) {
+        // #11821: defaulting resolver kept — an allowlist lookup; the spawn it admits clones through `try_base_clone_path`.
         workspace_subpath(config, &parse_github_path(&project.repo_url)?)
     } else {
         PathBuf::from(&project.repo_url)
@@ -194,6 +195,7 @@ fn degenerate_root_reason(root: &Path, config: &TrustyToolsConfig) -> Option<&'s
     if dirs::home_dir().is_some_and(|home| same_path(&home, root)) {
         return Some("it is the operator's home directory");
     }
+    // #11821: defaulting resolver kept — this check can only add a refusal.
     if same_path(&workspace_root(config), root) {
         return Some("it is the daemon's workspace root");
     }

@@ -170,6 +170,7 @@ pub struct ProjectRoster {
 pub fn list_projects() -> ProjectRoster {
     // #5203: scan the CONFIGURED workspace root, not a hardcoded literal.
     match dirs::home_dir() {
+        // #11821: defaulting resolver kept — a read-only project listing.
         Some(home) => list_projects_in(&home, &trusty_common::workspace_layout::workspace_root()),
         None => ProjectRoster::default(),
     }

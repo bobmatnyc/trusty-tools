@@ -25,6 +25,7 @@ pub(super) const CHECK_NAME: &str = "owner_config";
 ///
 /// Test: `tests/owner_config_8988.rs`.
 pub(super) fn check_owner_config(project_dir: Option<&Path>) -> DoctorCheck {
+    // #11821: defaulting resolver kept — a diagnostic row; it writes nothing.
     let repos_root = crate::core::repo_paths::repos_root();
     let state_root = crate::core::launch_policy::state_root();
     let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();

@@ -423,7 +423,8 @@ fn client_prompt_spec_as(
         .extend(crate::core::pm_tool_trim::trim_args(profile));
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
     // #8992: the same profile decides whether the skill and tool parts apply.
-    let settings = crate::core::launch_policy::provision_settings_default(project, None, profile);
+    // #11821: a broken install.toml refuses the launch (df-D1w).
+    let settings = crate::core::launch_policy::provision_settings_default(project, None, profile)?;
     // #10127: the owner file and an Architect's deny as ONE `--settings`.
     crate::core::architect_lockdown::Lockdown::PRODUCTION.apply_to_spec(
         profile,

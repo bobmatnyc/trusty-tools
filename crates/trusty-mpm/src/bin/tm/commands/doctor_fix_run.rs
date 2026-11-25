@@ -241,13 +241,17 @@ pub(crate) fn dispatch(id: &str) -> Option<RepairFn> {
             })
         },
         "worktree_markers" => |c| {
-            RepairRun::Evaluated(
-                trusty_mpm::session_manager::worktree_marker_migration::repair_worktree_markers(
-                    &trusty_mpm::daemon::managed_routes::inproject::repos_root(),
-                    &trusty_mpm::project::default_adopted_anchors(),
-                    c.mode,
+            // #11821: a broken install.toml leaves the repair unrun (df-D1t).
+            match trusty_mpm::daemon::managed_routes::inproject::try_repos_root() {
+                Ok(root) => RepairRun::Evaluated(
+                    trusty_mpm::session_manager::worktree_marker_migration::repair_worktree_markers(
+                        &root,
+                        &trusty_mpm::project::default_adopted_anchors(),
+                        c.mode,
+                    ),
                 ),
-            )
+                Err(e) => RepairRun::NotEvaluated(format!("repos root unresolved: {e}")),
+            }
         },
         _ => return None,
     };
