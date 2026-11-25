@@ -353,8 +353,3 @@ pub fn collect_closed(st: &mut Json, evs: &[Ev]) -> Vec<(String, Json)> {
     }
     out
 }
-
-/// Whether `st` holds an id (used by `ilio`).
-pub fn is_live(st: &Json, id: &str) -> bool {
-    live_ids(st).contains(id)
-}
