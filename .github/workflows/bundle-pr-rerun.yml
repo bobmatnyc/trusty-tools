@@ -35,11 +35,17 @@ permissions:
   pull-requests: read
   contents: read
 
+# One pass at a time, none cancelled: each push's pass must finish (#11342).
+concurrency:
+  group: bundle-pr-rerun
+  cancel-in-progress: false
+
 jobs:
   rerun:
     name: Re-run bundle-pr-current on open PRs
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The script waits up to WAIT_MAX (180s) for runs that predate the push.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
@@ -51,4 +57,5 @@ jobs:
       - name: Re-run the check on every open PR targeting main
         env:
           GH_TOKEN: ${{ github.token }}
+          PUSHED_AT: ${{ github.event.head_commit.timestamp }}
         run: bash scripts/rerun_bundle_pr_current.sh

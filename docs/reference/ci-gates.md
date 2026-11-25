@@ -337,8 +337,11 @@ ruling 2026-11-14.
   (`bundle-pr-rerun.yml`, #11342) re-runs its latest run on every open PR
   that targets `main`. The re-run fetches `main` fresh, so a bundle PR that
   another bundle PR overtook turns red. The job's path list is the script's
-  `BUNDLE_PATHS`. It logs a `::warning::` for a PR with no run or a refused
-  re-run, and exits 1 when no re-run was accepted. Its logic is
+  `BUNDLE_PATHS`. A PR with no run is logged and not counted. A run still
+  in progress that started after the push already fetches the new `main`; one
+  that started before is awaited (up to 180 s) and then re-run. A refused
+  re-run, or a run not completed by the bound, logs a `::warning::` and
+  exits 1. GitHub re-runs only runs from the last 30 days. Its logic is
   `scripts/rerun_bundle_pr_current.sh`, its selftest
   `scripts/rerun_bundle_pr_current_selftest.sh`.
 - On `merge_group` it reports success with a message: a queue commit already
@@ -363,9 +366,10 @@ squash-merged in sequence, `main` held bytes neither recorded and went red.
   PRs merged in sequence and asserts that `check_bundle_pr_current.sh` fails
   the second PR's head and `history --check` fails the merge of both. Both
   pass once the second PR merges `main` and regenerates the history.
-- A `pull_request` run judges the merge ref as of the event. Re-running it
-  reuses that stale merge SHA, so after `main` moves only the re-run of
-  `Architect bundle PR is current with main` above catches the overtaken PR.
+- Without a merge queue, it judges the merge ref at event time only: a
+  `pull_request` run, and any re-run of it, reuses that merge SHA. After
+  `main` moves, only `Architect bundle PR is current with main` (re-run as
+  above) turns the overtaken PR red; this check stays green.
 - **Pending, for the owner:** neither context is required in branch
   protection, and no merge queue is enabled. Making
   `Architect bundle history/provenance check` and
