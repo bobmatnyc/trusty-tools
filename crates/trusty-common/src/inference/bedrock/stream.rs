@@ -109,14 +109,27 @@ impl SdkEventSource {
 impl ConverseEventSource for SdkEventSource {
     async fn recv(&mut self) -> Result<Option<ConverseEvent>, InferenceError> {
         self.response.stream.recv().await.map_err(|e| {
-            InferenceError::Provider(format!(
-                "ConverseStream failed mid-stream (model={}, region={}): {}",
-                self.model,
-                self.region,
-                DisplayErrorContext(&e)
+            InferenceError::Provider(mid_stream_error_message(
+                &self.model,
+                &self.region,
+                &DisplayErrorContext(&e).to_string(),
             ))
         })
     }
+}
+
+/// Build the mid-stream failure message with ARN account ids masked.
+///
+/// Why: the model id and the AWS error text can both quote an ARN, and its
+/// 12-digit account id must not reach a log or a user (#9200).
+/// What: formats model, region and error text, then masks account ids.
+/// Test: `super::tests::mid_stream_error_message_masks_arn_account_ids`.
+pub(super) fn mid_stream_error_message(model: &str, region: &str, err_text: &str) -> String {
+    // #11865: mask account ids per #9200
+    super::arn::mask_account_ids(&format!(
+        "ConverseStream failed mid-stream (model={model}, region={region}): {err_text}"
+    ))
+    .into_owned()
 }
 
 /// Folds `ConverseStream` events into the neutral streaming event model.
