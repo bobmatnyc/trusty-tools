@@ -32,32 +32,44 @@
 #   Coverage stays with `blob_store_corrupt_blob_with_backup_fails_closed`.
 #   The log file holds step names, exit codes, prompt counts and fixed tm
 #   text; `list` output is reduced to vault and key counts. No value is
-#   ever written. A trap runs a bounded `tm secrets lock` (once tm steps
-#   began) and removes the tmux server, `log stream` and the temp dir on
-#   every exit path. Every step and every wait is bounded by a timeout.
+#   ever written. On every exit path a trap stops the in-flight steps and
+#   the tmux server, waits 1 s, then runs a bounded, logged `tm secrets
+#   lock`, but only once tm steps began and only while an owner server
+#   runs, so the trap never spawns a server from the caller's tree. It
+#   then stops `log stream` and removes the temp dir. Every step and every
+#   wait is bounded by a timeout.
 #   A prompt assertion passes only on positive evidence: the step's own
 #   Keychain prompt count from `log stream` is >= 1. A read that fails with
-#   no prompt is INCONCLUSIVE, never PASS. The server is restarted before
-#   the run, and before the read after lock when `list` failed, so an
-#   abandoned dialog cannot make a later read fail fast with no prompt
-#   (see `restart_server`).
+#   no prompt is INCONCLUSIVE, never PASS.
+#   `--restart-server` (opt-in, OFF by default; Architect ruling D1aa)
+#   restarts the owner's server before the run, and before the read after
+#   lock when `list` failed, so an abandoned dialog cannot make a later
+#   read fail fast with no prompt (see `restart_server`). Without it, D-c
+#   and D-d may report INCONCLUSIVE. Only the server serving the owner
+#   socket is signalled, by pid (`owner_server_pids`); sandbox and
+#   `cargo test` servers use other sockets and are never touched.
 # Test: `scripts/live_check_11786_unlock_selftest.sh` (ancestry verdict,
 #   log classification, list redaction, audit counting, the prompt verdict
-#   `judge_prompted`, `bounded`, dry-run); `--probe-ancestry` checks the
-#   tmux route on the host without calling tm.
+#   `judge_prompted`, `bounded`, `owner_server_pids`, dry-run);
+#   `--probe-ancestry` checks the tmux route on the host without calling tm.
 #
 # Run (the Architect, with the Claude Code Bash sandbox disabled:
 #   `dangerouslyDisableSandbox: true`; use run_in_background, the worst case
-#   is about 14 min). It runs --probe-ancestry first; the live check runs
-#   only when the probe passes. Verbatim:
-#   cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a9aa6ad0a0b2a602e && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --project-dir /Users/masa/Projects/trusty-tools --log /Users/masa/.trusty-tools/trusty-secrets/live_check_11786.log
-#   Add `--approve` to the second command only when the owner is at the
-#   Studio to answer Touch ID. Side effects: any live 8 h grant is locked,
-#   and the trusty-secrets server is restarted (the next call starts it).
+#   is about 14 min). Each runs --probe-ancestry first; the live check runs
+#   only when the probe passes. Verbatim.
+#   Deny only (unattended; no restart, so D-c/D-d may be INCONCLUSIVE):
+#   cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a9aa6ad0a0b2a602e && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --project-dir /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools --log /Users/masa/.trusty-tools/trusty-secrets/live_check_11786.log
+#   Studio run (owner present to answer Touch ID):
+#   cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a9aa6ad0a0b2a602e && ./scripts/live_check_11786_unlock.sh --probe-ancestry && ./scripts/live_check_11786_unlock.sh --restart-server --approve --project-dir /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools --log /Users/masa/.trusty-tools/trusty-secrets/live_check_11786.log
+#   Side effects: any live 8 h grant is locked; with --restart-server the
+#   owner's trusty-secrets server is restarted (the next call starts it).
 #
 # Usage: live_check_11786_unlock.sh [--dry-run | --probe-ancestry]
-#          [--approve] [--log FILE] [--project-dir DIR]
+#          [--approve] [--restart-server] [--log FILE] [--project-dir DIR]
 #          [--unlock-timeout SECS] [--step-timeout SECS]
+#   --restart-server  opt-in, off by default: restart the owner-socket
+#                     server to clear abandoned Keychain dialogs. Without
+#                     it, D-c and D-d may report INCONCLUSIVE.
 # Exit: 0 overall PASS, 1 overall FAIL, 2 usage or pre-flight error,
 #   3 overall INCONCLUSIVE (no FAIL, but an assertion lacked evidence).
 
@@ -169,6 +181,22 @@ audit_unlock_agent_parent() {
 # and lock replies are fixed text; `list` output never reaches this.
 excerpt() { head -n 2 "$1" 2>/dev/null | cut -c1-240 | tr '\n' ' '; }
 
+# owner_server_pids <ps file> <uid> <socket>: pids of the server serving
+# exactly the owner socket. The ps file holds `pid uid command` lines
+# (`ps -ax -o pid= -o uid= -o command=`). A match needs the uid, a program
+# whose basename is `trusty-secrets`, and the arguments exactly
+# `serve --socket <socket>`: the argv the client spawns with
+# (crates/trusty-secrets/src/server/client.rs `ensure_running`; tm adds no
+# server args). A sandbox server (other socket, extra flags) or a
+# `cargo test` server (temp socket) never matches.
+owner_server_pids() {
+  awk -v u="$2" -v want="serve --socket $3" '
+    $2 != u { next }
+    { n = split($3, a, "/"); if (a[n] != "trusty-secrets") next
+      rest = $0; sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", rest)
+      if (rest == want) print $1 }' "$1"
+}
+
 # judge_prompted <keychain prompts> <rc> [restarted]: the verdict of a
 # "this read prompts" assertion. Only a prompt seen by `log stream` is
 # evidence. A failed read with no prompt cannot tell "no grant" from an
@@ -213,7 +241,7 @@ fi
 
 # ---------------------------------------------------------------- arguments
 
-MODE=deny; DRY=0; PROBE_ONLY=0
+MODE=deny; DRY=0; PROBE_ONLY=0; RESTART=0
 LOG_FILE="${TMPDIR:-/tmp}/live_check_11786-$(date +%Y%m%d-%H%M%S).log"
 PROJECT_DIR=$PWD
 UNLOCK_TIMEOUT=200   # > tm's 120 s PROMPT_TIMEOUT plus the 20 s Keychain call
@@ -225,6 +253,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1 ;;
     --probe-ancestry) PROBE_ONLY=1 ;;
     --approve) MODE=approve ;;
+    --restart-server) RESTART=1 ;;
     --log) LOG_FILE=${2:?--log needs a path}; shift ;;
     --project-dir) PROJECT_DIR=${2:?--project-dir needs a path}; shift ;;
     --unlock-timeout) UNLOCK_TIMEOUT=${2:?}; shift ;;
@@ -242,12 +271,22 @@ case $TM_BIN in
 esac
 SOCK="tm11786-$$"
 AUDIT_LOG="$HOME/.trusty-tools/trusty-secrets/audit/audit.jsonl"
+OWNER_SOCKET="$HOME/.trusty-tools/trusty-secrets/secrets.sock"
 STEPS="baseline_lock unlock list lock read_after_lock"
 
 if [ "$DRY" = 1 ]; then
+  if [ ! -d "$PROJECT_DIR" ]; then
+    echo "DRY RUN PRE-FLIGHT: project dir missing: $PROJECT_DIR" >&2; exit 2
+  fi
+  if [ "$RESTART" = 1 ]; then
+    restart_plan="kill by pid the server whose argv is exactly 'trusty-secrets serve --socket $OWNER_SOCKET': TERM, 10 s, KILL"
+  else
+    restart_plan="off (no --restart-server): D-c/D-d may be INCONCLUSIVE"
+  fi
   cat <<EOF
 DRY RUN — nothing below is executed.
 mode:            $MODE
+restart server:  $([ "$RESTART" = 1 ] && echo on || echo off)
 tm binary:       ${TM_BIN:-<tm not found>}
 project dir:     $PROJECT_DIR
 log file:        $LOG_FILE
@@ -257,15 +296,15 @@ audit log read:  $AUDIT_LOG (+ .1), read-only
 PLAN: env -i HOME USER LOGNAME PATH TMPDIR LANG SHELL [SSH_*] tmux -L $SOCK -f /dev/null new-session -d -s chk -c $PROJECT_DIR '<idle loop>'
 PLAN: tmux new-window: probe.sh — walk ps ppid chain to pid 1; abort on any Claude ancestor
 PLAN: log stream --style compact --predicate '$PREDICATE'
-PLAN: restart_server:       pkill -TERM -U \$(id -u) -x trusty-secrets; 10 s; then KILL (clears abandoned dialogs)
+PLAN: restart_server:       $restart_plan
 PLAN: step baseline_lock:   $TM_BIN secrets lock          (clears any earlier grant; T0 = epoch before it)
 PLAN: step unlock:          $TM_BIN secrets unlock        (timeout ${UNLOCK_TIMEOUT}s)
 PLAN: status:               audit records secrets.unlock decision=allow with ts >= T0 (read-only)
 PLAN: step list:            $TM_BIN secrets list          (output reduced to counts)
 PLAN: step lock:            $TM_BIN secrets lock
-PLAN: restart_server again only if list failed (its unanswered dialog would mask this read)
+PLAN: restart_server again only if list failed (when on)
 PLAN: step read_after_lock: $TM_BIN secrets list          (output reduced to counts)
-PLAN: on exit (trap):       bounded 30 s $TM_BIN secrets lock, logged; stop log stream (5 s bound); kill tmux server
+PLAN: on exit (trap):       kill in-flight steps + tmux server; 1 s; bounded 30 s $TM_BIN secrets lock if an owner server runs, logged; stop log stream (5 s bound)
 PLAN: SKIP corrupt-blob: no isolated blob (login Keychain item trusty-secrets.vault-blob)
 EOF
   if [ "$MODE" = deny ]; then cat <<'EOF'
@@ -297,15 +336,23 @@ cleanup() {
   # #11786 critic: a run killed after a granted unlock must not leave the
   # 8 h grant open. Bounded and logged, on every exit path once tm steps
   # began. `lock` has no ancestry check, so it runs here, outside tmux.
-  if [ "$LOCK_ON_EXIT" = 1 ]; then
-    bounded 30 "$TM_BIN" secrets lock > "$TMP/exit_lock.out" 2>&1 < /dev/null
-    logf "exit lock rc=$?: $(excerpt "$TMP/exit_lock.out")"
-  fi
-  [ -n "$LOG_PID" ] && stop_pid "$LOG_PID" 5
+  # M1: in-flight steps and the tmux server go first, so no step races the lock.
   for f in "$TMP"/*.pid; do
     [ -f "$f" ] && kill -KILL "$(cat "$f")" 2>/dev/null
   done
   tmux -L "$SOCK" kill-server 2>/dev/null
+  sleep 1
+  if [ "$LOCK_ON_EXIT" = 1 ]; then
+    # L2: with no owner server there is no grant, and a lock would spawn
+    # a server from the caller's (Claude) tree.
+    if [ -n "$(live_owner_pids)" ]; then
+      bounded 30 "$TM_BIN" secrets lock > "$TMP/exit_lock.out" 2>&1 < /dev/null
+      logf "exit lock rc=$?: $(excerpt "$TMP/exit_lock.out")"
+    else
+      logf "exit lock skipped: no owner server running"
+    fi
+  fi
+  [ -n "$LOG_PID" ] && stop_pid "$LOG_PID" 5
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -329,18 +376,29 @@ die() { echo "PRE-FLIGHT: $*" >&2; logf "PRE-FLIGHT $*"; echo "OVERALL FAIL (pre
 # with no prompt (store/keychain_item.rs `read_within`; audit
 # `abandoned_item: true`). The dialog does not time out on its own, so
 # waiting cannot clear it; the abandoned set lives in the server process,
-# so a restart does (server/errors.rs TIMEOUT_RECOVERY). Bounded: TERM,
-# 10 s, then KILL. The next tm call starts a fresh server.
+# so a restart does (server/errors.rs TIMEOUT_RECOVERY). Opt-in via
+# --restart-server (D1aa). M2: only the owner-socket server, by pid
+# (`owner_server_pids`). Bounded: TERM, 10 s, then KILL. The next tm call
+# starts a fresh server.
+live_owner_pids() {
+  ps -ax -o pid= -o uid= -o command= > "$TMP/ps.txt" 2>/dev/null
+  owner_server_pids "$TMP/ps.txt" "$(id -u)" "$OWNER_SOCKET"
+}
 restart_server() {
-  uid=$(id -u)
-  if ! pgrep -U "$uid" -x trusty-secrets > /dev/null; then logf "restart: no trusty-secrets running"; return 0; fi
-  pkill -TERM -U "$uid" -x trusty-secrets
+  pids=$(live_owner_pids)
+  if [ -z "$pids" ]; then logf "restart: no owner-socket server running"; return 0; fi
+  # shellcheck disable=SC2086 # pids is a word list of numbers
+  kill -TERM $pids 2>/dev/null
   k=0
-  while pgrep -U "$uid" -x trusty-secrets > /dev/null && [ "$k" -lt 10 ]; do sleep 1; k=$((k + 1)); done
-  pgrep -U "$uid" -x trusty-secrets > /dev/null && pkill -KILL -U "$uid" -x trusty-secrets
-  sleep 1
-  if pgrep -U "$uid" -x trusty-secrets > /dev/null; then logf "restart: trusty-secrets still running after KILL"
-  else logf "restart: trusty-secrets stopped after ${k}s"; fi
+  while [ "$k" -lt 10 ]; do
+    alive=""
+    for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    [ -z "$alive" ] && break
+    sleep 1; k=$((k + 1))
+  done
+  # shellcheck disable=SC2086
+  [ -n "$alive" ] && kill -KILL $alive 2>/dev/null && sleep 1
+  logf "restart: signalled owner-socket server pid(s) $(echo "$pids" | tr '\n' ' ')after ${k}s"
 }
 
 [ "$(uname -s)" = Darwin ] || die "macOS only"
@@ -419,10 +477,11 @@ LOG_PID=$!
 w=0; while ! grep -q 'Filtering' "$TMP/stream.raw" 2>/dev/null && [ "$w" -lt 10 ]; do sleep 1; w=$((w + 1)); done
 kill -0 "$LOG_PID" 2>/dev/null || die "log stream did not start"
 
-# A clean server first: an abandoned item from an earlier session would
-# make the first list fail fast with no prompt.
+# With --restart-server, a clean server first: an abandoned item from an
+# earlier session would make the first list fail fast with no prompt.
 LOCK_ON_EXIT=1
-restart_server
+[ "$RESTART" = 1 ] && restart_server
+logf "restart-server=$RESTART"
 T0=$(date +%s)
 run_step baseline_lock "$STEP_TIMEOUT" "$TM_BIN" secrets lock
 logf "baseline_lock: $(excerpt "$TMP/baseline_lock.out")"
@@ -435,7 +494,7 @@ logf "lock: $(excerpt "$TMP/lock.out")"
 # The first list's unanswered dialog would make this read fail fast with no
 # prompt; restart only then, and record it (a restart also ends any grant).
 RESTARTED=0
-if [ "$RC_list" != 0 ]; then restart_server; RESTARTED=1; fi
+if [ "$RESTART" = 1 ] && [ "$RC_list" != 0 ]; then restart_server; RESTARTED=1; fi
 logf "restart before read_after_lock: $RESTARTED"
 run_step read_after_lock "$STEP_TIMEOUT" "$TM_BIN" secrets list; RC_read=$STEP_RC
 logf "read_after_lock: $(redact_list "$TMP/read_after_lock.out")"; rm -f "$TMP/read_after_lock.out"

@@ -97,6 +97,21 @@ check prompted_prompt_and_success_passes PASS "$(judge_prompted 2 0)"
 check prompted_after_restart_is_capped INCONCLUSIVE "$(judge_prompted 1 0 1)"
 check prompted_after_restart_no_prompt_still_fails FAIL "$(judge_prompted 0 0 1)"
 
+# --- owner_server_pids: only the exact owner-socket argv (#11786 M2)
+sock=/Users/u/.trusty-tools/trusty-secrets/secrets.sock
+cat > "$T/ps" <<EOF
+  101   502 /Users/u/.cargo/bin/trusty-secrets serve --socket $sock
+  102   502 /tmp/sbx/bin/trusty-secrets serve --idle-timeout-secs 600 --socket /tmp/sbx/home/.trusty-tools/trusty-secrets/secrets.sock
+  103   502 /Users/u/target/debug/trusty-secrets serve --socket /var/folders/x/T/.tmpAb12/secrets.sock
+  104   502 /Users/u/.cargo/bin/trusty-secrets serve --socket $sock --index-dir /tmp/idx
+  105   501 /Users/u/.cargo/bin/trusty-secrets serve --socket $sock
+  106   502 /usr/bin/grep trusty-secrets serve --socket $sock
+  107   502 /Users/u/.cargo/bin/trusty-secrets-other serve --socket $sock
+EOF
+check owner_pid_matches_only_owner_socket "101" "$(owner_server_pids "$T/ps" 502 "$sock" | tr '\n' ' ' | sed 's/ $//')"
+grep -v '^  101 ' "$T/ps" > "$T/ps-nonowner"
+check owner_pid_ignores_sandbox_test_and_foreign "" "$(owner_server_pids "$T/ps-nonowner" 502 "$sock")"
+
 # --- bounded: a command past its limit is killed with 124
 start=$(date +%s); bounded 1 sleep 30; brc=$?; took=$(( $(date +%s) - start ))
 check bounded_kills_overrun 124 "$brc"
@@ -110,8 +125,14 @@ check dry_run_exit 0 "$rc"
 check dry_run_banner 1 "$(printf '%s\n' "$out" | grep -c '^DRY RUN')"
 check dry_run_predicate 1 "$(printf '%s\n' "$out" | grep -c "^PLAN: log stream .*showing UI")"
 check dry_run_deny_asserts 6 "$(printf '%s\n' "$out" | grep -c '^ASSERT D-')"
+check dry_run_restart_off_by_default 1 "$(printf '%s\n' "$out" | grep -c '^restart server:  off$')"
 out=$(TM_BIN=/nonexistent/tm "$HERE/live_check_11786_unlock.sh" --dry-run --approve 2>&1)
 check dry_run_approve_asserts 5 "$(printf '%s\n' "$out" | grep -c '^ASSERT A-')"
+out=$(TM_BIN=/nonexistent/tm "$HERE/live_check_11786_unlock.sh" --dry-run --restart-server 2>&1)
+check dry_run_restart_opt_in 1 "$(printf '%s\n' "$out" | grep -c '^restart server:  on$')"
+out=$(TM_BIN=/nonexistent/tm "$HERE/live_check_11786_unlock.sh" --dry-run --project-dir "$T/no-such-dir" 2>&1); rc=$?
+check dry_run_missing_project_dir_exit 2 "$rc"
+check dry_run_missing_project_dir_message 1 "$(printf '%s\n' "$out" | grep -c 'project dir missing')"
 
 [ "$fails" = 0 ] && { echo "selftest: all passed"; exit 0; }
 echo "selftest: $fails failed"; exit 1
