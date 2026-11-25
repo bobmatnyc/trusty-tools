@@ -33,7 +33,7 @@
     "scripts/brief_ids.py": "ee0d2972d21318a93143559685be58073fe3cf1bc3b7cde34f22864b994c0c52",
     "scripts/ctx-watch.py": "dd12fa6e25a579d0525b7b5659eae842c5fc82a0d7c70e9d665ae427b38607f5",
     "scripts/ctx_bar.py": "4e59bf70569936eaca3b4ebbd1d2cac799ff2fd9d309c1d2d2d5912ac567ca2f",
-    "scripts/dashboard-db.py": "da2167c2492aeeb4abed727c5c443e9dafd2fc1f84b1653f37c6a805dbc8d766",
+    "scripts/dashboard-db.py": "f027819f444bc8c4f2d8f5bb904fca59aaf34d491b9be8bd7dbe69cac9307a06",
     "scripts/dashboard-serve.py": "9033a534823c9e983fd3e1c70c797fba444daa7fcd785ebbaed65b285ff7b352",
     "scripts/dashboard_archctx.py": "a0671fd9ffe327462d6da12836a7c2d30554c27a8ff081ee218afcb2fae6807e",
     "scripts/dashboard_attach.py": "6182265ac53cd527377f3fb726d211d998dabd51584b6f75926c63822afed477",

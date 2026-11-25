@@ -31,6 +31,8 @@ summary prints at most ~25 read-only lines for a resume: user_state (+ since), o
 Qualified ids (ar-T44): get/update/delete accept "<S id>:<local id>" (e.g. S0c:D01) as well as the bare id; the S id must be the store's own session (Architect store = S14, a session store = its meta/state.session_id), else exit 1 with a hint naming it.
 get/list on `items` add a derived `qualified` key (the store's S id, not the item's `session` field); stored ids stay bare. `set` on an existing doc without --if-version is refused (exit 3). `next PREFIX` prints the next free id;
 `create COLLECTION PREFIX --json X` picks that id and writes it with if_version 0 in one command (use it for every new item).
+#10766: `create items` with a `detail_ref` (caller key) an open item of that prefix carries updates it (version-pinned); `list --detail-ref KEY` finds it.
+Writes to `items` (set, update, create, batch) refuse a field items.schema.json does not name (e.g. `priority`); stored legacy fields still read.
 log items <T id> "<text>" appends {at: now UTC, text} to that task's `log` (short accomplishment lines; the owner 2026-10-28) with a version-pinned update (retried once on a conflict); exit 2 on empty text or a non-items collection.
 validate checks every document against schemas/dashboard/ (exit 1 on errors); fsck (jsonl store) checks canonical bytes and the change-log hashes.
 Every delete (single or in a batch) first appends the full pre-delete document to
@@ -168,6 +170,21 @@ def check_steps(item_id, data):
             raise ds.StoreError(f"{where} needs a non-empty string 'title'{hint}; expected fields: {STEP_FIELDS}")
 
 
+def check_item_fields(item_id, data):
+    """Refuse an `items` write naming a field items.schema.json does not (e.g. `priority`); only the fields this write supplies are checked."""
+    # #10766: the dir store runs schema_mode off, so `create` stored fields `validate` later rejected.
+    errs = [e for e in dsch.validate("items", item_id, {k: v for k, v in data.items() if k != "version"})
+            if e.endswith("property is not allowed")] if isinstance(data, dict) else []
+    if errs:
+        raise ds.StoreError("items write refused by schema: " + "; ".join(errs))
+
+
+def by_ref(docs, ref, open_only=False):
+    """Item docs whose caller key `detail_ref` equals ref (open_only: not answered/done/wont_do/cancelled); [] for an empty ref (#10766)."""
+    return [d for d in docs if ref and isinstance(d.get("data"), dict) and d["data"].get("detail_ref") == ref
+            and not (open_only and d["data"].get("status") in ("answered", "done", "wont_do", "cancelled"))]
+
+
 def has_progress(data):
     """True when a task doc carries a progress figure: a non-empty `steps` list, or `progress` as a number or a dict with a numeric `pct`."""
     if isinstance(data.get("steps"), list) and data["steps"]:
@@ -281,6 +298,7 @@ def check_ops(ops, store=None):
         verb = verb_of(entry)
         if entry.get("collection") == "items":
             check_steps(entry.get("id"), entry.get("data"))
+            check_item_fields(entry.get("id"), entry.get("data"))   # #10766
             if store is not None:
                 check_task_progress(store, verb, entry.get("id"), entry.get("data"))
                 oa.refuse_owner_answer_change(store, verb, entry.get("id"), entry.get("data"))   # #10711
@@ -425,7 +443,7 @@ def build_parser():
     ap.add_argument("--actor", default=os.environ.get("DASHBOARD_ACTOR", "architect"), help="change-log actor (jsonl store)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("get"); g.add_argument("collection"); g.add_argument("id")
-    ls = sub.add_parser("list"); ls.add_argument("collection"); ls.add_argument("--status")
+    ls = sub.add_parser("list"); ls.add_argument("collection"); ls.add_argument("--status"); ls.add_argument("--detail-ref")
     for name in ("set", "update"):
         w = sub.add_parser(name); w.add_argument("collection"); w.add_argument("id")
         w.add_argument("--json", required=True, metavar="FILE_OR_STRING")
@@ -465,24 +483,33 @@ def run(args):
             raise ds.StoreError(f"no free {args.prefix} ids", )
         return n
     if args.cmd == "create":
-        n = derive.next_id(derive.snapshot(store, derive.ID_COLLECTIONS), args.prefix)
+        data = load_json(args.json)
+        # #10766: an open item already carrying the caller's key (detail_ref, same prefix) is updated, never duplicated.
+        hits = [d for d in by_ref(store.list_docs("items"), isinstance(data, dict) and data.get("detail_ref"), True)
+                if d["id"].startswith(args.prefix)] if args.collection == "items" else []
+        n = hits[0]["id"] if hits else derive.next_id(derive.snapshot(store, derive.ID_COLLECTIONS), args.prefix)
         if n is None:
             raise ds.StoreError(f"no free {args.prefix} ids")
-        data = load_json(args.json)
+        verb = "update" if hits else "create"
         if args.collection == "items":
             check_steps(n, data)
-            check_task_progress(store, "create", n, data)
-            warn_no_task(store, "create", n, data)
+            check_item_fields(n, data)   # #10766
+            check_task_progress(store, verb, n, data)
+            oa.refuse_owner_answer_change(store, verb, n, data)   # #10711; a new id has no stored doc and passes
+            warn_no_task(store, verb, n, data)
             ll.warn_item(store, n, data)   # #11064: warns, never refuses
             data = normalize_specs(data)
-        return store.set(args.collection, n, data, 0)   # if_version 0: a concurrent create of the same id conflicts
+        # version-pinned update: a concurrent change conflicts (exit 3); if_version 0: a concurrent create of the same id conflicts
+        return store.update("items", n, data, hits[0]["version"]) if hits else store.set(args.collection, n, data, 0)
     if args.cmd == "get":
         local = dq.resolve(store, args.collection, args.id)
         doc = dq.with_qualifier(store, args.collection, store.get(args.collection, local))
         asked = dq.split(args.id)[1]
         return dict(doc, alias_of=asked) if asked != local else doc
     if args.cmd == "list":
-        return dq.with_qualifier(store, args.collection, store.list_docs(args.collection, status=args.status))
+        docs = store.list_docs(args.collection, status=args.status)
+        docs = docs if args.detail_ref is None else by_ref(docs, args.detail_ref)   # #10766: look up by caller key
+        return dq.with_qualifier(store, args.collection, docs)
     if args.cmd in ("set", "update"):
         if args.cmd == "update":
             args.id = dq.resolve(store, args.collection, args.id)
@@ -492,6 +519,7 @@ def run(args):
         data = load_json(args.json)
         if args.collection == "items":
             check_steps(args.id, data)
+            check_item_fields(args.id, data)   # #10766
             check_task_progress(store, args.cmd, args.id, data)
             oa.refuse_owner_answer_change(store, args.cmd, args.id, data)   # #10711: a close never rewrites the owner's answer
             warn_no_task(store, args.cmd, args.id, data)

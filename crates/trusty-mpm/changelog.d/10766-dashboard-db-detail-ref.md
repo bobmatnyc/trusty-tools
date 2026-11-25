@@ -1,0 +1,2 @@
+Fixed
+- Architect `dashboard-db.py`: `create items` with a `detail_ref` that an open item of the same prefix already carries updates that item instead of filing a duplicate, `list --detail-ref KEY` looks items up by that key, and every `items` write (create, set, update, batch) refuses a field `items.schema.json` does not name, such as `priority`; items already stored with such fields still read (closes [#10766](https://github.com/bobmatnyc/trusty-tools/issues/10766))
