@@ -421,6 +421,14 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/architect_config.py",
         false
     ),
+    // See #10161 D3c: the event-extractor agent's claim checker and its
+    // input module, imported by name from the same directory.
+    embedded!("scripts/verify-claim.py", "scripts/verify-claim.py", true),
+    embedded!(
+        "scripts/verify_claim_input.py",
+        "scripts/verify_claim_input.py",
+        false
+    ),
     // #9997: the voice guide the manual and `architect-operating-rules` cite.
     embedded!("docs/architect/voice.md", "docs/voice.md", false),
 ];

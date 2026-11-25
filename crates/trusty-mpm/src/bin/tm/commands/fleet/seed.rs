@@ -22,7 +22,8 @@
 //! (`seed_history.tsv`, see [`refresh`]). A file with any other bytes is
 //! someone's edit and is reported skipped, never overwritten; since #11245 the
 //! shipped copy is written beside it as `<file>.shipped`. The skills' bytes are the ones every Architect launch also
-//! deploys (#9540).
+//! deploys (#9540). The agents are written by [`super::seed_agents`] under
+//! the skills' deploy rule (#10161 D3c).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
 //! `every_schema_asset_is_seeded`, `every_dashboard_asset_is_seeded`,
@@ -100,11 +101,15 @@ pub(crate) fn files(seed: &ArchitectSeed) -> Vec<Seeded<'_>> {
 // #9997: per-project records live in `local/projects/`; the skills write
 // other users' profiles to `local/users/` and briefs to `local/briefs/`.
 // #10161: `architect-improvements` keeps its ledger in `local/improvements/`.
+// #10161 D3c: the curator, improver and drift-guard agents write run files.
 pub(crate) const DIRS: &[&str] = &[
     "local/projects",
     "local/users",
     "local/briefs",
     "local/improvements",
+    "local/improvements/runs",
+    "local/improver/runs",
+    "local/drift-guard/runs",
 ];
 
 /// Write every [`files`] entry and [`DIRS`] entry under `dir`, then the

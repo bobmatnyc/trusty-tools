@@ -117,6 +117,7 @@ trusty-mpm	lib	core::output_style_deployer::tests	reads the checkout's content: 
 trusty-mpm	lib	core::pm_prompt_golden_tests	reads test_support::rc — the committed PM prompt goldens (#9012)
 trusty-mpm	lib	core::pm_prompt_golden_tests::golden_bundled_fallback_prompt	reads compose_bundled_fallback_with_overrides
 trusty-mpm	lib	core::pm_prompt_golden_tests::the_memory_section_claims_no_per_prompt_context_hook	reads compose_bundled_fallback_with_overrides
+trusty-mpm	lib	core::project_skill_tier::architect_agents::tests	reads test_support::rc for the five Architect agents and pins their hashes (#10161)
 trusty-mpm	lib	core::project_skill_tier::architect_seed::tests	reads FrameworkContent::load and test_support::rc for the Architect seed files (#9132)
 trusty-mpm	lib	core::project_skill_tier::architect_skills::tests	reads the Architect skills from content through architect_seed::test_support (#9540, #9132)
 trusty-mpm	lib	core::prompt_self_improvement::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)

@@ -3,7 +3,7 @@ name: architect-improvements
 description: Architect skill. Load for an improvement finding, a framework or Architect change, or a question about the improvement pipeline - when a session sends an IMPROVEMENT REPORT, when a captured pane shows a Prompt feedback or Improvement recommendations block, once a day for consolidation and the routine check, and after a filed change merges or releases. Covers intake into the ledger, consolidation by a research agent, the daily scheduled-routine check, filing, and observing whether each change worked. Architect only.
 user-invocable: true
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 category: monitoring
 tags: [architect, self-improvement, ledger]
 effort: medium
@@ -78,8 +78,8 @@ issues only when the Architect asks it to.
 
 ## 3. Consolidation (daily, and when 10+ reports are open)
 
-Dispatch one read-only `research` agent in the background over the open
-ledger reports. Its brief asks it to cluster the reports by cause, check each
+Dispatch the read-only `improvement-curator` agent in the background over
+the open ledger reports. Its brief asks it to cluster the reports by cause, check each
 cluster's evidence, search the target tracker for an existing issue, and
 write one recommendation per cluster (symptom, cause, change, evidence,
 signal, existing issue if any) to a run file in `runs/`. Read its run file.
