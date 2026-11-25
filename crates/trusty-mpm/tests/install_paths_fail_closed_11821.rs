@@ -167,6 +167,39 @@ fn cold_start_refuses_on_a_broken_install_file() {
     );
 }
 
+/// #11828: `tm run <owner>/<repo>` bypasses `ensure_managed_checkout`, so its
+/// own `try_base_clone_path` call is what refuses; with the defaulting
+/// resolver the run got as far as the daemon check instead.
+#[test]
+fn tm_run_refuses_on_a_broken_install_file_before_cloning_11828() {
+    let fx = Fixture::new();
+    // The env is the child's only, so no `EnvGuard` is needed here.
+    let mut cmd = crate::common::tm_command_in(&fx.home);
+    for k in ROOT_VARS {
+        cmd.env_remove(k);
+    }
+    let out = cmd
+        .args(["run", "acme/widget"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn tm run");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "tm run must refuse: {stderr}");
+    assert!(
+        stderr.contains("cannot resolve the repos root") && stderr.contains("install.toml"),
+        "tm run must refuse on the repos root, got: {stderr}"
+    );
+    assert!(
+        !fx.home.join("trusty-mpm-projects").exists(),
+        "nothing may be created under the default root"
+    );
+    assert!(
+        !Path::new("/elsewhere/projects/acme/widget").exists(),
+        "nothing may be cloned under the configured root"
+    );
+}
+
 /// An in-project spawn refuses to reuse a clone found under the default root.
 #[test]
 fn inproject_spawn_refuses_on_a_broken_install_file() {
