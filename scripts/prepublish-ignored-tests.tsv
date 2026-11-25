@@ -254,5 +254,16 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # 146 + 1 -> 147 (Refs #10781; failing run 43129439454). The same PR's
 # macOS-only `presence_local_tests` test is not enumerated on Linux.
 #
+# #11696 (Phases A, B, C) added five trusty-computer live test files across PRs
+# #11755, #11757, #11760, and #11744: `live_pointer` (coordinate input + drag,
+# Phase A, #11755), `live_window_mgmt` (window management, Phase B, #11757),
+# `live_clipboard` (clipboard with redaction, Phase C, #11760), and both
+# `live_screenshot` and `live_menu` (bounded screenshot and menu invocation,
+# #11744). The baseline rises by 4 not 5 because one was already counted
+# (possibly an earlier live test from before these PRs). Each needs macOS
+# hardware (builds and runs CuaDriver.app bounded, needs an unlocked screen or
+# TRUSTY_SANDBOX=1), so all stay unselected.
+# 147 + 4 -> 151 (Refs #11696; failing runs 45344995292, 45346805627).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 147
+# UNSELECTED-BASELINE: 151

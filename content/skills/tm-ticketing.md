@@ -3,7 +3,7 @@ name: tm-ticketing
 description: The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, attribution, and the project-root TICKETING.md that overrides these defaults
 user-invocable: true
 metadata:
-  version: "2.3.0"
+  version: "2.3.1"
 category: pm-workflow
 tags: [tickets, issues, promotion-gate, deduplication, labels, pm-required]
 effort: medium
@@ -31,9 +31,8 @@ control writes it. The full boundary and the handoff sequence are stated once, i
 `tm-workflow`.
 
 For session-local task tracking that is not a formal ticket, use
-`mcp__trusty-memory__task_add` / `task_list` / `task_complete` directly. These
-are in-session TODOs, not a ticketing system, and are not a forbidden MCP family
-under CB#6.
+`tm memory task add` / `list` / `complete` directly. These are in-session
+TODOs, not a ticketing system.
 
 ## Backends
 

@@ -3,7 +3,7 @@ name: self-improvement-loop
 description: "Self-analysis and improvement reporting for a dispatched agent: the post-mortem-routed recommendation block, plus the per-task fast-loop hypothesis record that changes behavior now"
 user-invocable: false
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
 category: agent-reference
 effort: low
 ---
@@ -89,8 +89,9 @@ alternative is a report, not an experiment.
 <!-- rule:self-improvement-loop/hypothesis-tag -->
 **The tag is `self-improvement-hypothesis`.** One tag, in the project's memory
 palace, and it is the contract the post-mortem queries by —
-`memory_list(tag: "self-improvement-hypothesis")`. Add descriptive tags beside
-it, never in place of it.
+`tm memory list --tag self-improvement-hypothesis` (check `command -v tm`
+first; if `tm` is absent, skip the query and say so). Add descriptive tags
+beside it, never in place of it.
 
 **The record shape**, seven fields:
 

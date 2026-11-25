@@ -40,7 +40,13 @@ impl DaemonState {
         let real = crate::session_manager::RealTmuxDriver::from_driver(driver.clone());
         // #10101: the workspace-server probes are synchronous subprocesses.
         let observed = tokio::task::spawn_blocking(move || {
-            crate::session_manager::tmux_route::observe_workspace_servers(&real, default)
+            use crate::session_manager::tmux_route as route;
+            // #10700: the live default server's identity, to tell a session
+            // lost with an earlier server from one killed on this one.
+            let identity = route::default_server_identity(&real, &default);
+            let mut live = route::observe_workspace_servers(&real, default);
+            live.default_server = identity;
+            live
         })
         .await;
         match observed {
@@ -79,6 +85,8 @@ impl DaemonState {
     /// vanished WORKSPACE server is judged by its socket instead (absent:
     /// Deliberate; present but refusing: Unexpected), and a record started
     /// before the last host boot is Unexpected ([`LiveSet::server_lost`]).
+    /// #10700: so is a default-server record whose stored server identity
+    /// differs from the live default server's, because a resume restarted it.
     ///
     /// #8233 — a session whose resume is IN FLIGHT is skipped entirely. See the
     /// guard's own comment in the body for why a missing `tmux_name` proves

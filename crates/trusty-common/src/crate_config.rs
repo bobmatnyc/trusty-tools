@@ -40,7 +40,8 @@ use serde::de::DeserializeOwned;
 /// convention cannot drift to `.trusty_tools` / `.trustytools` variants.
 /// What: `".trusty-tools"`.
 /// Test: `crate_config_path_layout`.
-pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+// See #11821: one definition, shared with `install_paths`.
+pub const TRUSTY_TOOLS_DIR: &str = crate::install_paths::TOOLS_DIR_NAME;
 
 /// Canonical config filename within a crate's directory.
 ///
@@ -267,21 +268,28 @@ pub fn crate_config_path_at(base: &Path, crate_name: &str) -> PathBuf {
 ///
 /// Why: production callers want `~/.trusty-tools/<crate>` without resolving the
 /// home directory themselves.
-/// What: `~/.trusty-tools/<crate_name>`. Returns `None` only when the home
-/// directory cannot be determined (a stripped CI environment).
-/// Test: covered indirectly via `crate_config_dir_at`.
+/// What: `<config_dir>/.trusty-tools/<crate_name>`, where the config dir is
+/// `$HOME` unless `TRUSTY_MPM_CONFIG_DIR` or `install.toml` moves it (#11821).
+/// Returns `None` only when the home directory cannot be determined (a
+/// stripped CI environment).
+/// Test: `process_env_wrappers_match_today`.
 pub fn crate_config_dir(crate_name: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|home| crate_config_dir_at(&home, crate_name))
+    // See #11821
+    crate::install_paths::config_dir_for_legacy_wrapper()
+        .map(|base| crate_config_dir_at(&base, crate_name))
 }
 
 /// Resolve the canonical config file for `crate_name`.
 ///
 /// Why: the single path every crate reads/writes; surfacing it lets binaries log
 /// "edit this file" hints.
-/// What: `~/.trusty-tools/<crate_name>/config.yaml`. `None` when home is unknown.
-/// Test: covered indirectly via `crate_config_path_at`.
+/// What: `<config_dir>/.trusty-tools/<crate_name>/config.yaml`, the config
+/// dir resolved as in [`crate_config_dir`]. `None` when home is unknown.
+/// Test: `process_env_wrappers_match_today`.
 pub fn crate_config_path(crate_name: &str) -> Option<PathBuf> {
-    dirs::home_dir().map(|home| crate_config_path_at(&home, crate_name))
+    // See #11821
+    crate::install_paths::config_dir_for_legacy_wrapper()
+        .map(|base| crate_config_path_at(&base, crate_name))
 }
 
 /// Load and deserialise the config at an explicit path.
@@ -322,7 +330,8 @@ pub fn load_at<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, ConfigErro
 /// (both mean "no config", which the caller treats as defaults).
 /// Test: covered via `load_at` tests + `save_then_load_round_trips`.
 pub fn load<T: DeserializeOwned>(crate_name: &str) -> Result<Option<T>, ConfigError> {
-    match crate_config_path(crate_name) {
+    // See #11821: a broken install.toml is an error here, not "no config".
+    match checked_config_path(crate_name)? {
         Some(path) => load_at(path.as_path()),
         None => Ok(None),
     }
@@ -430,14 +439,31 @@ pub fn save_raw_at(path: &Path, contents: &str) -> Result<PathBuf, ConfigError> 
 /// Why: the convention's primary write entry point (console toggle, `config set`).
 /// What: resolves the path via [`crate_config_path`] then delegates to
 /// [`save_at`]. Errors with [`ConfigError::Io`] (synthesising a path-less error)
-/// when the home directory cannot be resolved.
-/// Test: covered via `save_at` + `save_then_load_round_trips`.
+/// when the home directory cannot be resolved, and with an `InvalidData`
+/// [`ConfigError::Io`] at the install file when `install.toml` is broken
+/// (#11821): it never writes under `$HOME` instead.
+/// Test: `save_then_load_round_trips`, `save_fails_closed_on_broken_install_file`.
 pub fn save<T: Serialize>(crate_name: &str, value: &T) -> Result<PathBuf, ConfigError> {
-    match crate_config_path(crate_name) {
+    // See #11821: fail closed on a broken install.toml.
+    match checked_config_path(crate_name)? {
         Some(path) => save_at(path.as_path(), value),
         None => Err(ConfigError::Io {
             path: PathBuf::from(format!("~/{TRUSTY_TOOLS_DIR}/{crate_name}/{CONFIG_FILE}")),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "home directory unavailable"),
+        }),
+    }
+}
+
+/// The config file path, or the install-paths error as a typed
+/// `ConfigError::Io` (`InvalidData`, path = the install file). See #11821.
+fn checked_config_path(crate_name: &str) -> Result<Option<PathBuf>, ConfigError> {
+    match crate::install_paths::config_dir_checked() {
+        Ok(dir) => Ok(dir.map(|base| crate_config_path_at(&base, crate_name))),
+        Err(err) => Err(ConfigError::Io {
+            path: dirs::home_dir()
+                .map(|h| crate::install_paths::install_file_path(&h))
+                .unwrap_or_default(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
         }),
     }
 }

@@ -35,6 +35,7 @@ use commands::{
     hooks::clean as hooks_clean,
     install::install,
     launch::{connect, launch},
+    launch_home::launch_home,
     managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
@@ -582,7 +583,6 @@ async fn main() -> anyhow::Result<()> {
                 commands::session_account::pin_account_for_dir(&daemon, &target, login, token)
                     .await?;
             }
-            let home = dirs::home_dir();
             launch(
                 &client,
                 &url,
@@ -590,15 +590,16 @@ async fn main() -> anyhow::Result<()> {
                 style,
                 worktree,
                 LaunchDir::OperatorCwd,
-                home.as_deref(),
-                twin, // #8878: only an operator's `tm launch --twin` arms.
+                launch_home()?.as_deref(), // #11077: the sandbox home when sandboxed.
+                twin,                      // #8878: only an operator's `tm launch --twin` arms.
                 commands::launch_handoff::Handoff::from_detach(detach), // #8406
             )
             .await
         }
         Some(Command::Connect { dir }) => {
             let attach = commands::launch_handoff::Handoff::Attach; // #8406
-            connect(&client, &url, dir, dirs::home_dir().as_deref(), attach).await
+            // #11077: a sandboxed client writes under the sandbox home.
+            connect(&client, &url, dir, launch_home()?.as_deref(), attach).await
         }
         Some(Command::Attach {
             target,

@@ -3,7 +3,7 @@ name: tm-postmortem
 description: Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline
 user-invocable: true
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: pm-workflow
 tags: [postmortem, analysis, errors, pm-recommended]
 effort: medium
@@ -60,7 +60,7 @@ relationships, state".
 Captured errors are one input. The other is the continuous self-improvement loop
 every agent runs, which records hypotheses in the memory palace under one tag.
 
-5. `memory_list(tag: "self-improvement-hypothesis")` for each registered project.
+5. `tm memory list --tag self-improvement-hypothesis` for each registered project.
 6. Group the records by the metric each names, not by the agent that wrote them —
    the same metric moved by three agents is one finding.
 7. Report only the significant results: a group whose measurements show a
