@@ -65,6 +65,23 @@ pub fn classify(err: &anyhow::Error) -> Option<RateLimited> {
     Some(RateLimited { reset_epoch })
 }
 
+/// The name of the GraphQL limit a classified refusal hit, for a message.
+///
+/// Why: #11233 — `tm wait` must not tell the user "primary" while quota
+/// remains. The marker decides, not `reset_epoch`: a primary line whose reset
+/// lookup failed has no epoch either.
+/// What: the short-window name when [`RATE_LIMIT_SHORT_WINDOW_MARKER`] is in
+/// the error chain, else the primary name.
+/// Test: `classify_reads_the_short_window_line_as_a_backoff_with_no_reset`,
+/// `a_short_window_refusal_is_not_reported_as_the_primary_limit`.
+pub fn limit_name(err: &anyhow::Error) -> &'static str {
+    if format!("{err:#}").contains(RATE_LIMIT_SHORT_WINDOW_MARKER) {
+        "short-window or secondary GraphQL rate limit"
+    } else {
+        "primary GraphQL rate limit"
+    }
+}
+
 /// Real `gh` rate-limit texts the daemon backs off on (#11673).
 ///
 /// Why: the daemon's `gh` runs bound to the real binary (#9750), not a pinned
@@ -136,6 +153,12 @@ mod tests {
         let short = Some(RateLimited { reset_epoch: None });
         assert_eq!(classify(&err), short);
         assert_eq!(classify_any(&err), short);
+        assert_eq!(
+            limit_name(&err),
+            "short-window or secondary GraphQL rate limit"
+        );
+        let primary = anyhow::anyhow!("{RATE_LIMIT_REFUSAL_MARKER} (gh account 'bot')");
+        assert_eq!(limit_name(&primary), "primary GraphQL rate limit");
         assert_eq!(
             backoff_secs(RateLimited { reset_epoch: None }, 1_000, 20, 1),
             20
