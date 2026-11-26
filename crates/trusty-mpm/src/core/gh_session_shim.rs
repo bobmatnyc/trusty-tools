@@ -503,6 +503,45 @@ pub(crate) fn launch_pinned_login_cli(
     )
 }
 
+/// Production entry point: the daemon's session spawn env for `pinned` on
+/// `origin`, each login launched through [`launch_pinned_login_cli`] (#9750).
+///
+/// Why: #11821 — the launch writes the gh shim under tm's state root, so a
+/// broken `install.toml` must refuse it rather than write under `$HOME`.
+/// What: [`crate::core::gh_session_account::session_spawn_env`] over tm's
+/// state root. A pin with no account and no config dir is `None`, as before.
+/// When the config dir is unresolved every launch refuses before any write,
+/// naming `install.toml`, and the spawn gets the nobody-token env and that
+/// warning; the lenient root only names the store in the warning. Blocking.
+/// Test: `session_spawn_env_cli_fails_closed_on_a_broken_install_file`
+/// (env_serial); the other decisions are `session_spawn_env`'s.
+pub fn session_spawn_env_cli(
+    pinned: &PinnedGhIdentity,
+    origin: &str,
+) -> Option<Result<crate::core::gh_account::GhSpawnEnv, String>> {
+    use crate::core::paths::FrameworkPaths;
+    let aliases = SshHostAliases::for_current_user();
+    // #11821: the shim writer fails closed; no `$HOME` fallback, no partial write.
+    let state_root = FrameworkPaths::try_default()
+        .map(|paths| paths.root)
+        .map_err(|e| format!("tm's config dir is unresolved: {e}; no gh shim was written"));
+    let named_root = match &state_root {
+        Ok(root) => root.clone(),
+        Err(_) => FrameworkPaths::default().root,
+    };
+    let launch = |login: &str| {
+        let root = state_root.as_deref().map_err(Clone::clone)?;
+        launch_pinned_login_cli(pinned, origin, root, &aliases, login)
+    };
+    crate::core::gh_session_account::session_spawn_env(
+        pinned,
+        origin,
+        &named_root,
+        &aliases,
+        launch,
+    )
+}
+
 /// The gh env an in-place relaunch of a pinned project hands `claude` (#9750,
 /// plan Q1), with `launch` deciding the credential.
 ///

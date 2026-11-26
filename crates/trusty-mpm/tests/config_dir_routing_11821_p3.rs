@@ -337,7 +337,7 @@ fn assert_no_gh_writes(fx: &Fixture, err: &str) {
         "must name install.toml: {err}"
     );
     for tree in ["gh-shim", "gh-accounts"] {
-        let path = fx.home.join(".trusty-mpm").join(tree);
+        let path = FrameworkPaths::under(&fx.home).root.join(tree);
         assert!(!path.exists(), "no writer may create {}", path.display());
     }
 }
@@ -352,7 +352,8 @@ fn assert_no_gh_writes(fx: &Fixture, err: &str) {
 fn pinned_relaunch_env_fails_closed_on_a_broken_install_file() {
     let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
     let (fx, _env) = broken_install_home();
-    let registry = fx.home.join(".trusty-mpm/project-registry");
+    // The lenient reader's `$HOME` fallback, where the pin is read from.
+    let registry = trusty_mpm::project::registry_data_dir();
     std::fs::create_dir_all(&registry).expect("mkdir registry");
     let row = serde_json::json!({
         "name": "x", "repo_url": UNRESOLVED_ORIGIN, "default_branch": "main",
@@ -379,4 +380,31 @@ fn pinned_relaunch_env_fails_closed_on_a_broken_install_file() {
     let err = trusty_mpm::core::gh_session_shim::pinned_relaunch_env(&checkout)
         .expect_err("the relaunch refuses");
     assert_no_gh_writes(&fx, &err);
+}
+
+/// #11821 P3-f2: the daemon's session spawn env refuses the gh shim write and
+/// fails the session's gh closed with the nobody token; before the fix the
+/// shim root fell back to `$HOME/.trusty-mpm` and the warning named the host.
+/// #9123: a credential test, so `#[serial]` inside `CredentialSandbox`.
+#[test]
+#[serial_test::serial]
+fn session_spawn_env_cli_fails_closed_on_a_broken_install_file() {
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let (fx, _env) = broken_install_home();
+    let pinned = trusty_mpm::core::gh_account::PinnedGhIdentity {
+        account: Some("octo".to_string()),
+        ..Default::default()
+    };
+    let env = trusty_mpm::core::gh_session_shim::session_spawn_env_cli(&pinned, UNRESOLVED_ORIGIN)
+        .expect("an account pin yields an env")
+        .expect("the spawn contract never blocks");
+    let warning = env.warning.expect("the refusal rides the env");
+    assert_no_gh_writes(&fx, &warning);
+    assert!(
+        env.vars
+            .iter()
+            .any(|(k, v)| k == "GH_TOKEN" && v == "tm-refused-unverified-gh-account-pin"),
+        "the session's gh must authenticate as nobody: {:?}",
+        env.vars.iter().map(|(k, _)| k).collect::<Vec<_>>()
+    );
 }
