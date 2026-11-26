@@ -232,7 +232,7 @@ Enable or disable supervisor auto-resume by persisting the operator's desired fl
 
 ## `config_read`
 
-Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 cross-crate config convention) and return its current settings as JSON: `workspace_root_template`, `auto_resume`, `default_model`, the global `github` GitHub-identity binding, the global `untracked_sync` untracked/secret-file sync allowlist (#2196), and the full `projects` list (each entry may carry its own `github`/`commit_name`/`commit_email`/ `untracked_sync` per-project override). An absent file returns the defaults (all null/empty). Backs the trusty-console Config tab.
+Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 cross-crate config convention) and return its current settings as JSON: `workspace_root_template`, `auto_resume`, `default_model`, the global `github` GitHub-identity binding, the global `untracked_sync` untracked/secret-file sync allowlist (#2196), and the full `projects` list (each entry may carry its own `github`/`commit_name`/`commit_email`/ `untracked_sync` per-project override). An absent file returns the defaults (all null/empty). `install_paths` (#11821) is read-only: the resolved `projects_root` and `config_dir`, each `{path, source}`, or `error` naming a broken `install.toml` with both paths null. Backs the trusty-console Config tab.
 
 No parameters.
 
