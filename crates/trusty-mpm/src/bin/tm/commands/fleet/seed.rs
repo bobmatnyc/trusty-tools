@@ -39,6 +39,7 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
 
+use self::plan::Disposition;
 use super::Step;
 
 /// One file `tm fleet init` writes, relative to the Architect directory.
@@ -58,6 +59,8 @@ pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
         .map(|&(_, c, _)| c)
 }
 
+#[path = "seed_plan.rs"]
+pub(crate) mod plan;
 #[path = "seed_refresh.rs"]
 pub(crate) mod refresh;
 #[path = "seed_table.rs"]
@@ -222,23 +225,25 @@ fn deploy_file(
     shipped_before: ShippedBefore<'_>,
 ) -> anyhow::Result<Vec<Step>> {
     let path = dir.join(&file.dest);
-    match std::fs::read(&path) {
-        Ok(bytes) if bytes == file.contents.as_bytes() => {
-            Ok(vec![Step::Unchanged(file.dest.clone())])
-        }
+    let shipped = file.contents.as_bytes();
+    // #11368: one decision for this write and the launch deploy's backup plan.
+    let live =
+        std::fs::read(&path).map(|b| (plan::of_live(&file.dest, shipped, &b, shipped_before), b));
+    match live {
+        Ok((Disposition::Same, _)) => Ok(vec![Step::Unchanged(file.dest.clone())]),
         // #10608: an upgrade leaves instance-owned files byte-identical.
-        Ok(_) if refresh::instance_owned(&file.dest) => Ok(vec![Step::Skipped(format!(
+        Ok((Disposition::InstanceKept, _)) => Ok(vec![Step::Skipped(format!(
             "{}: instance-owned, kept as is on upgrade",
             file.dest
         ))]),
-        Ok(bytes) if shipped_before(&file.dest, &bytes) => {
+        Ok((Disposition::Replace, _)) => {
             write_seed(&path, file)?;
             Ok(vec![Step::Changed(format!(
                 "updated {} (an unedited earlier shipped copy)",
                 file.dest
             ))])
         }
-        Ok(bytes) => {
+        Ok((Disposition::Edited, bytes)) => {
             // #11245: keep the edit, and write the new shipped copy beside it.
             let sibling = write_shipped_sibling(dir, file)?;
             let mut steps = vec![Step::Skipped(format!(

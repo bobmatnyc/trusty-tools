@@ -23,6 +23,8 @@ pub(crate) mod architect;
 pub(crate) mod architect_up; // #11364
 // #11773: `tm architect drift` rendering and the `up --strict` gate.
 pub(crate) mod architect_drift;
+// #11368: `tm architect restore`, the one-release undo of the launch deploy.
+pub(crate) mod architect_restore;
 // #10063: `tm architect dashboard <verb>`, in-process under the store lock.
 pub(crate) mod architect_dashboard;
 // #9167: the poller's wakes as trusty-events `message` events.

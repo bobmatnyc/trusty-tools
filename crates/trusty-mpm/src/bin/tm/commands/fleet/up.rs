@@ -9,7 +9,9 @@
 //! existing fleet path for it: [`super::init_full`] for no session and for
 //! ensure, [`super::relaunch::relaunch`] for a pane at a shell (after
 //! `respawn-pane` for a dead one). A live unbound `claude` is reported, never
-//! killed. Inside Claude Code it only ensures a bound Architect.
+//! killed. Inside Claude Code it only ensures a bound Architect. #11368: every
+//! action that runs first deploys the bundle through `ops.deploy`
+//! ([`super::launch_deploy`]); a failed deploy launches nothing and exits 1.
 //! Test: `up_tests.rs`; `tests/tm_architect_up.rs`.
 
 use std::fs::File;
@@ -21,6 +23,7 @@ use trusty_mpm::core::process::{self, PaneClaude};
 use trusty_mpm::session_manager::ArchitectRegistration;
 
 use super::launch::PaneState;
+use super::launch_deploy::{self, DeployFn, Mode};
 use super::session_name::SessionNames;
 use super::{Probe, Step, TMUX, config, relaunch, status};
 
@@ -81,6 +84,8 @@ pub(crate) struct Ops {
     pub(crate) bound: fn(&Path, &Path, Probe, &str) -> Result<String, String>,
     /// Runs an action that changes something.
     pub(crate) run: fn(Action, &Path, &Path, &SessionNames) -> anyhow::Result<Outcome>,
+    /// #11368: the bundle deploy that runs before `run`.
+    pub(crate) deploy: DeployFn,
 }
 
 /// The real tmux server and fleet paths.
@@ -89,6 +94,7 @@ pub(crate) const LIVE: Ops = Ops {
     pane_claude: process::pane_claude,
     bound: status::bound,
     run: run_action,
+    deploy: launch_deploy::live,
 };
 
 /// The steps an action took and the registration to send.
@@ -207,6 +213,51 @@ pub(crate) fn action_for(observed: &Observed, inside: bool) -> Action {
     }
 }
 
+/// Whether `action` runs, and so deploys the bundle first (#11368).
+fn deploys(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Init | Action::Ensure | Action::Launch | Action::RespawnAndLaunch
+    )
+}
+
+/// Run `ops.deploy` into `report`; `false` when it failed (exit 1 set).
+///
+/// Why: #11368 Q8 and the Fail-Open Check — a failed write, backup or
+/// restart never downgrades to a warning beside a launch.
+fn deploy_into(
+    report: &mut UpReport,
+    dir: &Path,
+    names: &SessionNames,
+    mode: Mode,
+    ops: &Ops,
+) -> bool {
+    let ok = match (ops.deploy)(dir, names, mode) {
+        Ok(steps) => {
+            let ok = !steps.iter().any(|s| matches!(s, Step::Failed(_)));
+            report
+                .steps
+                .extend(steps.iter().map(|s| s.render_line().trim().to_owned()));
+            ok
+        }
+        Err(e) => {
+            report
+                .steps
+                .push(format!("FAILED     bundle deploy: {e:#}"));
+            false
+        }
+    };
+    if !ok {
+        report.exit = 1;
+        if !mode.dry_run {
+            report
+                .steps
+                .push("the bundle deploy failed, so nothing was launched".to_owned());
+        }
+    }
+    ok
+}
+
 /// Bring the Architect in `dir` up; see the module doc.
 ///
 /// Why: plan section 1.4, the `up` state table; #11364 closure conditions.
@@ -215,7 +266,12 @@ pub(crate) fn action_for(observed: &Observed, inside: bool) -> Action {
 /// waits and then finds the first one's Architect. Reads the state after the
 /// lock, then runs its action through `ops.run`. Exit: 0 up; 1 a step failed,
 /// the state cannot be read, or (inside Claude Code) not healthy; 2 refused.
+/// #11368: an action that runs deploys first, and `--dry-run` reports the
+/// planned deploy; a failed deploy runs no action.
 /// Test: `each_state_table_row_maps_to_its_action`,
+/// `every_launching_action_deploys_before_it_runs_11368`,
+/// `a_failed_deploy_launches_nothing_and_exits_1_11368`,
+/// `an_interrupted_deploy_through_up_launches_nothing_11368`,
 /// `two_concurrent_ups_start_one_architect`,
 /// `up_never_kills_a_live_unbound_claude`,
 /// `inside_claude_code_up_never_starts_or_stops_claude`,
@@ -269,6 +325,14 @@ pub(crate) fn up(
         Action::Report if inside => 1,
         _ => 0,
     };
+    let mode = Mode {
+        dry_run,
+        restart: !inside,
+    };
+    // #11368 Q7: a dry run reports the planned deploy and writes nothing.
+    if dry_run && deploys(report.action) {
+        deploy_into(&mut report, &dir, names, mode, &ops);
+    }
     if dry_run
         || matches!(
             report.action,
@@ -282,6 +346,10 @@ pub(crate) fn up(
                     .into(),
             );
         }
+        return report;
+    }
+    // #11368: the same deploy before every launch; a failure launches nothing.
+    if !deploy_into(&mut report, &dir, names, mode, &ops) {
         return report;
     }
     match (ops.run)(report.action, &dir, home, names) {
