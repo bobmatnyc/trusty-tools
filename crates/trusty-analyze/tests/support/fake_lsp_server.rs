@@ -24,7 +24,8 @@
 //! pull never returns, with and without a version; `no_check` pushes
 //! nothing; `check_late` pushes nothing on `didOpen` and then, after a
 //! `didChange`, a check set stamped with the new version (a v1 check landing
-//! late); `slow_pull` holds each pull for [`SLOW_PULL_MS`].
+//! late); `held_pull` holds each pull until the next `didChange` arrives,
+//! after writing [`pull_marker`] so a test knows the pull is in flight.
 //! What: it runs inside the integration-test binary itself. `tests/lsp_child.rs`
 //! re-executes its own executable through `/bin/sh` as
 //! `<exe> --exact fake_lsp_server_entry --nocapture 3>&1 1>&2`, with the mode in
@@ -38,7 +39,7 @@
 #![allow(dead_code)] // each test binary compiles this module and uses a subset
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -46,8 +47,6 @@ use serde_json::{json, Value};
 
 /// How long `loading` mode stays not quiescent after `initialized`.
 pub const LOADING_MS: u64 = 400;
-/// How long `slow_pull` holds a `textDocument/diagnostic` answer.
-pub const SLOW_PULL_MS: u64 = 800;
 /// The message of the check-only (flycheck-like) diagnostic the `check*`
 /// modes push and never pull, as rust-analyzer does for `cargo check`.
 pub const CHECK_MESSAGE: &str = "use of moved value: `s`";
@@ -125,6 +124,8 @@ fn serve(mode: &str) -> i32 {
     let mut references_seen = 0u32;
     let ready = Arc::new(AtomicBool::new(false));
     let open_doc: OpenDoc = Arc::new(Mutex::new(None));
+    // #11935: the pull `held_pull` answers only after the next didChange.
+    let mut held_pull: Option<Value> = None;
     while let Some(msg) = read_frame(&mut input) {
         let method = msg["method"].as_str().unwrap_or_default().to_string();
         let id = msg.get("id").cloned();
@@ -175,6 +176,11 @@ fn serve(mode: &str) -> i32 {
                     let loaded = ready.load(Ordering::SeqCst);
                     publish(&mut out, mode, &doc["uri"], &doc["version"], loaded);
                 }
+                if method == "textDocument/didChange" {
+                    if let Some(id) = held_pull.take() {
+                        reply_pull(&mut out, mode, &ready, id);
+                    }
+                }
             }
             (_, None) => {}
             (_, Some(_)) if mode == "crash" => return 3,
@@ -183,19 +189,13 @@ fn serve(mode: &str) -> i32 {
             ("textDocument/references", Some(id)) if !ready.load(Ordering::SeqCst) => {
                 reply(&mut out, id, json!([]));
             }
-            ("textDocument/diagnostic", Some(id)) => {
-                if mode == "slow_pull" {
-                    // A sync can land while this pull is in flight.
-                    std::thread::sleep(std::time::Duration::from_millis(SLOW_PULL_MS));
-                }
-                let loaded = ready.load(Ordering::SeqCst) && mode != "loading_clean";
-                let items = if loaded { canned() } else { json!([]) };
-                reply(
-                    &mut out,
-                    id,
-                    json!({"kind": "full", "resultId": "fake", "items": items}),
-                );
+            // #11935: a sync lands while this pull is in flight by
+            // construction, not by a timer that load can outrun.
+            ("textDocument/diagnostic", Some(id)) if mode == "held_pull" => {
+                held_pull = Some(id);
+                mark_pull_held();
             }
+            ("textDocument/diagnostic", Some(id)) => reply_pull(&mut out, mode, &ready, id),
             ("textDocument/references", Some(id))
                 if mode == "content_modified_forever"
                     || (mode == "content_modified"
@@ -226,6 +226,34 @@ fn serve(mode: &str) -> i32 {
         }
     }
     0
+}
+
+/// Answer a `textDocument/diagnostic` pull: the canned set once loaded.
+fn reply_pull(out: &mut impl Write, mode: &str, ready: &AtomicBool, id: Value) {
+    let loaded = ready.load(Ordering::SeqCst) && mode != "loading_clean";
+    let items = if loaded { canned() } else { json!([]) };
+    reply(
+        out,
+        id,
+        json!({"kind": "full", "resultId": "fake", "items": items}),
+    );
+}
+
+/// The file `held_pull` writes once it holds a pull: the pidfile path plus
+/// `.pull`, so each rig's marker lives in its own temp dir.
+pub fn pull_marker(pidfile: &Path) -> PathBuf {
+    let mut name = pidfile.as_os_str().to_owned();
+    name.push(".pull");
+    PathBuf::from(name)
+}
+
+fn mark_pull_held() {
+    if let Ok(path) = std::env::var(PIDFILE_ENV) {
+        let marker = pull_marker(Path::new(&path));
+        let tmp = format!("{}.tmp", marker.display());
+        std::fs::write(&tmp, b"held").expect("write pull marker");
+        std::fs::rename(&tmp, &marker).expect("publish pull marker");
+    }
 }
 
 /// What `load_failed` puts in its status message; it must never reach a caller.
