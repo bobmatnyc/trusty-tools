@@ -226,13 +226,17 @@ def _fake_run(calls, returncode=0, stdout="OK", stderr=""):
     return run
 
 
-def test_run_haiku_sets_config_dir_when_unset(monkeypatch):
+def test_run_haiku_sets_config_dir_when_unset(monkeypatch, tmp_path):
+    # #11821 P6b: the managed dir sits under the install's config dir (install.toml), not a fixed home path.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("TRUSTY_MPM_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".trusty-tools").mkdir()
+    (tmp_path / ".trusty-tools" / "install.toml").write_text('config_dir = "/srv/cfg"\n')
     calls = []
     monkeypatch.setattr(at.subprocess, "run", _fake_run(calls))
     assert at.run_haiku("p") == "OK"
-    assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] == at.CLAUDE_CONFIG_DIR
-    assert at.CLAUDE_CONFIG_DIR.endswith(".trusty-tools/trusty-mpm/claude-config")
+    assert calls[0]["env"]["CLAUDE_CONFIG_DIR"] == "/srv/cfg/.trusty-tools/trusty-mpm/claude-config"
 
 
 def test_run_haiku_keeps_existing_config_dir(monkeypatch):

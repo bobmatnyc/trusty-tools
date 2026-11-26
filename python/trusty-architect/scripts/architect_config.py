@@ -5,10 +5,19 @@ installation. They must live in the instance's own file, never in a shipped
 script, so the shipped scripts carry no operator value (#9171, D77).
 `tailnet_url` is the dashboard's tailnet origin (e.g. https://<name>:7890/), the
 second link of the reply footer; "" means localhost only. `projects_root` is the
-directory holding <owner>/<repo> checkouts (default ~/trusty-mpm-projects;
-`ARCHITECT_PROJECTS_ROOT` overrides) and `claude_config_dir` the Claude Code config
+directory holding <owner>/<repo> checkouts (`ARCHITECT_PROJECTS_ROOT` overrides;
+default `install_projects_root()`) and `claude_config_dir` the Claude Code config
 directory whose projects/ holds the transcripts (`CLAUDE_CONFIG_DIR` overrides; default
-~/.trusty-tools/trusty-mpm/claude-config). Both are returned absolute (#10571).
+`managed_claude_config_dir()`). Both are returned absolute (#10571).
+Install paths (#11821 P6b): the defaults come from the install's own paths, the
+chain trusty-common's resolver applies per key: env (`TRUSTY_MPM_WORKSPACE_ROOT`,
+`TRUSTY_MPM_CONFIG_DIR`; trimmed, blank = unset, `~` expanded), then
+`<home>/.trusty-tools/install.toml` (values literal), then the default
+(`<home>/trusty-mpm-projects`, `<home>`). Every winning value must be absolute.
+A broken, unreadable or unknown-key install.toml raises `ConfigError`, never a
+`$HOME` fallback; it is read only when env, the file and the env overrides above
+leave a key undecided. The managed claude-config dir is
+`<config_dir>/.trusty-tools/trusty-mpm/claude-config`, as tm derives it.
 `poll_interval_s` is the poller's cycle length in whole seconds (default 60): the one
 cadence every start path reads (#11369).
 What: `load()` reads `<root>/local/architect.json`, where `root` is the parent
@@ -23,13 +32,14 @@ never the value. Unknown keys are kept out of the config and listed in
 Python 3.9+; import it as `architect_config` from a sibling script. A shell script reads one value with
 `python3 architect_config.py poll-interval|owner-name` (#11369): it prints the value, or exits 2 with the
 ConfigError text on stderr.
-Test: tests/test_architect_config.py; tailnet_url in tests/test_dashboard_footer.py; the CLI in tests/test_poll_cadence.py.
+Test: tests/test_architect_config.py and tests/test_architect_install_paths.py; tailnet_url in tests/test_dashboard_footer.py; the CLI in tests/test_poll_cadence.py.
 """
 # No `from __future__ import annotations`: a dataclass with string annotations
 # fails when a sibling loads this file by path without registering it.
 import json
 import math
 import os
+import re
 import types
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
@@ -41,8 +51,12 @@ _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 # #11002: `schema_version` is the seeded file's ADR-0077 version; known, so it is never `unknown`.
 _KNOWN = ("owner_name", "memory_palace", "dashboard_port", "tailnet_url", "repos", "caps",
           "projects_root", "claude_config_dir", "poll_interval_s", "schema_version")
-DEFAULT_PROJECTS_ROOT = "~/trusty-mpm-projects"
-DEFAULT_CLAUDE_CONFIG_DIR = "~/.trusty-tools/trusty-mpm/claude-config"
+# #11821 P6b: the install-path names trusty-common's resolver uses (install_paths/mod.rs).
+PROJECTS_ROOT_ENV = "TRUSTY_MPM_WORKSPACE_ROOT"
+CONFIG_DIR_ENV = "TRUSTY_MPM_CONFIG_DIR"
+INSTALL_KEYS = ("projects_root", "config_dir", "claude_config_dir", "codex_home")
+_TOOLS_DIR = ".trusty-tools"
+_MANAGED_CLAUDE = (_TOOLS_DIR, "trusty-mpm", "claude-config")
 _REPO_FIELDS = ("slug", "gh_config_dir", "checkout")
 _EMPTY: Mapping[str, Any] = types.MappingProxyType({})
 
@@ -85,9 +99,104 @@ class Config:
 
 
 def default_claude_config_dir(environ: Optional[Mapping[str, str]] = None) -> str:
-    """`CLAUDE_CONFIG_DIR`, else the trusty-mpm default; absolute. Reads no file (safe at import time)."""
+    """`CLAUDE_CONFIG_DIR`, else `managed_claude_config_dir()`; absolute.
+
+    #11821 P6b: with `CLAUDE_CONFIG_DIR` unset it reads install.toml, so a broken one raises ConfigError.
+    """
     env = os.environ if environ is None else environ
-    return os.path.abspath(os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or DEFAULT_CLAUDE_CONFIG_DIR))
+    if env.get("CLAUDE_CONFIG_DIR"):
+        return _abs(env["CLAUDE_CONFIG_DIR"])
+    return managed_claude_config_dir(env)
+
+
+def _home(env: Mapping[str, str]) -> str:
+    return env.get("HOME") or os.path.expanduser("~")
+
+
+def install_file_path(home: str) -> str:
+    """`<home>/.trusty-tools/install.toml`, anchored at home, never at the config dir."""
+    return os.path.join(home, _TOOLS_DIR, "install.toml")
+
+
+def read_install_file(home: str) -> Optional[dict]:
+    """The parsed install file; None when absent; ConfigError when unreadable, malformed or off-schema."""
+    path = install_file_path(home)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise ConfigError(f"{path}: cannot read: {type(err).__name__}") from None
+    try:
+        data = _parse_toml(raw.decode("utf-8"))
+    except ValueError as err:  # UnicodeDecodeError and TOMLDecodeError are ValueErrors
+        raise ConfigError(f"{path}: not valid install TOML ({err})") from None
+    for key, value in data.items():
+        if key not in INSTALL_KEYS:
+            raise _fail(path, key, f"one of {list(INSTALL_KEYS)} (unknown field)")
+        if not isinstance(value, str):
+            raise _fail(path, key, "a string path")
+    return data
+
+
+_FLAT_LINE = re.compile(r'^\s*([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*"|\'[^\']*\')\s*(?:#.*)?$')
+
+
+def _parse_toml(text: str) -> dict:
+    """tomllib from Python 3.11; below it the flat `key = "string"` lines tm writes, anything else a ValueError."""
+    try:
+        import tomllib
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        return tomllib.loads(text)
+    data = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = _FLAT_LINE.match(line)
+        if not m:
+            raise ValueError(f"line {n}: only `key = \"string\"` lines are read below Python 3.11")
+        key, val = m.groups()
+        if key in data:
+            raise ValueError(f"line {n}: duplicate key `{key}`")
+        data[key] = json.loads(val) if val.startswith('"') else val[1:-1]
+    return data
+
+
+def _install_path(key: str, env_var: str, default: str, env: Mapping[str, str], home: str) -> str:
+    """One key's chain: env, then install.toml, then `default`; the winner must be absolute."""
+    raw = (env.get(env_var) or "").strip()
+    if raw:
+        value, origin = (os.path.join(home, raw[2:]) if raw.startswith("~/") else home if raw == "~" else raw), env_var
+    else:
+        file = read_install_file(home)
+        if file is None or key not in file:
+            return default
+        value, origin = file[key], install_file_path(home)
+    if not value or not os.path.isabs(value):
+        raise _fail(origin, key, "a non-empty absolute path")
+    return value
+
+
+def install_config_dir(environ: Optional[Mapping[str, str]] = None, home: Optional[str] = None) -> str:
+    """The install's config dir: `TRUSTY_MPM_CONFIG_DIR`, install.toml `config_dir`, else home (#11821 P6b)."""
+    env = os.environ if environ is None else environ
+    home = home or _home(env)
+    return _install_path("config_dir", CONFIG_DIR_ENV, home, env, home)
+
+
+def install_projects_root(environ: Optional[Mapping[str, str]] = None, home: Optional[str] = None) -> str:
+    """The install's projects root: `TRUSTY_MPM_WORKSPACE_ROOT`, install.toml, else `<home>/trusty-mpm-projects`."""
+    env = os.environ if environ is None else environ
+    home = home or _home(env)
+    return _install_path("projects_root", PROJECTS_ROOT_ENV, os.path.join(home, "trusty-mpm-projects"), env, home)
+
+
+def managed_claude_config_dir(environ: Optional[Mapping[str, str]] = None, home: Optional[str] = None) -> str:
+    """`<config_dir>/.trusty-tools/trusty-mpm/claude-config`, tm's managed CLAUDE_CONFIG_DIR (#11821 P6b)."""
+    return os.path.join(install_config_dir(environ, home), *_MANAGED_CLAUDE)
 
 
 def default_path(root: Optional[str] = None,
@@ -113,8 +222,8 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
     repos = _repos(path, data.get("repos", {}), unknown)
     caps = _caps(path, data.get("caps", {}))
     interval = _interval(path, data.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S))
-    projects_root = _string(path, data, "projects_root") or DEFAULT_PROJECTS_ROOT
-    claude_dir = _string(path, data, "claude_config_dir") or DEFAULT_CLAUDE_CONFIG_DIR
+    projects_root = _string(path, data, "projects_root")
+    claude_dir = _string(path, data, "claude_config_dir")
     # See #10161: the environment wins over the file, one variable per key.
     owner = env.get("ARCHITECT_OWNER_NAME") or owner
     palace = env.get("ARCHITECT_MEMORY_PALACE") or palace
@@ -122,8 +231,10 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
         tailnet = _url("environment", "DASHBOARD_TAILNET_URL", env["DASHBOARD_TAILNET_URL"])
     if env.get("DASHBOARD_PORT"):
         port = _port("environment", "DASHBOARD_PORT", _env_number(env, "DASHBOARD_PORT", int))
-    projects_root = env.get("ARCHITECT_PROJECTS_ROOT") or projects_root
-    claude_dir = env.get("CLAUDE_CONFIG_DIR") or claude_dir
+    # #11821 P6b: install paths only when neither env nor the file decides, so a
+    # broken install.toml cannot block an explicit value.
+    projects_root = env.get("ARCHITECT_PROJECTS_ROOT") or projects_root or install_projects_root(env)
+    claude_dir = env.get("CLAUDE_CONFIG_DIR") or claude_dir or managed_claude_config_dir(env)
     if env.get("LOAD_FACTOR"):
         caps["load_factor"] = _positive(
             "environment", "LOAD_FACTOR", _env_number(env, "LOAD_FACTOR", float))

@@ -410,9 +410,19 @@ class RegistryError(ValueError):
 
 
 def mpm_root(env=None, home=None):
-    """tm's root: $TRUSTY_MPM_ROOT when set and non-empty, else ~/.trusty-mpm."""
+    """tm's root: $TRUSTY_MPM_ROOT when set and non-empty, else <config_dir>/.trusty-mpm.
+
+    #11821 P6b: config_dir is the install's (architect_config.install_config_dir); a broken install.toml is a
+    RegistryError, never a $HOME guess.
+    """
     env = os.environ if env is None else env
-    return env.get("TRUSTY_MPM_ROOT") or os.path.join(home or os.path.expanduser("~"), ".trusty-mpm")
+    if env.get("TRUSTY_MPM_ROOT"):
+        return env["TRUSTY_MPM_ROOT"]
+    import architect_config
+    try:
+        return os.path.join(architect_config.install_config_dir(env, home), ".trusty-mpm")
+    except architect_config.ConfigError as err:
+        raise RegistryError(f"The install paths could not be resolved, so the Projects view is empty. {err}") from None
 
 
 def _registry_json(path):
@@ -436,8 +446,8 @@ def registered_projects(root=None):
     tm's ProjectAliasEntry; dashboard_watch.alias_for: exact alias, else ASCII case-insensitive, else the row whose path is
     the managed checkout), kept when absolute, else None; `alias` = that row's alias (the session alias, None with no row);
     that file never adds a project. When the map gives no path, the managed checkout is used: an absolute repo_url, else
-    the canonical clone <projects_root>/<owner>/<repo> (projects_root from local/architect.json, default
-    ~/trusty-mpm-projects); `path_source` says which ("project map", "canonical layout", or None with no path). The path
+    the canonical clone <projects_root>/<owner>/<repo> (projects_root from local/architect.json, default the
+    install's projects root); `path_source` says which ("project map", "canonical layout", or None with no path). The path
     may not exist; build() says so. root defaults to mpm_root(). Absent files give []; a file in another shape is a
     RegistryError, which the view shows as registry_error.
     Test: tests/test_dashboard_projects_registry.py, tests/test_dashboard_watch.py
@@ -488,12 +498,15 @@ def clone_slug(segment):
 
 
 def _projects_root():
-    """local/architect.json `projects_root` (ARCHITECT_PROJECTS_ROOT wins), else ~/trusty-mpm-projects (#10571)."""
+    """local/architect.json `projects_root` (ARCHITECT_PROJECTS_ROOT wins), else the install's projects root (#10571).
+
+    #11821 P6b: an unusable config or install.toml is a RegistryError; it no longer falls back to a $HOME layout.
+    """
+    import architect_config
     try:
-        import architect_config
         return architect_config.load().projects_root
-    except Exception:  # an unusable config keeps the default layout
-        return os.path.expanduser("~/trusty-mpm-projects")
+    except architect_config.ConfigError as err:
+        raise RegistryError(f"The Architect config could not be read, so the Projects view is empty. {err}") from None
 
 
 def root_note(row, ok):
