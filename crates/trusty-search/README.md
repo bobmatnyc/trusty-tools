@@ -376,14 +376,14 @@ The indexer skips a file larger than its size cap and lists it in the index
 status `skipped_files` with reason `exceeds_size_limit`. Two caps can be set
 per index:
 
-| Field | Applies to | Default |
-|---|---|---|
-| `source_file_max_bytes` | source and text files | 1 MiB (1048576) |
-| `office_file_max_bytes` | pdf, docx, pptx, xls, xlsx, xlsm | 10 MiB (10485760) |
+| Field | Applies to | Default | Hard ceiling |
+|---|---|---|---|
+| `source_file_max_bytes` | source and text files | 1 MiB (1048576) | 256 MiB (268435456) |
+| `office_file_max_bytes` | pdf, docx, pptx, xls, xlsx, xlsm | 10 MiB (10485760) | 256 MiB (268435456) |
 
-Each accepts 1 byte to 256 MiB (268435456). Office extraction and chunking
-read the whole file into memory, so the ceiling bounds memory per file. A
-value of 0 or above the ceiling fails config loading. `data_file_max_bytes`
+Each accepts 1 byte up to the ceiling. Office extraction and chunking read
+the whole file into memory, so the ceiling bounds memory per file. A value of
+0 or above the ceiling fails config loading. `data_file_max_bytes`
 (64 KiB) still applies on top for json, xml, txt and log files.
 
 Set them in `.trusty-search.yaml` (single index) or per index in
@@ -394,9 +394,11 @@ source_file_max_bytes: 2097152    # 2 MiB
 office_file_max_bytes: 52428800   # 50 MiB
 ```
 
-The caps are sent when the index is registered (`search.index.create`, which
+The caps are set when the index is registered (`search.index.create`, which
 takes the same two fields). An index registered before the caps were set keeps
-its old caps; delete it and run `trusty-search index` again to apply them.
+its old caps: re-registering it answers `size_caps_applied: false` with the
+registered and requested caps, and `trusty-search index` prints a warning. To
+change the caps, delete the index and run `trusty-search index` again.
 
 ## Memory tiers (auto-tuned at startup)
 

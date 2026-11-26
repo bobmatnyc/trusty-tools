@@ -297,24 +297,6 @@ pub(crate) async fn list_indexes_report(
 /// Test: `create_over_the_socket_matches_the_http_body`,
 /// `a_root_the_allowlist_has_not_approved_is_refused_and_registers_nothing` in
 /// `crate::service::rpc::writes`.
-/// #11655: `400 invalid_size_cap` for a size cap of 0 or over the ceiling.
-///
-/// Test: `create_refuses_an_out_of_range_size_cap`.
-fn reject_invalid_size_caps(
-    req: &CreateIndexRequest,
-) -> Result<(), (axum::http::StatusCode, serde_json::Value)> {
-    crate::service::size_caps::validate_size_caps(
-        req.source_file_max_bytes,
-        req.office_file_max_bytes,
-    )
-    .map_err(|message| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            serde_json::json!({ "error": "invalid_size_cap", "message": message }),
-        )
-    })
-}
-
 pub(crate) async fn create_index_report(
     state: &Arc<SearchAppState>,
     mut req: CreateIndexRequest,
@@ -323,7 +305,7 @@ pub(crate) async fn create_index_report(
     // #8922: refused before anything is registered.
     super::index_config::reject_invalid_globs(req.exclude_globs.as_deref())?;
     // #11655: an out-of-range size cap is refused before anything registers.
-    reject_invalid_size_caps(&req)?;
+    super::create_size_caps::reject_invalid(&req)?;
     // Issue #63: validate root_path is absolute and points at an existing
     // directory before registering. Previously the handler accepted any
     // `PathBuf` the client supplied, so a relative path (e.g. `claude-mpm`)
@@ -410,7 +392,7 @@ pub(crate) async fn create_index_report(
         super::create_layout::refuse_layout_change(&req, Some(&*registered)).await?;
         // #7434: `roots` the index does not hold are refused, never dropped.
         super::indexes_roots::refuse_unapplied_roots(&req, &registered)?;
-        return Ok(serde_json::json!({
+        let mut body = serde_json::json!({
             "id": req.id,
             "created": false,
             "reason": "already exists",
@@ -419,7 +401,10 @@ pub(crate) async fn create_index_report(
             // same reason as `root_path_mismatch_response` — serializing a raw
             // `Path` through `json!` panics on a non-UTF-8 path (#5827).
             "root_path": registered_root.display().to_string(),
-        }));
+        });
+        // #11655: caps apply at registration; say so when these were ignored.
+        super::create_size_caps::report_unapplied(&req, &registered, &mut body);
+        return Ok(body);
     }
     // Issue #2336: reject a second live index over the same canonical
     // root_path. Two registrations sharing one colocated root resolve to the

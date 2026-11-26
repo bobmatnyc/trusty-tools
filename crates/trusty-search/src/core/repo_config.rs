@@ -169,8 +169,9 @@ pub struct IndexConfig {
     pub source_file_max_bytes: Option<u64>,
 
     /// #11655: office/PDF size cap (bytes) for pdf/docx/pptx/xls/xlsx/xlsm.
-    /// Absent ⇒ 10 MiB (`extract::MAX_OFFICE_FILE_BYTES`). Same range and
-    /// rules as `source_file_max_bytes`.
+    /// Absent ⇒ 10 MiB (`extract::MAX_OFFICE_FILE_BYTES`). Range
+    /// `1..=268435456` (256 MiB hard ceiling); applied at registration only,
+    /// as `source_file_max_bytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub office_file_max_bytes: Option<u64>,
 }

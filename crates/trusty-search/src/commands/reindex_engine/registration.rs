@@ -206,6 +206,10 @@ pub(crate) async fn register_on(
                 .get("created")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // #11655: caps apply at registration only; say when they did not.
+            if let Some(line) = size_caps_warning(index_name, &body) {
+                eprintln!("{line}");
+            }
             Ok(RegisterOutcome::Registered { created })
         }
         // #9214 H2: unreachable only; it used to be `Err(_) => Unreachable`.
@@ -294,6 +298,32 @@ fn create_params(
         create_body["office_file_max_bytes"] = serde_json::json!(v);
     }
     create_body
+}
+
+/// The warning line for a create answer whose size caps were not applied.
+///
+/// Why (#11655): caps are set when an index is registered, so caps added to
+/// the yaml for an existing index do nothing; the user must be told.
+/// What: `Some(line)` when the daemon answered `size_caps_applied: false`,
+/// naming the index, both cap sets and the remedy; `None` otherwise.
+/// Test: `a_create_answer_with_unapplied_caps_yields_one_warning_line`.
+pub(crate) fn size_caps_warning(index_name: &str, body: &serde_json::Value) -> Option<String> {
+    if body.get("size_caps_applied").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    let caps = |key: &str| {
+        let side = &body[key];
+        format!(
+            "source={} office={}",
+            side["source_file_max_bytes"], side["office_file_max_bytes"]
+        )
+    };
+    Some(format!(
+        "warning: index '{index_name}' is already registered with size caps {} (requested {}); \
+         delete the index and re-index to change the size caps",
+        caps("registered_size_caps"),
+        caps("requested_size_caps"),
+    ))
 }
 
 /// Fetch an index's chunk count from its status. `None` when the status

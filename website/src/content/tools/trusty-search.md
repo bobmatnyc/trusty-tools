@@ -76,7 +76,8 @@ matched pattern named in the error, not silently skipped.
 Files over a size cap are skipped and listed in the index status. The caps
 default to 1 MiB for source files and 10 MiB for PDF and Office documents.
 Set `source_file_max_bytes` or `office_file_max_bytes` in `.trusty-search.yaml`
-to raise either one, up to 256 MiB.
+to raise either one, up to a hard ceiling of 256 MiB. The caps are set when
+the index is registered; to change them, delete the index and re-index.
 
 ## 24 tools over MCP
 

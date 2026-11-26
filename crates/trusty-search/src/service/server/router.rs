@@ -284,14 +284,17 @@ pub struct CreateIndexRequest {
     ///
     /// Why: a project with large source or text files can raise the cap for
     /// its own index without lifting it for every index.
-    /// What: `1..=size_caps::MAX_CONFIGURABLE_FILE_BYTES`, else `400
-    /// invalid_size_cap`; persisted to `indexes.toml` when set.
+    /// What: `1..=size_caps::MAX_CONFIGURABLE_FILE_BYTES` (256 MiB hard
+    /// ceiling), else `400 invalid_size_cap`; persisted to `indexes.toml` when
+    /// set. On an id already registered with other caps the answer carries
+    /// `size_caps_applied: false` and the caps are unchanged.
     /// Test: `create_refuses_an_out_of_range_size_cap`.
     #[serde(default)]
     pub source_file_max_bytes: Option<u64>,
 
-    /// #11655: office/PDF size cap (bytes). `None`/missing ⇒ 10 MiB. Same
-    /// range and persistence as `source_file_max_bytes`.
+    /// #11655: office/PDF size cap (bytes). `None`/missing ⇒ 10 MiB. Range
+    /// 1 byte to 256 MiB (hard ceiling); same persistence and re-registration
+    /// rules as `source_file_max_bytes`.
     #[serde(default)]
     pub office_file_max_bytes: Option<u64>,
 

@@ -796,3 +796,33 @@ async fn create_params_carries_configured_size_caps() {
         RegisterOutcome::Registered { created: true }
     );
 }
+
+/// #11655: a create answer reporting unapplied caps yields exactly one warning
+/// line naming the index and the remedy; any other answer yields none.
+#[test]
+#[serial_test::parallel]
+fn a_create_answer_with_unapplied_caps_yields_one_warning_line() {
+    use super::registration::size_caps_warning;
+    let body = json!({
+        "id": "docs",
+        "created": false,
+        "size_caps_applied": false,
+        "registered_size_caps": { "source_file_max_bytes": 1_048_576, "office_file_max_bytes": 10_485_760 },
+        "requested_size_caps": { "source_file_max_bytes": 2_097_152, "office_file_max_bytes": null },
+    });
+    let line = size_caps_warning("docs", &body).expect("a warning");
+    assert!(!line.contains('\n'), "one line: {line}");
+    assert!(line.contains("'docs'"), "{line}");
+    assert!(
+        line.contains("source=1048576") && line.contains("source=2097152"),
+        "{line}"
+    );
+    assert!(line.contains("delete the index and re-index"), "{line}");
+
+    assert!(size_caps_warning(
+        "docs",
+        &json!({ "created": false, "reason": "already exists" })
+    )
+    .is_none());
+    assert!(size_caps_warning("docs", &json!({ "created": true })).is_none());
+}

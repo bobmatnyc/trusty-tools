@@ -18,6 +18,8 @@ mod admin;
 mod components;
 mod contrib_graph;
 mod create_layout;
+// #11655: size-cap validation and the not-applied signal on create.
+mod create_size_caps;
 // #8167/#8232: a delete closes the index's redb and HNSW files first.
 mod delete_close;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
