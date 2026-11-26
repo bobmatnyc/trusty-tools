@@ -89,6 +89,8 @@ mod tm_architect_drift_11773;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #11821 P6b: `tm paths set` refuses a Claude Code session; `show` on a broken file.
+mod tm_paths_11821;
 // #10735: the claude.ai connectors pass the egress guard; the rest stays.
 mod connectors_allowed_10735;
 // #8454 S2: the trust anchors through the egress hook, pm-guard off.
