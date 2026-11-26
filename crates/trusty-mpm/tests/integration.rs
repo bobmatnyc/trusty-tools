@@ -76,7 +76,9 @@ mod tm_compress_pipe;
 mod tm_doctor_fix_dry_run;
 mod tm_doctor_network;
 mod tm_doctor_standalone;
+// #11003: `tm whats-new` and the once-per-release doctor notice.
 mod tm_register_url_id_10569;
+mod tm_whats_new;
 // #9822: `tm architect <verb>` against the Python goldens, fake tmux.
 mod tm_architect_verbs;
 // #8436: `tm fleet init|status` through the binary.
