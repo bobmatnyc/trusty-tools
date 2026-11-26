@@ -441,10 +441,13 @@ mod tests_byte_cap;
 
 #[cfg(test)]
 mod tests_bool_flags;
+// #11903: `create_index` carries the #11655 size caps to the real create path.
 #[cfg(test)]
 mod tests_lane;
 #[cfg(test)]
 mod tests_lexical_args;
+#[cfg(test)]
+mod tests_size_caps_11903;
 // Issue #138: tools/list completeness and per-lane dispatch validation.
 #[cfg(test)]
 mod tests_tools_list;
