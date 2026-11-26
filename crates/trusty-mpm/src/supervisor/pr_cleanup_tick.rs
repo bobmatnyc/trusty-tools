@@ -161,14 +161,16 @@ pub async fn run_sweep(mgr: &SessionManager) -> usize {
             (Vec::new(), Vec::new())
         }
     };
+    // #11821: the sweep stamps the registry; a broken install.toml skips it.
+    let registry = match CleanupRegistry::production() {
+        Ok(registry) => registry,
+        Err(e) => {
+            warn!("pr cleanup sweep: the config dir is unresolved ({e}); skipping the sweep");
+            return 0;
+        }
+    };
     let gh = RealGh::new(env, unset);
-    run_sweep_with_gh(
-        mgr,
-        &gh,
-        &CleanupRegistry::production(),
-        auth_backoff::shared(),
-    )
-    .await
+    run_sweep_with_gh(mgr, &gh, &registry, auth_backoff::shared()).await
 }
 
 /// [`run_sweep`] with the `gh` seam, registry and backoff gate passed in.

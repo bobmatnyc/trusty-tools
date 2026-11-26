@@ -68,7 +68,7 @@ pub use worktree_adoption::{
 };
 pub use worktree_policy::{
     dispatched_agent_worktree_enabled, registry_data_dir, registry_data_dir_under,
-    worktree_enabled_for_origin, worktree_enabled_for_origin_at, worktree_enabled_for_project,
-    worktree_enabled_in, worktree_override_in_project,
+    try_registry_data_dir, worktree_enabled_for_origin, worktree_enabled_for_origin_at,
+    worktree_enabled_for_project, worktree_enabled_in, worktree_override_in_project,
 };
 pub use worktree_unadopt::{UnadoptReport, unadopt_paths};

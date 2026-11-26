@@ -408,3 +408,65 @@ fn session_spawn_env_cli_fails_closed_on_a_broken_install_file() {
         env.vars.iter().map(|(k, _)| k).collect::<Vec<_>>()
     );
 }
+
+/// #11821 P3-f2 PR 2: the `.mcp.json` provenance writer records nothing;
+/// before the fix it wrote `$HOME/.trusty-mpm/mcp-json-provenance.json`.
+#[test]
+fn mcp_provenance_writers_fail_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let target = fx.home.join("above/.mcp.json");
+    trusty_mpm::core::mcp_provenance::record_write_best_effort(&target, "{}");
+    assert_refused_closed(&fx, "install.toml".to_string());
+}
+
+/// #11821 P3-f2 PR 2: the `tm pr` cleanup registry refuses; before the fix
+/// `production()` resolved `$HOME/.trusty-mpm/pr-cleanup.json`.
+#[test]
+fn pr_cleanup_registry_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::pr_cleanup::CleanupRegistry::production()
+        .expect_err("the registry refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f2 PR 2: the project-registry dir a writer uses refuses.
+#[test]
+fn registry_writers_fail_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::project::try_registry_data_dir().expect_err("the registry dir refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f2 PR 2: the savings ledger path a writer uses refuses.
+#[test]
+fn default_savings_log_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::savings::default_savings_log().expect_err("the ledger refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f2 PR 2: the SessionStart sweep leaves a staged row alone;
+/// before the fix it swept `$HOME/.trusty-mpm/usage/pending-savings` and
+/// deleted this stranded row there.
+#[test]
+fn staged_savings_sweep_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    // The lenient `$HOME` fallback root, named through the constant.
+    let fallback = fx.home.join(trusty_mpm::core::paths::FRAMEWORK_DIR_NAME);
+    let pending = fallback.join("usage/pending-savings");
+    std::fs::create_dir_all(&pending).expect("mkdir pending");
+    let staged = pending.join("00000000000000aa.json");
+    std::fs::write(&staged, "{}").expect("stage");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(13 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(&staged)
+        .and_then(|f| f.set_modified(old))
+        .expect("age the staged row");
+    assert!(!trusty_mpm::core::savings_sidecar::emit_staged_row_for_session("sess-11821"));
+    assert!(staged.exists(), "the $HOME root must not be swept");
+    assert!(
+        !fallback.join("usage/savings.jsonl").exists(),
+        "no row appended under $HOME"
+    );
+}

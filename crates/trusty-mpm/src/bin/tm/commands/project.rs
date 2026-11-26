@@ -133,7 +133,10 @@ pub(crate) async fn project(
 /// `project_unadopt_fails_when_a_path_matches_no_record_10592`,
 /// `project_unadopt_matches_a_deleted_folder_by_relative_and_symlinked_path_10592`.
 fn unadopt_cmd(paths: &[std::path::PathBuf], dry_run: bool) -> anyhow::Result<()> {
-    let store_dir = trusty_mpm::project::registry_data_dir();
+    // #11821: the ledger write fails closed; no `$HOME` fallback.
+    let store_dir = trusty_mpm::project::try_registry_data_dir().map_err(|e| {
+        anyhow::anyhow!("tm project unadopt: the config dir is unresolved: {e}; ledger unchanged")
+    })?;
     let report = trusty_mpm::project::unadopt_paths(&store_dir, paths, dry_run)
         .map_err(|e| anyhow::anyhow!("tm project unadopt: ledger unchanged: {e}"))?;
     let verb = if dry_run { "would remove" } else { "removed" };

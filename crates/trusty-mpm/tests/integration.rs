@@ -22,6 +22,8 @@ mod common;
 // #10571 Phase 2: the Architect's clear chain on a fresh install.
 mod architect_turn_active_chain_10571;
 mod catalog_sync_idempotent;
+// #11821 P3-f2: a broken install.toml fails the CLI's state writers closed.
+mod broken_install_cli_writers_11821_p3f2;
 mod commit_stats_hook_budget;
 mod config_mount;
 // #10153: `dbatg` MCP writes are bound to the bridge's PM session.

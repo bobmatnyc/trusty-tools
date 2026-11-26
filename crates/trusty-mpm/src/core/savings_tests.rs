@@ -102,7 +102,7 @@ fn savings_log_in_nests_under_usage() {
 /// Test: itself.
 #[test]
 fn default_savings_log_is_under_the_framework_root() {
-    let path = default_savings_log();
+    let path = default_savings_log().expect("the host's config dir resolves");
     assert!(
         path.ends_with("usage/savings.jsonl"),
         "default ledger must be <root>/usage/savings.jsonl: {}",

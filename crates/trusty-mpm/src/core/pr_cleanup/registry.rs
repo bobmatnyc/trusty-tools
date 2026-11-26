@@ -146,10 +146,13 @@ impl CleanupRegistry {
     ///
     /// Why: `tm pr open`, `tm pr cleanup` and the supervisor's sweep must all
     /// resolve the SAME file, and each computing `~/.trusty-mpm` for itself is
-    /// how they would drift apart.
-    /// Test: `sweep_registry_path_is_under_the_framework_root` pins the shape.
-    pub fn production() -> Self {
-        Self::under_root(crate::core::paths::FrameworkPaths::default().root)
+    /// how they would drift apart. Every caller writes the registry, so a
+    /// broken `install.toml` is an error, never the `$HOME` fallback (#11821).
+    /// Test: `sweep_registry_path_is_under_the_framework_root` pins the shape;
+    /// `pr_cleanup_registry_fails_closed_on_a_broken_install_file` the refusal.
+    pub fn production() -> Result<Self, trusty_common::install_paths::InstallPathsError> {
+        // #11821: writers fail closed; no `$HOME` fallback.
+        crate::core::paths::FrameworkPaths::try_default().map(|paths| Self::under_root(paths.root))
     }
 
     /// Where this registry reads and writes.
