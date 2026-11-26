@@ -88,6 +88,29 @@ fn cargo_install_failure_is_reported() {
     );
 }
 
+/// #11909: a published server whose `cargo install` exits non-zero is
+/// `Missing` with a "failed" reason, and is not registered.
+#[test]
+fn a_failed_cargo_install_of_a_published_server_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("failing-cargo");
+    std::fs::write(&path, "#!/bin/sh\nexit 101\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env = env_in(tmp.path(), Some(path));
+    let out = ensure(&env);
+    let Install::Missing(why) = &out[0].install else {
+        panic!("want Missing, got {:?}", out[0].install);
+    };
+    assert!(why.contains("failed"), "{why}");
+    assert!(why.contains("cargo install trusty-browser"), "{why}");
+    assert_eq!(out[0].register, Register::Skipped);
+    assert!(
+        mcp_config::get_server(&env.config_dir, "trusty-browser-mcp")
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn missing_cargo_is_reported_and_registration_skipped() {
     let tmp = tempfile::tempdir().unwrap();
