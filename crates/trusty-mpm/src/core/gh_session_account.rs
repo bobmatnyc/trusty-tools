@@ -72,11 +72,14 @@ fn refusal(login: &str, dir: &Path, reason: &str) -> String {
 ///
 /// Why: the one call `tm sessions new --account`, `tm launch --account` and
 /// `tm <url> --account` make before a session exists.
-/// What: resolves `origin` through [`session_origin`]; stores `stdin_token`
+/// What: refuses first when the config dir is unresolved (a broken
+/// `install.toml`, #11821); resolves `origin` through [`session_origin`]; stores `stdin_token`
 /// first when given ([`store_supplied_token`]); then
 /// [`prepare_session_account_with`]. Blocking (a `gh` subprocess and HTTPS
 /// calls); run it off the async executor.
-/// Test: none directly (real `gh` and network); the decisions are
+/// Test: `gh_session_token_writer_fails_closed_on_a_broken_install_file`
+/// (env_serial) for the refusal; otherwise none directly (real `gh` and
+/// network); the decisions are
 /// [`session_origin`]'s, [`store_supplied_token`]'s and
 /// [`prepare_session_account_with`]'s.
 pub fn prepare_session_account(
@@ -84,7 +87,15 @@ pub fn prepare_session_account(
     origin: &str,
     stdin_token: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let state_root = crate::core::paths::FrameworkPaths::default().root;
+    // #11821: the token writer refuses a broken install.toml; no `$HOME` fallback.
+    let state_root = crate::core::paths::FrameworkPaths::try_default()
+        .map_err(|e| {
+            format!(
+                "cannot run this session as gh account '{login}': the config dir is \
+                 unresolved: {e}"
+            )
+        })?
+        .root;
     let operator_dir = crate::core::gh_account::gh_config_dir()
         .unwrap_or_else(|| PathBuf::from(".config").join("gh"));
     let origin = session_origin(login, origin, &SshHostAliases::for_current_user())?;

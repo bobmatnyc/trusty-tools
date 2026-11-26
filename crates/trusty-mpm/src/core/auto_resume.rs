@@ -127,10 +127,16 @@ pub fn read_override() -> std::io::Result<Option<bool>> {
 /// Write the persisted desired flag to the default framework root.
 ///
 /// Why: the console's auto-resume toggle calls this through the MCP backend.
-/// What: resolves [`FrameworkPaths::default`] and writes `desired_path`.
-/// Test: covered indirectly via `write_desired_at`.
+/// What: resolves [`FrameworkPaths::try_default`] and writes `desired_path`;
+/// an unresolved config dir (a broken `install.toml`) is an `Err` naming the
+/// file, never a write under `$HOME` (#11821).
+/// Test: `auto_resume_writer_fails_closed_on_a_broken_install_file` (env_serial);
+/// the write itself via `write_then_read_round_trips`.
 pub fn write_desired(enabled: bool) -> std::io::Result<()> {
-    write_desired_at(&desired_path(&FrameworkPaths::default()), enabled)
+    // #11821: a writer fails closed; readers above keep the lenient `default()`.
+    let paths = FrameworkPaths::try_default()
+        .map_err(|e| std::io::Error::other(format!("the config dir is unresolved: {e}")))?;
+    write_desired_at(&desired_path(&paths), enabled)
 }
 
 /// Report the auto-resume flag the supervisor process booted with.

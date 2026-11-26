@@ -87,6 +87,9 @@ pub enum ArchiveMoveError {
     /// No home directory to place the archive root under.
     #[error("no home directory to place the archive root under")]
     NoHome,
+    /// The config dir does not resolve, e.g. a broken `install.toml` (#11821).
+    #[error("the config dir is unresolved: {0}")]
+    ConfigDir(trusty_common::install_paths::InstallPathsError),
 }
 
 /// How the directory reached the archive.
@@ -145,12 +148,22 @@ fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> ArchiveMoveEr
     move |error| ArchiveMoveError::Io { context, error }
 }
 
-/// `~/.trusty-tools/archive` (owner ruling D8b).
+/// `<config dir>/.trusty-tools/archive` (owner ruling D8b), failing closed.
+///
+/// Why: archive moves session data here; on a broken `install.toml` it must
+/// refuse, not move the data under `$HOME` (#11821).
+/// What: [`crate::core::config_base::try_config_base_under`] of the home dir,
+/// joined with `.trusty-tools/archive`; [`ArchiveMoveError::NoHome`] with no
+/// home, [`ArchiveMoveError::ConfigDir`] naming the file otherwise.
+/// Test: `archive_root_fails_closed_on_a_broken_install_file` (env_serial).
 pub fn default_archive_root() -> Result<PathBuf, ArchiveMoveError> {
-    dirs::home_dir()
-        // #11821 P3: under the configured config dir.
-        .map(|h| crate::core::config_base::tools_root_under(&h).join("archive"))
-        .ok_or(ArchiveMoveError::NoHome)
+    let home = dirs::home_dir().ok_or(ArchiveMoveError::NoHome)?;
+    // #11821: the writer's root fails closed; no `$HOME` fallback.
+    let base = crate::core::config_base::try_config_base_under(&home)
+        .map_err(ArchiveMoveError::ConfigDir)?;
+    Ok(base
+        .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+        .join("archive"))
 }
 
 #[cfg(unix)]

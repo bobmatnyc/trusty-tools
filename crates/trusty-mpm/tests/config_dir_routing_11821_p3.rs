@@ -26,7 +26,11 @@ const PATH_VARS: [&str; 4] = [
     "CLAUDE_CONFIG_DIR",
 ];
 
-/// Points `HOME` at a scratch dir, clears [`PATH_VARS`], restores all on drop.
+/// The env vars that pick the operator's `gh` config dir (#11821 P3-f1).
+const GH_VARS: [&str; 2] = ["GH_CONFIG_DIR", "XDG_CONFIG_HOME"];
+
+/// Points `HOME` at a scratch dir, clears [`PATH_VARS`] and [`GH_VARS`],
+/// restores all on drop.
 ///
 /// `env_serial` runs one test at a time, so no other test observes the rewrite.
 struct EnvGuard {
@@ -37,12 +41,13 @@ impl EnvGuard {
     fn install(home: &Path) -> Self {
         let saved = std::iter::once("HOME")
             .chain(PATH_VARS)
+            .chain(GH_VARS)
             .map(|k| (k, std::env::var_os(k)))
             .collect();
         // SAFETY: `env_serial` forces one test thread; Drop restores every var.
         unsafe {
             std::env::set_var("HOME", home);
-            for k in PATH_VARS {
+            for k in PATH_VARS.into_iter().chain(GH_VARS) {
                 std::env::remove_var(k);
             }
         }
@@ -237,4 +242,85 @@ fn build_lease_store_fails_closed_on_a_broken_install_file() {
     let err = trusty_mpm::core::build_lease::store::try_canonical_path(&fx.home)
         .expect_err("store path refuses");
     assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f1: `--account-token-stdin` refuses before it touches the token.
+/// Before the fix the state root fell back to `$HOME/.trusty-mpm`. A blank
+/// token keeps the pre-fix run off the network: there the refusal named the
+/// empty token, not install.toml.
+#[test]
+fn gh_session_token_writer_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::gh_session_account::prepare_session_account(
+        "octo",
+        "https://github.com/acme/x",
+        Some(" "),
+    )
+    .expect_err("the token writer refuses");
+    assert_refused_closed(&fx, err);
+}
+
+/// #11821 P3-f1: the console's auto-resume toggle refuses; before the fix it
+/// wrote `$HOME/.trusty-mpm/auto_resume`.
+#[test]
+fn auto_resume_writer_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::core::auto_resume::write_desired(true).expect_err("write refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f1: the per-login gh account dir refuses; before the fix it was
+/// built under `$HOME/.trusty-mpm/gh-accounts`.
+#[test]
+fn account_config_dir_writer_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let operator_gh = fx.cfg.with_file_name("operator-gh");
+    std::fs::create_dir_all(&operator_gh).expect("mkdir operator gh dir");
+    std::fs::write(
+        operator_gh.join("hosts.yml"),
+        "github.com:\n    users:\n        octo:\n    user: octo\n",
+    )
+    .expect("hosts.yml");
+    // SAFETY: `env_serial`; `EnvGuard` restores the var.
+    unsafe { std::env::set_var("GH_CONFIG_DIR", &operator_gh) };
+    let err = trusty_mpm::daemon::managed_routes::inproject::account_config_dir_for("octo")
+        .expect_err("the account dir refuses");
+    assert_refused_closed(&fx, err);
+}
+
+/// #11821 P3-f1: the session archive root refuses; before the fix it was
+/// `$HOME/.trusty-tools/archive`.
+#[test]
+fn archive_root_fails_closed_on_a_broken_install_file() {
+    let (fx, _env) = broken_install_home();
+    let err = trusty_mpm::session_manager::archive_move::default_archive_root()
+        .expect_err("the archive root refuses");
+    assert_refused_closed(&fx, err.to_string());
+}
+
+/// #11821 P3-f1 review: a `github.token_env` launch refuses before it proves
+/// or stores the token; before the fix the state root fell back to
+/// `$HOME/.trusty-mpm`. An invalid `host` keeps the pre-fix run off the
+/// network: there the refusal named the host, not install.toml.
+/// #9123: a credential test, so `#[serial]` inside `CredentialSandbox`; the
+/// fixture's `EnvGuard` drops first and hands `$HOME` back to the sandbox.
+#[test]
+#[serial_test::serial]
+fn token_env_shim_fails_closed_on_a_broken_install_file() {
+    const SOURCE: &str = "TM_TEST_11821_P3F1_TOKEN_ENV";
+    let mut sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let (fx, _env) = broken_install_home();
+    let cfg = trusty_mpm::core::trusty_tools_config::GithubConfig {
+        token_env: Some(SOURCE.to_string()),
+        host: Some("not a host!".to_string()),
+        ..Default::default()
+    };
+    sandbox.set(SOURCE, "tok-11821");
+    let env = trusty_mpm::core::gh_identity::resolve_gh_env(Some(&cfg));
+    sandbox.remove(SOURCE);
+    let env = env.expect("a token_env binding resolves");
+    let err = trusty_mpm::core::gh_token_env_shim::shim_token_env(&env)
+        .expect_err("the token_env shim refuses");
+    assert!(!err.contains("tok-11821"), "the token must not leak: {err}");
+    assert_refused_closed(&fx, err);
 }
