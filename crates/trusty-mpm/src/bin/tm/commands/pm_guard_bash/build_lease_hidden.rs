@@ -100,11 +100,13 @@ pub(super) fn unparseable_build_refusal(
 /// substitution body in `spans`. A word outside a here-document body whose
 /// basename is a heavy program, and whose words from there on
 /// [`heavy_program_offset`] reads as a heavy build, needs one of `inserts`
-/// inside its simple command; a `build-lease` word before it counts as
-/// leased. Otherwise the command is refused. A quoted word stays data, and a
+/// inside its simple command and outside any closed `$(…)` nested in it; a
+/// `build-lease` word before it, or a [`REMOTE_RUNNERS`] program word, counts
+/// as leased. Otherwise the command is refused. A quoted word stays data, and a
 /// build a program starts without naming it (`make`, a script) is not seen.
 /// Test: `an_unleased_heavy_build_is_refused_whatever_its_shape`,
 /// `leased_builds_and_builds_named_by_no_word_are_not_refused`,
+/// `a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command`,
 /// `an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886`.
 pub(super) fn unleased_build_refusal(
     command: &str,
@@ -120,8 +122,17 @@ pub(super) fn unleased_build_refusal(
         let origin = text.as_ptr() as usize;
         for seg in split_shell_segments_raw(text) {
             let seg_at = base + (seg.as_ptr() as usize - origin);
-            let covered = |at: &usize| (seg_at..seg_at + seg.len()).contains(at);
-            if unleased_heavy_word(seg, seg_at, heavy, bodies) && !inserts.iter().any(covered) {
+            let seg_end = seg_at + seg.len();
+            // #11886 r3: a closed `$(…)` opened inside this segment is its own
+            // command; its words and its lease insertions are not this one's.
+            let nested = |at: usize| {
+                spans.iter().any(|&(s, e)| {
+                    e.is_some_and(|e| s > seg_at && e <= seg_end && (s..e).contains(&at))
+                })
+            };
+            let skip = |at: usize| bodies.contains(at) || nested(at);
+            let covered = |at: &usize| (seg_at..seg_end).contains(at) && !nested(*at);
+            if unleased_heavy_word(seg, seg_at, heavy, &skip) && !inserts.iter().any(covered) {
                 return Some(unleased_refusal(seg.trim()));
             }
         }
@@ -135,20 +146,34 @@ pub(super) fn unleased_build_refusal(
 ///
 /// Why: the fail-closed rule refused the EVO gate form (`$EVO cargo test`),
 /// which builds on EVO, not in this machine's shared target directory.
-/// What: a fixed list, no config key; [`unleased_heavy_word`] stops at any
-/// word whose basename is on it.
+/// What: a fixed list, no config key; [`unleased_heavy_word`] skips a simple
+/// command whose program word is exactly an entry (#11886 r3: not a basename,
+/// not any word, so `/tmp/evo` and `GIT_SSH=/usr/bin/ssh` do not match).
 /// Test: `a_build_after_a_remote_runner_is_not_refused`,
+/// `a_remote_runner_counts_only_as_the_exact_program_word`,
 /// `a_remote_runner_build_is_not_refused_11886`.
 const REMOTE_RUNNERS: &[&str] = &["$EVO", "${EVO}", "evo", "ssh"];
 
-/// Whether a word of `seg` (at absolute `seg_at`) starts a heavy build that
-/// no `build-lease` or [`REMOTE_RUNNERS`] word before it takes elsewhere.
-fn unleased_heavy_word(seg: &str, seg_at: usize, heavy: &Heavy, bodies: &HeredocBodies) -> bool {
-    for word in words(seg) {
-        if word.text == "build-lease" || REMOTE_RUNNERS.contains(&basename(&word.text)) {
+/// Whether a word of `seg` (at absolute `seg_at`, `skip`ped offsets aside)
+/// starts a heavy build that no `build-lease` word before it leases, in a
+/// simple command whose program word is not a [`REMOTE_RUNNERS`] entry.
+fn unleased_heavy_word(
+    seg: &str,
+    seg_at: usize,
+    heavy: &Heavy,
+    skip: &dyn Fn(usize) -> bool,
+) -> bool {
+    let seg_words = words(seg);
+    if program_index(&seg_words)
+        .is_some_and(|i| REMOTE_RUNNERS.contains(&seg_words[i].text.as_str()))
+    {
+        return false;
+    }
+    for word in seg_words {
+        if word.text == "build-lease" {
             return false;
         }
-        if bodies.contains(seg_at + word.start) {
+        if skip(seg_at + word.start) {
             continue;
         }
         let base = basename(&word.text);
@@ -265,8 +290,8 @@ fn operator_line_feeds_a_shell(line: &str) -> bool {
     })
 }
 
-/// Whether `text`, run as shell source, runs a heavy build.
-fn runs_heavy(text: &str, heavy: &Heavy) -> bool {
+/// Whether `text`, run as shell source, runs a heavy build: leased or refused.
+pub(super) fn runs_heavy(text: &str, heavy: &Heavy) -> bool {
     !matches!(
         rewrite_for_lease(text, heavy, "tm build-lease --"),
         LeaseRewrite::None
