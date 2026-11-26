@@ -46,7 +46,7 @@ fn the_shipped_agent_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "improver",
-            "3c1cde4b226291e68591defd73fbf9121ff5a7ab188ec14aa81b846f6d8fa124",
+            "5a76f9b6aad8d3edf4a6675f106337aeeb0ad079996e561d8c372be583a423b0",
         ),
         (
             "improvement-curator",
@@ -54,18 +54,13 @@ fn the_shipped_agent_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "drift-guard",
-            "1e94d54d878bfe88c37a1a9319b94bf576f1a0aae9234aa9cd4ab1612b222b66",
+            "a1dc95370f2ba7c5a0dd22e505556b701c6f331a51c4e2e95fe0ee45cf40b9a6",
         ),
     ];
     // An agent on its first release has no earlier text; its first edit
     // moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 5] = [
-        "runner",
-        "event-extractor",
-        "improver",
-        "improvement-curator",
-        "drift-guard",
-    ];
+    // #11896: improver and drift-guard took in their skills (D2f).
+    const FIRST_RELEASE: [&str; 3] = ["runner", "event-extractor", "improvement-curator"];
     assert_eq!(PINNED.len(), SHIPPED_AGENTS.len());
     for (agent, (name, pinned)) in shipped().iter().zip(PINNED) {
         assert_eq!(agent.stem, name);
@@ -107,6 +102,38 @@ fn every_shipped_agent_names_itself_and_none_is_from_a_later_slice() {
         );
     }
     assert!(!agents.iter().any(|a| a.stem == "token-optimizer"));
+}
+
+/// #11896 (ruling D2f): drift-guard and improver ship as agents only; each
+/// agent file carries the Architect's steps its old skill held.
+#[test]
+fn drift_guard_and_improver_ship_as_agents_not_skills() {
+    use crate::core::project_skill_tier::architect_skills::SHIPPED;
+    for stem in ["architect-drift-guard", "architect-improver"] {
+        assert!(
+            !SHIPPED.iter().any(|s| s.stem == stem),
+            "{stem} still ships as a skill"
+        );
+    }
+    let agents = shipped();
+    let moved: Vec<_> = agents
+        .iter()
+        .filter(|a| a.stem == "drift-guard" || a.stem == "improver")
+        .collect();
+    assert_eq!(moved.len(), 2);
+    for agent in moved {
+        assert!(
+            agent.contents.contains("\n## For the Architect\n"),
+            "{}: the Architect's steps are missing",
+            agent.stem
+        );
+        assert!(
+            !agent.contents.contains("architect-drift-guard")
+                && !agent.contents.contains("architect-improver"),
+            "{}: still points at a removed skill",
+            agent.stem
+        );
+    }
 }
 
 /// The five agents land byte-equal in `<project>/.claude/agents`, recorded,
