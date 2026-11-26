@@ -140,6 +140,8 @@ fn ids(list: &[Candidate]) -> Vec<&str> {
 /// index is reported rather than dropped.
 /// Test: this test.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn resolves_by_name_by_identity_and_by_path() {
     let fleet = fleet();
     for (query, how) in [
@@ -161,6 +163,7 @@ fn resolves_by_name_by_identity_and_by_path() {
 /// Why: a caller holding a worktree's own id still gets the canonical index.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn an_exact_index_id_resolves_to_its_repos_main_checkout() {
     let got =
         resolve(&ProjectQuery::Name("feat-x".into()), &fleet(), &NO_DERIVE).expect("resolves");
@@ -173,6 +176,7 @@ fn an_exact_index_id_resolves_to_its_repos_main_checkout() {
 /// path inside a live root must return that index, not the group's f7 pick.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn an_exact_id_or_owned_path_wins_over_repos_sharing_its_content_identity() {
     let shared = Some("content:be8b1ba6947f050abec6b50ef34389f7fa70858d");
     let fleet = vec![
@@ -222,6 +226,7 @@ fn an_exact_id_or_owned_path_wins_over_repos_sharing_its_content_identity() {
 /// identity alone cannot choose between them.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn sibling_subdirectory_indexes_are_never_each_others_duplicates() {
     let shared = "content:ac6e482f3142b050226dfe7309b9fca5c31c4abd";
     let fleet: Vec<Candidate> = [
@@ -257,6 +262,7 @@ fn sibling_subdirectory_indexes_are_never_each_others_duplicates() {
 /// Why: ruling f7 — a main checkout wins outright, recency only ranks the rest.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn the_main_checkout_beats_a_newer_indeterminate_root() {
     let group = vec![
         cand(
@@ -283,6 +289,7 @@ fn the_main_checkout_beats_a_newer_indeterminate_root() {
 /// is the case that fails if the worktree rule is inverted.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_worktree_never_wins_even_when_newest() {
     let group = vec![
         cand(
@@ -303,6 +310,7 @@ fn a_worktree_never_wins_even_when_newest() {
 /// corpus sorts last.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn an_absent_corpus_sorts_last_among_main_checkouts() {
     let group = vec![
         cand(
@@ -340,6 +348,7 @@ fn an_absent_corpus_sorts_last_among_main_checkouts() {
 /// `index.redb` of a different age; the newer corpus wins.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let now = SystemTime::now();
@@ -386,6 +395,7 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
 /// rewrote the unstamped file; between two stamps the newer wins.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_stamped_corpus_beats_an_unstamped_one_whatever_its_mtime() {
     let stamped = |id: &str, stamp: u64| Candidate {
         reindexed_unix: Some(stamp),
@@ -422,6 +432,7 @@ fn a_stamped_corpus_beats_an_unstamped_one_whatever_its_mtime() {
 /// read-only open, picks B, and leaves B's file untouched.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     use crate::core::corpus::CorpusStore;
     use crate::core::indexer::CodeIndexer;
@@ -582,6 +593,7 @@ async fn resolve_with_resident(
 /// and the resolver must pick A. Fails on origin/main: it picks B.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_incremental_write_after_the_others_full_reindex_resolves_to_it() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (rows, a) = clone_a_older_than_b(tmp.path());
@@ -643,6 +655,7 @@ async fn a_delete_only_reconcile_after_the_others_full_reindex_resolves_to_it() 
 /// live index when a subdirectory of it (no `.git` of its own) is indexed.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_subdirectory_index_beats_a_worktree_only_identity_group() {
     let group = vec![
         cand("docs", "/x/docs", Some("owner/x"), RootKind::Checkout, None),
@@ -669,6 +682,7 @@ fn a_subdirectory_index_beats_a_worktree_only_identity_group() {
 /// as a duplicate instead.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_subdirectory_index_beats_an_unmounted_volume_of_the_same_repo() {
     let group = vec![
         cand("docs", "/x/docs", Some("owner/x"), RootKind::Checkout, None),
@@ -694,6 +708,7 @@ fn a_subdirectory_index_beats_an_unmounted_volume_of_the_same_repo() {
 /// the miss names what is there instead of picking a worktree.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_repo_with_only_worktree_indexes_has_no_live_index() {
     let group = vec![
         cand(
@@ -714,6 +729,7 @@ fn a_repo_with_only_worktree_indexes_has_no_live_index() {
 /// Why: a bare name two repos share must not silently pick one of them.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_name_shared_by_two_repos_is_ambiguous() {
     let mut fleet = fleet();
     fleet.push(cand(
@@ -734,6 +750,7 @@ fn a_name_shared_by_two_repos_is_ambiguous() {
 /// Why: #9169 — a miss returns the nearest candidates, never a bare not-found.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_miss_reports_the_nearest_candidates() {
     match resolve(
         &ProjectQuery::Name("trusty-tool".into()),
@@ -752,6 +769,7 @@ fn a_miss_reports_the_nearest_candidates() {
 /// through its git identity.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_path_outside_every_root_falls_back_to_the_derived_identity() {
     let query = ProjectQuery::Path("/elsewhere/clone".into());
     let derives = AsBuilt {
@@ -778,6 +796,7 @@ fn a_path_outside_every_root_falls_back_to_the_derived_identity() {
 /// is normalised lexically.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_dotdot_query_path_matches_the_root_it_names() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
@@ -805,6 +824,7 @@ fn a_dotdot_query_path_matches_the_root_it_names() {
 /// `/Volumes` root appears in neither, and a miss probes at most five.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_volumes_root_is_indeterminate_and_never_probed_for_another_project() {
     let kemono = cand(
         "kemono",
@@ -853,6 +873,7 @@ fn a_volumes_root_is_indeterminate_and_never_probed_for_another_project() {
 /// worktree bases (which win even when the directory is gone).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn classify_root_kind_reads_the_git_entry_and_the_worktree_base() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let names = WorktreeDirNames::default();
@@ -885,6 +906,7 @@ fn classify_root_kind_reads_the_git_entry_and_the_worktree_base() {
 /// resolvable by its id.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_resident_handle_with_no_persisted_row_is_still_a_candidate() {
     let mut row = PersistedIndex::new("cold", "/r/cold");
     row.repo_identity = Some(REPO.to_string());
@@ -899,6 +921,7 @@ fn a_resident_handle_with_no_persisted_row_is_still_a_candidate() {
 /// Why: the one input string is classified before anything is looked up.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn parse_classifies_paths_identities_and_names() {
     assert_eq!(
         ProjectQuery::parse("/abs/repo"),
@@ -928,6 +951,7 @@ fn parse_classifies_paths_identities_and_names() {
 /// deeper primary root of another index takes a path nested under it.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_path_under_an_additional_root_resolves_to_its_index() {
     let row = |id: &str, root: &str, extra: &[&str]| PersistedIndex {
         id: id.to_string(),

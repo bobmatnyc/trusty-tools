@@ -214,6 +214,8 @@ mod tests {
     /// A lap is charged to the stage it ran in, and a promote between start
     /// and finish is reported.
     #[test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     fn stage_clock_charges_each_lap_to_its_stage() {
         let mut clock = StageClock::start(QueryPhase::Embed, true, 3);
         clock.lap -= std::time::Duration::from_millis(7);
@@ -229,6 +231,7 @@ mod tests {
 
     /// Outside a query scope the phase is not tracked and `mark` is a no-op.
     #[test]
+    #[serial_test::parallel]
     fn mark_outside_a_scope_is_a_no_op() {
         mark(QueryPhase::Embed);
         assert!(scope_state().is_none());
@@ -275,6 +278,7 @@ mod tests {
 
     /// Inside a scope the last marked phase and the deadline are readable.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn scope_state_reports_the_marked_phase_and_deadline() {
         let past = Instant::now();
         let state = scoped(past, Arc::default(), async {

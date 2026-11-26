@@ -125,6 +125,8 @@ pub(super) fn long_fn(marker: &str) -> String {
 
 /// Each window fits with its header, and together they cover the text.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn a_chunk_over_the_window_splits_into_windows_that_each_fit() {
     let tok = tokenizer();
     let parent = long_chunk("p", &text(10));
@@ -154,6 +156,7 @@ fn a_chunk_over_the_window_splits_into_windows_that_each_fit() {
 
 /// Consecutive windows share the common chunker's overlap and leave no gap.
 #[test]
+#[serial_test::parallel]
 fn consecutive_windows_overlap_by_the_common_chunker_constant() {
     let tok = tokenizer();
     let parent = long_chunk("p", &text(10));
@@ -176,6 +179,7 @@ fn consecutive_windows_overlap_by_the_common_chunker_constant() {
 
 /// A chunk that fits keeps its id and content, and nothing is counted.
 #[test]
+#[serial_test::parallel]
 fn a_chunk_within_the_window_keeps_its_id_and_content() {
     let tok = tokenizer();
     let short = long_chunk("short-id", &text(2));
@@ -190,6 +194,7 @@ fn a_chunk_within_the_window_keeps_its_id_and_content() {
 
 /// With no room past the header the chunk stays whole and is reported.
 #[test]
+#[serial_test::parallel]
 fn a_window_that_cannot_be_split_keeps_the_chunk_whole() {
     let tok = tokenizer();
     let parent = long_chunk("p", &text(10));
@@ -202,6 +207,7 @@ fn a_window_that_cannot_be_split_keeps_the_chunk_whole() {
 
 /// One physical line: every window has the same span, so ids take `::dup::`.
 #[test]
+#[serial_test::parallel]
 fn windows_of_a_one_line_chunk_get_distinct_ids() {
     let tok = tokenizer();
     let one_line = (0..60)
@@ -223,6 +229,7 @@ fn windows_of_a_one_line_chunk_get_distinct_ids() {
 
 /// The first window keeps the edges; every window keeps name, type, language.
 #[test]
+#[serial_test::parallel]
 fn edges_go_to_window_zero_and_identity_to_all() {
     let tok = tokenizer();
     let mut parent = long_chunk("p", &text(10));
@@ -244,6 +251,7 @@ fn edges_go_to_window_zero_and_identity_to_all() {
 
 /// The header names the path and, for a named chunk, the kind and symbol.
 #[test]
+#[serial_test::parallel]
 fn the_header_names_the_path_and_symbol() {
     let mut c = long_chunk("p", "x");
     assert_eq!(embed_header(&c, &c.file), "// path: src/a.rs\n");
@@ -257,6 +265,7 @@ fn the_header_names_the_path_and_symbol() {
 
 /// No window, no split: today's output, and no header.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_embedder_with_no_window_does_not_split() {
     let r = rig(None);
     let chunks = vec![long_chunk("p", &text(10))];
@@ -269,6 +278,7 @@ async fn an_embedder_with_no_window_does_not_split() {
 
 /// The vector lane finds text past the window through the window that holds it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_query_on_text_past_the_window_hits_its_window_chunk() {
     let r = rig(Some(WINDOW));
     let content = long_fn("tapirnose okapispot");
@@ -302,6 +312,7 @@ async fn a_query_on_text_past_the_window_hits_its_window_chunk() {
 
 /// The embedder sees the header on every text; storage and BM25 never do.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_header_is_embedded_but_never_stored() {
     let r = rig(Some(WINDOW));
     r.indexer
@@ -334,6 +345,7 @@ async fn the_header_is_embedded_but_never_stored() {
 
 /// A changed file's old chunk is replaced by the new windows.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_changed_file_supersedes_its_old_chunk_with_windows() {
     let r = rig(Some(WINDOW));
     r.indexer
@@ -355,6 +367,7 @@ async fn a_changed_file_supersedes_its_old_chunk_with_windows() {
 /// A chunk committed before the change keeps its id and vector, and a later
 /// write of another file does not touch it (guard: green before and after).
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_existing_long_chunk_keeps_its_id_and_vector() {
     let r = rig(Some(WINDOW));
     let old = long_chunk("old-long-id", &text(10));
@@ -381,6 +394,7 @@ async fn an_existing_long_chunk_keeps_its_id_and_vector() {
 /// The deferred catch-up embeds corpus chunks as stored: no split, no header
 /// (guard: green before and after).
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_deferred_catch_up_pass_never_splits_corpus_chunks() {
     let r = rig(Some(WINDOW));
     let parsed = r
@@ -454,6 +468,7 @@ impl Embedder for LazyWindow {
 /// A window the embedder reports only after its first answer is not guessed:
 /// a write before that answer goes unsplit, and the next one splits.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unknown_window_does_not_split_until_the_embedder_reports_it() {
     let lazy = Arc::new(LazyWindow {
         inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
@@ -488,6 +503,7 @@ async fn an_unknown_window_does_not_split_until_the_embedder_reports_it() {
 /// An absolute path is made root-relative in the header, so a home directory
 /// never reaches the embedded text and one chunk has one header.
 #[test]
+#[serial_test::parallel]
 fn an_absolute_path_is_made_root_relative_in_the_header() {
     assert_eq!(header_path("/tmp/test/src/a.rs", &roots()), "src/a.rs");
     assert_eq!(header_path("src/a.rs", &roots()), "src/a.rs");
@@ -500,6 +516,7 @@ fn an_absolute_path_is_made_root_relative_in_the_header() {
 
 /// Under no root only the file name is kept.
 #[test]
+#[serial_test::parallel]
 fn an_absolute_path_under_no_root_keeps_only_its_file_name() {
     assert_eq!(
         header_path("/Users/someone/private/dir/b.rs", &roots()),
@@ -509,6 +526,7 @@ fn an_absolute_path_under_no_root_keeps_only_its_file_name() {
 
 /// `index_file` with an absolute path embeds the same header as the relative one.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_file_embeds_the_same_header_for_an_absolute_path() {
     let r = rig(Some(WINDOW));
     r.indexer
@@ -530,6 +548,7 @@ async fn index_file_embeds_the_same_header_for_an_absolute_path() {
 /// A header that leaves under half the window is dropped for that chunk, and the
 /// content is cut at the full window instead.
 #[test]
+#[serial_test::parallel]
 fn a_header_that_leaves_too_little_room_is_dropped() {
     let tok = tokenizer();
     let mut parent = long_chunk("p", &text(10));
@@ -554,6 +573,7 @@ fn a_header_that_leaves_too_little_room_is_dropped() {
 /// Re-indexing a file that shrank from several windows to one chunk leaves no
 /// trace of the old windows in the vector store, BM25 or the corpus.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_shrinking_file_leaves_no_old_window_behind() {
     let r = rig(Some(WINDOW));
     r.indexer

@@ -52,6 +52,8 @@ fn opens_read_only(path: &Path) -> bool {
 /// inside a 5 s outer timeout. Without the deadline the outer timeout fires.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_held_corpus_or_lock_cannot_stall_the_close() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = IndexRegistry::new();
@@ -113,6 +115,7 @@ async fn a_held_corpus_or_lock_cannot_stall_the_close() {
 /// index is reported unclean, naming the held permit.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_corpus_whose_reindex_is_running_stays_attached() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = IndexRegistry::new();
@@ -150,6 +153,7 @@ async fn a_corpus_whose_reindex_is_running_stays_attached() {
 /// the index permit until it is dropped.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_clone_released_inside_the_budget_is_closed_cleanly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = IndexRegistry::new();
@@ -192,6 +196,7 @@ async fn a_clone_released_inside_the_budget_is_closed_cleanly() {
 /// `indexes.toml`. Both write entry points then refuse directly.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_reconcile_delta_after_the_close_fails_and_does_not_stamp() {
     let tree = tempfile::tempdir().expect("tree");
     let root = tree.path().canonicalize().expect("canonical root");

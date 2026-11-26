@@ -103,6 +103,8 @@ impl Fixture {
 /// stamps. Keyed through the primary root, the delete finds nothing at all.
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_failed_delete_under_an_additional_root_withholds_its_stamp() {
     let fx = Fixture::new("watcher", &["src/x.rs"]).await;
     let key = "@root1/src/x.rs";
@@ -139,6 +141,7 @@ async fn a_failed_delete_under_an_additional_root_withholds_its_stamp() {
 /// be swept at all — stat'd under the primary root it reads as deleted.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn rescan_does_not_sweep_another_root_s_files() {
     let fx = Fixture::new("rescan", &["src/gone.rs", "node_modules/kept.rs"]).await;
     std::fs::remove_file(fx.extra.join("src/gone.rs")).expect("delete from disk");
@@ -174,6 +177,7 @@ async fn rescan_does_not_sweep_another_root_s_files() {
 /// the root that owns it, as the watcher and the reindex walk do.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn rescan_covers_every_root() {
     let fx = Fixture::new("covers", &[]).await;
     let primary = fx.table[0].canonical().to_path_buf();
@@ -205,6 +209,7 @@ async fn rescan_covers_every_root() {
 /// stale one-root table, exactly as the primary watch would.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_rescan_from_a_watch_with_a_stale_root_table_keeps_the_new_roots_keys() {
     let fx = Fixture::new("stale-table", &["src/x.rs"]).await;
     let primary = fx.table[0].canonical().to_path_buf();
@@ -252,6 +257,7 @@ async fn a_rescan_from_a_watch_with_a_stale_root_table_keeps_the_new_roots_keys(
 /// rescan keeps the first and still sweeps the second.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_rescan_keeps_the_chunks_of_an_absent_additional_root() {
     let fx = Fixture::new("absent-root", &["src/kept.rs"]).await;
     {

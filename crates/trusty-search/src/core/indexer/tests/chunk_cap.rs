@@ -58,6 +58,8 @@ async fn indexer_at_cap() -> CodeIndexer {
 /// success. Pre-fix this returned `Ok(())` and the HTTP handler answered
 /// `"indexed": true` while the corpus was unchanged.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn at_cap_index_file_is_an_error_not_a_silent_success() {
     let idx = indexer_at_cap().await;
     let at_cap = idx.in_memory_chunk_count().await;
@@ -92,6 +94,7 @@ async fn at_cap_index_file_is_an_error_not_a_silent_success() {
 /// index (a CI hook on a network mount, the file watcher) had no signal at all
 /// that it had stopped accepting content.
 #[tokio::test]
+#[serial_test::parallel]
 async fn at_cap_index_stays_an_error_for_every_later_write() {
     let idx = indexer_at_cap().await;
     let at_cap = idx.in_memory_chunk_count().await;
@@ -114,6 +117,7 @@ async fn at_cap_index_stays_an_error_for_every_later_write() {
 /// refusing here would break the file watcher on every save once an index
 /// filled up.
 #[tokio::test]
+#[serial_test::parallel]
 async fn at_cap_update_to_an_already_indexed_file_still_succeeds() {
     let idx = indexer_at_cap().await;
     let at_cap = idx.in_memory_chunk_count().await;
@@ -128,6 +132,7 @@ async fn at_cap_update_to_an_already_indexed_file_still_succeeds() {
 /// and its `CommitTimings` is the only channel carrying that out. `chunks`
 /// must count what landed, not what was attempted.
 #[tokio::test]
+#[serial_test::parallel]
 async fn commit_parsed_batch_reports_cap_drops_in_timings() {
     let idx = indexer_at_cap().await;
 

@@ -82,6 +82,8 @@ fn query(text: &str) -> SearchQuery {
 ///
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_bm25_hit_carries_the_engines_raw_score() {
     let idx = corpus().await;
     let engine = idx
@@ -105,6 +107,7 @@ async fn a_bm25_hit_carries_the_engines_raw_score() {
 ///
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_vector_only_hit_has_no_bm25_raw_and_no_json_key() {
     let idx = corpus().await;
     let hits = idx.search(&query("authenticate")).await.expect("search");
@@ -132,6 +135,7 @@ async fn a_vector_only_hit_has_no_bm25_raw_and_no_json_key() {
 ///
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn ranking_is_byte_identical_to_the_pre_change_snapshot() {
     let idx = corpus().await;
     let queries = [

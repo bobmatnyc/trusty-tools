@@ -10,6 +10,8 @@
 use super::*;
 
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn test_file_type_multiplier_demotes_docs() {
     // Why: Definition-intent ranking should prefer source over docs.
     // What: confirms the helper's contract — multiplier 0.5 for .md/.toml/
@@ -28,6 +30,7 @@ fn test_file_type_multiplier_demotes_docs() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_definition_demotes_markdown_below_source() {
     // Why: issue #92 — for Definition-intent queries, the canonical
     // source-file declaration must outrank any .md doc that mentions the
@@ -69,6 +72,7 @@ async fn test_definition_demotes_markdown_below_source() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_struct_definition_boost_surfaces_struct_over_usage() {
     // Why: issue #117 — queries containing struct-name acronyms (`HNSW`,
     // `BM25`, `RRF`, `ORT`) historically returned usage sites at top ranks
@@ -173,6 +177,7 @@ async fn test_struct_definition_boost_surfaces_struct_over_usage() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_function_definition_boost_surfaces_function_over_string_literal_usage() {
     // Why: issue #122 — function-name queries (`BRUSILOV_EPOCH`,
     // `get_call_chain`) were placing usage sites OR string-literal
@@ -270,6 +275,7 @@ async fn test_function_definition_boost_surfaces_function_over_string_literal_us
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_method_definition_boost_fires() {
     // Why: issue #122 — symmetric coverage for `ChunkType::Method`. The
     // boost must apply identically for impl-block method declarations.
@@ -329,6 +335,7 @@ async fn test_method_definition_boost_fires() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_function_boost_skipped_on_conceptual_intent() {
     // Why: issue #122 — the function-definition boost must only fire when
     // the classifier routes the query to Definition. On Conceptual intent
@@ -401,6 +408,7 @@ async fn test_function_boost_skipped_on_conceptual_intent() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_function_boost_no_op_when_function_name_missing() {
     // Why: issue #122 — guard against a panic / unwrap regression. A
     // Function chunk that somehow ended up without a `function_name`
@@ -470,6 +478,7 @@ async fn test_function_boost_no_op_when_function_name_missing() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_conceptual_does_not_demote_docs() {
     // Why: issue #73 — Conceptual queries are documentation-retrieval by
     // nature; they need `.md` content to answer correctly. When the
@@ -536,6 +545,7 @@ async fn test_conceptual_does_not_demote_docs() {
 /// chunk rather than nothing.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_code_mode_source_outranks_changelog_pre_truncation() {
     use crate::core::classifier::{QueryClassifier, QueryIntent};
 
@@ -611,6 +621,7 @@ async fn test_code_mode_source_outranks_changelog_pre_truncation() {
 /// trigger, run the search in default mode, and assert non-empty results.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_definition_default_mode_returns_docs_when_no_source_matches() {
     use crate::core::classifier::{QueryClassifier, QueryIntent};
 
@@ -666,6 +677,7 @@ async fn test_definition_default_mode_returns_docs_when_no_source_matches() {
 /// non-empty results in default mode.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_conceptual_default_mode_returns_docs_when_no_source_matches() {
     use crate::core::classifier::{QueryClassifier, QueryIntent};
 
@@ -702,6 +714,7 @@ async fn test_conceptual_default_mode_returns_docs_when_no_source_matches() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_kg_results_survive_top_k_truncation() {
     // Why: issue #94 — KG-expanded neighbours used to be appended after
     // `take(top_k)` had already trimmed the result list, so on busy
@@ -772,6 +785,7 @@ async fn test_kg_results_survive_top_k_truncation() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn test_intent_routing_definitions() {
     // Sanity: intent table from CLAUDE.md is wired through.
     use crate::core::classifier::QueryIntent;
@@ -782,6 +796,7 @@ fn test_intent_routing_definitions() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_enumerate_chunks_paginates_stable_order() {
     // Why: pagination over an underlying HashMap must produce a stable
     // total order so successive pages don't overlap or skip rows.

@@ -282,12 +282,15 @@ async fn reconcile_delete_stamps_only_when_committed() {
 
 /// The rescan sweep's `drop_file`. Fails against 8fe9e93737 and cb543af1de.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn rescan_delete_stamps_only_when_committed() {
     assert_only_a_committed_delete_stamps(Site::Rescan).await;
 }
 
 /// The watcher's `handle_removed`. Fails against 8fe9e93737 and cb543af1de.
 #[tokio::test]
+#[serial_test::parallel]
 async fn watcher_delete_stamps_only_when_committed() {
     assert_only_a_committed_delete_stamps(Site::Watcher).await;
 }
@@ -295,6 +298,7 @@ async fn watcher_delete_stamps_only_when_committed() {
 /// The watcher's `handle_modified` stale-chunk delete, for an edit whose new
 /// content commits no chunks (sops). Fails against cb543af1de: no stamp.
 #[tokio::test]
+#[serial_test::parallel]
 async fn watcher_edit_delete_stamps_only_when_committed() {
     assert_only_a_committed_delete_stamps(Site::WatcherModified).await;
 }
@@ -304,6 +308,7 @@ async fn watcher_edit_delete_stamps_only_when_committed() {
 /// warn-only and never stamped; against cb543af1de: a refused delete
 /// answered 200.
 #[tokio::test]
+#[serial_test::parallel]
 async fn remove_file_report_stamps_only_a_committed_delete() {
     assert_only_a_committed_delete_stamps(Site::RemoveFile).await;
 }
@@ -312,6 +317,7 @@ async fn remove_file_report_stamps_only_a_committed_delete() {
 /// Fails against 7a7e7479d4: it purged warn-only and never stamped; against
 /// cb543af1de: a refused purge answered 403.
 #[tokio::test]
+#[serial_test::parallel]
 async fn excluded_pushed_write_purge_stamps_only_when_committed() {
     assert_only_a_committed_delete_stamps(Site::PurgePushed).await;
 }

@@ -101,6 +101,8 @@ async fn has_chunks(indexer: &Arc<RwLock<CodeIndexer>>, rel: &str) -> bool {
 /// through `index_admission::apply_modified`: `registry.toml` and
 /// `notes/private.md` are then indexed by the unfiltered `handle_modified`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn daemon_watcher_honours_include_paths_extensions_and_exclude_globs() {
     let (_temp, root) = fixture_root();
     let id = IndexId::new("watcher-filters-7379-daemon");
@@ -176,6 +178,7 @@ async fn daemon_watcher_honours_include_paths_extensions_and_exclude_globs() {
 /// `UnregisteredIndex` until a handle returns. Falling back to the unfiltered
 /// `handle_modified` would index the note here and fail the first assertion.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn an_event_without_a_readable_policy_indexes_nothing_and_requests_a_rescan() {
     let (_temp, root) = fixture_root();
     write_fixture(&root, 0);
@@ -215,6 +218,7 @@ async fn an_event_without_a_readable_policy_indexes_nothing_and_requests_a_resca
 /// pass, so it applies the same policy as the event path — including a policy
 /// replaced after the watcher started.
 #[tokio::test]
+#[serial_test::parallel]
 async fn dropped_event_rescan_applies_the_live_registry_policy() {
     let (_temp, root) = fixture_root();
     write_fixture(&root, 0);

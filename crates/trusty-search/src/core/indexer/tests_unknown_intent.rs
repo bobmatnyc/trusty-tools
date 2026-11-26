@@ -73,6 +73,8 @@ fn make_indexer() -> CodeIndexer {
 /// caller that never sets `mode` explicitly — and the matching `.md` doc hit
 /// must survive in a non-empty result set instead of being hard-dropped.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn test_unknown_intent_downranks_docs_instead_of_dropping_them() {
     let idx = make_indexer();
     idx.add_chunk(raw(
@@ -132,6 +134,7 @@ async fn test_unknown_intent_downranks_docs_instead_of_dropping_them() {
 /// covers a `Usage`-intent query end-to-end; this adds an independent
 /// `BugDebt`-intent example.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_bugdebt_intent_still_hard_filters_code_mode() {
     let idx = make_indexer();
     idx.add_chunk(raw(
@@ -187,6 +190,7 @@ async fn test_bugdebt_intent_still_hard_filters_code_mode() {
 /// `archive_reason` cannot tell the two apart — `doc_score_penalty` labels a
 /// `.md` file in every mode.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_keyword_intent_upgrades_code_mode_and_surfaces_docs() {
     let idx = make_indexer();
     idx.add_chunk(raw(
