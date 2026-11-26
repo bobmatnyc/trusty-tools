@@ -1353,6 +1353,103 @@ fn pending_view_on(head: &str) -> String {
     )
 }
 
+/// A `gh` seam that answers every read with one canned reply or error.
+struct ReplyProbe(Result<String, String>);
+
+impl ChecksProbe for ReplyProbe {
+    fn pr_view_json(
+        &self,
+        _pr: u64,
+        _repo: Option<&str>,
+        _budget: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        self.0.clone().map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// A stored budget for the no-head cases, started at t=1000 on head `aaaa`.
+const RECORD_ON_HEAD: &str = r#"{"spec":"check:372","started_at":1000,"updated_at":1100,"polls":11,"timeout_s":1800,"rate_limited_streak":0,"head":"aaaa"}"#;
+
+/// The same budget as written before #10668: no `head` field at all.
+const RECORD_WITHOUT_HEAD: &str = r#"{"spec":"check:372","started_at":1000,"updated_at":1100,"polls":11,"timeout_s":1800,"rate_limited_streak":0}"#;
+
+/// Why: a poll that yields no head must never restart the budget. If one did,
+/// a wait whose reads keep failing or keep omitting the SHA would reset its
+/// deadline every slice and never time out (fail open).
+/// What: each case loads a stored budget started at t=1000, polls one slice
+/// with a canned reply, and requires `started_at` (and so `elapsed`) kept.
+/// Failures are collected so one run names every broken case.
+// #10668: no-head paths keep `started_at`; a reset here means `tm wait` never times out.
+#[test]
+fn no_head_poll_paths_keep_the_budget_start() {
+    const NO_HEAD_FIELD: &str = r#"{"state":"OPEN","statusCheckRollup":[
+        {"name":"e2e","status":"IN_PROGRESS","conclusion":""}]}"#;
+    /// (name, stored record, poll reply, head expected after the slice).
+    type NoHeadCase = (
+        &'static str,
+        &'static str,
+        Result<String, String>,
+        Option<&'static str>,
+    );
+    let cases: [NoHeadCase; 4] = [
+        (
+            "reply_without_head_ref_oid",
+            RECORD_ON_HEAD,
+            Ok(NO_HEAD_FIELD.into()),
+            Some("aaaa"),
+        ),
+        (
+            "reply_with_blank_head_ref_oid",
+            RECORD_ON_HEAD,
+            Ok(pending_view_on("")),
+            Some("aaaa"),
+        ),
+        (
+            "poll_returns_err",
+            RECORD_ON_HEAD,
+            Err("connection reset".into()),
+            Some("aaaa"),
+        ),
+        (
+            "old_record_without_head_field",
+            RECORD_WITHOUT_HEAD,
+            Ok(pending_view_on("aaaa")),
+            Some("aaaa"),
+        ),
+    ];
+
+    let mut broken = Vec::new();
+    for (name, record, reply, head_after) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = budget::path_for(dir.path(), "check:372");
+        std::fs::write(&path, record).unwrap();
+        let clock = FakeClock::at(1_150);
+        let mut b = budget::load_or_start(&path, "check:372", 1_800, clock.now_unix(), 600);
+        let loaded_start = b.started_at;
+
+        let cond = CheckCondition::new(ReplyProbe(reply), 372, None, false);
+        let out = poll_until(&cond, &plan(10, 20, 1_800), &mut b, &clock).unwrap();
+        let now = clock.now_unix();
+
+        let got = (
+            loaded_start,
+            b.started_at,
+            b.elapsed(now),
+            out.status,
+            b.head.as_deref(),
+        );
+        let want = (1_000, 1_000, now - 1_000, Status::Pending, head_after);
+        if got != want {
+            broken.push(format!("{name}: got {got:?}, want {want:?}"));
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "budget start reset:\n{}",
+        broken.join("\n")
+    );
+}
+
 /// One `tm wait` invocation against a canned head: the same steps
 /// `run_inner` takes after it builds the condition — load or start the budget,
 /// poll one slice, persist or clear, render the status line.
