@@ -129,11 +129,23 @@ pub(super) fn unleased_build_refusal(
     None
 }
 
+// #11886: option (a), Architect ruling — a build after one of these runs on
+// another host, so it takes no local slot.
+/// Words that run the rest of a simple command on a remote host.
+///
+/// Why: the fail-closed rule refused the EVO gate form (`$EVO cargo test`),
+/// which builds on EVO, not in this machine's shared target directory.
+/// What: a fixed list, no config key; [`unleased_heavy_word`] stops at any
+/// word whose basename is on it.
+/// Test: `a_build_after_a_remote_runner_is_not_refused`,
+/// `a_remote_runner_build_is_not_refused_11886`.
+const REMOTE_RUNNERS: &[&str] = &["$EVO", "${EVO}", "evo", "ssh"];
+
 /// Whether a word of `seg` (at absolute `seg_at`) starts a heavy build that
-/// no `build-lease` word before it already leases.
+/// no `build-lease` or [`REMOTE_RUNNERS`] word before it takes elsewhere.
 fn unleased_heavy_word(seg: &str, seg_at: usize, heavy: &Heavy, bodies: &HeredocBodies) -> bool {
     for word in words(seg) {
-        if word.text == "build-lease" {
+        if word.text == "build-lease" || REMOTE_RUNNERS.contains(&basename(&word.text)) {
             return false;
         }
         if bodies.contains(seg_at + word.start) {
