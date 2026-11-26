@@ -151,6 +151,7 @@ trusty-mpm	lib	core::skill_source::tests::materialize_skill_artifacts_writes_nes
 trusty-mpm	lib	core::sm::prompt::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::standalone::global_config::tests::test_deploy_output_styles_idempotent_via_global_config	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::standalone::global_config::tests::test_deploy_output_styles_wired_into_config_dir	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
+trusty-mpm	lib	core::whats_new::tests	reads RELEASES, for_version, render and literal 'src/assets/whats-new' — the bundled release highlights (#11003)
 trusty-mpm	lib	daemon::doctor::doctor_asset_tier::tests	reads test_support::repo_roster (#9011)
 trusty-mpm	lib	daemon::doctor::doctor_bundled_asset_lag::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	daemon::doctor::doctor_deploy_validate::tests::deployment_check_keeps_the_project_tier_under_claude_config_dir	reads seed_settings — the checkout settings seed under a CLAUDE_CONFIG_DIR override (#9156)
