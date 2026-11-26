@@ -12,7 +12,7 @@ orgs:
       bot_token: secret://trusty/duettoresearch/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN
   bta:
     kind: gchat
-    project: agentic-crm-508715
+    project: test-project-001
     service_account: ai-chat-bot
     space: AAAATEST001
     credentials:
