@@ -730,3 +730,24 @@ fn expanded_tool_paths_and_commented_builds_pass_11886() {
         Verdict11886::Leased,
     );
 }
+
+/// #11886 critic round 2: a comment's apostrophe cannot hide a build.
+#[test]
+fn a_comments_apostrophe_cannot_hide_a_build_11886() {
+    assert_all_11886(
+        &[
+            "# it's\nbash -c 'cargo fmt; cargo test'",
+            "# don't cache\ncargo test -p x\n# it's done",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886 critic round 2: an `_`-joined expansion naming cargo is refused.
+#[test]
+fn an_underscored_expansion_naming_cargo_is_refused_11886() {
+    assert_all_11886(
+        &["$CARGO_BIN test", "${CARGO_CMD} build"],
+        Verdict11886::Refused,
+    );
+}
