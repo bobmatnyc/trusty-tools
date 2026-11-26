@@ -281,14 +281,22 @@ fn new_session_cwd_enter_registers_then_creates_in_the_checkout() {
 /// Twelve registered projects under one owner: longer than the eight-row window.
 fn long_registry() -> Vec<Project> {
     (0..12)
-        .map(|i| project(&format!("p{i:02}"), &format!("https://github.com/acme/p{i:02}")))
+        .map(|i| {
+            project(
+                &format!("p{i:02}"),
+                &format!("https://github.com/acme/p{i:02}"),
+            )
+        })
         .collect()
 }
 
 /// Assert the highlighted row is the one labelled `label`.
 fn assert_at(state: &TuiState, label: &str) {
     let row = highlighted(open_flow(state));
-    assert!(row.starts_with(&format!("▸ {label}")), "want {label}, got {row}");
+    assert!(
+        row.starts_with(&format!("▸ {label}")),
+        "want {label}, got {row}"
+    );
 }
 
 /// AC (b): every Up/Down, sent through the decoder, moves the highlight exactly
@@ -309,13 +317,21 @@ fn new_session_cwd_arrows_step_one_row_and_clamp_over_a_long_list() {
         assert_eq!(press(&mut state, KeyCode::Down), Action::Redraw, "{label}");
         assert_at(&state, label);
     }
-    assert_eq!(press(&mut state, KeyCode::Down), Action::Ignore, "Down clamps");
+    assert_eq!(
+        press(&mut state, KeyCode::Down),
+        Action::Ignore,
+        "Down clamps"
+    );
     assert_at(&state, "other");
     for label in order[..order.len() - 1].iter().rev() {
         assert_eq!(press(&mut state, KeyCode::Up), Action::Redraw, "{label}");
         assert_at(&state, label);
     }
-    assert_eq!(press(&mut state, KeyCode::Up), Action::Ignore, "Up clamps again");
+    assert_eq!(
+        press(&mut state, KeyCode::Up),
+        Action::Ignore,
+        "Up clamps again"
+    );
 }
 
 /// AC (b): with no rows at all, every list key is a no-op and nothing panics.
