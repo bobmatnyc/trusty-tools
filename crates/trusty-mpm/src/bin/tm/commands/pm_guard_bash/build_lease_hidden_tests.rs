@@ -216,3 +216,36 @@ fn comments_and_underscored_names_stay_fail_closed() {
 fn underscored_expansions_naming_cargo_are_refused() {
     assert_refused(&["$CARGO_BIN test", "${CARGO_CMD} build"]);
 }
+
+/// #11886 fail-closed rule: a heavy build no lease insertion covers is
+/// refused, whatever shape hid it — an unknown runner, a second build in a
+/// composed command, a quoted substitution.
+#[test]
+fn an_unleased_heavy_build_is_refused_whatever_its_shape() {
+    assert_refused(&[
+        "entr -c cargo test -p x",
+        "systemd-run --user --scope cargo build",
+        "cargo check && entr cargo test",
+        "echo \"$(entr cargo test)\"",
+    ]);
+}
+
+/// #11886 fail-closed rule: a leased build still leases, and a build a
+/// program starts without naming it (`make`, `mise run`, a script) passes.
+#[test]
+fn leased_builds_and_builds_named_by_no_word_are_not_refused() {
+    assert_eq!(
+        rw("cargo test -p x"),
+        LeaseRewrite::Rewrite("tm build-lease -- cargo test -p x".into())
+    );
+    for input in [
+        "tm build-lease -- cargo test -p x",
+        "make test",
+        "CARGO_BUILD_JOBS=6 make -C crates/x check",
+        "mise run test",
+        "bash scripts/gate.sh",
+        "git commit -m \"fix cargo test\"",
+    ] {
+        assert_eq!(rw(input), LeaseRewrite::None, "{input}");
+    }
+}
