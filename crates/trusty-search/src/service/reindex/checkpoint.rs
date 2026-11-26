@@ -230,7 +230,8 @@ pub(super) fn evaluate(
 /// What: SHA-256 over a LENGTH-PREFIXED rendering of the walk filters
 /// (`include_paths`, `exclude_globs`, `extensions`, `path_filter`,
 /// `extra_skip_dirs`, `include_docs`, `respect_gitignore`, `follow_links`,
-/// `data_file_max_bytes`) and the pipeline flags that decide which stages run
+/// `data_file_max_bytes`, and the #11655 size caps when not at their
+/// defaults) and the pipeline flags that decide which stages run
 /// (`lexical_only`, `skip_kg`, `skip_vector`, `defer_embed`). Collection fields
 /// are sorted so a pure reordering in `indexes.toml` does not force a rebuild.
 ///
@@ -278,6 +279,20 @@ pub(super) fn config_fingerprint(handle: &IndexHandle) -> String {
         "data_file_max_bytes",
         &handle.data_file_max_bytes,
     );
+    // #11655: a cap changes the walked set. Absorbed only off its default so
+    // every existing checkpoint keeps its fingerprint across the upgrade.
+    if handle.size_caps != crate::service::size_caps::FileSizeCaps::default() {
+        absorb_scalar(
+            &mut hasher,
+            "source_file_max_bytes",
+            &handle.size_caps.source,
+        );
+        absorb_scalar(
+            &mut hasher,
+            "office_file_max_bytes",
+            &handle.size_caps.office,
+        );
+    }
     absorb_scalar(&mut hasher, "lexical_only", &handle.lexical_only);
     absorb_scalar(&mut hasher, "skip_kg", &handle.skip_kg);
     absorb_scalar(&mut hasher, "skip_vector", &handle.skip_vector);

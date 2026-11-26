@@ -71,7 +71,7 @@ pub(crate) fn admits_pushed(handle: &IndexHandle, path: &str, content_len: usize
         return Admission::Excluded;
     }
     let opts = index_admission::walk_options(handle);
-    if walker::len_exceeds_caps(given, content_len as u64, opts.data_file_max_bytes) {
+    if walker::len_exceeds_caps(given, content_len as u64, &opts) {
         return Admission::Excluded;
     }
     // #7434: a relative `@root<n>/…` push is checked at its own root; joined

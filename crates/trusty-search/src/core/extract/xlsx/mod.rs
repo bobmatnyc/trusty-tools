@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 use calamine::{open_workbook_auto_from_rs, Reader};
 
-use super::{ExtractError, Extracted, MAX_OFFICE_FILE_BYTES};
+use super::{ExtractError, Extracted};
 
 /// Cap on the TOTAL uncompressed size of every entry in a spreadsheet
 /// package (bytes).
@@ -84,7 +84,7 @@ const MAX_WORKBOOK_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 /// of empty entries declares zero uncompressed bytes, so both passes wave it
 /// through: 200_000 stored empty entries in a 16.6 MiB container returned
 /// `Ok(())` while adding 142.8 MiB RSS. At the 10 MiB
-/// [`MAX_OFFICE_FILE_BYTES`] container ceiling that is ~115k entries ≈ 82 MiB,
+/// [`MAX_OFFICE_FILE_BYTES`](super::MAX_OFFICE_FILE_BYTES) container ceiling that is ~115k entries ≈ 82 MiB,
 /// and calamine then builds its own `ZipArchive` over the same bytes and pays
 /// it a second time.
 ///
@@ -112,10 +112,11 @@ const MAX_WORKBOOK_ENTRIES: usize = 16384;
 /// Test: `test_extracts_single_sheet`,
 /// `test_zip_bomb_extraction_stays_within_memory_bound`,
 /// `test_forged_central_directory_size_still_rejected`.
-pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
+// #11655: `cap` is the index's office/PDF cap.
+pub fn extract(path: &Path, cap: u64) -> Result<Extracted, ExtractError> {
     // #4894: read ONCE, then validate and parse the same bytes. Validating a
     // path and reopening it hands calamine a file the guard never saw.
-    let bytes = read_package_bytes(path)?;
+    let bytes = read_package_bytes(path, cap)?;
 
     preflight_package_bounds(Cursor::new(&bytes[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)?;
 
@@ -140,8 +141,8 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
     })
 }
 
-/// Read the whole document into memory, refusing anything over
-/// [`MAX_OFFICE_FILE_BYTES`].
+/// Read the whole document into memory, refusing anything over `cap` (the
+/// index's office cap, default [`MAX_OFFICE_FILE_BYTES`](super::MAX_OFFICE_FILE_BYTES), #11655).
 ///
 /// Why: every later step — the preflight guard and calamine — works from this
 /// one buffer, so the file is opened exactly once and cannot change underneath
@@ -151,7 +152,7 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
 /// What: returns the file's contents, or `TooLarge` when it exceeds the cap.
 /// Test: `test_oversized_package_reports_too_large`,
 /// `test_extracts_single_sheet`.
-fn read_package_bytes(path: &Path) -> Result<Vec<u8>, ExtractError> {
+fn read_package_bytes(path: &Path, cap: u64) -> Result<Vec<u8>, ExtractError> {
     let to_io_err = |source| ExtractError::Io {
         path: path.display().to_string(),
         source,
@@ -159,22 +160,22 @@ fn read_package_bytes(path: &Path) -> Result<Vec<u8>, ExtractError> {
     let too_large = |size| ExtractError::TooLarge {
         path: path.display().to_string(),
         size,
-        cap: MAX_OFFICE_FILE_BYTES,
+        cap,
     };
 
     let file = std::fs::File::open(path).map_err(to_io_err)?;
     let declared = file.metadata().map_err(to_io_err)?.len();
-    if declared > MAX_OFFICE_FILE_BYTES {
+    if declared > cap {
         return Err(too_large(declared));
     }
 
     // One byte past the cap: enough to detect an over-cap file, never enough
     // to let one in.
     let mut bytes = Vec::with_capacity(declared as usize);
-    file.take(MAX_OFFICE_FILE_BYTES + 1)
+    file.take(cap + 1)
         .read_to_end(&mut bytes)
         .map_err(to_io_err)?;
-    if bytes.len() as u64 > MAX_OFFICE_FILE_BYTES {
+    if bytes.len() as u64 > cap {
         return Err(too_large(bytes.len() as u64));
     }
     Ok(bytes)

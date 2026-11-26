@@ -154,6 +154,26 @@ pub struct IndexConfig {
     /// Test: `data_file_max_bytes_defaults_and_round_trips` in this module.
     #[serde(default = "default_data_file_max_bytes")]
     pub data_file_max_bytes: Option<u64>,
+
+    /// #11655: source-file size cap (bytes). Absent ⇒ 1 MiB
+    /// (`walker::MAX_FILE_BYTES`).
+    ///
+    /// Why: a project with large source or text files can index them without
+    /// raising the cap for every index (#11655).
+    /// What: `1..=size_caps::MAX_CONFIGURABLE_FILE_BYTES` (256 MiB); 0 or a
+    /// larger value fails config loading. Sent to the daemon when the index
+    /// is registered; an already-registered index keeps the caps it was
+    /// created with.
+    /// Test: `size_caps_load_and_reject_out_of_range` in this module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file_max_bytes: Option<u64>,
+
+    /// #11655: office/PDF size cap (bytes) for pdf/docx/pptx/xls/xlsx/xlsm.
+    /// Absent ⇒ 10 MiB (`extract::MAX_OFFICE_FILE_BYTES`). Range
+    /// `1..=268435456` (256 MiB hard ceiling); applied at registration only,
+    /// as `source_file_max_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office_file_max_bytes: Option<u64>,
 }
 
 /// Shared serde default for `IndexConfig::data_file_max_bytes` (issue #1372):
@@ -195,6 +215,8 @@ impl Default for IndexConfig {
             defer_embed: true,
             extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
             data_file_max_bytes: default_data_file_max_bytes(),
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         }
     }
 }
@@ -227,6 +249,12 @@ impl RepoConfig {
         for index in &cfg.indexes {
             validate_exclude_globs(&index.exclude)
                 .map_err(|e| anyhow::anyhow!("{}: index '{}': {e}", path.display(), index.name))?;
+            // #11655: an out-of-range size cap is a load error too.
+            crate::service::size_caps::validate_size_caps(
+                index.source_file_max_bytes,
+                index.office_file_max_bytes,
+            )
+            .map_err(|e| anyhow::anyhow!("{}: index '{}': {e}", path.display(), index.name))?;
         }
         Ok(Some(cfg))
     }
@@ -870,5 +898,51 @@ indexes:
             serialized.contains("data_file_max_bytes"),
             "default must serialise: {serialized}"
         );
+    }
+
+    /// #11655: both caps load from YAML, stay absent when unset, and an
+    /// out-of-range value fails loading for either config file.
+    #[test]
+    fn size_caps_load_and_reject_out_of_range() {
+        let tmp = tempdir().unwrap();
+        write_yaml(
+            tmp.path(),
+            r#"
+version: 1
+indexes:
+  - name: big-docs
+    source_file_max_bytes: 2097152
+    office_file_max_bytes: 52428800
+"#,
+        );
+        let loaded = RepoConfig::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded.indexes[0].source_file_max_bytes, Some(2_097_152));
+        assert_eq!(loaded.indexes[0].office_file_max_bytes, Some(52_428_800));
+        assert_eq!(IndexConfig::default().source_file_max_bytes, None);
+
+        for bad in [
+            "source_file_max_bytes: 0",
+            "office_file_max_bytes: 999999999999",
+        ] {
+            let tmp = tempdir().unwrap();
+            write_yaml(
+                tmp.path(),
+                &format!("version: 1\nindexes:\n  - name: bad\n    {bad}\n"),
+            );
+            let err = RepoConfig::load(tmp.path()).expect_err(bad).to_string();
+            assert!(err.contains("must be between 1 and"), "{err}");
+
+            let tmp = tempdir().unwrap();
+            std::fs::write(
+                tmp.path()
+                    .join(super::super::project_config::PROJECT_CONFIG_FILENAME),
+                format!("{bad}\n"),
+            )
+            .unwrap();
+            let err = super::super::project_config::ProjectConfig::load(tmp.path())
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains("must be between 1 and"), "{err}");
+        }
     }
 }

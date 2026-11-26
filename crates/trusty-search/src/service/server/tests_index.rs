@@ -389,6 +389,8 @@ async fn create_index_rejects_relative_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;
@@ -436,6 +438,8 @@ async fn create_index_rejects_nonexistent_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;
@@ -512,6 +516,8 @@ async fn create_index_canonicalizes_symlinked_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;
@@ -574,6 +580,8 @@ async fn create_index_accepts_valid_absolute_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;
@@ -591,3 +599,30 @@ fn assert_create_ok((status, body): (StatusCode, serde_json::Value)) {
     panic!("create_index returned {status}, expected 200 OK; body: {body}");
 }
 // Denylist tests live in `tests_denylist.rs` (split to keep this file ≤ 500 lines).
+
+/// #11655: a size cap of 0 or over the ceiling is refused with
+/// `400 invalid_size_cap` before anything registers.
+#[tokio::test]
+#[serial_test::parallel]
+async fn create_refuses_an_out_of_range_size_cap() {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let root = tempfile::tempdir().expect("tempdir");
+    for (field, value) in [
+        ("source_file_max_bytes", 0u64),
+        (
+            "office_file_max_bytes",
+            crate::service::size_caps::MAX_CONFIGURABLE_FILE_BYTES + 1,
+        ),
+    ] {
+        let mut body = serde_json::json!({ "id": "cap-bad", "root_path": root.path() });
+        body[field] = serde_json::json!(value);
+        let req: CreateIndexRequest = serde_json::from_value(body).expect("request");
+        let (status, v) = create_answer(&state, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        assert_eq!(v["error"], "invalid_size_cap", "{v}");
+        assert!(state
+            .registry
+            .get(&crate::core::registry::IndexId::new("cap-bad"))
+            .is_none());
+    }
+}

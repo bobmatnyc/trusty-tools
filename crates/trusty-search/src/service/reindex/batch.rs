@@ -573,7 +573,9 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         async move {
             // Issue #2923: pdf/docx/xls/xlsx/xlsm route through the office
             // document extractor instead of being treated as UTF-8 text.
-            let content = crate::core::extract::read_content(&path).await;
+            // #11655: the index's own office/PDF cap.
+            let cap = ctx.handle.size_caps.office;
+            let content = crate::core::extract::read_content_with_cap(&path, cap).await;
             (path, content)
         }
     });

@@ -127,6 +127,7 @@ async fn stamp_handle_produces_valid_rfc3339_date() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     stamp_handle(&handle, "abc123").await;
@@ -329,6 +330,7 @@ async fn reconcile_stamps_head_sha_after_delta() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     let new_sha = "new_sha_abcde";
@@ -450,6 +452,7 @@ async fn reconcile_up_to_date_index_is_noop() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(
@@ -531,6 +534,7 @@ async fn reconcile_stale_index_stamps_new_sha() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(
@@ -671,6 +675,7 @@ async fn apply_delta_total_failure_does_not_stamp() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     // Pass a non-empty files list containing a path that does NOT exist on disk.
@@ -908,6 +913,7 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -989,6 +995,7 @@ async fn reconcile_in_progress_clears_after_tasks_complete() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -1082,6 +1089,7 @@ async fn reconcile_summary_counts_up_to_date() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -1153,6 +1161,7 @@ fn stuck_unwalked_handle(
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     })
 }
 

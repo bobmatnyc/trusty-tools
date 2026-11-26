@@ -304,6 +304,11 @@ pub(crate) async fn reconcile_with_policy(
             .flat_map(|r| walk_source_files(r.canonical()).files)
             .collect(),
     };
+    // #11655: the index's own office/PDF cap; defaults with no policy handle.
+    let office_cap = policy.map_or_else(
+        || crate::service::size_caps::FileSizeCaps::default().office,
+        |h| h.size_caps.office,
+    );
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
     // #9230: a delete whose rows left redb stamps the corpus once, below.
@@ -326,7 +331,7 @@ pub(crate) async fn reconcile_with_policy(
         let mut fingerprints: Vec<(PathBuf, String)> = Vec::with_capacity(batch.len());
 
         for abs in batch {
-            let content = match crate::core::extract::read_content(abs).await {
+            let content = match crate::core::extract::read_content_with_cap(abs, office_cap).await {
                 Ok(content) => content,
                 Err(err) => {
                     // Counted into `files_unreadable`, not just logged — this

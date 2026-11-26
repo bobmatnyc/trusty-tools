@@ -405,6 +405,7 @@ pub(crate) async fn patch_index_config_report(
         // #6524: a rebuild must not drop an operator's pause or the event feed.
         embedding_pause: Arc::clone(&existing.embedding_pause),
         file_events: Arc::clone(&existing.file_events),
+        size_caps: existing.size_caps,
     };
 
     // Snapshot the owned fields we need for persistence + the response view.

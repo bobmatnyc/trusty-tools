@@ -55,7 +55,8 @@ pub const EXTRACT_EXTS: &[&str] = &["pdf", "docx", "pptx", "xls", "xlsx", "xlsm"
 /// documents before extraction ever runs. 10 MiB comfortably covers realistic
 /// single documents while still bounding worst-case extraction cost (a
 /// pathological 10 MiB PDF/XLSX is still a bounded, one-shot parse).
-/// What: a `u64` byte count consulted by `service::walker::should_skip_path`.
+/// What: a `u64` byte count; the DEFAULT of the per-index office cap
+/// (`service::size_caps::FileSizeCaps::office`, #11655).
 /// Test: `service::walker` tests exercise the walker-side wiring.
 pub const MAX_OFFICE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -154,6 +155,17 @@ pub struct Extracted {
 /// `test_extract_text_rejects_oversized_input`, plus each submodule's own
 /// tests for format-specific correctness.
 pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
+    extract_text_with_cap(path, MAX_OFFICE_FILE_BYTES)
+}
+
+/// [`extract_text`] against an index's own office/PDF cap (#11655).
+///
+/// Why: a cap raised in project config must be honoured here too, or the
+/// walker admits a document this refuses as `TooLarge`.
+/// What: identical to [`extract_text`] with `cap` in place of
+/// [`MAX_OFFICE_FILE_BYTES`].
+/// Test: `raised_office_cap_is_honoured_by_extraction`.
+pub fn extract_text_with_cap(path: &Path, cap: u64) -> Result<Extracted, ExtractError> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -169,11 +181,11 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
             source,
         })?
         .len();
-    if size > MAX_OFFICE_FILE_BYTES {
+    if size > cap {
         return Err(ExtractError::TooLarge {
             path: path.display().to_string(),
             size,
-            cap: MAX_OFFICE_FILE_BYTES,
+            cap,
         });
     }
 
@@ -181,7 +193,7 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
         "pdf" => pdf::extract(path)?,
         "docx" => docx::extract(path)?,
         "pptx" => pptx::extract(path)?,
-        "xls" | "xlsx" | "xlsm" => xlsx::extract(path)?,
+        "xls" | "xlsx" | "xlsm" => xlsx::extract(path, cap)?,
         other => return Err(ExtractError::UnsupportedExtension(other.to_string())),
     };
 
@@ -216,6 +228,15 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
 /// directly; `service::walker` covers the extension-allowlist wiring this
 /// function's callers depend on.
 pub async fn read_content(path: &Path) -> Result<String, String> {
+    read_content_with_cap(path, MAX_OFFICE_FILE_BYTES).await
+}
+
+/// [`read_content`] against an index's own office/PDF cap (#11655).
+///
+/// What: office documents go through [`extract_text_with_cap`]; plain text is
+/// read unchanged (its cap is enforced by the walker and watcher gates).
+/// Test: `raised_office_cap_is_honoured_by_extraction`.
+pub async fn read_content_with_cap(path: &Path, cap: u64) -> Result<String, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -229,7 +250,9 @@ pub async fn read_content(path: &Path) -> Result<String, String> {
 
     let owned = path.to_path_buf();
     let path_str = owned.display().to_string();
-    let extracted = run_extract_with_timeout(move || extract_text(&owned), EXTRACT_TIMEOUT).await?;
+    let extracted =
+        run_extract_with_timeout(move || extract_text_with_cap(&owned, cap), EXTRACT_TIMEOUT)
+            .await?;
     if let Some(warning) = extracted.warning {
         tracing::warn!(path = %path_str, %warning, "office document extraction warning");
     }

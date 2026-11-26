@@ -370,6 +370,9 @@ pub struct WalkOptions {
     /// always receives a concrete cap. Default [`DEFAULT_DATA_FILE_MAX_BYTES`]
     /// (64 KiB). Non-data extensions keep the global [`MAX_FILE_BYTES`] cap.
     pub data_file_max_bytes: u64,
+    /// #11655: the per-index source and office/PDF caps. Default 1 MiB and
+    /// 10 MiB. `data_file_max_bytes` still applies on top for [`DATA_EXTS`].
+    pub size_caps: crate::service::size_caps::FileSizeCaps,
 }
 
 impl Default for WalkOptions {
@@ -387,6 +390,7 @@ impl Default for WalkOptions {
             follow_links: false,
             extra_skip_dirs: default_extra_skip_dirs(),
             data_file_max_bytes: DEFAULT_DATA_FILE_MAX_BYTES,
+            size_caps: crate::service::size_caps::FileSizeCaps::default(),
         }
     }
 }
@@ -547,7 +551,19 @@ const MIN_LINES_FOR_READABLE_JS: usize = 5;
 /// - Files larger than [`MAX_FILE_BYTES`] (requires `fs::metadata` — only
 ///   called when extension checks pass).
 pub fn should_skip_path(path: &Path) -> bool {
-    skip_by_name(path) || oversize_len(path, u64::MAX).is_some()
+    should_skip_path_with_caps(path, crate::service::size_caps::FileSizeCaps::default())
+}
+
+/// [`should_skip_path`] against an index's own size caps (#11655).
+///
+/// Why: the watcher re-checks a saved file after admission; with the default
+/// caps it refused a file the index's raised cap admits.
+/// Test: `watcher_gate_honours_a_raised_source_cap`.
+pub fn should_skip_path_with_caps(
+    path: &Path,
+    caps: crate::service::size_caps::FileSizeCaps,
+) -> bool {
+    skip_by_name(path) || oversize_len(path, caps, u64::MAX).is_some()
 }
 
 /// The name/extension half of [`should_skip_path`]; never touches the disk.
@@ -611,33 +627,27 @@ fn skip_by_name(path: &Path) -> bool {
 ///
 /// Why: the walker reports what the size gate refused, so the gate must say
 /// how large the file was, from one `stat`.
-/// What: the cap is [`size_cap_for_ext`] (office documents get
-/// `MAX_OFFICE_FILE_BYTES`, #2923), lowered to `data_cap` for [`DATA_EXTS`]
-/// (#1372). A failed `stat` is not oversize.
-/// Test: `oversized_file_is_recorded_with_reason_and_size`.
-fn oversize_len(path: &Path, data_cap: u64) -> Option<u64> {
+/// What: the cap is `caps.for_ext` (office documents get `caps.office`,
+/// #2923; #11655 made both caps per-index), lowered to `data_cap` for
+/// [`DATA_EXTS`] (#1372). A failed `stat` is not oversize.
+/// Test: `oversized_file_is_recorded_with_reason_and_size`,
+/// `raised_source_cap_indexes_a_file_over_the_old_default`.
+fn oversize_len(
+    path: &Path,
+    caps: crate::service::size_caps::FileSizeCaps,
+    data_cap: u64,
+) -> Option<u64> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let mut cap = size_cap_for_ext(&ext);
+    let mut cap = caps.for_ext(&ext);
     if DATA_EXTS.contains(&ext.as_str()) {
         cap = cap.min(data_cap);
     }
     let len = std::fs::metadata(path).ok()?.len();
     (len > cap).then_some(len)
-}
-
-/// The global size cap for a lowercased extension: office documents get
-/// [`crate::core::extract::MAX_OFFICE_FILE_BYTES`], everything else
-/// [`MAX_FILE_BYTES`].
-fn size_cap_for_ext(ext: &str) -> u64 {
-    if crate::core::extract::is_extractable_ext(ext) {
-        crate::core::extract::MAX_OFFICE_FILE_BYTES
-    } else {
-        MAX_FILE_BYTES
-    }
 }
 
 /// Whether `len` bytes of content at `path` exceed a size cap the walker
@@ -646,15 +656,17 @@ fn size_cap_for_ext(ext: &str) -> u64 {
 /// Why: `index_file` receives content, not a file, so the walker's
 /// metadata-based caps in [`should_skip_path`] and [`exceeds_data_cap`] see
 /// nothing for it.
-/// What: the global cap for the extension, then the tighter [`DATA_EXTS`] cap.
+/// What: the index's cap for the extension (#11655), then the tighter
+/// [`DATA_EXTS`] cap.
 /// Test: `pushed_write_over_a_size_cap_is_refused`.
-pub(crate) fn len_exceeds_caps(path: &Path, len: u64, data_file_max_bytes: u64) -> bool {
+pub(crate) fn len_exceeds_caps(path: &Path, len: u64, opts: &WalkOptions) -> bool {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    len > size_cap_for_ext(&ext) || (DATA_EXTS.contains(&ext.as_str()) && len > data_file_max_bytes)
+    len > opts.size_caps.for_ext(&ext)
+        || (DATA_EXTS.contains(&ext.as_str()) && len > opts.data_file_max_bytes)
 }
 
 /// Return `true` when any path component of `path` is an excluded directory
@@ -982,7 +994,8 @@ fn path_admission(root: &Path, path: &Path, opts: &WalkOptions) -> Admission {
     }
     // Size caps: global/office (#2923) and the tighter data cap (#1372).
     // #11651: checked last so the refusal is reported as a size skip only.
-    match oversize_len(path, opts.data_file_max_bytes) {
+    // #11655: the index's own caps, not the constants.
+    match oversize_len(path, opts.size_caps, opts.data_file_max_bytes) {
         Some(len) => Admission::TooLarge(len),
         None => Admission::Admitted,
     }

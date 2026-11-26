@@ -473,6 +473,7 @@ async fn rechunk_all(
     // permit — `index_cancel_flag`'s contract, so a flag left over from a delete
     // that has already finished is gone by now and this one is correctly false.
     let cancel = crate::service::reindex::index_cancel_flag(&index.id);
+    let office_cap = index.size_caps.office;
     {
         let indexer = indexer_arc.read().await;
         let cleared = indexer
@@ -505,7 +506,8 @@ async fn rechunk_all(
         let reads = futures::future::join_all(batch.iter().map(|file| {
             let abs = root_path.join(file.as_str());
             async move {
-                let content = crate::core::extract::read_content(&abs).await;
+                // #11655: the index's own office/PDF cap.
+                let content = crate::core::extract::read_content_with_cap(&abs, office_cap).await;
                 (abs, content)
             }
         }))

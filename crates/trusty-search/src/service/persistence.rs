@@ -158,6 +158,20 @@ pub struct PersistedIndex {
     #[serde(default = "default_data_file_max_bytes")]
     pub data_file_max_bytes: Option<u64>,
 
+    /// #11655: source-file size cap override (bytes). `None` = 1 MiB.
+    ///
+    /// Why: persisted so a raised cap survives restarts.
+    /// What: written only when set, so an index that sets nothing keeps an
+    /// unchanged `indexes.toml`; resolved by `FileSizeCaps::resolve`.
+    /// Test: `size_caps_round_trip_through_indexes_toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file_max_bytes: Option<u64>,
+
+    /// #11655: office/PDF size cap override (bytes). `None` = 10 MiB.
+    /// Same persistence rules as `source_file_max_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office_file_max_bytes: Option<u64>,
+
     /// Staged-pipeline opt-out (issue #109, Phase 1): when `true`, the
     /// reindex pipeline stops after Stage 1 (lexical / BM25 / redb) and
     /// never embeds. Useful for callers who explicitly want a daemonized
@@ -447,6 +461,8 @@ impl Default for PersistedIndex {
             follow_links: default_follow_links(),
             extra_skip_dirs: default_extra_skip_dirs(),
             data_file_max_bytes: default_data_file_max_bytes(),
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
