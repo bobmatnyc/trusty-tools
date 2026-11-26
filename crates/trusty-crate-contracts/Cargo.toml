@@ -57,6 +57,11 @@ trusty-installer = { workspace = true }
 # #9271: `embedder-test-support` is the engine's mock embedder seam (C); it was
 # a trusty-common feature until the engine moved here.
 trusty-memory = { path = "../trusty-memory", features = ["embedder-test-support"] }
+# #11821 P4-f2 (D): `tests/architect_install_paths_parity_11821.rs` runs
+# trusty-architect's local install.toml reader and trusty-common's resolver over
+# one fixture set. trusty-architect is a leaf that may not depend on
+# trusty-common (#9171 A1), so neither crate can host the test.
+trusty-architect = { workspace = true }
 # The features the moved tests need from the shared crate, named here rather
 # than inherited from whichever neighbour happens to enable them:
 #   `intent-source`  — the real ISR the cross-gate test resolves through (A).
