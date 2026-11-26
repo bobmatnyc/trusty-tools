@@ -74,10 +74,13 @@ pub fn row_line(row: &TreeRow) -> Line<'static> {
 /// visible.
 /// What: the [`row_line`] text when it fits. Otherwise the owner drops its
 /// project count and both kinds show [`short_counter_text`]; a name still too
-/// long is cut with `…` so the counter is never the part cut off.
-/// Test: `narrow_left_column_keeps_the_counters`.
+/// long is cut with `…` so the counter is never the part cut off. #10990: a
+/// `dim` project row draws every span in [`dim_style`].
+/// Test: `narrow_left_column_keeps_the_counters`,
+/// `decommissioned_project_row_draws_dim_not_like_an_active_one`.
 pub fn row_line_fit(row: &TreeRow, width: usize) -> Line<'static> {
     let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = matches!(row.kind, TreeRowKind::Project { dim: true, .. });
     let (lead, lead_style, name, extra, total, live) = match &row.kind {
         TreeRowKind::Owner {
             name,
@@ -101,7 +104,9 @@ pub fn row_line_fit(row: &TreeRow, width: usize) -> Line<'static> {
                 *live,
             )
         }
-        TreeRowKind::Project { name, total, live } => {
+        TreeRowKind::Project {
+            name, total, live, ..
+        } => {
             let lead = format!("  {PROJECT_GLYPH} ");
             (lead, Style::default(), name, String::new(), *total, *live)
         }
@@ -134,7 +139,20 @@ pub fn row_line_fit(row: &TreeRow, width: usize) -> Line<'static> {
         spans.push(Span::raw(extra));
     }
     spans.push(Span::styled(counters, counter_style(live)));
+    if dim {
+        // #10990: grey the whole row; the text stays so the name reads.
+        for span in &mut spans {
+            span.style = dim_style();
+        }
+    }
     Line::from(spans)
+}
+
+/// The style of a decommissioned project row (#10990): muted and dimmed.
+pub fn dim_style() -> Style {
+    Style::default()
+        .fg(palette().muted)
+        .add_modifier(Modifier::DIM)
 }
 
 /// The style of a column title: accent and bold while the column is focused.
@@ -269,6 +287,72 @@ mod tests {
         // #10754: the left column holds owner and projects only.
         assert_eq!(lines[2], "  · beta  0 sessions, 0 live");
         assert_eq!(lines.len(), 3, "{lines:?}");
+    }
+
+    /// #10990: a decommissioned project row keeps its text but not its look;
+    /// against the pre-#10990 renderer both rows draw identically.
+    #[test]
+    fn decommissioned_project_row_draws_dim_not_like_an_active_one() {
+        let row = |dim: bool| TreeRow {
+            id: NodeId::Project {
+                owner: "acme".to_string(),
+                name: "alpha".to_string(),
+            },
+            kind: TreeRowKind::Project {
+                name: "alpha".to_string(),
+                total: 2,
+                live: 0,
+                dim,
+            },
+        };
+        let active = row_line(&row(false));
+        let gone = row_line(&row(true));
+        assert_eq!(line_text(&active), line_text(&gone), "same text");
+        assert_ne!(active, gone, "a decommissioned row must not look active");
+        for span in &gone.spans {
+            assert_eq!(span.style, dim_style(), "{:?} is not dim", span.content);
+            assert!(span.style.add_modifier.contains(Modifier::DIM));
+        }
+        assert!(
+            active
+                .spans
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::DIM)),
+            "an active row carries no DIM"
+        );
+    }
+
+    /// #10990: drawn through the real layout, the dim reaches the buffer.
+    #[test]
+    fn decommissioned_project_renders_dim_in_the_buffer() {
+        let mut state = state();
+        state.projects[1].decommissioned = true;
+        state.rebuild_tree();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test backend");
+        terminal
+            .draw(|f| crate::tui::project_ctl::layout::render(f, &mut state))
+            .expect("draw the projects view");
+        let buffer = terminal.backend().buffer();
+        let row_of = |needle: &str| {
+            (0..buffer.area.height)
+                .find(|&y| {
+                    let line: String = (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect();
+                    line.contains(needle)
+                })
+                .unwrap_or_else(|| panic!("{needle} not drawn"))
+        };
+        let is_dim = |y: u16, name: &str| {
+            let line: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            let col = line.find(name).expect("name on its row");
+            let x = u16::try_from(line[..col].chars().count()).expect("fits");
+            buffer[(x, y)].modifier.contains(Modifier::DIM)
+        };
+        assert!(is_dim(row_of("· beta"), "beta"), "beta is decommissioned");
+        assert!(!is_dim(row_of("· alpha"), "alpha"), "alpha is active");
     }
 
     /// #11554: the Architect row draws unindented and tagged privileged.
