@@ -45,7 +45,9 @@ impl DaemonRelauncher {
 impl RuntimeRelauncher for DaemonRelauncher {
     /// Put a verified runtime back into `record`'s pane.
     ///
-    /// What: resolves the workspace the same way the record does
+    /// What: first undoes a decommission park of the record's project index
+    /// through `SessionManager::restore_parked_index` (#11230), warning on a
+    /// failure; then resolves the workspace the same way the record does
     /// (`workspace_path` → `cwd`), resolves the pinned `gh` identity, builds the
     /// adapter for the record's OWN runtime kind, calls `spawn_resume` into the
     /// record's OWN pane once [`spawn_resume_into_owned_pane`] proves it
@@ -53,7 +55,9 @@ impl RuntimeRelauncher for DaemonRelauncher {
     /// failure is an `Err(message)` — never a warning beside a record left
     /// `Active`, which is the defect this exists to close.
     /// Test: `a_dropped_daemon_state_fails_the_relaunch` in
-    /// `auto_relaunch_tests.rs`. The no-runtime arm is proven one level up, by
+    /// `auto_relaunch_tests.rs`; `an_auto_resume_after_a_decommission_unparks_the_index`
+    /// and `an_auto_resume_of_a_live_project_unparks_nothing` in
+    /// `resume_restore_tests.rs`. The no-runtime arm is proven one level up, by
     /// `an_auto_resume_whose_relaunch_finds_no_runtime_is_not_left_active`
     /// (`session_manager/relaunch_tests.rs`), over a scripted relauncher.
     async fn relaunch(&self, record: &SessionRecord) -> Result<(), String> {
@@ -61,6 +65,13 @@ impl RuntimeRelauncher for DaemonRelauncher {
             return Err("the daemon state is gone, so no runtime could be started".to_owned());
         };
         let mgr = state.session_manager().await;
+        // #11230: undo a decommission park before the launch, as
+        // `resume_managed` does; a failure is warned and never blocks the launch.
+        warn_unrestored(
+            record,
+            mgr.restore_parked_index(&*state.project_registry().await, record)
+                .await,
+        );
         let workspace = record
             .workspace_path
             .clone()
@@ -87,6 +98,23 @@ impl RuntimeRelauncher for DaemonRelauncher {
             Some(msg) => Err(msg),
             None => Ok(()),
         }
+    }
+}
+
+/// Log an auto-resume's failed index restore at WARN (#11230).
+///
+/// Why: an auto-resume has no caller to hand an error to, and an `Err` from
+/// the relaunch errors a session whose runtime may be fine. #11230's closure
+/// condition: the failure is a warning and the session stays running.
+/// What: `Err(msg)` (the message names the still-parked index and the unpark
+/// command) is logged at WARN; any `Ok` state is left to `restore_for_session`.
+/// Test: `a_failed_unpark_on_auto_resume_is_warned_and_the_launch_still_runs`.
+fn warn_unrestored(
+    record: &SessionRecord,
+    restored: Result<crate::session_manager::index_restore::RestoreState, String>,
+) {
+    if let Err(msg) = restored {
+        tracing::warn!(id = %record.id, "auto-resume: {msg}");
     }
 }
 
