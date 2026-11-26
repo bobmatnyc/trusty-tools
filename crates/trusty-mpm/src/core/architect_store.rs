@@ -39,7 +39,8 @@ pub const ENV_ARCHITECT_PROJECT_DIR: &str = "ARCHITECT_PROJECT_DIR";
 
 /// `~/.trusty-mpm/config.toml` under `home`.
 pub fn user_config_path(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm").join("config.toml")
+    // #11821 P3: under the configured config dir.
+    crate::core::config_base::framework_root_under(home).join("config.toml")
 }
 
 /// Every absolute `[architect]` (legacy `[supervisor]`) `projects` entry

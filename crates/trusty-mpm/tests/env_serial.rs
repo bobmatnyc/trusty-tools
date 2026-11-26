@@ -20,6 +20,8 @@
 mod common;
 
 mod auth_cost;
+// #11821 P3: the config trees follow the configured config dir.
+mod config_dir_routing_11821_p3;
 mod daemon_serve_drain;
 // #9121: a test daemon's environment carries no inherited secret.
 mod architect_floor_host;

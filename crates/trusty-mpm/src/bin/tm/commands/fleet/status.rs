@@ -230,7 +230,8 @@ fn unrecorded_claude(dir: &Path, home: &Path, probe: Probe, session: &str) -> Op
         return None;
     }
     let pid = (probe.claude)(session)?;
-    let root = home.join(".trusty-mpm");
+    // #11821 P3: under the configured config dir.
+    let root = trusty_mpm::core::config_base::framework_root_under(home);
     let records = trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
     if !matches!(records.read(&root, pid), Ok(None)) {
         return None;
@@ -263,8 +264,14 @@ pub(super) fn bound(
     let pid = (probe.claude)(session).ok_or_else(|| {
         format!("no `claude` process was found in tmux session {session}, or tmux could not say")
     })?;
-    check_session_binding(&home.join(".trusty-mpm"), dir, session, pid)
-        .map_err(|why| why.to_string())?;
+    // #11821 P3: under the configured config dir.
+    check_session_binding(
+        &trusty_mpm::core::config_base::framework_root_under(home),
+        dir,
+        session,
+        pid,
+    )
+    .map_err(|why| why.to_string())?;
     Ok(format!(
         "the `claude` in tmux session {session} is the Architect `tm fleet init` launched"
     ))

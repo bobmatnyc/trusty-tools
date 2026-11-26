@@ -161,10 +161,11 @@ fn resolve_root(cli_root: Option<&str>) -> anyhow::Result<PathBuf> {
         return Ok(p);
     }
 
-    // 4. Default
-    dirs::home_dir()
-        .map(|h| h.join(".trusty-mpm"))
-        .context("cannot resolve home directory for default managed root")
+    // 4. Default. #11821 P3: under the configured config dir; a broken
+    // install.toml refuses rather than defaulting to $HOME.
+    trusty_mpm::core::config_base::try_config_base()
+        .map(|base| base.join(trusty_mpm::core::paths::FRAMEWORK_DIR_NAME))
+        .context("cannot resolve the config dir for the default managed root")
 }
 
 /// Expand a leading `~/` to the real home directory.

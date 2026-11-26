@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use super::sources::{
-    default_project_paths_file, project_roots, resolve_allow_source, AllowSource, AllowlistPaths,
+    default_project_paths_file, mpm_root_from, project_roots, resolve_allow_source, AllowSource,
+    AllowlistPaths,
 };
 use super::{check_path_with, AllowlistConfig, AllowlistEntry, AllowlistVerdict};
 
@@ -80,6 +81,34 @@ fn default_project_paths_file_ends_at_the_registry() {
         p.ends_with("project-paths.json"),
         "expected the tm project registry filename, got {}",
         p.display()
+    );
+}
+
+/// #11821: the tm registry follows a configured config dir, and a broken
+/// `install.toml` reads the home default.
+#[test]
+fn mpm_root_from_follows_the_config_dir() {
+    use trusty_common::install_paths::{
+        install_file_path, InstallPaths, PathOverrides, MPM_DIR_NAME,
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let moved = InstallPaths::resolve_with(
+        |name| (name == "TRUSTY_MPM_CONFIG_DIR").then(|| "/srv/cfg".to_string()),
+        home.path(),
+        &PathOverrides::default(),
+    );
+    assert_eq!(
+        mpm_root_from(moved, Some(home.path().to_path_buf())),
+        PathBuf::from("/srv/cfg/.trusty-mpm")
+    );
+    let file = install_file_path(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "bogus = 1\n").unwrap();
+    let broken = InstallPaths::resolve_with(|_| None, home.path(), &PathOverrides::default());
+    assert!(broken.is_err());
+    assert_eq!(
+        mpm_root_from(broken, Some(home.path().to_path_buf())),
+        home.path().join(MPM_DIR_NAME)
     );
 }
 

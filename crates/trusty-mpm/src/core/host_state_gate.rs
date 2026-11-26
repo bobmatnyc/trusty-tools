@@ -212,7 +212,8 @@ pub fn classify_with_data_root(
         effective_home,
     ) {
         (HostStateAccess::RealEnvironment, Some(home)) => {
-            let expected_root = home.join(crate::core::paths::FRAMEWORK_DIR_NAME);
+            // #11821 P3: the configured config dir.
+            let expected_root = crate::core::config_base::framework_root_under(home);
             if same_path(data_root, &expected_root) {
                 HostStateAccess::RealEnvironment
             } else {

@@ -31,7 +31,9 @@ const NAME: &str = "org_accounts";
 /// `Err`.
 /// Test: the four tests named in the module doc.
 pub(super) fn check_org_accounts(home: &Path) -> DoctorCheck {
-    match OrgAccounts::inspect(&home.join(".trusty-mpm")) {
+    // #11821 P3: under the configured config dir.
+    let root = crate::core::config_base::framework_root_under(home);
+    match OrgAccounts::inspect(&root) {
         Ok((_, Some(warning))) => DoctorCheck::new(NAME, CheckStatus::Warn, warning),
         Ok((accounts, None)) if accounts.is_empty() => DoctorCheck::new(
             NAME,

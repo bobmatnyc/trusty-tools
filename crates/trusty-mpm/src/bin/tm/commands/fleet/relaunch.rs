@@ -218,7 +218,8 @@ pub(crate) fn relaunch(
         names,
         ops.start_poller,
     ));
-    let root = home.join(".trusty-mpm");
+    // #11821 P3: under the configured config dir.
+    let root = trusty_mpm::core::config_base::framework_root_under(home);
     report.steps.extend(prune_replaced(
         &root,
         &dir,

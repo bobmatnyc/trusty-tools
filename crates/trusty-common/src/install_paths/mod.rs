@@ -8,7 +8,10 @@
 //!
 //! What: [`InstallPaths::resolve`] applies **flag > env > install file >
 //! default** per key and returns absolute paths plus the winning
-//! [`PathSource`]. The install file is always `$HOME/.trusty-tools/install.toml`
+//! [`PathSource`]. For `projects_root` only, the legacy `config.yaml`
+//! `workspace_root_template` sits between the install file and the default;
+//! `workspace_layout`'s workspace-root resolvers are thin wrappers over this
+//! one chain (#11821). The install file is always `$HOME/.trusty-tools/install.toml`
 //! ([`install_file_path`]), never under the configured config dir, because the
 //! config dir cannot name itself. Every value must be absolute: a relative or
 //! empty value is an [`InstallPathsError`], never a silent default.
@@ -24,10 +27,15 @@
 //! [`write_install_file`]: crate::install_paths::write_install_file
 
 mod file;
+mod process;
 
 use std::path::{Path, PathBuf};
 
 pub use file::{InstallFile, install_file_path, read_install_file, write_install_file};
+#[cfg(feature = "crate-config")]
+pub(crate) use process::{config_dir_checked, config_dir_for_legacy_wrapper};
+pub(crate) use process::{projects_root_checked, projects_root_for_legacy_wrapper};
+pub use process::{try_config_dir, try_config_dir_under};
 
 use crate::workspace_layout::{DEFAULT_WORKSPACE_DIR, WORKSPACE_ROOT_ENV, expand_tilde};
 
@@ -52,7 +60,8 @@ pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// so an operator can tell a stray env var from the install file.
 /// What: one variant per rung of the precedence chain, highest first.
 /// Test: `flag_beats_env_file_and_default`, `env_beats_file_and_default`,
-/// `file_beats_default`, `missing_file_means_default`.
+/// `file_beats_default`, `missing_file_means_default`,
+/// `file_beats_template_and_template_beats_default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathSource {
     /// An explicit override passed in by the caller (a CLI flag).
@@ -61,6 +70,9 @@ pub enum PathSource {
     Env,
     /// `$HOME/.trusty-tools/install.toml`.
     InstallFile,
+    /// trusty-mpm's `config.yaml` `workspace_root_template` (`projects_root`
+    /// only), below the install file (#11821).
+    Template,
     /// The built-in default.
     Default,
 }
@@ -71,6 +83,7 @@ impl std::fmt::Display for PathSource {
             Self::Flag => "flag",
             Self::Env => "env",
             Self::InstallFile => "install-file",
+            Self::Template => "config-template",
             Self::Default => "default",
         })
     }
@@ -85,9 +98,12 @@ pub struct ResolvedPath {
     pub source: PathSource,
 }
 
-/// Caller-supplied overrides, the top rung of the chain (CLI flags in P2).
+/// Caller-supplied inputs: the flag rung (CLI flags in P2) plus the legacy
+/// `config.yaml` template for `projects_root`.
 ///
-/// A `None` field defers to env, then the install file, then the default.
+/// A `None` flag field defers to env, then the install file, then the
+/// default. `projects_root_template` is NOT a flag: it sits below the install
+/// file (#11821).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PathOverrides {
     /// Override for the projects root.
@@ -98,6 +114,9 @@ pub struct PathOverrides {
     pub claude_config_dir: Option<PathBuf>,
     /// Override for the Codex home.
     pub codex_home: Option<PathBuf>,
+    /// trusty-mpm's `config.yaml` `workspace_root_template`, may lead with
+    /// `~`; consulted after the install file and before the default.
+    pub projects_root_template: Option<String>,
 }
 
 /// Errors from resolving or writing install paths.
@@ -221,6 +240,18 @@ impl Key {
         }
     }
 
+    /// The non-blank template rung; `projects_root` is the only templated key.
+    fn pick_template(self, o: &PathOverrides) -> Option<&str> {
+        match self {
+            Self::ProjectsRoot => o
+                .projects_root_template
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty()),
+            Self::ConfigDir | Self::ClaudeConfigDir | Self::CodexHome => None,
+        }
+    }
+
     fn pick_file(self, f: &InstallFile) -> Option<&PathBuf> {
         match self {
             Self::ProjectsRoot => f.projects_root.as_ref(),
@@ -263,7 +294,8 @@ impl InstallPaths {
     /// Resolve against an injected env lookup and home dir.
     ///
     /// Why: the pure core, so tests never mutate process-global env.
-    /// What: per key takes the first of override, env, file, default. The
+    /// What: per key takes the first of override, env, file, template
+    /// (`projects_root` only), default. The
     /// install file is read at most once, and only when some key is not decided
     /// by an override or env (#11821), so a broken file cannot block a valid
     /// env value. Override and env values are trimmed (empty env means unset)
@@ -285,7 +317,7 @@ impl InstallPaths {
             if file.is_none() {
                 file = Some(read_install_file(home)?);
             }
-            resolve_late(key, file.as_ref().and_then(Option::as_ref), home)
+            resolve_late(key, file.as_ref().and_then(Option::as_ref), overrides, home)
         };
         let projects_root = required(Key::ProjectsRoot, one(Key::ProjectsRoot)?)?;
         let config_dir = required(Key::ConfigDir, one(Key::ConfigDir)?)?;
@@ -334,15 +366,20 @@ fn resolve_early(
     Ok(None)
 }
 
-/// The file and default rungs; `None` only for a key with no default.
+/// The file, template and default rungs; `None` only for a key with no default.
 fn resolve_late(
     key: Key,
     file: Option<&InstallFile>,
+    overrides: &PathOverrides,
     home: &Path,
 ) -> Result<Option<ResolvedPath>, InstallPathsError> {
     if let Some(path) = file.and_then(|f| key.pick_file(f)) {
         // install.toml values are taken literally: no `~`, no trimming.
         return absolute(key, PathSource::InstallFile, path.clone()).map(Some);
+    }
+    // #11821: the template is one rung of this chain, validated like the rest.
+    if let Some(raw) = key.pick_template(overrides) {
+        return absolute(key, PathSource::Template, expand_tilde(raw, home)).map(Some);
     }
     Ok(key.default_for(home).map(|path| ResolvedPath {
         path,
@@ -384,93 +421,6 @@ fn validate(key: &'static str, origin: PathSource, path: &Path) -> Result<(), In
         });
     }
     Ok(())
-}
-
-/// Resolve ONE key from the process env and `$HOME`, so a bad value under
-/// another key cannot change what a legacy wrapper returns.
-/// Env is checked before the file is read (#11821).
-fn resolve_process_key(key: Key) -> Result<Option<ResolvedPath>, InstallPathsError> {
-    let home = dirs::home_dir().ok_or(InstallPathsError::NoHome)?;
-    let env = |name: &str| std::env::var(name).ok();
-    if let Some(hit) = resolve_early(key, &env, &home, &PathOverrides::default())? {
-        return Ok(Some(hit));
-    }
-    let file = read_install_file(&home)?;
-    resolve_late(key, file.as_ref(), &home)
-}
-
-/// The process-env config dir for `crate_config`'s writers and `load`.
-///
-/// Why: a broken install file must fail a write closed, never redirect it
-/// under `$HOME` (#11821).
-/// What: `Ok(Some(dir))` when resolved; `Ok(None)` when home is unknown (the
-/// pre-#11821 "no home" case); `Err` for a broken or invalid source that no
-/// higher rung overrides.
-/// Test: `save_fails_closed_on_broken_install_file`.
-#[cfg(feature = "crate-config")]
-pub(crate) fn config_dir_checked() -> Result<Option<PathBuf>, InstallPathsError> {
-    match resolve_process_key(Key::ConfigDir) {
-        Ok(resolved) => Ok(resolved.map(|r| r.path)),
-        Err(InstallPathsError::NoHome) => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-
-/// The process-env config dir for the `Option`-returning `crate_config_dir`.
-///
-/// Why: `crate_config_dir` cannot surface an error without breaking callers
-/// in other crates, and some of them write under the path it returns.
-/// What: [`config_dir_checked`], with an error logged at `warn` and mapped
-/// to `None`, the "no config dir" answer every caller already handles. It
-/// never falls back to `$HOME` (#11821).
-/// Test: `process_env_wrappers_match_today`, `save_fails_closed_on_broken_install_file`.
-#[cfg(feature = "crate-config")]
-pub(crate) fn config_dir_for_legacy_wrapper() -> Option<PathBuf> {
-    config_dir_checked().unwrap_or_else(|err| {
-        tracing::warn!(error = %err, "install paths unresolved; no config dir (fail closed)");
-        None
-    })
-}
-
-/// The process-env projects root for the default rung of
-/// `workspace_layout::try_resolve_workspace_root`, consulted only when neither
-/// its env var nor its template is set.
-///
-/// Why: a writer must not clone under the default root when `install.toml`
-/// is broken (df-D1t, #11821).
-/// What: `Ok` with the install-file value or the default; `NoHome` yields
-/// `Ok(/tmp/trusty-mpm-projects)`, the pre-#11821 answer; any other error,
-/// such as a broken install file, is returned.
-/// Test: `try_resolve_workspace_root_fails_closed_on_broken_install_file`.
-pub(crate) fn projects_root_checked() -> Result<PathBuf, InstallPathsError> {
-    match resolve_process_key(Key::ProjectsRoot) {
-        Ok(Some(resolved)) => Ok(resolved.path),
-        // `ProjectsRoot` always has a default; kept total for the type.
-        Ok(None) => Ok(legacy_projects_root()),
-        Err(InstallPathsError::NoHome) => Ok(PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR)),
-        Err(err) => Err(err),
-    }
-}
-
-/// The process-env projects root for the legacy `resolve_workspace_root`
-/// wrapper, consulted only when neither its env var nor its template is set.
-///
-/// What: [`projects_root_checked`], with an error logged at `warn` and
-/// mapped to the pre-#11821 default. Writers use the `try_` variant instead
-/// (#11821).
-/// Test: `process_env_wrappers_match_today`.
-pub(crate) fn projects_root_for_legacy_wrapper() -> PathBuf {
-    projects_root_checked().unwrap_or_else(|err| {
-        tracing::warn!(error = %err, "install paths unresolved; using the default projects root");
-        legacy_projects_root()
-    })
-}
-
-/// `$HOME/trusty-mpm-projects`, or under `/tmp` when home is unknown.
-fn legacy_projects_root() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(DEFAULT_WORKSPACE_DIR)
 }
 
 #[cfg(test)]

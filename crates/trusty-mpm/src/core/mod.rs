@@ -308,6 +308,8 @@ pub mod pane_foreground;
 #[cfg(test)]
 pub(crate) mod pane_foreground_tests;
 pub mod paths;
+// #11821 P3: the config dir every framework path nests under.
+pub mod config_base;
 // #10753: tmux-ancestry evidence that a pid file's session still exists.
 pub mod pid_host;
 pub mod pid_registry;

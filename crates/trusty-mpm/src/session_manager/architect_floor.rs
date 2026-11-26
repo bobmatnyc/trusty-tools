@@ -114,7 +114,8 @@ impl ArchitectFloor {
     /// Test: `a_missing_or_relative_home_is_undeterminable`.
     pub fn from_home(home: Option<PathBuf>) -> Self {
         match home.filter(|h| h.is_absolute()) {
-            Some(home) => Self::at_root(&home.join(".trusty-mpm")),
+            // #11821 P3: under the configured config dir.
+            Some(home) => Self::at_root(&crate::core::config_base::framework_root_under(&home)),
             None => Self {
                 source: FloorSource::NoHome,
             },

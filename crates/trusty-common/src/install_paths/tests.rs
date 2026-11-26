@@ -81,6 +81,7 @@ fn flag_beats_env_file_and_default() {
         config_dir: Some("/flag/config".into()),
         claude_config_dir: Some("/flag/claude".into()),
         codex_home: Some("/flag/codex".into()),
+        projects_root_template: Some("/template/projects".into()),
     };
     let got = InstallPaths::resolve_with(env_of(&FULL_ENV), home.path(), &flags).expect("resolve");
     assert_eq!(got.projects_root, rp("/flag/projects", PathSource::Flag));
@@ -242,6 +243,79 @@ fn relative_flag_value_is_rejected() {
     );
 }
 
+/// Why: the #11821 P2 critic MEDIUM: the workspace-root chain ranked the
+/// YAML template above the install file while `InstallPaths::resolve` did not
+/// read it at all, so one config gave two roots.
+/// What: the one rule for `projects_root`: install file > template > default;
+/// the template is `~`-expanded and labelled `Template`.
+#[test]
+fn file_beats_template_and_template_beats_default() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let tpl = PathOverrides {
+        projects_root_template: Some("  ~/tpl  ".into()),
+        ..PathOverrides::default()
+    };
+    let got = InstallPaths::resolve_with(no_env(), home.path(), &tpl).expect("resolve");
+    assert_eq!(got.projects_root.path, home.path().join("tpl"));
+    assert_eq!(got.projects_root.source, PathSource::Template);
+    assert_eq!(got.config_dir.source, PathSource::Default);
+
+    write_raw(home.path(), "projects_root = \"/file/projects\"\n");
+    let got = InstallPaths::resolve_with(no_env(), home.path(), &tpl).expect("resolve");
+    assert_eq!(
+        got.projects_root,
+        rp("/file/projects", PathSource::InstallFile)
+    );
+
+    let blank = PathOverrides {
+        projects_root_template: Some("   ".into()),
+        ..PathOverrides::default()
+    };
+    write_raw(home.path(), "");
+    let got = InstallPaths::resolve_with(no_env(), home.path(), &blank).expect("resolve");
+    assert_eq!(got.projects_root.source, PathSource::Default);
+}
+
+/// What: a relative template is a `Relative` error with the template source.
+#[test]
+fn relative_template_value_is_rejected() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let tpl = PathOverrides {
+        projects_root_template: Some("projects".into()),
+        ..PathOverrides::default()
+    };
+    let err = InstallPaths::resolve_with(no_env(), home.path(), &tpl)
+        .expect_err("relative template must fail");
+    assert!(
+        matches!(
+            err,
+            InstallPathsError::Relative {
+                key: "projects_root",
+                origin: PathSource::Template,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+/// Why: the #11821 P2 critic LOW: with no home, the `try_` projects-root path
+/// answered `/tmp/trusty-mpm-projects`, a root nobody configured.
+/// What: no home -> `NoHome`, even with an absolute template; the injected
+/// core is the only way to reach it on hosts whose `dirs::home_dir()` falls
+/// back to the password database.
+#[test]
+fn try_projects_root_fails_closed_without_a_home() {
+    let got = super::process::projects_root_with(no_env(), None, Some("/abs/tpl"));
+    assert!(
+        matches!(got, Err(InstallPathsError::NoHome)),
+        "no home must fail closed, got {got:?}"
+    );
+    let env = env_of(&[("TRUSTY_MPM_WORKSPACE_ROOT", "/env/projects")]);
+    let got = super::process::projects_root_with(env, None, None);
+    assert!(matches!(got, Err(InstallPathsError::NoHome)), "got {got:?}");
+}
+
 /// What: a misspelt key fails the parse instead of being ignored.
 #[test]
 fn unknown_key_is_rejected() {
@@ -341,17 +415,17 @@ fn writer_refuses_relative_paths() {
 /// Why: P1's contract is that existing callers see no change with no new
 /// env or file set; this pins each wrapper to its pre-#11821 formula.
 /// What: with `$HOME` at a tempdir and the two env vars cleared, the wrappers
-/// return exactly the old values; an `install.toml` then moves them (below
-/// the YAML template). With a broken one, `crate_config_dir` fails closed
+/// return exactly the old values; an `install.toml` then moves them (above
+/// the YAML template, the one rule since #11821 P3). With a broken one, `crate_config_dir` fails closed
 /// (`None`, #11821); `resolve_workspace_root` keeps its logged default
 /// because its `PathBuf` signature cannot carry an error. Writers use
 /// `try_resolve_workspace_root`, pinned by
 /// `try_resolve_workspace_root_fails_closed_on_broken_install_file`.
-// Sets HOME and the env vars under the crate-wide `ENV_LOCK` (#5937).
 #[test]
 fn process_env_wrappers_match_today() {
     use crate::workspace_layout::resolve_workspace_root;
 
+    // #11821 P3: sets HOME and the env vars under the crate-wide `ENV_LOCK` (#5937).
     let _guard = crate::data_dir::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -408,7 +482,7 @@ fn process_env_wrappers_match_today() {
     assert_eq!(before_root, h.join(DEFAULT_WORKSPACE_DIR));
     assert_eq!(before_template, PathBuf::from("/tmp/from-config"));
     assert_eq!(file_root, PathBuf::from("/file/projects"));
-    assert_eq!(file_template, PathBuf::from("/tmp/from-config"));
+    assert_eq!(file_template, PathBuf::from("/file/projects"));
     assert_eq!(broken_root, h.join(DEFAULT_WORKSPACE_DIR));
     #[cfg(feature = "crate-config")]
     {
@@ -540,12 +614,16 @@ fn source_labels() {
         PathSource::Flag,
         PathSource::Env,
         PathSource::InstallFile,
+        PathSource::Template,
         PathSource::Default,
     ]
     .iter()
     .map(ToString::to_string)
     .collect();
-    assert_eq!(labels, ["flag", "env", "install-file", "default"]);
+    assert_eq!(
+        labels,
+        ["flag", "env", "install-file", "config-template", "default"]
+    );
 }
 
 /// Why: df-D1t (#11821): a writer must not act on the default projects root
@@ -553,13 +631,13 @@ fn source_labels() {
 /// What: with `$HOME` at a tempdir and `TRUSTY_MPM_WORKSPACE_ROOT` cleared,
 /// `try_resolve_workspace_root` returns the default with no file, the file's
 /// value with a valid one, and `Parse` with a broken one, while the legacy
-/// wrapper still answers the default. A template or the env var wins without
-/// reading the broken file.
-// Sets HOME and the env var under the crate-wide `ENV_LOCK` (#5937).
+/// wrapper still answers the default. The env var wins without reading the
+/// broken file; a template sits below the file, so it fails closed too.
 #[test]
 fn try_resolve_workspace_root_fails_closed_on_broken_install_file() {
     use crate::workspace_layout::{resolve_workspace_root, try_resolve_workspace_root};
 
+    // #11821 P3: sets HOME and the env var under the crate-wide `ENV_LOCK` (#5937).
     let _guard = crate::data_dir::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -603,12 +681,167 @@ fn try_resolve_workspace_root_fails_closed_on_broken_install_file() {
         "a broken install.toml must fail closed, got {broken:?}"
     );
     assert_eq!(broken_legacy, h.join(DEFAULT_WORKSPACE_DIR));
-    assert_eq!(
-        broken_template.expect("template wins"),
-        PathBuf::from("/tmp/from-config")
+    assert!(
+        matches!(broken_template, Err(InstallPathsError::Parse { .. })),
+        "the template is below the install file, got {broken_template:?}"
     );
     assert_eq!(
         broken_env.expect("env wins"),
         PathBuf::from("/env/projects")
+    );
+}
+
+/// Run `f` with `$HOME` at `home` and `TRUSTY_MPM_WORKSPACE_ROOT` set to
+/// `root_env` (or cleared), under `ENV_LOCK`, restoring both after.
+fn with_root_env<R>(home: &Path, root_env: Option<&str>, f: impl FnOnce() -> R) -> R {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("HOME");
+    let saved_root = std::env::var_os(WORKSPACE_ROOT_ENV);
+    // SAFETY: guarded by `ENV_LOCK`; restored below before returning.
+    unsafe {
+        std::env::set_var("HOME", home);
+        match root_env {
+            Some(v) => std::env::set_var(WORKSPACE_ROOT_ENV, v),
+            None => std::env::remove_var(WORKSPACE_ROOT_ENV),
+        }
+    }
+    let out = f();
+    // SAFETY: as above.
+    unsafe {
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_root {
+            Some(v) => std::env::set_var(WORKSPACE_ROOT_ENV, v),
+            None => std::env::remove_var(WORKSPACE_ROOT_ENV),
+        }
+    }
+    out
+}
+
+/// Why: the #11821 P2 critic MEDIUM: the writer chain accepted a relative env
+/// or template root that `InstallPaths::resolve` refuses.
+/// What: a relative `TRUSTY_MPM_WORKSPACE_ROOT` and a relative template are
+/// each a `Relative` error from `try_resolve_workspace_root`, naming the
+/// source; the reader wrapper logs and answers the default; a valid
+/// install file outranks the template, as in `InstallPaths::resolve`.
+#[test]
+fn try_resolve_workspace_root_refuses_relative_env_and_template() {
+    use crate::workspace_layout::{resolve_workspace_root, try_resolve_workspace_root};
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let h = home.path().to_path_buf();
+    let (env_try, env_legacy) = with_root_env(&h, Some("rel/env"), || {
+        (
+            try_resolve_workspace_root(None),
+            resolve_workspace_root(None),
+        )
+    });
+    let tpl_try = with_root_env(&h, None, || try_resolve_workspace_root(Some("rel/tpl")));
+    write_raw(&h, "projects_root = \"/file/projects\"\n");
+    let (ranked, agreed) = with_root_env(&h, None, || {
+        (
+            try_resolve_workspace_root(Some("/tmp/from-config")),
+            InstallPaths::resolve_with(
+                |n| std::env::var(n).ok(),
+                &h,
+                &PathOverrides {
+                    projects_root_template: Some("/tmp/from-config".into()),
+                    ..PathOverrides::default()
+                },
+            ),
+        )
+    });
+
+    assert!(
+        matches!(
+            env_try,
+            Err(InstallPathsError::Relative {
+                key: "projects_root",
+                origin: PathSource::Env,
+                ..
+            })
+        ),
+        "a relative env root must fail closed, got {env_try:?}"
+    );
+    assert_eq!(env_legacy, h.join(DEFAULT_WORKSPACE_DIR));
+    assert!(
+        matches!(
+            tpl_try,
+            Err(InstallPathsError::Relative {
+                origin: PathSource::Template,
+                ..
+            })
+        ),
+        "a relative template must fail closed, got {tpl_try:?}"
+    );
+    let ranked = ranked.expect("valid file");
+    assert_eq!(ranked, PathBuf::from("/file/projects"));
+    assert_eq!(agreed.expect("resolve").projects_root.path, ranked);
+}
+
+/// Why: trusty-mpm's framework layout resolves the config dir through
+/// `try_config_dir` (#11821 P3).
+/// What: no env, no file -> `$HOME`; the file's `config_dir` next; the env
+/// var over the file; a broken file -> `Parse`, never `$HOME`.
+#[cfg(feature = "crate-config")]
+#[test]
+fn try_config_dir_follows_env_file_and_fails_closed() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let h = home.path();
+    let absent = with_process_env(h, None, try_config_dir);
+    write_raw(h, "config_dir = \"/file/cfg\"\n");
+    let file = with_process_env(h, None, try_config_dir);
+    let env = with_process_env(h, Some(Path::new("/env/cfg")), try_config_dir);
+    write_raw(h, "config_dir = \"/file/cfg\"\nbogus = 1\n");
+    let broken = with_process_env(h, None, try_config_dir);
+
+    assert_eq!(absent.expect("default"), h);
+    assert_eq!(file.expect("file"), PathBuf::from("/file/cfg"));
+    assert_eq!(env.expect("env"), PathBuf::from("/env/cfg"));
+    assert!(
+        matches!(broken, Err(InstallPathsError::Parse { .. })),
+        "a broken install.toml must fail closed, got {broken:?}"
+    );
+}
+
+/// What: an explicit home's own install file decides its config dir; a
+/// broken one is `Parse`, never that home.
+#[cfg(feature = "crate-config")]
+#[test]
+fn try_config_dir_under_reads_the_install_file_of_that_home() {
+    let process_home = tempfile::tempdir().expect("tempdir");
+    let other = tempfile::tempdir().expect("tempdir");
+    write_raw(other.path(), "config_dir = \"/other/cfg\"\n");
+    let got = with_process_env(process_home.path(), None, || {
+        try_config_dir_under(other.path())
+    });
+    assert_eq!(got.expect("file"), PathBuf::from("/other/cfg"));
+    let plain = with_process_env(process_home.path(), None, || {
+        try_config_dir_under(process_home.path())
+    });
+    assert_eq!(plain.expect("default"), process_home.path());
+    let env = Some(Path::new("/env/cfg"));
+    let (own, scratch) = with_process_env(process_home.path(), env, || {
+        (
+            try_config_dir_under(process_home.path()),
+            try_config_dir_under(other.path()),
+        )
+    });
+    assert_eq!(own.expect("env"), PathBuf::from("/env/cfg"));
+    assert_eq!(
+        scratch.expect("file, env ignored"),
+        PathBuf::from("/other/cfg")
+    );
+    write_raw(other.path(), "bogus = 1\n");
+    let broken = with_process_env(process_home.path(), None, || {
+        try_config_dir_under(other.path())
+    });
+    assert!(
+        matches!(broken, Err(InstallPathsError::Parse { .. })),
+        "got {broken:?}"
     );
 }

@@ -31,7 +31,8 @@ pub fn run_catchup_blocking_in(
 ) -> String {
     if advance_watermark {
         let root = state_root.clone().or_else(|| {
-            dirs::home_dir().map(|h| crate::core::paths::FrameworkPaths::under(h).root)
+            // #11821 P3: under the configured config dir.
+            dirs::home_dir().map(|h| crate::core::paths::FrameworkPaths::under_home(h).root)
         });
         if let Some(root) = root {
             crate::core::home_write_fence::check(&root.join("projects"));

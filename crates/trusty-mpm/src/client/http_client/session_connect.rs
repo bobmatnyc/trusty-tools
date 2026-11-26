@@ -326,7 +326,8 @@ impl DaemonClient {
         // #11270: the grant and the record live under the same home.
         let root = home
             .filter(|home| home.is_absolute())
-            .map(|home| home.join(".trusty-mpm"));
+            // #11821 P3: under the configured config dir.
+            .map(|home| crate::core::config_base::framework_root_under(&home));
         let binding = crate::runtime::cli_launch::send_spec_launch_at(
             root.as_deref(),
             server,

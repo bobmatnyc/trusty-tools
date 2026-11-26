@@ -271,11 +271,9 @@ pub(crate) const CONFIG_BASENAME: &str = "issue-state.yaml";
 /// What: joins `dirs::home_dir()` with the trusty-tools/trusty-mpm subpath.
 /// Test: `user_config_path_uses_basename`.
 pub(crate) fn user_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| {
-        h.join(".trusty-tools")
-            .join("trusty-mpm")
-            .join(CONFIG_BASENAME)
-    })
+    // #11821 P3: under the configured config dir; `None` on a broken install.toml.
+    trusty_mpm::core::config_base::tools_root_dir()
+        .map(|h| h.join("trusty-mpm").join(CONFIG_BASENAME))
 }
 
 /// The repo's own `issue-state.yaml`, searched from `start` up to the git

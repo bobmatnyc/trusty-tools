@@ -31,7 +31,7 @@ use super::routes::{
     blocking, error, instances_or_500, list_handler, turns_handler, unknown_instance,
 };
 use super::{AGENTS_APP_NAME, InstanceId, ReplyErrorKind, socket_path_in};
-use crate::routes::origin_guard::{SelfOrigins, origin_is_loopback, origin_matches_self};
+use crate::routes::origin_guard::WriteOrigins;
 use crate::server::AppState;
 use crate::tailnet_peer::AdmittedBy;
 
@@ -62,7 +62,7 @@ pub const MAX_ASK_BODY_BYTES: usize = 4 * MAX_QUESTION_BYTES;
 /// route layer over all three; the POST also carries [`require_same_origin`]
 /// and a [`MAX_ASK_BODY_BYTES`] body limit.
 /// Test: `ungated_listener_cannot_reach_assistants` (`tests/assistants_ask.rs`).
-pub(crate) fn router(self_origins: SelfOrigins) -> Router<AppState> {
+pub(crate) fn router(self_origins: WriteOrigins) -> Router<AppState> {
     Router::new()
         .route("/api/console/assistants", get(list_handler))
         .route("/api/console/assistants/{id}/turns", get(turns_handler))
@@ -101,20 +101,21 @@ async fn require_gated_listener(req: Request, next: Next) -> Response {
 /// Why: #11748 item 6. The router-wide write guard admits a POST with no
 /// `Origin` (for `curl` and `tm`); a model run from the browser page must
 /// name its origin.
-/// What: the `Origin` must be present and be loopback or one of the console's
-/// bound self-origins (`routes/origin_guard.rs`). The per-listener guards
-/// have already pinned it to this listener's own authority.
+/// What: the `Origin` must be present and trusted by [`WriteOrigins`]:
+/// loopback, a bound self-origin, or (#11749, `--tailscale`) this node's
+/// MagicDNS origin. The per-listener guards have already pinned it to this
+/// listener's own authority.
 /// Test: `ask_with_a_foreign_origin_is_403`, `ask_with_no_origin_is_403`
 /// (`tests/assistants_ask.rs`).
 async fn require_same_origin(
-    State(self_origins): State<SelfOrigins>,
+    State(self_origins): State<WriteOrigins>,
     req: Request,
     next: Next,
 ) -> Response {
     let verdict = match req.headers().get(ORIGIN).map(|v| v.to_str()) {
         None => Err("missing"),
         Some(Err(_)) => Err("not UTF-8"),
-        Some(Ok(o)) if origin_is_loopback(o) || origin_matches_self(o, &self_origins) => Ok(()),
+        Some(Ok(o)) if self_origins.trusts(o) => Ok(()),
         Some(Ok(_)) => Err("not this console"),
     };
     if let Err(reason) = verdict {

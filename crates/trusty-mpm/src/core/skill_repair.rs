@@ -518,7 +518,8 @@ fn rewrite_and_verify(
 /// What: `<home>/.trusty-mpm/backup-doctor-remediation-<YYYYmmdd-HHMMSS>`.
 /// Test: `backup_root_follows_the_remediation_convention`.
 pub fn backup_root_for(home: &Path, now: chrono::DateTime<chrono::Utc>) -> PathBuf {
-    home.join(".trusty-mpm").join(format!(
+    // #11821 P3: under the configured config dir.
+    crate::core::config_base::framework_root_under(home).join(format!(
         "backup-doctor-remediation-{}",
         now.format("%Y%m%d-%H%M%S")
     ))

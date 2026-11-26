@@ -34,7 +34,7 @@ pub type AuditAppend = Arc<dyn Fn(&Path, &[AuditRecord]) -> Result<(), StateErro
 /// `~/.trusty-tools/trusty-mpm/channels/audit.jsonl`.
 pub fn audit_path(home: &Path) -> PathBuf {
     trusty_common::crate_config::crate_config_dir_at(
-        home,
+        &crate::core::config_base::config_base_under(home),
         crate::core::trusty_tools_config::CRATE_NAME,
     )
     .join("channels")

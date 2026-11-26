@@ -70,9 +70,15 @@ pub(crate) fn is_trust_anchor(path: &Path, home: &Path, no_guard_entry: bool) ->
         return parent == home.join(".claude") || !no_guard_entry;
     }
     let cargo_bin = home.join(".cargo/bin");
+    // #11821 P3: the configured config dir's anchors too, and install.toml,
+    // which relocates that dir; the `$HOME` anchors stay for a broken file.
+    let cfg = canon(&trusty_mpm::core::config_base::config_base_under(&home));
     (parent == cargo_bin && matches!(name, "tm" | "trusty-mpm"))
         || path == home.join(".trusty-mpm/config.toml")
         || path == home.join(".trusty-tools/trusty-mpm/config.yaml")
+        || path == cfg.join(".trusty-mpm/config.toml")
+        || path == cfg.join(".trusty-tools/trusty-mpm/config.yaml")
+        || path == trusty_common::install_paths::install_file_path(&home)
         || parent == home.join("Library/LaunchAgents")
         || (path.starts_with(home.join("Library")) && name.ends_with(".plist"))
 }

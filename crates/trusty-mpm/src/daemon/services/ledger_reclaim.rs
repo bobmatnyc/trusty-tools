@@ -51,7 +51,11 @@ pub(crate) const REMOVE_KEY: &str = "disk.ledger_reclaim_remove";
 /// `Report` plus the error, for the caller to log.
 /// Test: `the_mode_is_report_unless_the_config_says_remove`.
 pub(crate) fn mode_at(base: &Path) -> (ReclaimMode, Option<String>) {
-    let path = trusty_common::crate_config::crate_config_path_at(base, CRATE_NAME);
+    // #11821 P3: under the configured config dir of `base`.
+    let path = trusty_common::crate_config::crate_config_path_at(
+        &crate::core::config_base::config_base_under(base),
+        CRATE_NAME,
+    );
     match trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path) {
         Ok(Some(config))
             if config
