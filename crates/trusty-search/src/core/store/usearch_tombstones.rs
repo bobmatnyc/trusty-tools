@@ -267,6 +267,11 @@ impl UsearchStore {
         let mut keys = state.keys.clone();
         keys.extend(doomed.iter().map(|&(_, k)| k));
         write_tombstones(&hnsw_path, &digest, &keys)?;
+        // #9450: a tombstone is a removal for the compaction trigger; the
+        // graph apply later does not count it again.
+        self.compact.record((keys.len() - state.keys.len()) as u64);
+        // The write-cooldown persist and the compaction epoch read this clock.
+        self.write_clock.record_write();
         state.keys = keys;
         state.sidecar_digest = Some(digest);
         drop(state);
@@ -304,7 +309,7 @@ impl UsearchStore {
     /// vectors along with the rest; they must leave the graph before the next
     /// save publishes it.
     /// What: removes each key the graph holds, credits the #1717 shrink guard
-    /// and the #9450 churn count, and clears the in-memory tombstones. Returns
+    /// (churn was counted at the tombstone write), and clears the in-memory tombstones. Returns
     /// how many vectors left the graph; the file stays until a publish.
     /// Test: `super::tombstones_10303_tests::a_crash_between_tombstone_write_and_graph_apply_loses_nothing`.
     pub(super) async fn apply_tombstones_to_graph(
@@ -321,11 +326,9 @@ impl UsearchStore {
                 applied += 1;
             }
         }
-        if applied > 0 {
-            self.removed_since_save
-                .fetch_add(applied as u64, Ordering::Relaxed);
-            self.compact.record(applied as u64);
-        }
+        // #1717: credit the shrink guard now that the graph lost the vectors.
+        self.removed_since_save
+            .fetch_add(applied as u64, Ordering::Relaxed);
         self.tombstones.lock().await.keys.clear();
         Ok(applied)
     }
@@ -354,6 +357,15 @@ impl UsearchStore {
     pub(super) async fn tombstones_in_graph(&self, index: &Index) -> usize {
         let state = self.tombstones.lock().await;
         state.keys.iter().filter(|&&k| index.contains(k)).count()
+    }
+
+    /// `true` when a view holds tombstones and the #9450 compaction is due.
+    ///
+    /// Why: no write promotes a view that only takes removals, so the idle
+    /// persist is the one place its tombstones get folded into a new pair.
+    /// Test: `super::tests_9450::churn_past_the_threshold_compacts_at_the_next_persist`.
+    pub(super) async fn tombstones_due_compaction(&self) -> bool {
+        self.has_tombstones().await && self.compaction_due().await
     }
 
     /// `true` while view-mode tombstones are pending.
