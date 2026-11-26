@@ -302,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Paths { action }) => return commands::paths::run(action),
         // #8994: `tm worktrees` reads and appends the worktree ledger only.
         Some(Command::Worktrees(args)) => return commands::worktrees::run(args).await,
+        Some(Command::WhatsNew) => return commands::whats_new::run(), // #11003
         _ => {}
     }
 
@@ -512,12 +513,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         Some(cmd @ Command::Validate { .. }) => validate(cmd).await,
-        Some(Command::Hooks { action }) => {
-            use cli::HooksAction;
-            match action {
-                HooksAction::Clean { path, force } => hooks_clean(path, force),
-            }
-        }
+        // #11003: one-variant destructure, same dispatch, frees cap room.
+        Some(Command::Hooks {
+            action: cli::HooksAction::Clean { path, force },
+        }) => hooks_clean(path, force),
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
         Some(tui @ Command::Tui { .. }) => commands::projects::run_tui(tui).await,
@@ -785,6 +784,7 @@ async fn main() -> anyhow::Result<()> {
         // #11001: `tm il` is daemon-less too, dispatched in the early match.
         // #11821 P6b: `tm paths` too; all three are dispatched early.
         Some(Command::Config(_) | Command::Il { .. } | Command::Paths { .. }) => unreachable!(),
+        Some(Command::WhatsNew) => unreachable!("whats-new dispatched before URL resolution"),
         // Unreachable for the same reason as `Config`: the #2997 disclaim-exec
         // shim returned early right after `Config` above, before this match.
         Some(Command::InternalSpawnDisclaimed { .. }) => unreachable!("dispatched early"),

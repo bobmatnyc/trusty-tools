@@ -46,6 +46,10 @@ commands:
     description: Show the recent hook-event feed
   doctor:
     description: Run a full system diagnostic of the trusty-mpm stack
+  whats-new:
+    description: Print the curated highlights of the installed release, each with a command to try
+    examples:
+      - cmd: trusty-mpm whats-new
   tui:
     description: Launch the ratatui multi-session TUI dashboard
     flags:

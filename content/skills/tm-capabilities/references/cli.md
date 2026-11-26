@@ -352,4 +352,5 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `watch` — Watch a board for label-routed issues and dispatch them autonomously
   - `listen` — Long-running: poll on `--interval-secs`, dispatching new issues each cycle
   - `poll` — One-shot: list label-matched issues, dispatch each, then exit
+- `whats-new` — Print the curated highlights of the installed trusty-mpm release
 - `worktrees` — List the worktrees the machine-wide ledger records (#8994)

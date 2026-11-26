@@ -421,4 +421,6 @@ pub(crate) mod tui_session_hooks;
 pub(crate) mod wait;
 // #8994: `tm worktrees` — the worktree ledger report.
 pub(crate) mod watch;
+// #11003: `tm whats-new` and the once-per-release doctor notice.
+pub(crate) mod whats_new;
 pub(crate) mod worktrees;
