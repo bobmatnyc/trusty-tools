@@ -131,11 +131,18 @@ fn new_session_window_scrolls_across_both_edges_at_every_height() {
             state.apply(Input::Up, &[]);
             let (rows, highlight) = frame(height, &mut state);
             assert_eq!(highlight, Some(id(i)), "height {height}, up to {i}");
-            assert_eq!(rows, scrolled, "height {height}: scrolled inside the window");
+            assert_eq!(
+                rows, scrolled,
+                "height {height}: scrolled inside the window"
+            );
         }
         state.apply(Input::Up, &[]);
         let (rows, highlight) = frame(height, &mut state);
-        assert_eq!(highlight.as_deref(), Some("row00"), "height {height}, past top");
+        assert_eq!(
+            highlight.as_deref(),
+            Some("row00"),
+            "height {height}, past top"
+        );
         assert_eq!(rows, first, "height {height}: did not scroll back up");
 
         // The last row: End, then drawn at the bottom of a full window.
