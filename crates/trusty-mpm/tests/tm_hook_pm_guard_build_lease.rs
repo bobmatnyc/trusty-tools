@@ -763,3 +763,16 @@ fn an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886() {
     assert_all_11886(&["cargo test -p x"], Verdict11886::Leased);
     assert_ne!(verdict_11886("make test"), Verdict11886::Refused);
 }
+
+/// #11886 option (a): an EVO or ssh build is not refused; a local wrapped
+/// build still is.
+#[test]
+fn a_remote_runner_build_is_not_refused_11886() {
+    for command in [
+        "$EVO cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
+        "ssh host cargo test",
+    ] {
+        assert_ne!(verdict_11886(command), Verdict11886::Refused, "{command}");
+    }
+    assert_all_11886(&["entr cargo test -p x"], Verdict11886::Refused);
+}
