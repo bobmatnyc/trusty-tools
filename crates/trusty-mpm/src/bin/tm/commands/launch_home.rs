@@ -213,7 +213,8 @@ mod tests {
         let err = apply_sandbox(&ws, Some(&home), None, pm).expect_err("unset refuses");
         assert!(err.to_string().contains("CLAUDE_CONFIG_DIR"), "{err}");
         assert!(!home.join(".claude").exists(), "no `~/.claude` write");
-        let config = home.join(".trusty-tools/trusty-mpm/claude-config");
+        let config =
+            trusty_mpm::core::paths::FrameworkPaths::under(&home).managed_claude_config_dir();
         apply_sandbox(&ws, Some(&home), Some(&config), pm).expect("applies");
         assert!(config.join("settings.json").exists());
     }
@@ -231,7 +232,8 @@ mod tests {
         )
         .expect("plant");
         let home = root.join("home");
-        let config = home.join(".trusty-tools/trusty-mpm/claude-config");
+        let config =
+            trusty_mpm::core::paths::FrameworkPaths::under(&home).managed_claude_config_dir();
         let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
         let err = apply_sandbox(&ws, Some(&home), Some(&config), pm).expect_err("refuses");
         assert!(err.to_string().contains("settings.local.json"), "{err}");

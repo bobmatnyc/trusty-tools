@@ -2235,7 +2235,7 @@ fn spawn_writes_and_verifies_the_sandbox_before_the_line() {
         project.pointer("/sandbox/enabled"),
         Some(&serde_json::json!(true))
     );
-    let fw = FrameworkPaths::from_root(home.home().join(".trusty-mpm"));
+    let fw = FrameworkPaths::from_root(home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME));
     let config_dir = fw.managed_claude_config_dir();
     let mut inputs = crate::core::session_launch::SandboxInputs::new(home.home(), home.home());
     inputs.cargo_target_dir = None;
@@ -2261,7 +2261,10 @@ fn spawn_refuses_when_the_sandbox_does_not_verify() {
     let local = home.home().join(".claude/settings.local.json");
     std::fs::create_dir_all(local.parent().expect("parent")).expect("mkdir");
     std::fs::write(&local, r#"{"sandbox":{"enabled":false}}"#).expect("plant override");
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(
+        fake.clone(),
+        &home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME),
+    );
     let err = adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect_err("an unverified sandbox must refuse the spawn");
@@ -2297,7 +2300,7 @@ fn inplace_relaunch_applies_the_sandbox_and_refuses_an_unverified_one() {
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let fw = FrameworkPaths::from_root(home.home().join(".trusty-mpm"));
+    let fw = FrameworkPaths::from_root(home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME));
     let prompts = home.home().join("prompts");
     std::fs::create_dir_all(&prompts).expect("mkdir prompts");
 

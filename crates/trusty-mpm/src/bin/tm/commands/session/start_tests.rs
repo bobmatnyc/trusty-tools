@@ -913,7 +913,7 @@ async fn run_inplace(
 ) -> anyhow::Result<()> {
     // #10102: a start with no tm-owned config dir is refused by the sandbox
     // step, so these starts name one under the test home.
-    let config = home.join(".trusty-tools/trusty-mpm/claude-config");
+    let config = trusty_mpm::core::paths::FrameworkPaths::under(home).managed_claude_config_dir();
     run_inplace_in(url, target, home, Some(&config), tmux_bin).await
 }
 
