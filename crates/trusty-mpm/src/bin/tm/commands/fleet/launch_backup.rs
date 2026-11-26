@@ -74,7 +74,9 @@ pub(crate) fn keep(dir: &Path, version: &str, kept: &[Kept]) -> anyhow::Result<V
         return Ok(Vec::new());
     }
     let root = release_dir(dir, version)?;
-    let mut manifest = read_manifest(&root)?.unwrap_or_default();
+    let mut manifest = read_manifest(&root)
+        .context("backup: cannot read the kept copy")?
+        .unwrap_or_default();
     for k in kept {
         if let Some(entry) = manifest.get_mut(&k.dest) {
             entry.new_sha.clone_from(&k.new_sha);

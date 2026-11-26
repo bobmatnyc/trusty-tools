@@ -481,8 +481,8 @@ fn an_interrupted_deploy_through_up_launches_nothing_11368() {
         }
     }
     std::fs::write(dir.join(tests::POLL), tests::OLD_POLL).expect("old poller");
-    let outside = tempfile::tempdir().expect("outside");
-    let target = outside.path().join("SKILL.md");
+    // Inside `dir`: the preflight refuses a symlink that leaves it.
+    let target = dir.join("skill-target.md");
     std::fs::write(&target, tests::OLD_SKILL).expect("target");
     let last = dir.join(tests::last_dest());
     std::fs::remove_file(&last).expect("rm");
