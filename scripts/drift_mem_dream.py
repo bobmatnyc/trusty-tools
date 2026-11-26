@@ -7,7 +7,7 @@ measure again, and judge the result. Test:
 """
 import hashlib, json, re, subprocess
 
-from drift_mem_core import TH_RECALL10, list_all, map_expected, score_query, summarize
+from drift_mem_core import TH_RECALL10, check_own, list_all, map_expected, recall, score_query, summarize
 
 DREAM_TIMEOUT = 1800.0
 # max_age_days <= 0 is a no-op guard in engine/dream/semantic.rs, and a seeded
@@ -73,13 +73,15 @@ def deletions(pal):
 
 def measure(m, pal, queries, idmap, survivor):
     """Recall of the golden set on `pal` over the FULL expected set (#11351); a
-    merged drawer's survivor counts. A query with no seeded target is skipped."""
-    rows = []
+    merged drawer's survivor counts. A query with no seeded target is skipped.
+    #11815: a wing-scoped recall, and any hit from outside `pal` aborts the run."""
+    rows, own = [], set(list_all(m, pal))
     for q in queries:
         mapped, missing = map_expected(q["expected"], idmap)
         if missing == len(mapped):
             continue
-        resp, ms, err = m.call("memory_recall", {"palace": pal, "query": q["query"], "top_k": 10})
+        resp, ms, err = recall(m, pal, q["query"], 10)
+        check_own(resp, own, pal)
         ranked = [survivor.get(r["drawer_id"], r["drawer_id"]) for r in (resp or {}).get("results", [])]
         exp = [survivor.get(e, e) for e in mapped]
         rows.append({"id": q["id"], "ms": ms, "degraded": bool(err), "top10": ranked[:10],

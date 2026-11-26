@@ -155,17 +155,17 @@ def test_coverage_findings():
     assert M.coverage_findings(dict(golden, missing=[]), full, None, None) == []
 
 
-# ---- #11351 HIGH 2: seed failures reported, recall over the full set
+# ---- #11351 HIGH 2: recall over the full set. A seed failure aborts instead (#11815,
+# scripts/tests/test_drift_mem_search_isolation.py).
 
 
-def test_memory_partial_seed():
-    cfg = {"palaces": {"supervisor": {"a": "drawer A", "b": "drawer B"}}, "fail_texts": {"drawer B"}}
+def test_memory_partial_targets():
+    cfg = {"palaces": {"supervisor": {"a": "drawer A"}}}
     golden = {"search": [], "memory": [{"id": "q1", "palace": "supervisor", "query": "q", "expected": ["a", "b"]}]}
     rows, info = [], new_info()
     with_fake(cfg, lambda: M.run_memory(golden, rows, info, "/nonexistent"))
     assert len(rows) == 1 and rows[0]["r10"] == 0.5, f"recall computed over a shrunk set: {rows}"
     f = M.memory_findings(info)
-    assert any("failed to seed" in x for x in f), f"seed_skipped not a finding: {f}"
     assert any("missing from the seeded palace" in x for x in f), f"missing targets not a finding: {f}"
 
 

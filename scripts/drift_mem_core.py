@@ -33,6 +33,15 @@ TEST_PREFIX = "drift-dream-test-"
 TEST_TS_FMT = "%Y%m%dt%H%M%Sz"
 TEST_NAME_RE = re.compile(re.escape(TEST_PREFIX) + r"(\d{8}t\d{6}z)-[0-9a-f]{6}")
 STALE_AGE_S = 3600
+# #11815: an unscoped (RecallScope::All) recall also runs the daemon's user-scope
+# rulings leg (TRUSTY_MEMORY_RULINGS_PALACES), which serves and access-bumps live
+# drawers from other palaces. A wing-scoped recall skips that leg; a fresh test
+# palace files every room under its `default` wing, so this scope is the whole palace.
+RECALL_WING = "default"
+
+
+class RunAborted(RuntimeError):
+    """#11815: the run must not be scored or recorded (partial seed, foreign hit)."""
 
 
 class Mcp:
@@ -84,6 +93,9 @@ class Mcp:
             if guard is None:
                 raise PermissionError(f"tool {name} needs a palace guard")
             guard.check(args.get("palace") or args.get("palace_id") or args.get("name"))
+        if name == "memory_recall" and (args.get("wing") != RECALL_WING or "room" in args):
+            raise PermissionError(f"#11815: memory_recall must be scoped to wing {RECALL_WING!r}, "
+                                  "or the daemon's rulings leg touches live palaces")
         t = time.perf_counter()
         try:
             r = self._rpc("tools/call", {"name": name, "arguments": args}, timeout)
@@ -313,3 +325,31 @@ def list_all(m, pal):
     for d in resp.get("drawers", []):
         out.setdefault(d["drawer_id"], dict(d, _room=None))
     return out
+
+
+def recall(m, pal, query, top_k):
+    """#11815: the only recall the harness issues: test palace, wing-scoped (no rulings leg)."""
+    return m.call("memory_recall", {"palace": pal, "wing": RECALL_WING, "query": query, "top_k": top_k})
+
+
+def check_own(resp, own, pal):
+    """Raise RunAborted when a recall served a drawer that is not in test palace `pal` (#11815)."""
+    foreign = [r.get("drawer_id") for r in (resp or {}).get("results", []) if r.get("drawer_id") not in own]
+    if foreign:
+        raise RunAborted(f"recall on {pal} served {len(foreign)} drawer(s) from another palace, so a live "
+                         f"drawer's access_count rose; aborting the memory lane: {foreign[:10]}")
+
+
+def check_scope_covers(m, pal, own):
+    """Refuse to recall when the wing scope would hide seeded drawers, or when
+    there are none, so the check never passes vacuously (#11815).
+    Test: `test_wing_hiding_a_seeded_drawer_aborts_before_recall`."""
+    if not own:
+        raise RunAborted(f"test palace {pal} has no seeded drawers; nothing to recall")
+    resp, _, err = m.call("memory_list", {"palace": pal, "wing": RECALL_WING, "limit": 100000, "full": True})
+    if err or resp is None or resp.get("truncated"):
+        raise RunAborted(f"memory_list {pal} wing {RECALL_WING}: {err or 'truncated'}")
+    hidden = own - {d["drawer_id"] for d in resp.get("drawers", [])}
+    if hidden:
+        raise RunAborted(f"wing {RECALL_WING!r} of {pal} misses {len(hidden)} seeded drawer(s); "
+                         f"a scoped recall would under-score: {sorted(hidden)[:10]}")

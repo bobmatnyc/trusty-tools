@@ -345,6 +345,13 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p 'test_install_paths.py'
           python3 -m unittest discover -s scripts/tests -p 'test_check_path_literals.py'
 
+      # #11815: the memory/search drift harness never recalls a live palace and
+      # never scores a partial seed. Fake daemon only; no build.
+      - name: Drift harness live-palace isolation tests (#11815)
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_drift_mem_search_isolation.py'
+          python3 -I scripts/test_drift_test_mem_search.py
+
       - name: Sandbox install-paths selftest (#11821)
         run: bash scripts/sandbox_install_paths_selftest.sh
 
