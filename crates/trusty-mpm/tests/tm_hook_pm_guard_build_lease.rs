@@ -587,11 +587,12 @@ enum Verdict11886 {
 
 fn verdict_11886(command: &str) -> Verdict11886 {
     let home = scratch_home();
-    let stdout = run_hook(
-        home.path(),
-        &["--pm-guard"],
-        &bash_payload(home.path(), command, true),
-    );
+    verdict_11886_in(home.path(), command)
+}
+
+/// [`verdict_11886`] in an existing sandbox `home`.
+fn verdict_11886_in(home: &Path, command: &str) -> Verdict11886 {
+    let stdout = run_hook(home, &["--pm-guard"], &bash_payload(home, command, true));
     if stdout.contains("\"deny\"") && stdout.contains("#11886") {
         return Verdict11886::Refused;
     }
@@ -764,19 +765,6 @@ fn an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886() {
     assert_ne!(verdict_11886("make test"), Verdict11886::Refused);
 }
 
-/// #11886 option (a): an EVO or ssh build is not refused; a local wrapped
-/// build still is.
-#[test]
-fn a_remote_runner_build_is_not_refused_11886() {
-    for command in [
-        "$EVO cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
-        "ssh host cargo test",
-    ] {
-        assert_ne!(verdict_11886(command), Verdict11886::Refused, "{command}");
-    }
-    assert_all_11886(&["entr cargo test -p x"], Verdict11886::Refused);
-}
-
 /// #11886 critic round 3: a runner word that is not the exact program word,
 /// and a lease inside a nested `$(…)`, no longer let a build run bare; a `-c`
 /// string the rule would refuse is leased whole.
@@ -784,7 +772,7 @@ fn a_remote_runner_build_is_not_refused_11886() {
 fn critic_round_3_shapes_are_leased_or_refused_11886() {
     assert_all_11886(
         &[
-            "GIT_SSH=/usr/bin/ssh entr cargo test",
+            "GIT_X=/usr/bin/remote-runner-x entr cargo test",
             "entr cargo test $(cargo check)",
         ],
         Verdict11886::Refused,
@@ -792,10 +780,61 @@ fn critic_round_3_shapes_are_leased_or_refused_11886() {
     assert_all_11886(&["bash -c 'entr cargo test'"], Verdict11886::Leased);
 }
 
-/// #11886 option (a): the quoted evo-gate-log gate form is not refused.
+/// Write `yaml` as the sandbox home's trusty-mpm settings file (#11886).
+fn write_settings(home: &Path, yaml: &str) {
+    let path = trusty_common::crate_config::crate_config_path_at(home, "trusty-mpm");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&path, yaml).expect("settings file");
+}
+
+/// [`verdict_11886`] for `command` in a fresh home whose settings file is
+/// `settings` (none when `None`).
+fn verdict_with_settings_11886(settings: Option<&str>, command: &str) -> Verdict11886 {
+    let home = scratch_home();
+    if let Some(yaml) = settings {
+        write_settings(home.path(), yaml);
+    }
+    verdict_11886_in(home.path(), command)
+}
+
+/// #11886: a runner listed in the settings file is not refused; one that is
+/// not listed is.
 #[test]
-fn the_evo_gate_log_form_is_not_refused_11886() {
-    let command =
-        "\"$S/evo-gate-log\" --tag t \"$S/evo\" cargo +1.99.0 test -p trusty-mpm --no-fail-fast";
-    assert_ne!(verdict_11886(command), Verdict11886::Refused, "{command}");
+fn a_runner_listed_in_the_settings_file_is_not_refused_11886() {
+    let settings = Some("build:\n  remote_runners:\n    - remote-runner-x\n");
+    let listed = "remote-runner-x cargo test -p x --no-fail-fast";
+    assert_ne!(
+        verdict_with_settings_11886(settings, listed),
+        Verdict11886::Refused,
+        "{listed}"
+    );
+    assert_eq!(
+        verdict_with_settings_11886(settings, "other-runner-y cargo test -p x"),
+        Verdict11886::Refused
+    );
+}
+
+/// #11886: no settings file, or a settings file without the field, lists no
+/// runner, so a runner-led build is refused.
+#[test]
+fn a_runner_led_build_is_refused_when_no_runner_is_listed_11886() {
+    let command = "remote-runner-x cargo test -p x";
+    for settings in [None, Some("build:\n  build_jobs: 2\n")] {
+        assert_eq!(
+            verdict_with_settings_11886(settings, command),
+            Verdict11886::Refused,
+            "{settings:?}"
+        );
+    }
+}
+
+/// #11886: a settings file that does not parse lists no runner, even when the
+/// broken file names one.
+#[test]
+fn a_broken_settings_file_lists_no_runner_11886() {
+    let broken = Some("build:\n  remote_runners: [remote-runner-x]\nprojects: {broken\n");
+    assert_eq!(
+        verdict_with_settings_11886(broken, "remote-runner-x cargo test -p x"),
+        Verdict11886::Refused
+    );
 }

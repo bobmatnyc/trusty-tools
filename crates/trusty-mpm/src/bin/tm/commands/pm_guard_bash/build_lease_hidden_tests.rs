@@ -250,35 +250,6 @@ fn leased_builds_and_builds_named_by_no_word_are_not_refused() {
     }
 }
 
-/// #11886 option (a): a build after a remote runner word runs on another
-/// host, so the fail-closed rule skips it; a local wrapped build is refused.
-#[test]
-fn a_build_after_a_remote_runner_is_not_refused() {
-    assert_not_refused(&[
-        "$EVO cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
-        "\"${EVO}\" cargo check -p x",
-        "evo cargo clippy -p x",
-        "ssh host cargo test",
-    ]);
-    assert_refused(&["entr cargo test -p x"]);
-}
-
-/// #11886 critic round 3: only the program word, matched exactly, is a
-/// remote runner; an `ssh` path in an assignment or a local `./ssh` is not.
-#[test]
-fn a_remote_runner_counts_only_as_the_exact_program_word() {
-    assert_refused(&[
-        "GIT_SSH=/usr/bin/ssh entr cargo test",
-        "./ssh cargo test",
-        "/tmp/evo cargo test",
-    ]);
-    assert_not_refused(&[
-        "$EVO cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
-        "\"${EVO}\" cargo check",
-        "ssh host cargo test",
-    ]);
-}
-
 /// #11886 critic round 3: a `-c` string the rule would refuse is a hidden
 /// heavy build, so the wrapper is leased whole.
 #[test]
@@ -315,17 +286,4 @@ fn a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command() {
     ] {
         assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
     }
-}
-
-/// #11886 option (a): the evo-gate-log spellings are exact remote-runner
-/// program words; another path to a file of that name is not.
-#[test]
-fn the_evo_gate_log_program_word_is_a_remote_runner() {
-    assert_not_refused(&[
-        "\"$S/evo-gate-log\" --tag t \"$S/evo\" cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
-        "$S/evo-gate-log --tag t $S/evo cargo clippy -p x",
-        "${S}/evo-gate-log --tag t ${S}/evo cargo check -p x",
-        "evo-gate-log --tag t evo cargo test -p x",
-    ]);
-    assert_refused(&["/tmp/evo-gate-log cargo test", "./evo-gate-log cargo test"]);
 }
