@@ -24,10 +24,7 @@ use serde_json::{Value, json};
 
 use super::PrepError;
 pub use super::sandbox_settings_verify::verify_sandbox_settings;
-pub use sandbox_launch::{
-    apply_launch_sandbox, launch_sandbox_inputs, resolve_launch_home, sandbox_launch_home,
-    sandbox_role_for,
-};
+pub use sandbox_launch::{apply_launch_sandbox, launch_sandbox_inputs, sandbox_role_for};
 
 // #10102: children here, not in `mod.rs`, which sits at the SLOC cap.
 #[path = "sandbox_launch.rs"]

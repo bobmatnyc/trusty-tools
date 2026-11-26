@@ -28,7 +28,7 @@ pub(crate) fn launch_home() -> anyhow::Result<Option<PathBuf>> {
 
 // #10102: the pure core moved to the library, so the daemon's managed spawn
 // names the same sandbox-aware home.
-pub(crate) use trusty_mpm::core::session_launch::resolve_launch_home;
+pub(crate) use trusty_mpm::core::launch_home::resolve_launch_home;
 
 /// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and
 /// trust-seeding it under `home`.

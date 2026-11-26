@@ -247,6 +247,8 @@ pub mod ipc;
 pub mod issue_audit;
 pub mod issue_audit_gh;
 // #8988: per-owner launch config — owner discovery, schema, extends, last-good.
+// #10102: the sandbox-aware launch home, shared by `tm` and the daemon.
+pub mod launch_home;
 pub mod launch_policy;
 pub mod llm_overseer;
 // ADR-0055 / #6000: the local-path `repo_url` rule and its typed refusal,

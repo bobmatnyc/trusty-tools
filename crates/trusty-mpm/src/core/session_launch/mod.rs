@@ -81,8 +81,7 @@ mod sandbox_settings;
 mod sandbox_settings_verify;
 pub use sandbox_settings::{
     SandboxInputs, SandboxRole, SandboxSettingsError, apply_launch_sandbox, launch_sandbox_inputs,
-    project_policy, resolve_launch_home, sandbox_launch_home, sandbox_role_for, user_policy,
-    verify_sandbox_settings, write_sandbox_settings,
+    project_policy, sandbox_role_for, user_policy, verify_sandbox_settings, write_sandbox_settings,
 };
 mod search_index;
 pub(crate) use search_index::registered_project_for;

@@ -344,7 +344,7 @@ fn owner_settings(
 /// only inside the sandbox its profile's role asked for.
 /// What: [`crate::core::session_launch::apply_launch_sandbox`] for
 /// `profile`'s role, with `config_dir` as the user tier and the home from
-/// [`crate::core::session_launch::sandbox_launch_home`]. FAIL-CLOSED: an
+/// [`crate::core::launch_home::sandbox_launch_home`]. FAIL-CLOSED: an
 /// error, or no resolvable home, refuses the launch.
 /// Test: `spawn_writes_and_verifies_the_sandbox_before_the_line`,
 /// `spawn_refuses_when_the_sandbox_does_not_verify`,
@@ -357,7 +357,7 @@ fn managed_sandbox(
     use crate::core::session_launch as sl;
     // #10102: the real (sandbox-aware) home, never `fw.root`'s parent — that is
     // the config base, which can sit off `$HOME`. No home refuses the launch.
-    let home = sl::sandbox_launch_home().map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+    let home = crate::core::launch_home::sandbox_launch_home().map_err(RuntimeError::Spawn)?;
     let inputs = sl::launch_sandbox_inputs(cwd, &home);
     sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, Some(config_dir))
         .map_err(|err| RuntimeError::Spawn(err.to_string()))
