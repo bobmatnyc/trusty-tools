@@ -281,22 +281,14 @@ fn new_session_cwd_enter_registers_then_creates_in_the_checkout() {
 /// Twelve registered projects under one owner: longer than the eight-row window.
 fn long_registry() -> Vec<Project> {
     (0..12)
-        .map(|i| {
-            project(
-                &format!("p{i:02}"),
-                &format!("https://github.com/acme/p{i:02}"),
-            )
-        })
+        .map(|i| project(&format!("p{i:02}"), &format!("https://github.com/acme/p{i:02}")))
         .collect()
 }
 
 /// Assert the highlighted row is the one labelled `label`.
 fn assert_at(state: &TuiState, label: &str) {
     let row = highlighted(open_flow(state));
-    assert!(
-        row.starts_with(&format!("▸ {label}")),
-        "want {label}, got {row}"
-    );
+    assert!(row.starts_with(&format!("▸ {label}")), "want {label}, got {row}");
 }
 
 /// AC (b): every Up/Down, sent through the decoder, moves the highlight exactly
