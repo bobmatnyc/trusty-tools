@@ -268,12 +268,14 @@ fn live_session_names() -> Option<Vec<String>> {
 /// The live tmux sessions with their paths, or `None` when tmux cannot be
 /// read.
 ///
-/// "No server" is zero sessions, not an unknown count.
+/// "No server" is zero sessions, not an unknown count. #10701: read on the
+/// fleet's server, where the Architect runs; a server that cannot be resolved
+/// is `None`, never the server `$TMUX` names.
 fn live_sessions() -> Option<Vec<LiveSession>> {
-    use trusty_mpm::core::tmux::run_tmux_argv;
     // #11012: the session path lets `init` map a session by directory.
     let argv = ["list-sessions", "-F", "#{session_name}\t#{session_path}"].map(str::to_owned);
-    let out = run_tmux_argv(&argv).ok()?;
+    // #10701: `-L default`, so an inherited `$TMUX` cannot pick the server.
+    let out = super::launch::run_fleet_argv(&argv).ok()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let no_server = err.contains("no server running") || err.contains("error connecting");

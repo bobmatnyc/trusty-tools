@@ -74,6 +74,51 @@ impl PaneState {
     }
 }
 
+/// The fleet's tmux server name, or the refusal as an `io::Error` (#10701).
+fn server() -> std::io::Result<&'static str> {
+    trusty_mpm::core::tmux_access::fleet_server()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))
+}
+
+/// Run raw tmux `argv` on the fleet's server, never on the one an inherited
+/// `$TMUX` names (#10701).
+///
+/// What: `-L <`[`FLEET_SERVER`](trusty_mpm::core::tmux_access::FLEET_SERVER)`>`
+/// ahead of `argv`; with no server, `Err` and no spawn.
+/// Test: `fleet_init_never_reaches_the_server_an_inherited_tmux_names_10701`.
+pub(crate) fn run_fleet_argv(argv: &[String]) -> std::io::Result<std::process::Output> {
+    let argv = trusty_mpm::core::tmux_server::server_argv(Some(server()?), argv.iter().cloned());
+    tmux::run_tmux_argv(&argv)
+}
+
+/// [`run_fleet_argv`] for a typed command (#10701).
+fn run_fleet(cmd: &TmuxCommand) -> std::io::Result<std::process::Output> {
+    tmux::run_tmux_on(&tmux::resolve_tmux_binary_or_bare(), Some(server()?), cmd)
+}
+
+/// Whether a `claude` runs in `session`'s pane, read on the fleet's server
+/// (#10701: `process::pane_claude` asks the server `$TMUX` names).
+///
+/// What: the pane's `#{pane_pid}`, then [`trusty_mpm::core::process::harness_under_pane`].
+/// A pane that cannot be read is [`PaneClaude::Unknown`].
+/// Test: `fleet_relaunch_restarts_the_architect_and_rebinds_it`.
+pub(crate) fn pane_claude(session: &str) -> PaneClaude {
+    let target = tmux::TmuxTarget::session(session);
+    let pid = run_fleet_argv(&tmux::display_message_argv(Some(&target), "#{pane_pid}"))
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        });
+    match pid {
+        Some(pid) => trusty_mpm::core::process::harness_under_pane(pid, "claude"),
+        None => PaneClaude::Unknown,
+    }
+}
+
 /// tmux session `name`'s directory and whether its first pane is dead.
 ///
 /// Why: status and the one-Architect check need to know whether the running
@@ -95,7 +140,8 @@ pub(crate) fn pane_state(name: &str) -> PaneState {
         "#{pane_dead} #{session_path}",
     ]
     .map(str::to_owned);
-    let out = match tmux::run_tmux_argv(&argv) {
+    // #10701: on the fleet's server only.
+    let out = match run_fleet_argv(&argv) {
         Ok(out) => out,
         Err(err) => return PaneState::Unknown(format!("cannot run tmux: {err}")),
     };
@@ -139,7 +185,8 @@ pub(crate) fn parse_pane(answer: &str) -> PaneState {
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
 pub(crate) fn launch_stamp(name: &str) -> Option<String> {
     let argv = tmux::show_environment_argv(Some(name), SESSION_PROFILE_ENV);
-    let out = tmux::run_tmux_argv(&argv).ok()?;
+    // #10701: on the fleet's server only.
+    let out = run_fleet_argv(&argv).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -154,7 +201,9 @@ pub(crate) fn launch_stamp(name: &str) -> Option<String> {
 ///
 /// Test: `fleet_init_with_a_session_override_names_every_session`.
 pub(crate) fn claude_pid(name: &str) -> Option<u32> {
-    trusty_mpm::core::process::find_claude_pid_in_tmux(name, 1, std::time::Duration::ZERO)
+    // #10701: on the fleet's server; no server, no probe.
+    let server = server().ok()?;
+    trusty_mpm::core::process::find_claude_pid_in_tmux_on(Some(server), name, 1, Duration::ZERO)
 }
 
 /// Start the Architect's session in `dir`, detached.
@@ -359,7 +408,17 @@ impl Prepared {
         } = self;
         let (dir, home, session) = (dir.as_path(), home.as_path(), session.as_str());
         if pane == Pane::Create {
-            let created = tmux::create_managed_session_exclusive(None, session, Some(&workdir))
+            // #10701: the session goes on the fleet's server, never `$TMUX`'s.
+            let created = server()
+                .and_then(|server| {
+                    tmux::create_managed_session_on(
+                        None,
+                        Some(server),
+                        session,
+                        Some(&workdir),
+                        false,
+                    )
+                })
                 .with_context(|| format!("failed to run tmux to create {session}"))?;
             if !created.output.status.success() {
                 bail!(
@@ -371,7 +430,7 @@ impl Prepared {
         if let Err(err) = stamp_and_send(&profile, &claude_spec, &spec_dir, session, &root) {
             // #9092: a relaunch never kills a session it did not create.
             if pane == Pane::Create {
-                let _ = tmux::run_tmux(&TmuxCommand::KillSession {
+                let _ = run_fleet(&TmuxCommand::KillSession {
                     name: session.to_owned(),
                 });
             }
@@ -390,11 +449,7 @@ impl Prepared {
         let binding = record_process(dir, home, session);
         // #8981 critic HIGH: a dead resume must not be retried by every later run.
         if let ConversationStart::Resume(id) = &conversation {
-            let check = resume_check(
-                &binding,
-                || trusty_mpm::core::process::pane_claude(session),
-                std::thread::sleep,
-            );
+            let check = resume_check(&binding, || pane_claude(session), std::thread::sleep);
             settle_resume(check, &root, id, session, pane)?;
         }
         // #10448: an unrecorded Architect is denied every anchor write, so
@@ -534,7 +589,8 @@ fn settle_resume(
 
 /// Kill tmux session `session`; `Err` says why it may still run.
 fn kill_session(session: &str) -> Result<(), String> {
-    let out = tmux::run_tmux(&TmuxCommand::KillSession {
+    // #10701: on the fleet's server only.
+    let out = run_fleet(&TmuxCommand::KillSession {
         name: session.to_owned(),
     })
     .map_err(|e| format!("cannot run tmux: {e}"))?;
@@ -581,16 +637,22 @@ pub(crate) fn architect_args(conversation: &ConversationStart, session: &str) ->
 /// `fleet_init_with_a_session_override_names_every_session`,
 /// `fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written`.
 fn record_process(dir: &Path, home: &Path, session: &str) -> Result<ArmingRecord, Unbound> {
-    let pid = trusty_mpm::core::process::find_claude_pid_in_tmux(
-        session,
-        20,
-        std::time::Duration::from_millis(500),
-    )
-    .ok_or_else(|| {
-        Unbound::NoClaude(format!(
-            "no `claude` process appeared in {session} within 10 s"
-        ))
-    })?;
+    // #10701: on the fleet's server; no server, no `claude` found.
+    let pid = server()
+        .ok()
+        .and_then(|server| {
+            trusty_mpm::core::process::find_claude_pid_in_tmux_on(
+                Some(server),
+                session,
+                20,
+                std::time::Duration::from_millis(500),
+            )
+        })
+        .ok_or_else(|| {
+            Unbound::NoClaude(format!(
+                "no `claude` process appeared in {session} within 10 s"
+            ))
+        })?;
     record_found(dir, home, session, pid).map_err(Unbound::NotRecorded)
 }
 
@@ -611,7 +673,8 @@ fn stamp_and_send(
     root: &Path,
 ) -> anyhow::Result<()> {
     let (key, value) = session_profile::launch_env(*profile);
-    let set = tmux::run_tmux(&TmuxCommand::SetEnvironment {
+    // #10701: on the fleet's server only.
+    let set = run_fleet(&TmuxCommand::SetEnvironment {
         session: session.to_owned(),
         key,
         value,
@@ -621,10 +684,11 @@ fn stamp_and_send(
     }
     // #8308: one call types the short line naming the spec.
     // #10101: the Architect is not a fresh PM; it stays on the default server.
+    // #10701: named with `-L`, so an inherited `$TMUX` cannot move it.
     // #8878: unbound here; `record_process` binds through `bind_architect`.
     // #11270: the shim's grant goes under this launch's own `~/.trusty-mpm`.
     trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(
-        None,
+        Some(server()?),
         session,
         claude_spec,
         spec_dir,
