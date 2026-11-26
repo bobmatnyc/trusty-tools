@@ -109,6 +109,7 @@ normative grammar — this note does not restate it.
 | DOC-90 | `SPEC-SLEDNET-01~draft` … `-11~draft` | [Cloud sled network boundary](./DOC-90-cloud-sled-network-boundary.md) | sled image, `trusty-console` (inbound, token), `trusty-agents` (`tagent --api`), update checks, egress proxy — console is the one inbound surface, one allowlisted egress proxy the one outbound surface. Owner ruling D1b 2026-11-11; [#11054](https://github.com/bobmatnyc/trusty-tools/issues/11054) |
 | DOC-91 | `SPEC-TECHLEVEL-01~draft` … `-08~draft` | [Settable technical level for Architect owner-facing text](./DOC-91-architect-technical-level.md) | `python/trusty-architect` — level reader, hook line, settings selector, level lint; Architect manual and skills under `content/instructions/architect/`; `trusty-architect` dashboard store. Six levels (non-technical to cto), default `pm`, per-item detail on request, per-user level for secondary users; relays and records stay technical. Owner ruling 2026-11-11; [#11064](https://github.com/bobmatnyc/trusty-tools/issues/11064) |
 | DOC-92 | `SPEC-ILCHAN-01~approved` … `-11~approved`, `SPEC-ILCHAN-12~draft` | [Intent Ledger as the PM-agent channel, for every harness](./DOC-92-il-pm-agent-channel.md) | `trusty-mpm` — `tm hook`, daemon ledger methods, `tm dbatg`, runtime adapters; `trusty-code` — `delegate_to_agent`, search and memory clients; `trusty-architect` — dbatg ledger; generated Codex and tcode instructions. Tracked under #11819 |
+| DOC-93 | `SPEC-REVSKILL-01~draft` … `-11~draft` | [trusty-review repo-named review skills](./DOC-93-trusty-review-repo-skills.md) | `trusty-review` — `[[review.skills]]` in `.trusty-review.toml`, `.claude/skills/<name>/SKILL.md` read at the pull request base commit, size caps, skip reporting, prompt block, review record, CLI, local MCP and webhook surfaces. Tracked under [#11899](https://github.com/bobmatnyc/trusty-tools/issues/11899) |
 
 > **Related catalog — Trusty Code implementation status.** [Trusty Code
 > specification and ADR reconciliation](../trusty-code/spec-adr-reconciliation.md)
@@ -120,8 +121,10 @@ normative grammar — this note does not restate it.
 > **Catalog note — `DOC-73` claim.** `DOC-72` is claimed by open pull request
 > [#6607](https://github.com/bobmatnyc/trusty-tools/pull/6607) on branch
 > `docs/6606-analyze-lsp-spec`, which the note below could not have seen when it
-> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-93`** (updated
-> 2026-11-25 — `DOC-92` claimed by
+> named `DOC-72` as next free. **Next free `DOC-N` = `DOC-94`** (updated
+> 2026-11-26 — `DOC-93` claimed by
+> [trusty-review repo-named review skills](./DOC-93-trusty-review-repo-skills.md) under #11899.
+> Prior note: 2026-11-25 — `DOC-92` claimed by
 > [Intent Ledger as the PM-agent channel](./DOC-92-il-pm-agent-channel.md) under #11819.
 > Prior note: 2026-11-12 — `DOC-91` claimed by
 > [Settable technical level for Architect owner-facing text](./DOC-91-architect-technical-level.md) under #11064.
