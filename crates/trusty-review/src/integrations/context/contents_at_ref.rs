@@ -14,7 +14,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use serde_json::Value;
 
 use super::external_spec::decode_base64_content;
@@ -265,8 +264,9 @@ pub(crate) fn classify_entry_response(
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(stripped.as_bytes())
+        // Fully qualified: the tests module imports `base64::Engine` itself.
+        let engine = &base64::engine::general_purpose::STANDARD;
+        let bytes = base64::Engine::decode(engine, stripped.as_bytes())
             .map_err(|e| DocFetchError::Undecodable(format!("base64 decode error: {e}")))?;
         Some(bytes)
     } else {
