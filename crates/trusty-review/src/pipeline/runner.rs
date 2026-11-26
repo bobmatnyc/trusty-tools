@@ -568,7 +568,7 @@ async fn run_pipeline(
     context.referenced_code = input.caller_context.referenced_code.clone();
     // #11899: repo-named review skills, read at the base commit, after the template.
     let skills = super::repo_skills::SkillsCall::new(options, &diff_source, &head, &raw_diff);
-    let voice_config = skills.attach(voice_config, &mut result);
+    let voice_config = skills.resolve(voice_config, &mut result).await; // #11899: hosted reads are async
 
     // ── Step 5c: MAP-REDUCE branch (#1643 / #680) ─────────────────────────
     // When the selector chose the per-file path, delegate to the map-reduce

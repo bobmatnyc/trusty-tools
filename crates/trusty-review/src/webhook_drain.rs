@@ -57,8 +57,8 @@ use crate::integrations::github::RunMode;
 use crate::models::ReviewResult;
 use crate::pipeline::pr_index::{IndexPin, resolve_pr_index};
 use crate::pipeline::{
-    DiffSource, ReviewDeps, ReviewInput, classify_review_request, enforce_verifier_liveness,
-    run_review,
+    DiffSource, ReviewDeps, ReviewInput, ReviewOptions, classify_review_request,
+    enforce_verifier_liveness, run_review_with,
 };
 use crate::store::DedupNeed;
 
@@ -272,10 +272,25 @@ impl ReviewPipeline for ConfiguredReviewPipeline {
             &built.config,
             built.deps.clone(),
             target,
-            |config, input, deps| async move { run_review(&config, input, deps).await },
+            |config, input, deps| async move {
+                // #11899 step 2: repo skills read through the Contents API.
+                run_review_with(&config, input, deps, hosted_review_options())
+                    .await
+                    .result
+            },
         )
         .await
     }
+}
+
+/// The options every hosted webhook review runs with (#11899).
+///
+/// Why: the hosted path has no checkout, so the repo's review skills are read
+/// at the PR base SHA through the Contents API (DOC-93 RS-38).
+/// What: default options plus [`ReviewOptions::with_hosted_repo_skills`].
+/// Test: `hosted_review_options_read_through_the_contents_api`.
+pub(crate) fn hosted_review_options() -> ReviewOptions {
+    ReviewOptions::default().with_hosted_repo_skills()
 }
 
 /// Review one target under its own repo's index, with the review step injected.

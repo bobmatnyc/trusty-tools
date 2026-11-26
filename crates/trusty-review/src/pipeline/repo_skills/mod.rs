@@ -10,20 +10,24 @@
 //! `.trusty-review.toml` at the base commit ([`RepoSkillsInput::from_repo_config`],
 //! what CLI `run` and MCP `review_pr` use), or take an explicit request list.
 //! [`SkillsCall`] finds the base commit from the diff source and PR head, and
-//! `load::load_skills` applies the rules. Step 1 reads a local checkout's git
-//! object store; the hosted webhook path (step 2) is not wired and passes no
-//! input, so it loads nothing.
-//! Test: `tests.rs` in this directory.
+//! `load::load_skills` applies the rules. CLI `run` and MCP `review_pr` read
+//! a local checkout's git object store; the hosted webhook path reads the
+//! same files through the Contents API at the base SHA (`contents_store`,
+//! `SkillsReader::ContentsAtRef`).
+//! Test: `tests.rs` and `hosted_tests.rs` in this directory.
 
+mod contents_store; // #11899 step 2: the hosted reader
 mod git_store;
 mod load;
 mod render;
 mod skill_format;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::repo_config::REPO_CONFIG_FILENAME;
 use crate::config::review_skills::{SkillEntry, parse_skill_entries};
+use crate::integrations::context::contents_at_ref::DocFetcher;
 use crate::models::{ReviewResult, SkipKind, SkippedSkill};
 use crate::pipeline::diff::{DiffSource, extract_changed_files};
 use crate::pipeline::optional_context::{ReviewOptions, seams::PrHead};
@@ -109,9 +113,24 @@ impl RepoSkillsInput {
 /// `runner_without_skills_leaves_prompt_and_record_unchanged`.
 pub(crate) struct SkillsCall<'a> {
     input: Option<&'a RepoSkillsInput>,
+    reader: SkillsReader,
+    fetcher: Option<&'a Arc<dyn DocFetcher>>,
     source: &'a DiffSource,
     head: &'a PrHead,
     raw_diff: &'a str,
+}
+
+/// How a review reads the base commit (#11899).
+///
+/// What: `Checkout` is step 1's local git object store; `ContentsAtRef` is
+/// the hosted webhook path's Contents API reader (DOC-93 RS-38).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SkillsReader {
+    /// Read `RepoSkillsInput::checkout` through git.
+    #[default]
+    Checkout,
+    /// Read the base commit of the GitHub PR through the Contents API.
+    ContentsAtRef,
 }
 
 impl<'a> SkillsCall<'a> {
@@ -124,22 +143,59 @@ impl<'a> SkillsCall<'a> {
     ) -> Self {
         Self {
             input: options.repo_skills.as_ref(),
+            reader: options.repo_skills_reader,
+            fetcher: options.doc_fetcher.as_ref(),
             source,
             head,
             raw_diff,
         }
     }
 
+    /// Load the skills through the review's reader (#11899).
+    ///
+    /// Why: the hosted path has no checkout; its reads are network calls.
+    /// What: `ContentsAtRef` reads the base config and skills through the
+    /// Contents API first ([`contents_store::find_base`]), then applies the
+    /// same rules as [`Self::attach`]; `Checkout` is [`Self::attach`].
+    /// Test: `hosted_skill_loads_at_base_and_reaches_the_prompt`,
+    /// `runner_hosted_review_loads_base_skill_into_the_system_prompt`.
+    pub(crate) async fn resolve(
+        self,
+        voice: VoiceConfig,
+        result: &mut ReviewResult,
+    ) -> VoiceConfig {
+        let Some(input) = self.input else {
+            return voice;
+        };
+        if self.reader == SkillsReader::Checkout {
+            return self.attach(voice, result);
+        }
+        let base =
+            contents_store::find_base(self.source, self.head, self.fetcher, &input.source).await;
+        self.finish(input, base, voice, result)
+    }
+
     /// Load the skills into `voice` and record them on `result`.
-    pub(crate) fn attach(self, mut voice: VoiceConfig, result: &mut ReviewResult) -> VoiceConfig {
+    pub(crate) fn attach(self, voice: VoiceConfig, result: &mut ReviewResult) -> VoiceConfig {
         let Some(input) = self.input else {
             return voice;
         };
         let base = find_base(self.source, self.head, input.checkout.as_deref());
+        self.finish(input, base, voice, result)
+    }
+
+    /// Apply the rules to what `base` holds; shared by both readers.
+    fn finish(
+        &self,
+        input: &RepoSkillsInput,
+        base: Base,
+        mut voice: VoiceConfig,
+        result: &mut ReviewResult,
+    ) -> VoiceConfig {
         let entries: Vec<SkillEntry> = match &input.source {
             SkillsSource::Requests(requests) => requests.iter().cloned().map(Ok).collect(),
             SkillsSource::RepoConfig => match &base.store {
-                Some(store) => config_entries(store),
+                Some(store) => config_entries(store.as_ref()),
                 None => Vec::new(), // no base commit: the entries are unknowable
             },
         };
@@ -155,7 +211,7 @@ impl<'a> SkillsCall<'a> {
             },
             (Some(store), false) => SkillOrigin::Base {
                 base_sha: base.sha.clone(),
-                tree: store,
+                tree: store.as_ref(),
             },
             (None, false) => SkillOrigin::NoBase(base.why.clone()),
         };
@@ -181,7 +237,7 @@ impl<'a> SkillsCall<'a> {
 /// `config_unreadable` skip naming the reason (#11899: never a silent drop).
 /// Test: `config_absent_is_silent_fork_or_not`, `config_empty_skill_list_is_silent_fork_or_not`,
 /// `unreadable_base_config_is_a_named_skip`.
-fn config_entries(store: &GitObjectStore) -> Vec<SkillEntry> {
+fn config_entries(store: &dyn BaseTree) -> Vec<SkillEntry> {
     let unreadable = |reason: String| {
         vec![Err(SkippedSkill {
             name: REPO_CONFIG_FILENAME.to_string(),
@@ -198,7 +254,7 @@ fn config_entries(store: &GitObjectStore) -> Vec<SkillEntry> {
         BlobRead::NotRegular(mode) => {
             return unreadable(format!("not a regular file (mode {mode})"));
         }
-        BlobRead::Error(e) => return unreadable(format!("git: {e}")),
+        BlobRead::Error(e) => return unreadable(e), // #11899: the store names its source
     };
     let parsed = std::str::from_utf8(&bytes)
         .map_err(|e| e.to_string())
@@ -208,7 +264,7 @@ fn config_entries(store: &GitObjectStore) -> Vec<SkillEntry> {
 
 /// The base commit of this review and the object store holding it.
 struct Base {
-    store: Option<GitObjectStore>,
+    store: Option<Box<dyn BaseTree + Send + Sync>>,
     sha: String,
     fork: bool,
     /// Why `store` is `None`.
@@ -231,7 +287,7 @@ fn find_base(source: &DiffSource, head: &PrHead, checkout: Option<&Path>) -> Bas
             repo_root, base, ..
         } => match git_store::resolve_base_commit(repo_root, base) {
             Ok(sha) => Base {
-                store: Some(GitObjectStore::new(repo_root, &sha)),
+                store: Some(Box::new(GitObjectStore::new(repo_root, &sha))),
                 sha,
                 fork: false,
                 why: String::new(),
@@ -251,7 +307,7 @@ fn find_base(source: &DiffSource, head: &PrHead, checkout: Option<&Path>) -> Bas
                 return none(why, sha, fork);
             }
             Base {
-                store: Some(GitObjectStore::new(root, sha)),
+                store: Some(Box::new(GitObjectStore::new(root, sha))),
                 sha: sha.to_string(),
                 fork,
                 why: String::new(),
@@ -265,3 +321,7 @@ fn find_base(source: &DiffSource, head: &PrHead, checkout: Option<&Path>) -> Bas
 
 #[cfg(test)]
 mod tests;
+
+// #11899 step 2: the hosted Contents API reader against a fake.
+#[cfg(test)]
+pub(crate) mod hosted_tests;
