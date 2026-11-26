@@ -58,12 +58,14 @@ fn seeded_state() -> ProjectCtlState {
                 repo_url: "https://github.com/acme/alpha".to_string(),
                 live_count: 1,
                 total_count: 1,
+                decommissioned: false,
             },
             ProjectRow {
                 name: "beta".to_string(),
                 repo_url: "https://github.com/acme/beta".to_string(),
                 live_count: 0,
                 total_count: 0,
+                decommissioned: false,
             },
         ],
         projects_full: [

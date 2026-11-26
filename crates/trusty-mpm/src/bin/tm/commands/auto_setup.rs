@@ -40,7 +40,16 @@ pub(crate) struct Server {
     pub bin: &'static str,
     /// The permission grant the server needs, printed once.
     pub grant: &'static str,
+    /// #11909: whether `krate` is on crates.io. An unpublished server is
+    /// optional: `tm install` never runs `cargo install` for it, and the
+    /// doctor reports its absence as an info line. Static, like tctl's
+    /// `StableMember::internal` (#10130); no runtime crates.io lookup.
+    pub published: bool,
 }
+
+/// #11909: how to get an unpublished server, named in the install and doctor lines.
+pub(crate) const UNPUBLISHED_HOWTO: &str = "optional, not published to crates.io; build it from \
+     a trusty-tools source checkout, then run `tm install` to register it";
 
 /// The servers G0b sets up.
 pub(crate) const SERVERS: [Server; 2] = [
@@ -48,11 +57,14 @@ pub(crate) const SERVERS: [Server; 2] = [
         krate: "trusty-browser",
         bin: "trusty-browser-mcp",
         grant: "Connect (approve the trusty-browser extension connection)",
+        published: true,
     },
     Server {
         krate: "trusty-computer",
         bin: "trusty-computer-mcp",
         grant: "Accessibility and Screen Recording (System Settings > Privacy & Security)",
+        // #11909: `publish = false` in its Cargo.toml; flip once it publishes.
+        published: false,
     },
 ];
 
@@ -166,13 +178,19 @@ pub(crate) fn ensure(env: &Env) -> Vec<Outcome> {
 /// What: stdin is null; the child runs in `install_cwd` with `--root
 /// <cargo_home>`. It is polled against `install_timeout`; on expiry it is
 /// killed and reaped. A missing cargo, a spawn error, a timeout, a non-zero
-/// exit, or an exit 0 that left no binary is `Missing`.
+/// exit, or an exit 0 that left no binary is `Missing`. #11909: an absent
+/// unpublished server is `Missing` without spawning cargo.
 /// Test: `cargo_install_failure_is_reported`, `fake_cargo_install_then_register`,
-/// `a_hung_cargo_install_is_killed_at_the_deadline`.
+/// `a_hung_cargo_install_is_killed_at_the_deadline`,
+/// `install_never_runs_cargo_for_an_unpublished_server`.
 fn ensure_binary(env: &Env, s: &Server) -> Install {
     let path = env.cargo_bin.join(s.bin);
     if path.is_file() {
         return Install::Present;
+    }
+    // #11909: never `cargo install` a crate crates.io does not have.
+    if !s.published {
+        return Install::Missing(UNPUBLISHED_HOWTO.into());
     }
     let Some(cargo) = &env.cargo else {
         return Install::Missing("no `cargo` on PATH".into());
@@ -352,8 +370,11 @@ fn read_entry_readonly(config_dir: &Path, name: &str) -> Result<Option<Value>, S
 /// The doctor rows: per server, installed, registered, command path exists.
 ///
 /// Why: G0b item 3. What: `Ok` when all three hold; `Warn` naming what is
-/// missing; `Unknown` when the config cannot be read. Read-only.
-/// Test: `doctor_rows_report_each_fact`.
+/// missing; `Unknown` when the config cannot be read. #11909: an unpublished
+/// server with no binary and no entry is an info line (`Ok`, message starting
+/// `info:`) naming how to get it. Read-only.
+/// Test: `doctor_rows_report_each_fact`,
+/// `doctor_lists_an_absent_unpublished_server_as_optional`.
 pub(crate) fn doctor_rows(env: &Env) -> Vec<DoctorCheck> {
     SERVERS
         .iter()
@@ -371,6 +392,11 @@ pub(crate) fn doctor_rows(env: &Env) -> Vec<DoctorCheck> {
                 .and_then(|e| e.get("command"))
                 .and_then(Value::as_str);
             let cmd_exists = command.is_some_and(|c| Path::new(c).is_file());
+            // #11909: an optional server the host never set up is not a fault.
+            if !s.published && !installed && entry.is_none() {
+                let msg = format!("info: {}: not installed ({UNPUBLISHED_HOWTO})", s.bin);
+                return DoctorCheck::new(CHECK, CheckStatus::Ok, msg);
+            }
             let msg = format!(
                 "{}: installed={installed} registered={} command-path-exists={cmd_exists}",
                 s.bin,

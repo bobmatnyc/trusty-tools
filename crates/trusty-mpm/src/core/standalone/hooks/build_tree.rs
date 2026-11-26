@@ -84,7 +84,7 @@ const TM_HOOK_ARGV_TAILS: &[&str] = &[
     STANDING_RULES_SUFFIX,
     // #11398: the PM's per-turn task stamp.
     TURN_TASK_SUFFIX,
-    // #11431: the log-only minimal pm-guard.
+    // #11431: the minimal pm-guard (rule 1 enforces, #10690).
     PM_GUARD_SHADOW_SUFFIX,
     // #10575: the PM's warn-only completion-evidence check.
     COMPLETION_EVIDENCE_SUFFIX,

@@ -77,6 +77,7 @@ async fn poll_marks_unreachable_clears_state() {
             repo_url: "https://github.com/acme/widget".to_string(),
             live_count: 1,
             total_count: 1,
+            decommissioned: false,
         }],
         daemon_reachable: true, // pretend a prior poll had succeeded
         ..Default::default()
@@ -116,6 +117,7 @@ fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
             repo_url: "https://github.com/acme/widget".to_string(),
             live_count: 1,
             total_count: 1,
+            decommissioned: false,
         }],
         daemon_reachable: true,
         ..Default::default()
