@@ -288,11 +288,16 @@ pub fn update(
 ///
 /// Why: issue #11001 AC3. `reset` drops every enrolled session, so an edited
 /// file is replaced only on request. It writes the preset bytes verbatim
-/// and does not parse the old file, so it also repairs a malformed one.
-/// What: under the lock: absent file or `force` writes the preset; a file
-/// equal to the preset is unchanged; any other file is
-/// [`IlScheduleError::Edited`].
-/// Test: `reset_refuses_an_edited_file_without_force`, `reset_force_restores_the_preset_bytes`.
+/// and needs no valid schedule, so it also repairs a malformed one. A file
+/// from a newer `tm` is never overwritten, even with `force` (#11002).
+/// What: under the lock: a file whose JSON carries an integer
+/// `schema_version` above [`SCHEMA_VERSION`] is
+/// [`IlScheduleError::SchemaTooNew`]; text that is not JSON skips that check.
+/// Then an absent file or `force` writes the preset; a file equal to the
+/// preset is unchanged; any other file is [`IlScheduleError::Edited`].
+/// Test: `reset_refuses_an_edited_file_without_force`, `reset_force_restores_the_preset_bytes`,
+/// `reset_force_refuses_a_newer_schema_and_the_file_is_unchanged`,
+/// `reset_refuses_a_newer_schema_without_force`, `reset_force_still_repairs_a_malformed_file`.
 pub fn reset(path: &Path, force: bool) -> Result<Outcome, IlScheduleError> {
     locked(path, || {
         let current = match std::fs::read_to_string(path) {
@@ -305,6 +310,15 @@ pub fn reset(path: &Path, force: bool) -> Result<Outcome, IlScheduleError> {
                 });
             }
         };
+        // #11002: refuse a newer file even with `force`. Only `schema_version`
+        // is read, and unparsable text skips the check, so it is still repaired.
+        let found = current
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .and_then(|doc| doc.get("schema_version").and_then(Value::as_u64));
+        if let Some(found) = found {
+            migrate::refuse_newer(path, found)?;
+        }
         if current.as_deref() == Some(PRESET) {
             return Ok(Outcome::unchanged("unchanged: the schedule is the preset"));
         }

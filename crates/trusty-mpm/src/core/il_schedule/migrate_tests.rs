@@ -224,6 +224,51 @@ fn a_newer_schema_is_refused_and_the_file_is_unchanged() {
     assert_eq!(std::fs::read_to_string(&file).expect("read"), newer);
 }
 
+/// The preset at `schema_version` 2, written to `file`.
+fn seed_v2(file: &Path) -> String {
+    let newer = PRESET.replacen("\"schema_version\": 1", "\"schema_version\": 2", 1);
+    assert_ne!(newer, PRESET, "the preset names schema_version 1");
+    std::fs::write(file, &newer).expect("seed v2");
+    newer
+}
+
+/// #11002: `--force` must not downgrade a newer file to this preset.
+#[test]
+fn reset_force_refuses_a_newer_schema_and_the_file_is_unchanged() {
+    let (_tmp, file) = fixture();
+    let newer = seed_v2(&file);
+    let err = reset(&file, true).expect_err("newer schema");
+    assert!(
+        matches!(err, IlScheduleError::SchemaTooNew { found: 2, .. }),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), newer);
+}
+
+/// #11002: without `--force` the refusal is the version, not an edit.
+#[test]
+fn reset_refuses_a_newer_schema_without_force() {
+    let (_tmp, file) = fixture();
+    let newer = seed_v2(&file);
+    let err = reset(&file, false).expect_err("newer schema");
+    assert!(
+        matches!(err, IlScheduleError::SchemaTooNew { found: 2, .. }),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), newer);
+}
+
+/// #11002: the version check skips text it cannot read, so `--force` repairs it.
+#[test]
+fn reset_force_still_repairs_a_malformed_file() {
+    let (_tmp, file) = fixture();
+    for bad in ["not json", "{\"schema_version\": 1, \"sessions\": 7}", "[2]"] {
+        std::fs::write(&file, bad).expect("seed malformed");
+        assert!(reset(&file, true).expect("force").changed, "{bad}");
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), PRESET);
+    }
+}
+
 /// The CLI edits keep the file's `schema_version`.
 #[test]
 fn an_edit_keeps_the_schema_version() {
