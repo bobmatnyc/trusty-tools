@@ -17,6 +17,10 @@
 #   count-shrank          one of two baselined hits removed   OK, with a shrink note
 #   stale                 a baseline entry with no hit left   FAIL STALE_BASELINE
 #   staged-paths(-hit)    path mode scans only the named file
+#   own-path-home         a file under a home/ dir, no baseline row  OK (#11641)
+#   own-path-content-hit  an operator path in that file's content    FAIL
+#   private-path          a path spelling the private name           FAIL PRIVATE_NAME
+#   brief-path            a clean file under the briefs dir          FAIL BRIEF_PATH
 #   private-<form>        the name camel, glued, with digits, plural, hyphen,
 #                         underscore, URL and @ forms         FAIL PRIVATE_NAME
 #   private-near-miss     a different word                    OK
@@ -169,6 +173,20 @@ new_repo staged-paths
 w notes.md "$HOST_LINE"
 ARGS="doc.md" expect staged-paths 0 "1 file(s) scanned"
 ARGS="notes.md" expect staged-paths-hit 1 "FAIL ${EH}: notes.md:1"
+
+# #11641: a file's own path is never matched against a content pattern.
+HOME_FILE="src/tui/home${J}/mod.rs"
+new_repo own-path-home
+w "$HOME_FILE" '// renders the home screen'
+expect own-path-home 0 "2 file(s) scanned, 0 baselined hit(s) — OK"
+w "$HOME_FILE" "// reads /home${J}/jdoe/.config"
+expect own-path-content-hit 1 "FAIL OPERATOR_PATH: $HOME_FILE:1: 1 hit(s), baseline allows 0"
+new_repo private-path
+w zorp/notes.md '# a clean page'
+expect private-path 1 "FAIL PRIVATE_NAME: zorp/notes.md:0" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
+new_repo brief-path
+w "docs/${J}briefs/x.md" '# a clean page'
+expect brief-path 1 "FAIL BRIEF_PATH: docs/${J}briefs/x.md:0"
 
 # The private-name class: every glued form of the synthetic name.
 while IFS='|' read -r form line; do
