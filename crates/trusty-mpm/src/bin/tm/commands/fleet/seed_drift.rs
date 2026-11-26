@@ -148,7 +148,8 @@ pub(crate) fn classify(dir: &Path, seed: &ArchitectSeed) -> anyhow::Result<Repor
 /// any other bytes are edited. Then `AGENTS.md` as `owner`, then `extra`.
 /// A `records/`-era directory skips the `local/` rows, as init does.
 /// # Errors
-/// A managed path that exists but cannot be read (not `NotFound`).
+/// A managed path that exists but cannot be read (not `NotFound`), or is not
+/// a regular file.
 /// Test: `each_state_is_classified`, `a_stale_history_copy_reads_stale`,
 /// `extras_and_orphaned_shipped_siblings_read_extra`.
 pub(crate) fn classify_with(
@@ -246,15 +247,33 @@ fn unmanaged(path: &str, state: State, bytes: &[u8]) -> Entry {
 }
 
 /// The file's bytes, `None` when it does not exist.
+///
+/// # Errors
+/// A path that exists but is not a regular file (a FIFO, socket, device or
+/// directory; a symlink is followed), or that cannot be read.
+/// Test: `a_fifo_at_a_managed_path_fails_closed_without_hanging`.
 fn read_optional(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    // #11773: `fs::read` on a FIFO blocks forever; check the type before opening.
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(meta) => anyhow::bail!(
+            "cannot read {}: not a regular file ({:?})",
+            path.display(),
+            meta.file_type()
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
+    std::fs::read(path)
+        .map(Some)
+        .with_context(|| format!("cannot read {}", path.display()))
 }
 
 /// Every regular file below `dir/rel`, as `/`-separated paths relative to `dir`.
+///
+/// What: a symlink to a file counts; a FIFO, socket, device or symlink to a
+/// directory is skipped, so the extras read never opens one.
+/// Test: `a_fifo_extra_is_skipped_without_hanging`.
 fn walk(dir: &Path, rel: &str, out: &mut BTreeSet<String>) {
     let Ok(entries) = std::fs::read_dir(dir.join(rel)) else {
         return;
@@ -268,9 +287,11 @@ fn walk(dir: &Path, rel: &str, out: &mut BTreeSet<String>) {
                     walk(dir, &child, out);
                 }
             }
-            Ok(_) => {
+            // #11773: only a regular file (symlinks followed); a FIFO would block `fs::read`.
+            Ok(_) if std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()) => {
                 out.insert(child);
             }
+            Ok(_) => {}
             Err(_) => {}
         }
     }
@@ -278,7 +299,12 @@ fn walk(dir: &Path, rel: &str, out: &mut BTreeSet<String>) {
 
 /// The `files` map of the installed provenance stamp; empty when absent or malformed.
 fn installed_provenance(dir: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(dir.join(refresh::PROVENANCE_DEST))
+    let path = dir.join(refresh::PROVENANCE_DEST);
+    // #11773: never open a non-regular file; its managed row fails closed instead.
+    if !path.is_file() {
+        return BTreeMap::new();
+    }
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| v.get("files").cloned())
