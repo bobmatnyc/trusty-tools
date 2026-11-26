@@ -156,3 +156,35 @@ fn a_refused_sandbox_names_the_variable() {
         "{reason}"
     );
 }
+
+// #10701: the server every fleet tmux call names with `-L`.
+#[test]
+fn the_fleet_server_is_named_when_tmux_is_allowed() {
+    let (_root, _data, tmux) = sandbox_dirs();
+    let host = TmuxAccess::Host(HostStateAccess::OptedIn);
+    assert_eq!(fleet_server_for(&host, None), Ok(FLEET_SERVER));
+    assert_eq!(fleet_server_for(&host, Some(&tmux)), Ok("default"));
+    let sandbox = TmuxAccess::SandboxServer { tmux_tmpdir: tmux };
+    assert_eq!(fleet_server_for(&sandbox, None), Ok(FLEET_SERVER));
+}
+
+#[test]
+fn the_fleet_server_is_refused_when_tmux_is_refused() {
+    let refused = TmuxAccess::SandboxRefused {
+        detail: "$TMUX is set".to_string(),
+    };
+    let err = fleet_server_for(&refused, None).expect_err("a refusal");
+    assert!(err.contains("#9557"), "{err}");
+}
+
+#[test]
+fn the_fleet_server_is_refused_when_its_socket_dir_does_not_resolve() {
+    let (root, _data, _tmux) = sandbox_dirs();
+    let missing = root.path().join("no-such-dir");
+    let host = TmuxAccess::Host(HostStateAccess::OptedIn);
+    let err = fleet_server_for(&host, Some(&missing)).expect_err("no socket dir");
+    assert!(
+        err.contains("no-such-dir") && err.contains("TMUX_TMPDIR"),
+        "{err}"
+    );
+}

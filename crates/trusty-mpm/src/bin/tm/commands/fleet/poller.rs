@@ -147,7 +147,8 @@ pub(crate) fn start(dir: &Path, probe: Probe, names: &SessionNames) -> anyhow::R
 /// `names`, #8878 R1) and `ARCHITECT_PROJECT_DIR`, so the poller wakes this
 /// Architect and measures this project's context. Removes `TMUX_SOCKET`: the
 /// script's tmux would honour it, and tm's own tmux calls, which read the
-/// session back, do not.
+/// session back, do not. #10701: removes `TMUX` and `TMUX_PANE` for the same
+/// reason; tm's calls name the fleet's server with `-L`.
 /// Test: `the_start_command_drops_tmux_socket`,
 /// `the_start_command_carries_the_chosen_session_names`.
 pub(crate) fn start_command(dir: &Path, names: &SessionNames) -> Command {
@@ -158,6 +159,9 @@ pub(crate) fn start_command(dir: &Path, names: &SessionNames) -> Command {
         .env("ARCHITECT_POLL_SESSION", names.poll())
         .env("ARCHITECT_PROJECT_DIR", dir)
         // #8436 P4 fix: one tmux server for the script and for tm.
-        .env_remove("TMUX_SOCKET");
+        .env_remove("TMUX_SOCKET")
+        // #10701: the script's tmux must not follow the caller's server.
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
     cmd
 }
