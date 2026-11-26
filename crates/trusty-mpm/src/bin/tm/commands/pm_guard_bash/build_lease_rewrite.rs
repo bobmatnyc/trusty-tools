@@ -24,8 +24,8 @@ use super::build_lease_program::{
 };
 use super::heredoc::HeredocBodies;
 use super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
+use super::split_shell_segments_raw;
 use super::substitutions::paren_substitution_live_at;
-use super::{split_shell_segments, split_shell_segments_raw};
 use crate::commands::hook_rewrite::is_env_assignment;
 
 // #11886: builds the rewrite cannot reach are refused (pm_guard_bash/mod.rs is
@@ -33,7 +33,7 @@ use crate::commands::hook_rewrite::is_env_assignment;
 #[path = "build_lease_hidden.rs"]
 mod build_lease_hidden;
 use build_lease_hidden::{
-    blank_comments, hidden_build_refusal, runner_operand_hides, unleased_build_refusal,
+    blank_comments, hidden_build_refusal, runner_operand_hides, runs_heavy, unleased_build_refusal,
     unparseable_build_refusal,
 };
 
@@ -200,10 +200,10 @@ pub(crate) fn is_heavy_build(argv: &[String], heavy: &[(String, Option<String>)]
 }
 
 /// Whether a wrapper's inner command runs a heavy build at any depth.
+///
+/// #11886 r3: one the rules would refuse counts, so the wrapper leases whole.
 fn hides_a_heavy_build(inner: &str, heavy: &[(String, Option<String>)]) -> bool {
-    split_shell_segments(inner)
-        .iter()
-        .any(|seg| heavy_program_offset(seg, heavy).is_some())
+    runs_heavy(inner, heavy)
 }
 
 fn refusal() -> String {
