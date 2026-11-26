@@ -32,6 +32,7 @@ lands on whoever runs this crate.
 | `tests/conformance_cross_gate.rs` | AC-18 (DOC-15 C5, #1362): trusty-mpm's FRONT gate and trusty-review's BACK gate never disagree about one shared `ResolvedIntent`. |
 | `tests/analyze_uds_consumers.rs` | #6287: one live trusty-analyze socket, and every in-tree consumer (trusty-console, tctl) agrees about what it sees. |
 | `tests/memory_uds_consumer.rs` | #6555: tctl's own probe reads a live trusty-memory daemon as `Serving`. |
+| `tests/architect_install_paths_parity_11821.rs` | #11821 P4-f2: trusty-architect's local install.toml reader resolves, or refuses, as trusty-common's resolver does. |
 
 ## Adding a test here
 

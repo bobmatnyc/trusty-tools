@@ -32,7 +32,10 @@ use trusty_architect::poller::{
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// A `Config` with every path under `dir` and the env `vars` on top.
-fn config(dir: &Path, vars: &[(&str, &str)]) -> Result<Config, trusty_architect::ConfigError> {
+fn config(
+    dir: &Path,
+    vars: &[(&str, &str)],
+) -> Result<Config, trusty_architect::install_paths::InstallPathsError> {
     let base: Vec<(String, String)> = [
         ("SUPERVISOR_INBOX_DIR", "inbox"),
         ("SESSIONS_DIR", "sessions"),
@@ -144,7 +147,7 @@ fn test_events_become_alerts_except_idle_prompt() -> TestResult {
 fn self_ctx_cfg(
     dir: &Path,
     vars: &[(&str, &str)],
-) -> Result<Config, trusty_architect::ConfigError> {
+) -> Result<Config, trusty_architect::install_paths::InstallPathsError> {
     let d = dir.to_string_lossy().into_owned();
     let mut all = vec![("SELF_CTX_DIR", d.as_str())];
     all.extend_from_slice(vars);
