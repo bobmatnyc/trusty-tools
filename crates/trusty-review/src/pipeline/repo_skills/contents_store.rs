@@ -137,7 +137,7 @@ pub(super) async fn find_base(
 /// over `cap` → `TooLarge`; a file with no inline content → `Error`; every
 /// other failure (HTTP status, timeout, rate limit, missing base commit) →
 /// `Error` naming it.
-/// Test: `hosted_read_maps_each_contents_result`,
+/// Test: `hosted_skill_errors_are_named_skips`, `hosted_oversize_skill_is_an_over_cap_skip`,
 /// `hosted_config_errors_are_config_unreadable_never_silent`.
 pub(crate) async fn read_at_ref(
     fetcher: &dyn DocFetcher,
