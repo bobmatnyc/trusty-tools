@@ -30,6 +30,13 @@ def free_port():
         return s.getsockname()[1]
 
 
+def _default_sigint():
+    """#11939: a suite launched with `cmd &` inherits SIGINT=SIG_IGN, so Python in the child
+    installs no KeyboardInterrupt handler and SIGINT is dropped. Give the child the
+    interactive (Ctrl-C) disposition the test means to exercise."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 def load_serve():
     sys.path.insert(0, SCRIPTS)
     spec = importlib.util.spec_from_file_location("dashboard_serve_under_test", SERVE)
@@ -52,7 +59,8 @@ class Base(unittest.TestCase):
         env = dict(os.environ, TRUSTY_DATA_DIR_OVERRIDE=self.data)
         p = subprocess.Popen(
             [sys.executable, SERVE, "--port", str(port), "--root", os.path.join(self.tmp.name, "store"),
-             "--page", self.page], env=env, stderr=subprocess.PIPE, text=True)
+             "--page", self.page], env=env, stderr=subprocess.PIPE, text=True,
+            preexec_fn=_default_sigint)
         self.addCleanup(lambda: p.poll() is None and p.kill())
         return p
 
