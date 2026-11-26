@@ -503,6 +503,45 @@ pub(crate) fn launch_pinned_login_cli(
     )
 }
 
+/// Production entry point: the daemon's session spawn env for `pinned` on
+/// `origin`, each login launched through [`launch_pinned_login_cli`] (#9750).
+///
+/// Why: #11821 — the launch writes the gh shim under tm's state root, so a
+/// broken `install.toml` must refuse it rather than write under `$HOME`.
+/// What: [`crate::core::gh_session_account::session_spawn_env`] over tm's
+/// state root. A pin with no account and no config dir is `None`, as before.
+/// When the config dir is unresolved every launch refuses before any write,
+/// naming `install.toml`, and the spawn gets the nobody-token env and that
+/// warning; the lenient root only names the store in the warning. Blocking.
+/// Test: `session_spawn_env_cli_fails_closed_on_a_broken_install_file`
+/// (env_serial); the other decisions are `session_spawn_env`'s.
+pub fn session_spawn_env_cli(
+    pinned: &PinnedGhIdentity,
+    origin: &str,
+) -> Option<Result<crate::core::gh_account::GhSpawnEnv, String>> {
+    use crate::core::paths::FrameworkPaths;
+    let aliases = SshHostAliases::for_current_user();
+    // #11821: the shim writer fails closed; no `$HOME` fallback, no partial write.
+    let state_root = FrameworkPaths::try_default()
+        .map(|paths| paths.root)
+        .map_err(|e| format!("tm's config dir is unresolved: {e}; no gh shim was written"));
+    let named_root = match &state_root {
+        Ok(root) => root.clone(),
+        Err(_) => FrameworkPaths::default().root,
+    };
+    let launch = |login: &str| {
+        let root = state_root.as_deref().map_err(Clone::clone)?;
+        launch_pinned_login_cli(pinned, origin, root, &aliases, login)
+    };
+    crate::core::gh_session_account::session_spawn_env(
+        pinned,
+        origin,
+        &named_root,
+        &aliases,
+        launch,
+    )
+}
+
 /// The gh env an in-place relaunch of a pinned project hands `claude` (#9750,
 /// plan Q1), with `launch` deciding the credential.
 ///
@@ -568,9 +607,12 @@ pub(crate) fn pinned_relaunch_env_with(
 /// ([`crate::core::gh_login_verify::session_pin_with`] over the host's registry
 /// and `[accounts]` table), then [`pinned_relaunch_env_with`] with
 /// [`launch_pinned_login_cli`]. An origin git cannot read, or an unreadable
-/// pin, is an `Err`, as the daemon fails it closed. Blocking (gh and
-/// `GET /user`).
-/// Test: `a_relaunch_whose_origin_git_cannot_read_is_refused`; the other
+/// pin, is an `Err`, as the daemon fails it closed. An unpinned checkout is
+/// `Ok(None)`; a pinned one with an unresolved config dir (a broken
+/// `install.toml`) refuses before any shim is written (#11821). Blocking (gh
+/// and `GET /user`).
+/// Test: `a_relaunch_whose_origin_git_cannot_read_is_refused`,
+/// `pinned_relaunch_env_fails_closed_on_a_broken_install_file` (env_serial); the other
 /// decisions are [`pinned_relaunch_env_with`]'s and `session_pin_with`'s.
 pub fn pinned_relaunch_env(cwd: &Path) -> Result<Option<crate::core::gh_identity::GhEnv>, String> {
     // #9750: a git error reading `origin` refuses; it never relaunches unpinned.
@@ -588,7 +630,15 @@ pub fn pinned_relaunch_env(cwd: &Path) -> Result<Option<crate::core::gh_identity
     let Some(pinned) = pinned else {
         return Ok(None);
     };
-    let state_root = crate::core::paths::FrameworkPaths::default().root;
+    // #11821: the shim writer fails closed; no `$HOME` fallback, no partial write.
+    let state_root = crate::core::paths::FrameworkPaths::try_default()
+        .map_err(|e| {
+            format!(
+                "tm: cannot start session: the config dir is unresolved: {e}. No gh shim was \
+                 written and no token was injected."
+            )
+        })?
+        .root;
     pinned_relaunch_env_with(&pinned, &origin, &state_root, &aliases, |login| {
         launch_pinned_login_cli(&pinned, &origin, &state_root, &aliases, login)
     })

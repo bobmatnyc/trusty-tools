@@ -796,28 +796,12 @@ pub(crate) async fn resolve_gh_account_env_for_registry_with(
     let cwd_for_log = cwd.to_path_buf();
     let (pinned_for_task, origin_for_task) = (pinned.clone(), origin.clone());
     let joined = tokio::task::spawn_blocking(move || {
-        use crate::core::gh_session_account::session_spawn_env;
-        let state_root = crate::core::paths::FrameworkPaths::default().root;
-        let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user();
         // #9750 (D6e): the login is verified, then the session's gh reads
         // the keyring per call through a shim; no token reaches the env.
-        let launch = |login: &str| {
-            crate::core::gh_session_shim::launch_pinned_login_cli(
-                &pinned_for_task,
-                &origin_for_task,
-                &state_root,
-                &aliases,
-                login,
-            )
-        };
-        // #8914: every config-dir pin is verified, never used bare.
-        let env = session_spawn_env(
-            &pinned_for_task,
-            &origin_for_task,
-            &state_root,
-            &aliases,
-            launch,
-        );
+        // #8914: every config-dir pin is verified, never used bare. #11821:
+        // an unresolved config dir refuses the shim write, fail-closed.
+        let env =
+            crate::core::gh_session_shim::session_spawn_env_cli(&pinned_for_task, &origin_for_task);
         log_spawn_env(env, &cwd_for_log)
     })
     .await;

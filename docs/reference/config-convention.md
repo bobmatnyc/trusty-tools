@@ -90,8 +90,12 @@ workspace root. For the config dir, not every writer refuses yet:
   OAuth token store, the gh token supplied with `--account-token-stdin`, the
   `github.token_env` token a session launch hands to the gh shim
   (`shim_token_env`), the console's auto-resume flag, the per-login gh
-  account dirs (`gh-accounts/<login>`), and the session archive root
-  (`.trusty-tools/archive`, #11821 row P3-f1).
+  account dirs (`gh-accounts/<login>`), the session archive root
+  (`.trusty-tools/archive`, #11821 row P3-f1), and the gh shim a pinned
+  session gets, written by an in-place relaunch (`pinned_relaunch_env`) and by
+  the daemon's session spawn (`session_spawn_env_cli`, #11821 row P3-f2). The
+  daemon never blocks a spawn, so its refusal gives the session's gh a token
+  that authenticates as nobody and logs the error.
 - The build-lease store does not use `$HOME`'s store. It falls back to its
   per-uid store under `/tmp`.
 - Readers, caches, logs and derived data still log the error and fall back

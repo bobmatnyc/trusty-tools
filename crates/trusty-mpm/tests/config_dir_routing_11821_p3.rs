@@ -324,3 +324,87 @@ fn token_env_shim_fails_closed_on_a_broken_install_file() {
     assert!(!err.contains("tok-11821"), "the token must not leak: {err}");
     assert_refused_closed(&fx, err);
 }
+
+/// An origin whose SSH alias no `~/.ssh/config` renames: the launch refuses
+/// at the host, before gh or `GET /user`, so a pre-fix run stays offline.
+const UNRESOLVED_ORIGIN: &str = "git@nohost-11821:acme/x.git";
+
+/// No gh shim and no per-login account dir landed under the `$HOME` state
+/// root, which only the lenient pin reader may use on a broken install.toml.
+fn assert_no_gh_writes(fx: &Fixture, err: &str) {
+    assert!(
+        err.contains("install.toml"),
+        "must name install.toml: {err}"
+    );
+    for tree in ["gh-shim", "gh-accounts"] {
+        let path = FrameworkPaths::under(&fx.home).root.join(tree);
+        assert!(!path.exists(), "no writer may create {}", path.display());
+    }
+}
+
+/// #11821 P3-f2: an in-place relaunch of a pinned checkout refuses before it
+/// writes the gh shim; before the fix the shim root fell back to
+/// `$HOME/.trusty-mpm` and the refusal named the host, not install.toml. The
+/// pin itself is read from the `$HOME` registry: readers stay lenient.
+/// #9123: a credential test, so `#[serial]` inside `CredentialSandbox`.
+#[test]
+#[serial_test::serial]
+fn pinned_relaunch_env_fails_closed_on_a_broken_install_file() {
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let (fx, _env) = broken_install_home();
+    // The lenient reader's `$HOME` fallback, where the pin is read from.
+    let registry = trusty_mpm::project::registry_data_dir();
+    std::fs::create_dir_all(&registry).expect("mkdir registry");
+    let row = serde_json::json!({
+        "name": "x", "repo_url": UNRESOLVED_ORIGIN, "default_branch": "main",
+        "gh_account": "octo",
+    });
+    std::fs::write(
+        registry.join("projects.json"),
+        serde_json::to_vec(&serde_json::json!({ "projects": { "x": row } })).expect("json"),
+    )
+    .expect("projects.json");
+    let checkout = fx.cfg.with_file_name("checkout");
+    std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", UNRESOLVED_ORIGIN][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&checkout)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let err = trusty_mpm::core::gh_session_shim::pinned_relaunch_env(&checkout)
+        .expect_err("the relaunch refuses");
+    assert_no_gh_writes(&fx, &err);
+}
+
+/// #11821 P3-f2: the daemon's session spawn env refuses the gh shim write and
+/// fails the session's gh closed with the nobody token; before the fix the
+/// shim root fell back to `$HOME/.trusty-mpm` and the warning named the host.
+/// #9123: a credential test, so `#[serial]` inside `CredentialSandbox`.
+#[test]
+#[serial_test::serial]
+fn session_spawn_env_cli_fails_closed_on_a_broken_install_file() {
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let (fx, _env) = broken_install_home();
+    let pinned = trusty_mpm::core::gh_account::PinnedGhIdentity {
+        account: Some("octo".to_string()),
+        ..Default::default()
+    };
+    let env = trusty_mpm::core::gh_session_shim::session_spawn_env_cli(&pinned, UNRESOLVED_ORIGIN)
+        .expect("an account pin yields an env")
+        .expect("the spawn contract never blocks");
+    let warning = env.warning.expect("the refusal rides the env");
+    assert_no_gh_writes(&fx, &warning);
+    assert!(
+        env.vars
+            .iter()
+            .any(|(k, v)| k == "GH_TOKEN" && v == "tm-refused-unverified-gh-account-pin"),
+        "the session's gh must authenticate as nobody: {:?}",
+        env.vars.iter().map(|(k, _)| k).collect::<Vec<_>>()
+    );
+}
