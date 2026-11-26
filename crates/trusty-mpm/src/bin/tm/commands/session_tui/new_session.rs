@@ -40,7 +40,12 @@
 //! through the SAME [`perform`] driver a typed checkout path uses
 //! ([`super::new_session_entry`]).
 //!
-//! Test: `new_session_*` in `super::tests`.
+//! #11822: the overlay opens on the cwd repo ([`super::new_session_cwd`]),
+//! each row says why it is offered, and an arrow in the path entry returns to
+//! the list.
+//!
+//! Test: `new_session_*` in `super::tests`, `new_session_cwd_*` in
+//! `super::new_session_cwd_tests`.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -56,6 +61,7 @@ use crate::commands::picker_launch_new::LaunchIsolation;
 use crate::commands::projects::registry::RegisterInput;
 use crate::commands::tmux_attach::AttachOutcome;
 
+pub(crate) use super::new_session_label::row_labels;
 use super::new_session_name::NameStep;
 use super::state::Input;
 
@@ -88,6 +94,8 @@ pub(crate) enum Target {
         /// the list is built; `None` when `repo_url` names no project at all.
         checkout: Option<PathBuf>,
     },
+    /// #11822: the cwd repo, when no registry row names it.
+    Cwd(ProjectIdentity),
     /// Type a path to a checkout the registry does not have yet.
     Other,
 }
@@ -192,6 +200,8 @@ pub(crate) struct NewSessionFlow {
     filter: String,
     /// #8587: `Some` while the Ctrl-N name step is open.
     naming: Option<NameStep>,
+    /// #11822: which target is the cwd repo, for its row reason.
+    cwd: Option<usize>,
     resolve: Resolver,
 }
 
@@ -208,6 +218,7 @@ impl PartialEq for NewSessionFlow {
             && self.typed == other.typed
             && self.filter == other.filter
             && self.naming == other.naming
+            && self.cwd == other.cwd
     }
 }
 
@@ -227,20 +238,32 @@ impl NewSessionFlow {
             typed: None,
             filter: String::new(),
             naming: None,
+            cwd: None,
             resolve,
         }
     }
 
-    /// Highlight the project the list cursor was already on (#7406).
+    /// Open on the cwd repo, else on the cursor session's project (#11822).
     ///
-    /// Why: the operator opened this overlay from a row, and the project of
-    /// that row is overwhelmingly the project they want another session in.
-    /// Starting on row 0 instead made them scroll past it every time.
-    /// What: moves the highlight to [`preselect_index`]'s answer for `session`,
-    /// which falls back to the first row when nothing matches.
-    /// Test: `new_session_preselects_the_cursor_sessions_project`.
-    pub(crate) fn preselected_for(mut self, session: Option<&ManagedSessionSummary>) -> Self {
-        self.selected = preselect_index(&self.targets, session);
+    /// Why: the repo the operator ran `tm` in is the one they want a session
+    /// in. The #7406 cursor rule — the project of the row the overlay was
+    /// opened from — stays as the fallback for a cwd that is no repo.
+    /// What: [`super::new_session_cwd::with_cwd`] adds or finds the cwd row;
+    /// with none, [`preselect_index`] answers for `session`, falling back to
+    /// the first row when nothing matches.
+    /// Test: `new_session_cwd_preselects_an_unregistered_cwd_repo`,
+    /// `new_session_cwd_falls_back_to_the_cursor_without_a_cwd_repo`,
+    /// `new_session_preselects_the_cursor_sessions_project`.
+    pub(crate) fn preselected(
+        mut self,
+        cwd: Option<ProjectIdentity>,
+        session: Option<&ManagedSessionSummary>,
+    ) -> Self {
+        let (targets, at) =
+            super::new_session_cwd::with_cwd(std::mem::take(&mut self.targets), cwd);
+        self.targets = targets;
+        self.cwd = at;
+        self.selected = at.unwrap_or_else(|| preselect_index(&self.targets, session));
         self
     }
 
@@ -318,7 +341,11 @@ impl NewSessionFlow {
             .map(|i| {
                 let marker = if *i == self.selected { "▸" } else { " " };
                 let label = labels.get(*i).map_or("", String::as_str);
-                format!("{marker} {label}")
+                // #11822: every row says why it is offered.
+                let reason = self.targets.get(*i).map_or("", |t| {
+                    super::new_session_label::row_reason(t, self.cwd == Some(*i))
+                });
+                format!("{marker} {label}{reason}")
             })
             .collect()
     }
@@ -410,6 +437,7 @@ impl NewSessionFlow {
                     Ok(request) => Step::Create(request),
                     Err(message) => Step::Reject(message),
                 },
+                Some(Target::Cwd(id)) => Step::Create(super::new_session_cwd::request_for_cwd(id)),
                 Some(Target::Other) => self.confirm_escape_row(),
                 None => Step::Ignore,
             },
@@ -450,9 +478,12 @@ impl NewSessionFlow {
 
     /// True while the filter still leaves a registered project on screen.
     fn filter_matches_a_registered_row(&self) -> bool {
-        self.visible()
-            .iter()
-            .any(|i| matches!(self.targets.get(*i), Some(Target::Registered { .. })))
+        self.visible().iter().any(|i| {
+            matches!(
+                self.targets.get(*i),
+                Some(Target::Registered { .. } | Target::Cwd(_))
+            )
+        })
     }
 
     /// Move the highlight to a position within the filtered rows.
@@ -482,6 +513,9 @@ impl NewSessionFlow {
     }
 
     /// Path-entry keys: edit the buffer, then Enter to resolve and confirm.
+    ///
+    /// #11822: a movement key closes the entry and moves over the list.
+    /// Test: `new_session_cwd_arrow_keys_leave_the_path_entry_for_the_list`.
     fn apply_path(&mut self, input: Input) -> Step {
         let Some(typed) = self.typed.as_mut() else {
             return Step::Ignore;
@@ -499,6 +533,18 @@ impl NewSessionFlow {
                 Ok(request) => Step::Create(request),
                 Err(msg) => Step::Reject(msg),
             },
+            // #11822: the entry has no list, so an arrow used to do nothing.
+            // It closes the entry and moves over the list instead.
+            Input::Up
+            | Input::Down
+            | Input::PageUp
+            | Input::PageDown
+            | Input::Home
+            | Input::End => {
+                self.typed = None;
+                self.apply_pick(input);
+                Step::Redraw
+            }
             _ => Step::Ignore,
         }
     }
@@ -603,7 +649,7 @@ pub(crate) fn request_for_path(
     };
     let known = targets.iter().any(|t| match t {
         Target::Registered { name, repo, .. } => *name == id.name || *repo == id.repo_url,
-        Target::Other => false,
+        Target::Cwd(_) | Target::Other => false,
     });
     Ok(NewSessionRequest {
         register: (!known).then(|| NewProject {
@@ -693,102 +739,6 @@ pub(crate) fn targets_from_with(
     checkout_of: CheckoutOf,
 ) -> Vec<Target> {
     super::new_session_order::ordered_targets(projects, sessions, checkout_of)
-}
-
-/// One display label per target — `owner/repo`, never a URL or a path (#7406).
-///
-/// Why: the owner's screen showed a stored `repo_url` verbatim, which is either
-/// a full `https://github.com/owner/repo` or an absolute checkout path. Both are
-/// wider than the overlay, so the row wrapped and the list stopped being
-/// scannable. `owner/repo` is the identity, and everything else was noise.
-/// What: a parseable git remote becomes `owner/repo`, widened to
-/// `host/owner/repo` ONLY when another row on a different host spells the same
-/// `owner/repo`. An absolute path becomes `<basename> (local)`, as does a row
-/// with no `repo_url` at all. Anything else falls back to the registry name.
-/// Test: `new_session_rows_show_owner_repo_only`,
-/// `new_session_labels_disambiguate_by_host`.
-pub(crate) fn row_labels(targets: &[Target]) -> Vec<String> {
-    let labels: Vec<Option<Label>> = targets
-        .iter()
-        .map(|t| match t {
-            Target::Registered { name, repo, .. } => Some(label_for(name, repo)),
-            Target::Other => None,
-        })
-        .collect();
-    labels
-        .iter()
-        .map(|label| match label {
-            Some(Label::Remote { host, owner, repo }) => {
-                if collides_across_hosts(&labels, host, owner, repo) {
-                    format!("{host}/{owner}/{repo}")
-                } else {
-                    format!("{owner}/{repo}")
-                }
-            }
-            Some(Label::Local(base)) => format!("{base} (local)"),
-            Some(Label::Plain(name)) => name.clone(),
-            None => "other — type a project path…".to_string(),
-        })
-        .collect()
-}
-
-/// What one registry row reduces to before the host is decided.
-enum Label {
-    /// A git remote: owner and repo as the remote spells them, plus its host.
-    Remote {
-        /// Remote host, kept only for the disambiguating form.
-        host: String,
-        /// Repository owner.
-        owner: String,
-        /// Repository name.
-        repo: String,
-    },
-    /// A checkout that exists only on this host; the directory's basename.
-    Local(String),
-    /// Neither a remote nor a path — the registry name is all there is.
-    Plain(String),
-}
-
-/// Reduce one registry row to its [`Label`].
-fn label_for(name: &str, repo: &str) -> Label {
-    if let Ok(remote) = parse_remote_url(repo) {
-        return Label::Remote {
-            host: remote.host,
-            owner: remote.owner,
-            repo: remote.repo,
-        };
-    }
-    let trimmed = repo.trim();
-    if trimmed.is_empty() {
-        return Label::Local(name.to_string());
-    }
-    if trimmed.starts_with('/') {
-        let base = Path::new(trimmed)
-            .file_name()
-            .map(|b| b.to_string_lossy().to_string())
-            .unwrap_or_else(|| name.to_string());
-        return Label::Local(base);
-    }
-    Label::Plain(name.to_string())
-}
-
-/// True when another row spells this `owner/repo` on a DIFFERENT host.
-///
-/// The host is width the row can rarely afford, so it is added only when
-/// leaving it out would make two rows read identically.
-fn collides_across_hosts(labels: &[Option<Label>], host: &str, owner: &str, repo: &str) -> bool {
-    labels.iter().flatten().any(|l| {
-        matches!(
-            l,
-            Label::Remote {
-                host: h,
-                owner: o,
-                repo: r,
-            } if o.eq_ignore_ascii_case(owner)
-                && r.eq_ignore_ascii_case(repo)
-                && !h.eq_ignore_ascii_case(host)
-        )
-    })
 }
 
 /// Which target row the overlay should open on, given the list cursor (#7406).

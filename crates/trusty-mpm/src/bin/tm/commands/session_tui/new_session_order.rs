@@ -149,8 +149,9 @@ struct Facts {
 fn facts(target: &Target, label: &str, sessions: &[ManagedSessionSummary]) -> Facts {
     let (name, repo) = match target {
         Target::Registered { name, repo, .. } => (name.as_str(), repo.as_str()),
-        // Never ranked: `ordered_targets` appends the escape row after sorting.
-        Target::Other => ("", ""),
+        // Never ranked: the escape row is appended after sorting, and the cwd
+        // row (#11822) is inserted after ordering.
+        Target::Cwd(_) | Target::Other => ("", ""),
     };
     let mut session = NO_SESSION;
     let mut recency = "";
