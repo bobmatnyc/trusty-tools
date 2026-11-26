@@ -100,12 +100,14 @@ pub(crate) type DeployFn = fn(&Path, &SessionNames, Mode) -> anyhow::Result<Vec<
 
 /// The processes a deploy may restart; [`LiveRestarter`] in production.
 pub(crate) trait Restarter {
-    /// Whether this Architect's poller session runs; `Err` when tmux cannot tell.
+    /// Whether this Architect's poller session runs; `Err` when tmux cannot
+    /// tell, or the session runs for another directory.
     fn poller_running(&self, dir: &Path, names: &SessionNames) -> Result<bool, String>;
     /// Stop the poller session and start it from the deployed scripts.
     fn restart_poller(&self, dir: &Path, names: &SessionNames) -> anyhow::Result<()>;
-    /// Whether launchd has the dashboard agent loaded.
-    fn dashboard_loaded(&self) -> bool;
+    /// Whether launchd has the dashboard agent loaded; `Err` when launchctl
+    /// cannot tell.
+    fn dashboard_loaded(&self) -> Result<bool, String>;
     /// Restart the dashboard under launchd.
     fn kickstart_dashboard(&self) -> anyhow::Result<()>;
 }
@@ -115,11 +117,7 @@ pub(crate) struct LiveRestarter;
 
 impl Restarter for LiveRestarter {
     fn poller_running(&self, dir: &Path, names: &SessionNames) -> Result<bool, String> {
-        match (TMUX.pane)(names.poll()) {
-            PaneState::Live(d) => Ok(d == dir),
-            PaneState::Absent | PaneState::Dead(_) => Ok(false),
-            PaneState::Unknown(e) => Err(e),
-        }
+        pane_running((TMUX.pane)(names.poll()), dir, names.poll())
     }
 
     fn restart_poller(&self, dir: &Path, names: &SessionNames) -> anyhow::Result<()> {
@@ -137,13 +135,63 @@ impl Restarter for LiveRestarter {
         poller::start(dir, TMUX, names)
     }
 
-    fn dashboard_loaded(&self) -> bool {
-        use dashboard_agent::Host;
-        dashboard_agent::RealHost.agent_loaded(&dashboard_agent::label())
+    fn dashboard_loaded(&self) -> Result<bool, String> {
+        launchd_loaded(&dashboard_agent::label())
     }
 
     fn kickstart_dashboard(&self) -> anyhow::Result<()> {
         dashboard_agent::kickstart()
+    }
+}
+
+/// Whether poller session `session`, read as `state`, runs for `dir`.
+///
+/// Why: #11368 — as `poller::step_with`, a session that runs for another
+/// directory is an error, never "not running" (fail closed).
+/// Test: `a_poller_session_of_another_dir_is_an_error_11368`.
+pub(crate) fn pane_running(state: PaneState, dir: &Path, session: &str) -> Result<bool, String> {
+    match state {
+        PaneState::Live(other) | PaneState::Dead(other) if other != dir => Err(format!(
+            "tmux session {session} runs in {}, not in this Architect; stop it with \
+             `tmux kill-session -t ={session}`",
+            other.display()
+        )),
+        PaneState::Live(_) => Ok(true),
+        PaneState::Absent | PaneState::Dead(_) => Ok(false),
+        PaneState::Unknown(e) => Err(format!("cannot read tmux session {session}: {e}")),
+    }
+}
+
+/// Whether launchd has `label` loaded; `Err` when `launchctl` cannot tell.
+#[cfg(target_os = "macos")]
+fn launchd_loaded(label: &str) -> Result<bool, String> {
+    let target = format!("gui/{}/{label}", trusty_common::launchd::current_uid());
+    let out = std::process::Command::new("launchctl")
+        .args(["print", &target])
+        .output()
+        .map_err(|e| format!("cannot run `launchctl print {target}`: {e}"))?;
+    loaded_from(out.status.code(), &String::from_utf8_lossy(&out.stderr))
+}
+
+/// No launchd off macOS, so no dashboard agent is loaded.
+#[cfg(not(target_os = "macos"))]
+fn launchd_loaded(_label: &str) -> Result<bool, String> {
+    Ok(false)
+}
+
+/// `launchctl print`'s exit read as loaded or not.
+///
+/// Why: #11368 — a read error is not "not loaded" (fail closed).
+/// What: 0 loaded; 113 (launchctl's "could not find service") not loaded;
+/// any other exit, or none, `Err`.
+/// Test: `a_launchctl_read_error_is_not_not_loaded_11368`.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn loaded_from(code: Option<i32>, stderr: &str) -> Result<bool, String> {
+    match code {
+        Some(0) => Ok(true),
+        Some(113) => Ok(false),
+        Some(c) => Err(format!("launchctl print exited {c}: {}", stderr.trim())),
+        None => Err("launchctl print was killed by a signal".to_owned()),
     }
 }
 
@@ -379,22 +427,23 @@ fn restarts(
             Ok(false) => Step::Unchanged(format!(
                 "poller session {session} is not running; a changed script does not start it"
             )),
-            Err(e) => Step::Failed(format!("poller restart: cannot read {session}: {e}")),
+            Err(e) => Step::Failed(format!("poller restart: {e}")),
         });
     }
     if !dash.is_empty() {
-        steps.push(if !host.dashboard_loaded() {
-            Step::Unchanged(
+        steps.push(match host.dashboard_loaded() {
+            Ok(false) => Step::Unchanged(
                 "the dashboard agent is not loaded; a changed script does not start it".to_owned(),
-            )
-        } else {
-            match host.kickstart_dashboard() {
+            ),
+            Ok(true) => match host.kickstart_dashboard() {
                 Ok(()) => Step::Changed(format!(
                     "kickstarted the dashboard agent once: changed {}",
                     dash.join(", ")
                 )),
                 Err(e) => Step::Failed(format!("dashboard restart: {e:#}")),
-            }
+            },
+            // #11368: an unreadable launchd state fails, as the poller arm does.
+            Err(e) => Step::Failed(format!("dashboard restart: cannot read the agent: {e}")),
         });
     }
     steps

@@ -12,10 +12,12 @@
 //! Test: `restore_brings_back_the_previous_release_bytes_11368`,
 //! `a_failed_backup_aborts_and_writes_nothing_11368`,
 //! `a_new_release_prunes_the_older_kept_copy_11368`,
-//! `restore_never_overwrites_an_edited_file_11368`.
+//! `a_release_that_replaces_nothing_restores_nothing_11368`,
+//! `restore_never_overwrites_an_edited_file_11368`,
+//! `a_manifest_row_outside_the_architect_dir_is_refused_11368`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, bail};
 use trusty_common::atomic_file::write_atomic;
@@ -64,16 +66,21 @@ fn release_dir(dir: &Path, version: &str) -> anyhow::Result<PathBuf> {
 /// Keep `kept` under `version`'s release, then prune every other release.
 ///
 /// Why: Q3, Q8 — a backup that fails aborts the deploy before its first write.
-/// What: nothing to keep writes and prunes nothing, so a relaunch on the
-/// same release keeps the undo it has. A file already kept for this release
-/// keeps its first bytes (the previous release's) and takes the new sha.
+/// What: a release that already has its manifest and replaces nothing writes
+/// and prunes nothing, so a relaunch on the same release keeps the undo it
+/// has. A new release that replaces nothing still writes its (empty)
+/// manifest and prunes, so `restore` never rolls back two releases. A file
+/// already kept for this release keeps its first bytes (the previous
+/// release's) and takes the new sha.
 /// Test: `a_failed_backup_aborts_and_writes_nothing_11368`,
-/// `a_new_release_prunes_the_older_kept_copy_11368`.
+/// `a_new_release_prunes_the_older_kept_copy_11368`,
+/// `a_release_that_replaces_nothing_restores_nothing_11368`.
 pub(crate) fn keep(dir: &Path, version: &str, kept: &[Kept]) -> anyhow::Result<Vec<Step>> {
-    if kept.is_empty() {
+    let root = release_dir(dir, version)?;
+    // #11368: only a release with its own manifest may skip the write.
+    if kept.is_empty() && root.join(MANIFEST).is_file() {
         return Ok(Vec::new());
     }
-    let root = release_dir(dir, version)?;
     let mut manifest = read_manifest(&root)
         .context("backup: cannot read the kept copy")?
         .unwrap_or_default();
@@ -98,6 +105,11 @@ pub(crate) fn keep(dir: &Path, version: &str, kept: &[Kept]) -> anyhow::Result<V
     write_atomic(&path, render_manifest(&manifest).as_bytes())
         .with_context(|| format!("backup: cannot write {}", path.display()))?;
     prune(dir, version)?;
+    if kept.is_empty() {
+        return Ok(vec![Step::Unchanged(format!(
+            "replaced no file; {ROOT}/{version}/ records an empty kept copy"
+        ))]);
+    }
     Ok(vec![Step::Changed(format!(
         "kept the {} replaced file(s) under {ROOT}/{version}/ for `tm architect restore`",
         kept.len()
@@ -135,7 +147,18 @@ fn releases_in(dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
+/// Whether `dest` names a path inside the Architect directory: only normal
+/// segments, so no root, `..` or `.` (#11368: a manifest row never escapes).
+fn inside(dest: &str) -> bool {
+    !dest.is_empty()
+        && Path::new(dest)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+
 /// The manifest of the release at `root`; `None` when it has none.
+///
+/// `Err` on a malformed row, including a `dest` outside the Architect directory.
 fn read_manifest(root: &Path) -> anyhow::Result<Option<BTreeMap<String, Entry>>> {
     let path = root.join(MANIFEST);
     let text = match std::fs::read_to_string(&path) {
@@ -152,6 +175,12 @@ fn read_manifest(root: &Path) -> anyhow::Result<Option<BTreeMap<String, Entry>>>
         let [dest, mode, old_sha, new_sha] = cols.as_slice() else {
             bail!("{}: malformed row {line:?}", path.display());
         };
+        if !inside(dest) {
+            bail!(
+                "{}: {dest:?} is not a path inside the Architect directory",
+                path.display()
+            );
+        }
         let mode = u32::from_str_radix(mode, 8)
             .with_context(|| format!("{}: bad mode in {line:?}", path.display()))?;
         out.insert(
@@ -205,9 +234,13 @@ impl Restored {
 /// release wrote, or that is absent, gets the kept bytes and mode; one that
 /// already holds the kept bytes is unchanged; any other bytes are an edit,
 /// kept and reported (exit 1). A kept file whose sha no longer matches its
-/// manifest row fails. `Err`: no complete release, or more than one.
+/// manifest row fails. A release that replaced nothing restores nothing and
+/// says so. `Err`: no complete release, more than one, or a manifest row
+/// whose `dest` is outside `dir`.
 /// Test: `restore_brings_back_the_previous_release_bytes_11368`,
-/// `restore_never_overwrites_an_edited_file_11368`.
+/// `restore_never_overwrites_an_edited_file_11368`,
+/// `a_release_that_replaces_nothing_restores_nothing_11368`,
+/// `a_manifest_row_outside_the_architect_dir_is_refused_11368`.
 pub(crate) fn restore(dir: &Path, version: Option<&str>) -> anyhow::Result<Restored> {
     let complete: Vec<String> = releases_in(dir)?
         .into_iter()
@@ -230,6 +263,12 @@ pub(crate) fn restore(dir: &Path, version: Option<&str>) -> anyhow::Result<Resto
     };
     let root = release_dir(dir, &version)?;
     let manifest = read_manifest(&root)?.unwrap_or_default();
+    if manifest.is_empty() {
+        let steps = vec![Step::Unchanged(format!(
+            "release {version} replaced no file, so there is nothing to restore"
+        ))];
+        return Ok(Restored { steps, version });
+    }
     let steps = manifest
         .iter()
         .map(|(dest, e)| restore_one(dir, &root, dest, e))

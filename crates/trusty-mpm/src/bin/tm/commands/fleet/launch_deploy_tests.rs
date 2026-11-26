@@ -3,16 +3,19 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
 
 use super::super::Step;
+use super::super::launch::PaneState;
 use super::super::launch_backup::{self, ROOT};
 use super::super::seed;
 use super::super::session_name::SessionNames;
-use super::{Ctx, DASHBOARD_SCRIPTS, Mode, POLLER_SCRIPTS, Restarter, run};
+use super::{
+    Ctx, DASHBOARD_SCRIPTS, Mode, POLLER_SCRIPTS, Restarter, loaded_from, pane_running, run,
+};
 
 /// The poller's entry script.
 pub(crate) const POLL: &str = "scripts/fleet-poll.py";
@@ -72,6 +75,10 @@ pub(crate) struct FakeHost {
     pub(crate) running: bool,
     /// Whether the dashboard agent is loaded.
     pub(crate) loaded: bool,
+    /// `dashboard_loaded` cannot read launchd.
+    pub(crate) unreadable: bool,
+    /// The poller session runs for this other directory.
+    pub(crate) other_dir: Option<PathBuf>,
     /// `restart_poller` fails.
     pub(crate) restart_fails: bool,
     /// Poller restarts so far.
@@ -81,16 +88,22 @@ pub(crate) struct FakeHost {
 }
 
 impl Restarter for FakeHost {
-    fn poller_running(&self, _: &Path, _: &SessionNames) -> Result<bool, String> {
-        Ok(self.running)
+    fn poller_running(&self, dir: &Path, _: &SessionNames) -> Result<bool, String> {
+        match &self.other_dir {
+            Some(other) => pane_running(PaneState::Live(other.clone()), dir, "s-poll"),
+            None => Ok(self.running),
+        }
     }
     fn restart_poller(&self, _: &Path, _: &SessionNames) -> anyhow::Result<()> {
         self.restarts.set(self.restarts.get() + 1);
         anyhow::ensure!(!self.restart_fails, "tmux died");
         Ok(())
     }
-    fn dashboard_loaded(&self) -> bool {
-        self.loaded
+    fn dashboard_loaded(&self) -> Result<bool, String> {
+        if self.unreadable {
+            return Err("launchctl print exited 5: boom".to_owned());
+        }
+        Ok(self.loaded)
     }
     fn kickstart_dashboard(&self) -> anyhow::Result<()> {
         self.kickstarts.set(self.kickstarts.get() + 1);
@@ -271,7 +284,7 @@ fn an_edited_file_is_never_backed_up_or_overwritten_11368() {
     assert_eq!(std::fs::read(dir.join(POLL)).unwrap(), EDITED);
     let sibling = dir.join(format!("{POLL}{}", seed::SHIPPED_SUFFIX));
     assert_eq!(std::fs::read(sibling).unwrap(), shipped(POLL));
-    assert!(!dir.join(ROOT).exists(), "nothing replaced, nothing kept");
+    assert_empty_release(dir, VERSION);
     assert_eq!(host.restarts.get(), 0, "the poller's script did not change");
 }
 
@@ -286,7 +299,17 @@ fn an_unchanged_deploy_does_not_restart_the_poller_11368() {
     };
     deploy(tmp.path(), &host, LIVE, VERSION).expect("deploy");
     assert_eq!((host.restarts.get(), host.kickstarts.get()), (0, 0));
-    assert!(!tmp.path().join(ROOT).exists());
+    assert_empty_release(tmp.path(), VERSION);
+}
+
+/// `version`'s kept copy exists and holds no file.
+fn assert_empty_release(dir: &Path, version: &str) {
+    let manifest = std::fs::read_to_string(dir.join(ROOT).join(version).join("manifest.tsv"))
+        .expect("the release's manifest");
+    assert!(
+        manifest.lines().all(|l| l.starts_with('#')),
+        "nothing replaced, nothing kept: {manifest:?}"
+    );
 }
 
 /// #11368 AC 3: two changed poller scripts restart the running poller once;
@@ -451,4 +474,119 @@ fn the_script_tables_name_seeded_scripts_11368() {
     for dest in POLLER_SCRIPTS.iter().chain(DASHBOARD_SCRIPTS) {
         assert!(dests.iter().any(|d| d == dest), "{dest} is not seeded");
     }
+}
+
+/// #11368 AC 2: a release that replaces nothing still prunes the older kept
+/// copy, so `restore` never rolls files back two releases.
+#[test]
+fn a_release_that_replaces_nothing_restores_nothing_11368() {
+    let tmp = seeded_dir();
+    let dir = tmp.path();
+    let host = FakeHost::default();
+    std::fs::write(dir.join(POLL), OLD_POLL).unwrap();
+    deploy(dir, &host, LIVE, "1.0.0").expect("deploy 1.0.0");
+    deploy(dir, &host, LIVE, "2.0.0").expect("deploy 2.0.0, nothing replaced");
+    let before = snapshot(dir);
+    let r = launch_backup::restore(dir, None).expect("restore");
+    assert_eq!(
+        (r.exit(), r.version.as_str()),
+        (0, "2.0.0"),
+        "{:?}",
+        r.steps
+    );
+    assert!(
+        matches!(r.steps.as_slice(), [Step::Unchanged(t)] if t.contains("nothing to restore")),
+        "{:?}",
+        r.steps
+    );
+    assert_eq!(snapshot(dir), before, "restore changed a file");
+    let kept: Vec<String> = std::fs::read_dir(dir.join(ROOT))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(kept, ["2.0.0"]);
+}
+
+/// #11368 security: a manifest row naming a path outside the Architect
+/// directory fails the restore and writes nothing there.
+#[test]
+fn a_manifest_row_outside_the_architect_dir_is_refused_11368() {
+    for dest in [
+        "../escape.txt",
+        "/tmp/escape-11368.txt",
+        "scripts/../../escape.txt",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("architect");
+        let release = dir.join(ROOT).join("1.0.0");
+        let kept = release.join("files").join(dest.trim_start_matches('/'));
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, b"planted").unwrap();
+        let sha = super::refresh::sha256_hex(b"planted");
+        std::fs::write(
+            release.join("manifest.tsv"),
+            format!("{dest}\t644\t{sha}\t{sha}\n"),
+        )
+        .unwrap();
+        let err = launch_backup::restore(&dir, None).expect_err(dest);
+        assert!(format!("{err:#}").contains("not a path inside"), "{err:#}");
+        assert!(!tmp.path().join("escape.txt").exists(), "{dest} escaped");
+    }
+}
+
+/// #11368 Fail-Open: a launchctl read error fails the dashboard restart; it is
+/// never read as "not loaded".
+#[test]
+fn a_launchctl_read_error_is_not_not_loaded_11368() {
+    assert_eq!(loaded_from(Some(0), ""), Ok(true));
+    assert_eq!(loaded_from(Some(113), "Could not find service"), Ok(false));
+    assert!(loaded_from(Some(5), "Input/output error").is_err());
+    assert!(loaded_from(None, "").is_err());
+    let tmp = seeded_dir();
+    std::fs::write(tmp.path().join(DASH), OLD_DASH).unwrap();
+    let host = FakeHost {
+        unreadable: true,
+        ..FakeHost::default()
+    };
+    let steps = deploy(tmp.path(), &host, LIVE, VERSION).expect("deploy");
+    assert_eq!(host.kickstarts.get(), 0);
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Failed(t) if t.contains("dashboard restart"))),
+        "{steps:?}"
+    );
+}
+
+/// #11368 Fail-Open: a poller session running for another directory fails the
+/// restart, as `poller::step_with` does; it is never "not running".
+#[test]
+fn a_poller_session_of_another_dir_is_an_error_11368() {
+    let (here, there) = (Path::new("/a/architect"), PathBuf::from("/b/other"));
+    assert_eq!(
+        pane_running(PaneState::Live(here.to_path_buf()), here, "s"),
+        Ok(true)
+    );
+    assert_eq!(pane_running(PaneState::Absent, here, "s"), Ok(false));
+    for state in [
+        PaneState::Live(there.clone()),
+        PaneState::Dead(there.clone()),
+    ] {
+        let err = pane_running(state, here, "s").expect_err("another dir");
+        assert!(err.contains("/b/other"), "{err}");
+    }
+    let tmp = seeded_dir();
+    std::fs::write(tmp.path().join(POLL), OLD_POLL).unwrap();
+    let host = FakeHost {
+        other_dir: Some(there),
+        ..FakeHost::default()
+    };
+    let steps = deploy(tmp.path(), &host, LIVE, VERSION).expect("deploy");
+    assert_eq!(host.restarts.get(), 0);
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Failed(t) if t.contains("/b/other"))),
+        "{steps:?}"
+    );
 }
