@@ -357,7 +357,10 @@ fn patch_one_repairs_a_legacy_serve_stdio_entry() {
 #[test]
 fn setup_codex_writes_the_serve_entrypoint() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    setup_codex(tmp.path()).expect("codex setup ok");
+    setup_codex(Ok(trusty_common::codex_config::codex_config_path(
+        tmp.path(),
+    )))
+    .expect("codex setup ok");
 
     let text =
         std::fs::read_to_string(tmp.path().join(".codex").join("config.toml")).expect("read");
@@ -398,7 +401,10 @@ fn setup_codex_repairs_a_legacy_stdio_registration() {
         )
         .unwrap();
 
-        setup_codex(tmp.path()).expect("codex setup ok");
+        setup_codex(Ok(trusty_common::codex_config::codex_config_path(
+            tmp.path(),
+        )))
+        .expect("codex setup ok");
 
         let cfg: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let args: Vec<&str> = cfg["mcp_servers"][MCP_SERVER_KEY]["args"]
@@ -417,10 +423,34 @@ fn setup_codex_repairs_a_legacy_stdio_registration() {
 fn setup_codex_is_idempotent() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join(".codex").join("config.toml");
-    setup_codex(tmp.path()).expect("first run");
+    setup_codex(Ok(trusty_common::codex_config::codex_config_path(
+        tmp.path(),
+    )))
+    .expect("first run");
     let before = std::fs::read_to_string(&path).expect("read");
-    setup_codex(tmp.path()).expect("second run");
+    setup_codex(Ok(trusty_common::codex_config::codex_config_path(
+        tmp.path(),
+    )))
+    .expect("second run");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+/// #11821: a broken `install.toml` refuses the Codex write.
+#[test]
+fn setup_codex_fails_closed_on_broken_install_file() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let file = trusty_common::install_paths::install_file_path(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "bogus = 1\n").unwrap();
+    let broken = trusty_common::install_paths::InstallPaths::resolve_with(
+        |_| None,
+        home.path(),
+        &trusty_common::install_paths::PathOverrides::default(),
+    )
+    .map(|p| trusty_common::codex_config::codex_config_path_in(&p, home.path()));
+    assert!(broken.is_err(), "the broken file must not resolve");
+    setup_codex(broken).expect_err("a broken install.toml must refuse the write");
+    assert!(!trusty_common::codex_config::codex_config_path(home.path()).exists());
 }
 
 /// Why (#6307): the GUI-client path must reject a client it does not know

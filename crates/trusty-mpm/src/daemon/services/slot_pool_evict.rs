@@ -184,8 +184,8 @@ pub(crate) fn evict_in(home: &Path, cancelled: &dyn Fn() -> bool) -> TickLog {
     let store = SlotDir::resolve(Some(home));
     let mut measure = |p: &Path| disk_usage_guard::measure(p).map(|m| m.usage_pct);
     // #10212: finish deleting rotated-aside profiles a dead `tm build-lease` left.
-    let shared = home
-        .join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+    // #11821 P3: under the configured config dir.
+    let shared = crate::core::config_base::tools_root_under(home)
         .join(crate::core::build_env::CARGO_TARGET_SUBDIR);
     deps_rotate::log_reclaim(
         &pool,

@@ -235,7 +235,8 @@ pub fn require_bound(
 pub fn home_root() -> Option<PathBuf> {
     dirs::home_dir()
         .filter(|home| home.is_absolute())
-        .map(|home| home.join(".trusty-mpm"))
+        // #11821 P3: under the configured config dir.
+        .map(|home| crate::core::config_base::framework_root_under(&home))
 }
 
 /// The `claude` under the pane shell `shell_pid` reads, retried as

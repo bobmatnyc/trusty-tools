@@ -61,6 +61,35 @@ fn an_unreadable_project_settings_file_is_an_r1_hit() {
     assert_eq!(evaluate("Write", &write, &env).0.map(|h| h.rule), None);
 }
 
+/// #11821 P3: install.toml relocates the config dir, so it is an anchor, and
+/// the relocated dir's config files are anchors alongside the `$HOME` ones.
+#[test]
+fn r1_flags_the_install_file_and_a_relocated_config_dir() {
+    let h = home();
+    let env = env_in(h.path(), h.path());
+    assert_eq!(
+        bash("echo x > ~/.trusty-tools/install.toml", &env), // path-literal: allow (guard input)
+        Some("R1")
+    );
+    let cfg = h.path().join("cfg");
+    let install = trusty_common::install_paths::install_file_path(h.path());
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+    std::fs::write(
+        install,
+        format!("config_dir = {:?}\n", cfg.display().to_string()),
+    )
+    .unwrap();
+    for rel in [
+        ".trusty-mpm/config.toml",
+        ".trusty-tools/trusty-mpm/config.yaml",
+    ] {
+        let cmd = format!("echo x > {}", cfg.join(rel).display());
+        assert_eq!(bash(&cmd, &env), Some("R1"), "{cmd}");
+    }
+    let cmd = "echo x > ~/.trusty-mpm/config.toml"; // path-literal: allow (guard input)
+    assert_eq!(bash(cmd, &env), Some("R1"));
+}
+
 #[test]
 fn r1_flags_writes_to_each_anchor() {
     let h = home();

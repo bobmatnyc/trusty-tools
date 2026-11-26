@@ -100,7 +100,8 @@ pub fn session_asset_staleness(record: &SessionRecord) -> StalenessReport {
 /// never a catalog directory scan or agent compose.
 /// Test: `session_plan_resolves_default_bundled_source`.
 pub fn session_plan(record: &SessionRecord) -> (FrameworkPaths, HarnessPlan) {
-    session_plan_under(record, &FrameworkPaths::home_base())
+    // #11821 P3: the framework base is the configured config dir.
+    session_plan_under(record, &crate::core::config_base::config_base())
 }
 
 /// [`session_plan`] with the framework install's base directory supplied by the
@@ -310,7 +311,7 @@ mod tests {
         );
         let (fw_default, plan_default) = session_plan(&record);
         let (fw_explicit, plan_explicit) =
-            session_plan_under(&record, &FrameworkPaths::home_base());
+            session_plan_under(&record, &crate::core::config_base::config_base());
 
         assert_eq!(fw_default, fw_explicit);
         assert_eq!(plan_default.agent_source, plan_explicit.agent_source);

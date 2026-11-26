@@ -340,13 +340,10 @@ impl DoctorCheck for McpRegistrationCheck {
             )];
         };
 
-        let codex = read_codex_registration(&home, MCP_SERVER_KEY);
-        let codex_path = trusty_common::codex_config::codex_config_path(&home);
-        let mut results = vec![check_registration(
-            codex.as_ref(),
-            "Codex",
-            &codex_path,
-            &version_of(codex.as_ref()),
+        // #11821: read the configured Codex home; a broken install.toml is
+        // reported, never read past to `~/.codex`.
+        let mut results = vec![codex_result(
+            trusty_common::codex_config::resolve_codex_config_path(),
             &state.location,
         )];
 
@@ -361,6 +358,31 @@ impl DoctorCheck for McpRegistrationCheck {
         ));
         results
     }
+}
+
+/// The Codex registration verdict for a resolved Codex config path.
+///
+/// Why: a broken `install.toml` must show in `doctor`, not read as "no Codex
+/// registration" under the default home (#11821).
+/// What: an unresolved path is a `Warn` naming the error; otherwise the
+/// registration at that path goes through `check_registration`.
+/// Test: `codex_result_warns_on_broken_install_file`.
+fn codex_result(
+    resolved: Result<std::path::PathBuf, trusty_common::install_paths::InstallPathsError>,
+    location: &str,
+) -> CheckResult {
+    let path = match resolved {
+        Ok(path) => path,
+        Err(e) => return CheckResult::Warn(format!("MCP registrations: Codex skipped ({e})")),
+    };
+    let codex = read_codex_registration(&path, MCP_SERVER_KEY);
+    check_registration(
+        codex.as_ref(),
+        "Codex",
+        &path,
+        &version_of(codex.as_ref()),
+        location,
+    )
 }
 
 /// Version of the executable a registration names, or a placeholder when there
@@ -405,6 +427,24 @@ pub(crate) async fn run_doctor_checks(client: DaemonClient) -> (Vec<CheckResult>
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// #11821: a broken `install.toml` is a warning naming the error.
+    #[test]
+    fn codex_result_warns_on_broken_install_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = trusty_common::install_paths::install_file_path(home.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "bogus = 1\n").unwrap();
+        let broken = trusty_common::install_paths::InstallPaths::resolve_with(
+            |_| None,
+            home.path(),
+            &trusty_common::install_paths::PathOverrides::default(),
+        )
+        .map(|p| trusty_common::codex_config::codex_config_path_in(&p, home.path()));
+        let result = codex_result(broken, "socket");
+        assert!(result.is_warn(), "expected Warn, got {result:?}");
+        assert!(format!("{result:?}").contains("install.toml"), "{result:?}");
+    }
 
     /// Save/restore a single env var across a test body — mirrors the
     /// identically-named guard in `doctor_checks/tests.rs` (kept as a

@@ -167,9 +167,11 @@ async fn provision(
     // #7603: the gate's measurement source is an argument, so an in-process test
     // of either entry point above pins it instead of reading the host's volume.
     // #8994: the tree enters `<home>/.trusty-mpm/worktrees.jsonl`, or is refused.
+    // #11821: a writer, so a broken `install.toml` refuses instead of `$HOME`.
     let ledger = home
-        .map(WorktreeLedger::under_home)
-        .ok_or_else(|| LedgerError::NoHome.to_string())?;
+        .ok_or(LedgerError::NoHome)
+        .and_then(WorktreeLedger::try_under_home)
+        .map_err(|e| e.to_string())?;
     let worktree = inproject::create_session_worktree_recorded(
         base_path,
         &session_id.to_string(),

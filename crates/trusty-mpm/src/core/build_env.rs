@@ -200,7 +200,8 @@ pub fn default_build_jobs(cores: usize) -> u32 {
 /// so every test is hermetic.
 /// Test: `rust_build_env_defaults_target_dir_from_git_remote`.
 pub fn default_cargo_target_dir_at(home: &Path, identity: &GithubPath) -> PathBuf {
-    home.join(trusty_common::crate_config::TRUSTY_TOOLS_DIR)
+    // #11821 P3: under the configured config dir.
+    crate::core::config_base::tools_root_under(home)
         .join(CARGO_TARGET_SUBDIR)
         .join(&identity.owner)
         .join(&identity.repo)

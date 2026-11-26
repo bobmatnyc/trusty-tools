@@ -70,11 +70,13 @@ pub(super) fn check_deployment_completeness(paths: &FrameworkPaths) -> DoctorChe
 /// A project-scoped run reads the project's own `.claude/`, which
 /// `CLAUDE_CONFIG_DIR` does not replace.
 /// What: [`claude_config_dir_override`] when `paths.claude_home_dir()` is the
-/// base the layout was resolved against (`paths.root`'s parent), else `None`.
+/// one an unscoped layout over the same root picks, else `None`.
 /// Test: `deployment_check_reads_settings_from_claude_config_dir`,
 /// `deployment_check_keeps_the_project_tier_under_claude_config_dir`.
 fn user_tier_settings_dir(paths: &FrameworkPaths) -> Option<PathBuf> {
-    let home_scoped = paths.root.parent() == Some(paths.claude_home_dir().as_path());
+    // #11821 P3: with a relocated config dir, `root`'s parent is not `$HOME`.
+    let home_scoped =
+        FrameworkPaths::from_root(&paths.root).claude_home_dir() == paths.claude_home_dir();
     home_scoped.then(claude_config_dir_override).flatten()
 }
 

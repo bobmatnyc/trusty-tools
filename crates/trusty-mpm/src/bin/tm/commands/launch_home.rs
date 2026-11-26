@@ -118,7 +118,9 @@ pub(crate) fn launch_files(
 ) -> anyhow::Result<trusty_mpm::core::launch_policy::LaunchFiles> {
     use trusty_mpm::core::launch_policy::{provision_settings, provision_settings_default};
     use trusty_mpm::core::session_mcp_scope::{provision_for_spawn, provision_for_spawn_at};
-    let root = home.map(|h| trusty_mpm::core::paths::FrameworkPaths::under(h).crate_config_root());
+    // #11821 P3: the layout of `home`'s install.
+    let root =
+        home.map(|h| trusty_mpm::core::paths::FrameworkPaths::under_home(h).crate_config_root());
     let provisioned = match &root {
         Some(root) => provision_for_spawn_at(root, workspace, config_dir),
         None => provision_for_spawn(workspace, config_dir),

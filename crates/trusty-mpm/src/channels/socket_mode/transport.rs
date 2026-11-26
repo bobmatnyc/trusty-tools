@@ -141,8 +141,9 @@ impl SocketTransport for LoopbackTransport {
 
 /// The file a sandbox home may hold naming a loopback fake server.
 pub fn fake_url_path(home: &Path) -> PathBuf {
+    // #11821 P3: under the configured config dir of `home`.
     trusty_common::crate_config::crate_config_dir_at(
-        home,
+        &crate::core::config_base::config_base_under(home),
         crate::core::trusty_tools_config::CRATE_NAME,
     )
     .join("channels")

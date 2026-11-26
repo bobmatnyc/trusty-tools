@@ -1,0 +1,4 @@
+Changed
+- The projects root has one precedence rule for every caller: `TRUSTY_MPM_WORKSPACE_ROOT` env, then `install.toml` `projects_root`, then the `config.yaml` `workspace_root_template`, then `~/trusty-mpm-projects`. `workspace_layout::resolve_workspace_root` and `try_resolve_workspace_root` now wrap the `install_paths` chain, so the install file outranks the template and a relative env or template value is refused (`InstallPathsError::Relative`); the reader logs it and answers the default. `PathSource::Template` labels the template rung and `PathOverrides::projects_root_template` carries it (#11821).
+- `try_resolve_workspace_root` with no home directory now returns `InstallPathsError::NoHome` instead of `/tmp/trusty-mpm-projects` (#11821).
+- New `install_paths::try_config_dir` and `try_config_dir_under(home)` resolve the config dir for one process or one home, failing closed on a broken install file (#11821).

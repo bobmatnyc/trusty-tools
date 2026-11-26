@@ -39,7 +39,11 @@ pub(crate) fn goals_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(GOALS_FILE_ENV).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    dirs::home_dir().map(|h| h.join("trusty-mpm-projects/architect/local/goals.md"))
+    // #11821 P3: the Architect dir from its one resolver, not a literal root.
+    let env = |key: &str| std::env::var(key).ok();
+    let home = dirs::home_dir();
+    trusty_mpm::core::architect_store::architect_dir(&env, home.as_deref())
+        .map(|dir| dir.join("local/goals.md"))
 }
 
 /// Read goal `id` from the goals file at `path`.

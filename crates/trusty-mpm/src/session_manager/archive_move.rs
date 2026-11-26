@@ -148,7 +148,8 @@ fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> ArchiveMoveEr
 /// `~/.trusty-tools/archive` (owner ruling D8b).
 pub fn default_archive_root() -> Result<PathBuf, ArchiveMoveError> {
     dirs::home_dir()
-        .map(|h| h.join(".trusty-tools").join("archive"))
+        // #11821 P3: under the configured config dir.
+        .map(|h| crate::core::config_base::tools_root_under(&h).join("archive"))
         .ok_or(ArchiveMoveError::NoHome)
 }
 

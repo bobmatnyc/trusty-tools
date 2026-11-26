@@ -163,6 +163,10 @@ pub enum LedgerError {
         /// The underlying error.
         source: std::io::Error,
     },
+    /// #11821 P3: the config dir does not resolve (a broken `install.toml`),
+    /// so the ledger has no location; never a `$HOME` guess.
+    #[error("worktree ledger: the config dir is unresolved: {0}")]
+    InstallPaths(#[from] trusty_common::install_paths::InstallPathsError),
     /// An event could not be encoded as JSON.
     #[error("worktree ledger: cannot encode event: {0}")]
     Encode(#[from] serde_json::Error),
@@ -196,26 +200,41 @@ impl WorktreeLedger {
         Self { path: path.into() }
     }
 
-    /// The ledger under `home`: `<home>/.trusty-mpm/worktrees.jsonl`.
+    /// The ledger under `home`: `<config dir of home>/.trusty-mpm/worktrees.jsonl`.
+    /// Readers only: a broken `install.toml` answers `home` (#11821).
     pub fn under_home(home: &Path) -> Self {
         Self::at(
-            home.join(crate::core::paths::FRAMEWORK_DIR_NAME)
-                .join(LEDGER_FILE),
+            // #11821 P3: under the configured config dir.
+            crate::core::config_base::framework_root_under(home).join(LEDGER_FILE),
         )
+    }
+
+    /// [`Self::under_home`] for a writer: fails closed when the config dir
+    /// of `home` does not resolve (#11821 P3).
+    ///
+    /// Test: `worktree_ledger_writers_fail_closed_on_a_broken_install_file` (env_serial).
+    pub fn try_under_home(home: &Path) -> Result<Self, LedgerError> {
+        let base = crate::core::config_base::try_config_base_under(home)?;
+        Ok(Self::at(
+            base.join(crate::core::paths::FRAMEWORK_DIR_NAME)
+                .join(LEDGER_FILE),
+        ))
     }
 
     /// The operator's ledger, resolved from the home directory.
     ///
     /// Why: a missing home must refuse, not fall back to the working directory
     /// the way `FrameworkPaths::home_base` does (#7290).
-    /// What: [`Self::under_home`] of an absolute `dirs::home_dir()`, else
-    /// [`LedgerError::NoHome`].
-    /// Test: covered through `reserve_inproject_worktree_refuses_when_the_ledger_cannot_record`.
+    /// What: [`Self::try_under_home`] of an absolute `dirs::home_dir()`, else
+    /// [`LedgerError::NoHome`]; a broken `install.toml` is
+    /// [`LedgerError::InstallPaths`] (#11821).
+    /// Test: covered through `reserve_inproject_worktree_refuses_when_the_ledger_cannot_record`,
+    /// `worktree_ledger_writers_fail_closed_on_a_broken_install_file`.
     pub fn host() -> Result<Self, LedgerError> {
-        dirs::home_dir()
+        let home = dirs::home_dir()
             .filter(|h| h.is_absolute())
-            .map(|h| Self::under_home(&h))
-            .ok_or(LedgerError::NoHome)
+            .ok_or(LedgerError::NoHome)?;
+        Self::try_under_home(&home)
     }
 
     /// The ledger file path.

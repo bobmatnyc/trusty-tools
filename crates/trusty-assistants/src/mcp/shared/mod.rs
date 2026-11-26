@@ -25,6 +25,8 @@
 
 pub mod migrate;
 pub mod resolve;
+#[cfg(test)]
+mod shared_path_tests;
 
 use std::path::{Path, PathBuf};
 
@@ -75,9 +77,40 @@ pub struct GlobalTier {
 ///
 /// Why: a one-line wrapper so no call site spells the layout itself — the path
 /// belongs to `trusty-mcp`, which `trusty-code` reads too.
-/// Test: covered through [`load_global`].
+/// What: [`shared_path_from`] over this process's install paths (#11821).
+/// Test: covered through [`shared_path_from`]'s tests.
 pub fn shared_path() -> Result<PathBuf, McpConfigError> {
-    trusty_mcp::config::default_path()
+    shared_path_from(trusty_common::install_paths::InstallPaths::resolve())
+}
+
+/// The shared file under a resolved install's config dir.
+///
+/// Why: `trusty-mcp` cannot depend on `trusty-common` (ADR-0040), so its
+/// `default_path` reads `$HOME`; this crate supplies the configured config
+/// dir instead (#11821). The file is written by `mcp_add` and friends, so a
+/// broken `install.toml` must fail closed, never fall back to `$HOME`.
+/// What: `<config_dir>/.trusty-tools/mcp/servers.toml`. `NoHome` stays
+/// [`McpConfigError::NoHome`]; any other resolver error is an `InvalidData`
+/// [`McpConfigError::Io`] naming the install file.
+/// Test: `shared_path_from_follows_the_config_dir`,
+/// `shared_path_from_fails_closed_on_broken_install_file`.
+pub fn shared_path_from(
+    paths: Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    >,
+) -> Result<PathBuf, McpConfigError> {
+    match paths {
+        Ok(paths) => Ok(trusty_mcp::config::default_path_at(&paths.config_dir.path)),
+        Err(trusty_common::install_paths::InstallPathsError::NoHome) => Err(McpConfigError::NoHome),
+        // #11821: fail closed on a broken install.toml.
+        Err(e) => Err(McpConfigError::Io {
+            path: dirs::home_dir()
+                .map(|h| trusty_common::install_paths::install_file_path(&h))
+                .unwrap_or_default(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        }),
+    }
 }
 
 /// Read the shared file, seeding it once from the retired tables.

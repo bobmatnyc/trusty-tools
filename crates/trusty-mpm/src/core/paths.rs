@@ -139,9 +139,25 @@ impl FrameworkPaths {
     /// [`crate::core::session_record::claude_config_dir`].
     /// Test: `default_resolves_under_trusty_mpm`,
     /// `default_is_a_single_global_path_never_project_relative`.
+    /// #11821 P3: the `.trusty-mpm` and `.trusty-tools` trees nest under the
+    /// configured config dir ([`crate::core::config_base::config_base`]);
+    /// `.claude` stays under `$HOME`. With nothing configured both are `$HOME`.
     #[allow(clippy::should_implement_trait)] // Intentional: no meaningful Default without I/O.
     pub fn default() -> Self {
-        Self::under(Self::home_base())
+        // #11821: config trees follow InstallPaths; a broken install.toml is logged.
+        Self::under_split(crate::core::config_base::config_base(), Self::home_base())
+    }
+
+    /// [`default`](Self::default) that fails closed on an unresolved config dir.
+    ///
+    /// Why: a writer must not deploy under `$HOME` while `install.toml` is
+    /// broken (#11821 P3).
+    /// What: [`under_split`](Self::under_split) over
+    /// [`crate::core::config_base::try_config_base`] and `$HOME`.
+    /// Test: `config_base_follows_the_install_paths_chain` (env_serial).
+    pub fn try_default() -> Result<Self, trusty_common::install_paths::InstallPathsError> {
+        let base = crate::core::config_base::try_config_base()?;
+        Ok(Self::under_split(base, Self::home_base()))
     }
 
     /// The base directory [`default`](Self::default) resolves against.
@@ -174,7 +190,30 @@ impl FrameworkPaths {
     /// What: joins `<base>/.trusty-mpm` and derives every subdirectory from it.
     /// Test: `under_nests_subdirectories`.
     pub fn under(base: impl AsRef<Path>) -> Self {
-        let base = base.as_ref();
+        Self::under_split(base.as_ref(), base.as_ref())
+    }
+
+    /// The layout of the install whose home is `home` (#11821 P3).
+    ///
+    /// What: [`under_split`](Self::under_split) over
+    /// [`crate::core::config_base::config_base_under`]`(home)` and `home`; for
+    /// a home with no `install.toml` this is [`under`](Self::under)`(home)`.
+    /// Test: `framework_and_tools_dirs_nest_under_the_config_base` (env_serial).
+    pub fn under_home(home: impl AsRef<Path>) -> Self {
+        let home = home.as_ref();
+        Self::under_split(crate::core::config_base::config_base_under(home), home)
+    }
+
+    /// [`under`](Self::under) with the config trees and `.claude` on separate
+    /// bases (#11821 P3).
+    ///
+    /// What: `.trusty-mpm` and the managed `.trusty-tools` dirs under
+    /// `config_base`; `.claude/{agents,skills}` (and so
+    /// [`claude_home_dir`](Self::claude_home_dir)) under `claude_base`.
+    /// Test: `under_split_keeps_claude_under_its_own_base`.
+    pub fn under_split(config_base: impl AsRef<Path>, claude_base: impl AsRef<Path>) -> Self {
+        let base = config_base.as_ref();
+        let claude_base = claude_base.as_ref();
         let root = base.join(FRAMEWORK_DIR_NAME);
         let framework = root.join("framework");
         let trusty_mpm_root = std::env::current_exe()
@@ -187,8 +226,8 @@ impl FrameworkPaths {
             hooks: framework.join("hooks"),
             instructions: framework.join("instructions"),
             registry: root.join("registry"),
-            claude_agents: base.join(".claude").join("agents"),
-            claude_skills: base.join(".claude").join("skills"),
+            claude_agents: claude_base.join(".claude").join("agents"),
+            claude_skills: claude_base.join(".claude").join("skills"),
             // Issue #4409: bundled agents deploy ONLY into the tm-managed
             // `CLAUDE_CONFIG_DIR`. Resolved from `base` (not `dirs::home_dir()`)
             // so `under(tempdir)` stays hermetic.
@@ -221,6 +260,10 @@ impl FrameworkPaths {
         if root.file_name().and_then(|n| n.to_str()) == Some(FRAMEWORK_DIR_NAME)
             && let Some(base) = root.parent()
         {
+            // #11821 P3: the default root keeps `.claude` under $HOME, as `default()` does.
+            if crate::core::config_base::config_base_dir().as_deref() == Some(base) {
+                return Self::under_split(base, Self::home_base());
+            }
             return Self::under(base);
         }
         // The root is not `.trusty-mpm`-nested (e.g. a bare test tempdir). Treat
@@ -307,7 +350,8 @@ impl FrameworkPaths {
     /// Test: `for_managed_workspace_targets_workspace_local_claude_dirs`,
     /// `for_managed_workspace_keeps_framework_source_at_default_root`.
     pub fn for_managed_workspace(workspace_dir: impl AsRef<Path>) -> Self {
-        Self::for_managed_workspace_under(Self::home_base(), workspace_dir)
+        // #11821 P3: the framework source follows the configured config dir.
+        Self::for_managed_workspace_under(crate::core::config_base::config_base(), workspace_dir)
     }
 
     /// [`for_managed_workspace`](Self::for_managed_workspace) with the base the
@@ -1055,6 +1099,23 @@ mod tests {
         // Distinct from both the bundled source and the deploy destination.
         assert_ne!(paths.user_skill_source_dir(), paths.skills);
         assert_ne!(paths.user_skill_source_dir(), paths.claude_skills_dir());
+    }
+
+    /// #11821 P3: a relocated config dir moves the framework trees, never `.claude`.
+    #[test]
+    fn under_split_keeps_claude_under_its_own_base() {
+        let paths = FrameworkPaths::under_split("/cfg", "/home");
+        assert_eq!(paths.root, PathBuf::from("/cfg/.trusty-mpm"));
+        assert_eq!(
+            paths.agent_deploy,
+            PathBuf::from("/cfg/.trusty-tools/trusty-mpm/claude-config/agents")
+        );
+        assert_eq!(paths.claude_agents, PathBuf::from("/home/.claude/agents"));
+        assert_eq!(paths.claude_home_dir(), PathBuf::from("/home"));
+        assert_eq!(
+            FrameworkPaths::under("/b"),
+            FrameworkPaths::under_split("/b", "/b")
+        );
     }
 
     #[test]

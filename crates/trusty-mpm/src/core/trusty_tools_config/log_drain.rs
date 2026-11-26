@@ -557,7 +557,8 @@ fn resolve_sources(
             enabled: true,
             source: LogSource {
                 crate_name: super::CRATE_NAME.to_string(),
-                root: home.join(".trusty-mpm").join(DAEMON_LOG_SUBDIR),
+                // #11821 P3: under the configured config dir.
+                root: crate::core::config_base::framework_root_under(home).join(DAEMON_LOG_SUBDIR),
                 include: DEFAULT_INCLUDE.iter().map(|s| (*s).to_string()).collect(),
                 level_filter: Some(Level::Info),
             },

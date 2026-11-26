@@ -272,7 +272,10 @@ fn evaluate_style(
     // #10580: a tm-launched session reads the managed `$CLAUDE_CONFIG_DIR` as
     // its user tier, so a style deployed only there is configured; check that
     // tier first, then the operator's `~/.claude`.
-    let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(home);
+    // #11821 P3: under the configured config dir of `home`.
+    let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(
+        &crate::core::config_base::config_base_under(home),
+    );
     let candidates: Vec<PathBuf> = output_style_tiers(home, Some(&managed))
         .into_iter()
         .rev()
