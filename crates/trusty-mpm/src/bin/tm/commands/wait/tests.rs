@@ -139,15 +139,13 @@ impl ChecksProbe for FailingProbe {
     }
 }
 
+/// A fresh budget: `load_or_start` on a path that cannot exist.
+///
+/// #10668: built through the loader rather than a struct literal, so a new
+/// `Budget` field never has to be threaded through every test.
 fn budget_at(now: u64, timeout_s: u64) -> Budget {
-    Budget {
-        spec: "file:/tmp/gate".into(),
-        started_at: now,
-        updated_at: now,
-        polls: 0,
-        timeout_s,
-        rate_limited_streak: 0,
-    }
+    let missing = std::path::Path::new("/nonexistent/tm-wait-test/none.json");
+    budget::load_or_start(missing, "file:/tmp/gate", timeout_s, now, 600)
 }
 
 // ── run verb ─────────────────────────────────────────────────────────────────
@@ -1343,4 +1341,172 @@ fn required_flags_need_for_check() {
         "{rerun}"
     );
     assert!(condition::spec(&c).ends_with(":required"));
+}
+
+// ── #10668: the budget is keyed to the spec plus the PR head SHA ────────────
+
+/// Canned `gh pr view` JSON: one check still running on `head`.
+fn pending_view_on(head: &str) -> String {
+    format!(
+        r#"{{"state":"OPEN","headRefOid":"{head}","statusCheckRollup":[
+        {{"name":"e2e","status":"IN_PROGRESS","conclusion":""}}]}}"#
+    )
+}
+
+/// One `tm wait` invocation against a canned head: the same steps
+/// `run_inner` takes after it builds the condition — load or start the budget,
+/// poll one slice, persist or clear, render the status line.
+fn invoke_check(args: &WaitArgs, head: &str, clock: &FakeClock) -> String {
+    let plan = resolve_plan(args).unwrap();
+    let cond = CheckCondition::new(
+        FakeProbe {
+            json: pending_view_on(head),
+        },
+        args.pr.unwrap(),
+        args.repo.clone(),
+        args.allow_empty_checks,
+    );
+    let spec = condition::spec(args);
+    let path = budget::path_for(args.state_dir.as_deref().unwrap(), &spec);
+    let now = clock.now_unix();
+    let abandon_after = ABANDON_AFTER_SECS.max(plan.interval_s.saturating_mul(10));
+    let mut b = budget::load_or_start(&path, &spec, plan.timeout_s, now, abandon_after);
+    let outcome = poll_until(&cond, &plan, &mut b, clock).unwrap();
+    if outcome.status.is_terminal() {
+        budget::clear(&path);
+    } else {
+        budget::save(&path, &b).unwrap();
+    }
+    status_line(
+        &outcome,
+        args.condition,
+        &b,
+        clock.now_unix(),
+        &rerun_command(args, &plan),
+        plan.slice_s,
+    )
+}
+
+/// The `key=` value of a bare field on a status line.
+fn line_field<'a>(line: &'a str, key: &str) -> &'a str {
+    let prefix = format!("{key}=");
+    line.split_whitespace()
+        .find_map(|tok| tok.strip_prefix(prefix.as_str()))
+        .unwrap_or_else(|| panic!("no {key}= in {line}"))
+}
+
+/// The numeric `key=` value of a status line.
+fn line_num(line: &str, key: &str) -> u64 {
+    line_field(line, key).parse().unwrap()
+}
+
+/// Parse the printed `rerun="…"` command back into `WaitArgs`, as a caller
+/// re-issuing it would.
+fn parse_rerun(line: &str) -> WaitArgs {
+    use clap::Parser as _;
+    let start = line
+        .find("rerun=\"")
+        .expect("a pending line carries rerun=")
+        + 7;
+    let cmd = &line[start..line.len() - 1];
+    let mut argv: Vec<&str> = cmd.split_whitespace().collect();
+    assert_eq!(&argv[..2], ["tm", "wait"], "{cmd}");
+    argv[0] = "trusty-mpm";
+    match crate::cli::Cli::try_parse_from(argv)
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        crate::cli::Command::Wait(args) => args,
+        other => panic!("rerun= did not parse as wait: {other:?}"),
+    }
+}
+
+/// The first invocation of the PR wait the issue recorded.
+fn check_wait_args(dir: &std::path::Path) -> WaitArgs {
+    let mut a = args_for(WaitFor::Check);
+    a.pr = Some(372);
+    a.repo = Some("owner/repo".into());
+    a.timeout = 1500;
+    a.state_dir = Some(dir.to_path_buf());
+    a
+}
+
+/// #10668, the recorded incident: a wait on one head is re-issued through
+/// `rerun=`, the PR gets a new push, and the caller keeps re-issuing. Every
+/// line's `elapsed` must equal the wall time spent on the NEW head, and
+/// `status=timeout` must not appear before the 1500s `--timeout` has passed on
+/// the wall clock. Before the fix the old head's `started_at` carried over and
+/// the wait timed out about 790s early.
+#[test]
+fn rerun_elapsed_tracks_wall_time_across_a_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = FakeClock::at(1_000_000);
+    let agent_gap = 30;
+
+    // Head A: four slices through the printed rerun= command.
+    let mut line = invoke_check(&check_wait_args(dir.path()), "aaaa", &clock);
+    for _ in 0..3 {
+        clock.sleep(agent_gap);
+        line = invoke_check(&parse_rerun(&line), "aaaa", &clock);
+    }
+    assert_eq!(line_field(&line, "status"), "pending", "{line}");
+
+    // The caller pushes a fix (inside the 600s abandon window) and re-issues.
+    clock.sleep(300);
+    let pushed_at = clock.now_unix();
+    let mut prior_pending_elapsed = 0;
+    for _ in 0..40 {
+        line = invoke_check(&parse_rerun(&line), "bbbb", &clock);
+        let wall = clock.now_unix() - pushed_at;
+        assert_eq!(
+            line_num(&line, "elapsed"),
+            wall,
+            "elapsed is wall time: {line}"
+        );
+        if line_field(&line, "status") == "timeout" {
+            assert!(wall >= 1500, "timed out {wall}s into a 1500s budget");
+            assert!(prior_pending_elapsed < 1500);
+            assert_eq!(line_num(&line, "remaining"), 0);
+            return;
+        }
+        assert_eq!(line_field(&line, "status"), "pending", "{line}");
+        prior_pending_elapsed = line_num(&line, "elapsed");
+        clock.sleep(agent_gap);
+    }
+    panic!("the wait never reached its timeout: {line}");
+}
+
+/// #10668: the first poll that sees a new head starts a fresh budget — elapsed
+/// and polls count from that poll, not from the earlier head's wait.
+#[test]
+fn rerun_on_a_new_head_starts_a_fresh_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = FakeClock::at(2_000_000);
+    let first = invoke_check(&check_wait_args(dir.path()), "aaaa", &clock);
+    assert_eq!(
+        (line_num(&first, "elapsed"), line_num(&first, "polls")),
+        (100, 5)
+    );
+
+    clock.sleep(60);
+    let next = invoke_check(&parse_rerun(&first), "bbbb", &clock);
+    assert_eq!(line_num(&next, "elapsed"), 100, "{next}");
+    assert_eq!(line_num(&next, "polls"), 5, "{next}");
+    assert_eq!(line_num(&next, "remaining"), 1400, "{next}");
+}
+
+/// #10668: a re-run on the SAME head keeps its budget, gap included — or a
+/// wait re-issued forever would never expire.
+#[test]
+fn rerun_on_the_same_head_keeps_its_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = FakeClock::at(3_000_000);
+    let first = invoke_check(&check_wait_args(dir.path()), "aaaa", &clock);
+
+    clock.sleep(60);
+    let next = invoke_check(&parse_rerun(&first), "aaaa", &clock);
+    assert_eq!(line_num(&next, "elapsed"), 260, "{next}");
+    assert_eq!(line_num(&next, "polls"), 10, "{next}");
+    assert_eq!(line_num(&next, "remaining"), 1240, "{next}");
 }
