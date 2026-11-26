@@ -574,8 +574,9 @@ pub fn sweep_pending_rows(
 /// it on stdin. Every other input — which ledger, which project, which compiled
 /// prompt — is ambient, and resolving it here keeps the handler's addition to
 /// one call. The framework root is
-/// [`crate::core::paths::FrameworkPaths::default`], the same root the producer
-/// staged under, so the two cannot disagree about where the files are.
+/// [`crate::core::paths::FrameworkPaths::try_default`], the same root the
+/// producer staged under, so the two cannot disagree about where the files
+/// are; a broken `install.toml` sweeps nothing and returns `false` (#11821).
 /// What: sweeps the staged rows ([`sweep_pending_rows`]) for two project
 /// directories — the checkout that owns this working directory's harness state,
 /// then the working directory itself, which differ when the session runs in a
@@ -586,9 +587,17 @@ pub fn sweep_pending_rows(
 /// Test: `the_sweep_claims_a_row_staged_under_another_session_scope` and
 /// `a_hook_with_nothing_staged_rederives_from_the_compiled_prompt` cover the
 /// two resolved-path forms this delegates to; the ambient reads themselves are
-/// exercised by the `tm hook` SessionStart path.
+/// exercised by the `tm hook` SessionStart path, the refusal by
+/// `staged_savings_sweep_fails_closed_on_a_broken_install_file`.
 pub fn emit_staged_row_for_session(claude_session_id: &str) -> bool {
-    let root = crate::core::paths::FrameworkPaths::default().root;
+    // #11821: the sweep appends and deletes; no `$HOME` fallback.
+    let root = match crate::core::paths::FrameworkPaths::try_default() {
+        Ok(paths) => paths.root,
+        Err(e) => {
+            tracing::warn!(error = %e, "the config dir is unresolved; no staged savings row swept");
+            return false;
+        }
+    };
     let Ok(cwd) = std::env::current_dir() else {
         return false;
     };

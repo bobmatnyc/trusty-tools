@@ -12,10 +12,12 @@
 //! real fixed-field form; see [`PendingAction::SubmitConfig`]'s handling
 //! below.
 //!
-//! **Decommission has no confirmation step**, matching the issue's keybinding
-//! table verbatim (`d` → decommission, no modal). This is a permanent,
-//! destructive action (the workspace is deleted); a confirmation modal would
-//! be a reasonable fast-follow but is out of scope for this skeleton.
+//! **Decommission is confirmed before it reaches this module** (#10990: this
+//! note said otherwise since #2465). `d` only opens the DOC-35 §5.2 confirm
+//! gate (`events::request_decommission`); [`PendingAction::Decommission`]
+//! exists only after the operator answers `y`
+//! (`decommission_always_opens_confirm_gate_regardless_of_state`,
+//! `confirm_gate_y_resolves_to_the_real_action_and_clears`).
 //!
 //! What: [`dispatch_on`] matches a [`PendingAction`] to its `DaemonClient` call
 //! and calls [`ProjectCtlState::set_notice`] with the outcome, requesting an

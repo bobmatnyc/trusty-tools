@@ -359,6 +359,8 @@ mod tests {
     /// #7923: every distinct chunk lands in redb, asserted by count and id set;
     /// a repeated id is reported, not folded away silently.
     #[tokio::test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     async fn json_migration_seeds_every_unique_chunk_and_reports_duplicate_ids() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.json");
@@ -402,6 +404,7 @@ mod tests {
 
     /// Error arm: a corrupt snapshot fails the step (no v1 stamp) and survives.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn json_migration_fails_on_corrupt_snapshot_and_keeps_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.json");
@@ -420,6 +423,7 @@ mod tests {
 
     /// Error arm: with no store to seed, the step fails instead of stamping v1.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn json_migration_fails_without_a_corpus_store_and_keeps_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.json");
@@ -443,6 +447,7 @@ mod tests {
     /// #7923: `migrate_corpus_to_redb` itself refuses when no store is wired,
     /// independent of the guard `run_migration_async` applies first.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn migrate_corpus_to_redb_without_a_store_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.json");
@@ -477,6 +482,7 @@ mod tests {
     /// row keeps its content, and the snapshot is untouched.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn json_migration_refuses_a_populated_durable_corpus() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.json");
@@ -503,6 +509,7 @@ mod tests {
     /// and refuses to overwrite a populated store, independent of the guard
     /// `run_migration_async` applies before the read.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn migrate_corpus_to_redb_never_overwrites_a_populated_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chunks.json");
@@ -532,6 +539,7 @@ mod tests {
     /// resolved source.
     /// Test: this test.
     #[test]
+    #[serial_test::parallel]
     fn colocated_snapshot_is_the_resolved_source() {
         let dir = tempfile::tempdir().unwrap();
         let colocated = dir.path().join(".trusty-search");
@@ -625,6 +633,7 @@ mod tests {
 
     /// #7923: a store holding fewer rows than were migrated fails the step.
     #[test]
+    #[serial_test::parallel]
     fn ensure_all_migrated_rejects_a_short_write() {
         use crate::core::indexer::persist::ensure_all_migrated;
         assert!(ensure_all_migrated("x", 4, 4).is_ok());

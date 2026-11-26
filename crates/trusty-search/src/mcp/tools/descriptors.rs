@@ -231,6 +231,15 @@ pub fn tool_descriptors() -> Value {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Glob patterns to exclude from the walk, on top of the built-in ignores (.gitignore, node_modules, .git, target, dist, build, ...). Use this to bring an oversized tree under the index budget, e.g. [\"**/fixtures/**\", \"**/*.generated.ts\"]."
+                    },
+                    // #11903: the #11655 size caps, forwarded to search.index.create.
+                    "source_file_max_bytes": {
+                        "type": "integer",
+                        "description": "Largest source or text file the index admits, in bytes. Default 1048576 (1 MiB); accepts 1 up to 268435456 (256 MiB). A larger file is skipped and listed in skipped_files as exceeds_size_limit. Set at registration only: re-registering an existing index with other caps answers size_caps_applied: false and changes nothing. Out of range is refused with invalid_size_cap."
+                    },
+                    "office_file_max_bytes": {
+                        "type": "integer",
+                        "description": "Largest pdf, docx, pptx, xls, xlsx or xlsm file the index admits, in bytes. Default 10485760 (10 MiB); accepts 1 up to 268435456 (256 MiB). Same registration-only and invalid_size_cap rules as source_file_max_bytes."
                     }
                 }
             }

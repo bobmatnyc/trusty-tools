@@ -362,3 +362,50 @@ fn a_repeat_init_keeps_questions_claude_home_and_skills_10608() {
         }
     }
 }
+
+/// #11001: `tm il config enroll` publishing between init's read and its write
+/// of `local/il-schedule.json` keeps the enrollment; init re-reads under the
+/// schedule's lock and leaves the file as is.
+#[test]
+fn an_il_schedule_enrolled_mid_init_is_kept_11001() {
+    use trusty_mpm::core::il_schedule;
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let path = il_schedule::path(&dir);
+    std::fs::remove_file(&path).unwrap();
+    let project = fx.home().to_path_buf();
+    let enroll_path = path.clone();
+    super::super::seed::hook::set(move || {
+        il_schedule::update(&enroll_path, |s| s.enroll("tm-a", &project, None))
+            .expect("enroll mid-init");
+    });
+    let steps = super::super::seed::deploy(&dir, seed()).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"tm-a\""), "enrollment lost: {text}");
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::Skipped(t)
+            if t.starts_with(il_schedule::REL_PATH) && t.contains("kept as is"))),
+        "{steps:?}"
+    );
+}
+
+/// #11002: an install seeded before `schema_version` keeps its schedule on
+/// re-init, and init names the verbs that show and apply the preset changes.
+#[test]
+fn a_reinit_keeps_an_unversioned_il_schedule_and_names_diff_11002() {
+    use trusty_mpm::core::il_schedule;
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let path = il_schedule::path(&dir);
+    let v0 = il_schedule::PRESET.replacen("  \"schema_version\": 1,\n", "", 1);
+    std::fs::write(&path, &v0).unwrap();
+    let steps = super::super::seed::deploy(&dir, seed()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), v0);
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::Skipped(t)
+            if t.starts_with(il_schedule::REL_PATH) && t.contains("tm il config diff"))),
+        "{steps:?}"
+    );
+}

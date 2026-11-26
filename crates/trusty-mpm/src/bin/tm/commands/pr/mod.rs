@@ -302,7 +302,9 @@ async fn run_inner(cmd: PrCmd, daemon: &trusty_mpm::client::DaemonClient) -> any
             // #8301: the cleanup scope is on disk BEFORE the merge; a failed
             // write aborts the merge. #7275: cleanup is the final step after
             // merge CONFIRMATION; under `--auto` the daemon's sweep acts later.
-            let registry = trusty_mpm::core::pr_cleanup::CleanupRegistry::production();
+            // #11821: no registry, no merge; never the `$HOME` fallback.
+            let registry = trusty_mpm::core::pr_cleanup::CleanupRegistry::production()
+                .context("tm pr merge: the config dir is unresolved; nothing was merged")?;
             let slug = || repo_slug(&gh, args.repo.as_deref());
             match cleanup::merge_with_recorded_scope(&gh, &args, slug, &registry)? {
                 cleanup::PostMerge::NotMerged(code) => Ok(code),

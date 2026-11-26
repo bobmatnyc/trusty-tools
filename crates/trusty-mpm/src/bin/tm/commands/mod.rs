@@ -131,9 +131,13 @@ pub(crate) mod env_file_fs;
 pub(crate) mod env_file_grant;
 // #8436: `tm fleet init|status` — the Architect's setup.
 pub(crate) mod fleet;
+// #11001: `tm il config` — the IL schedule's verbs.
 pub(crate) mod generate;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
+pub(crate) mod il;
+// #11821 P6b: `tm paths show|set` — install.toml's owner-only writer.
+pub(crate) mod paths;
 // #9034: the autostart decision, with launchctl and the process table injected.
 pub(crate) mod guided_autostart_plan;
 pub(crate) mod guided_inplace;
@@ -236,6 +240,8 @@ pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_architect_envfile;
 pub(crate) mod pm_guard_architect_reason;
 // #8878 PR2a: the presence gate on Architect anchor writes, and its verbs.
+// #11821 P6b: no hooked session runs `tm paths set`.
+pub(crate) mod pm_guard_paths_set;
 pub(crate) mod pm_guard_presence;
 // #8878 PR2a: no hooked caller writes the presence key's Keychain item.
 pub(crate) mod pm_guard_presence_key;

@@ -22,6 +22,8 @@ mod common;
 // #10571 Phase 2: the Architect's clear chain on a fresh install.
 mod architect_turn_active_chain_10571;
 mod catalog_sync_idempotent;
+// #11821 P3-f2: a broken install.toml fails the CLI's state writers closed.
+mod broken_install_cli_writers_11821_p3f2;
 mod commit_stats_hook_budget;
 mod config_mount;
 // #10153: `dbatg` MCP writes are bound to the bridge's PM session.
@@ -30,6 +32,8 @@ mod dbatg_bridge_owner_10153;
 mod disk_survey_mcp_smoke;
 #[cfg(feature = "daemon")]
 mod e2e;
+// #11001: generated doc regions (the IL schedule reference).
+mod generated_docs;
 mod inproject_hygiene_test;
 mod local_spawn;
 mod manager_cli_client;
@@ -85,6 +89,8 @@ mod tm_architect_drift_11773;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #11821 P6b: `tm paths set` refuses a Claude Code session; `show` on a broken file.
+mod tm_paths_11821;
 // #10735: the claude.ai connectors pass the egress guard; the rest stays.
 mod connectors_allowed_10735;
 // #8454 S2: the trust anchors through the egress hook, pm-guard off.

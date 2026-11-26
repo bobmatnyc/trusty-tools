@@ -291,6 +291,8 @@ mod tests {
     /// #7923: both migrations keep every row, by exact count and id set, and
     /// never overwrite the live relative row with the stale absolute one.
     #[tokio::test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     async fn relativize_preserves_every_chunk_for_m002_and_m004() {
         let migrations: [&dyn Migration; 2] =
             [&M002AbsoluteToRelativePaths, &M004RepairAbsoluteFilePaths];
@@ -311,6 +313,7 @@ mod tests {
     /// The declined arm is reported with a count and a reason, and a second
     /// pass reports the same collision without touching any row.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn relativize_reports_collisions_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, corpus) = handle(dir.path());
@@ -331,6 +334,7 @@ mod tests {
     /// Error arm and crash shape: a fault after every move is staged fails the
     /// count check, commits nothing, and a retry converges on the full result.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn failed_rewrite_commits_nothing_and_retry_converges() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, corpus) = handle(dir.path());
@@ -364,6 +368,7 @@ mod tests {
     /// Rows written or removed between the load and the transaction are
     /// neither overwritten nor reported as lost.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn rows_written_after_the_load_are_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let (_handle, corpus) = handle(dir.path());
@@ -396,6 +401,7 @@ mod tests {
     /// after the load keeps the new content, on both the moving and the
     /// in-place arm, and the skip is counted.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn rows_updated_in_place_after_the_load_keep_their_new_content() {
         let dir = tempfile::tempdir().unwrap();
         let (_handle, corpus) = handle(dir.path());

@@ -374,6 +374,9 @@ pub(crate) async fn finalize_review_at(
         &result.review_body,
         &result.findings,
     );
+    // #11899: name every loaded and skipped repo skill (DOC-93 RS-26); empty without one.
+    let skills_notice = crate::pipeline::repo_skills::body_notice(result.repo_skills.as_ref());
+    result.review_body.push_str(&skills_notice);
 
     // Append the metadata footer to review_body BEFORE the post/log branch so
     // the footer is identical in the live GitHub comment (which reads

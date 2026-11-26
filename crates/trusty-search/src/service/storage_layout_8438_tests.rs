@@ -118,6 +118,8 @@ pub(crate) async fn wait_for(path: &Path) -> bool {
 /// Why: the layout is the registry flag, whatever exists on disk.
 /// Test: this test.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn layout_follows_the_registry_flag_not_the_directory() {
     let entry = PersistedIndex::default();
     assert_eq!(StorageLayout::for_entry(&entry), StorageLayout::DataDir);

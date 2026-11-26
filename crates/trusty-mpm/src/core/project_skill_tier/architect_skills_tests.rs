@@ -257,7 +257,7 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 19] = [
+    const PINNED: [(&str, &str); 17] = [
         (
             "tm-fleet-check",
             "8e41b332fcb147ddf9d81d95936315986e5768c4efcd9d91a4149f2e3e7b55fd",
@@ -327,24 +327,15 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             // #9457: `fleet init` names when it starts the dashboard on macOS.
             "908deda6a43c699d7c2d355c3cb0fbfbb64d33d12b6117915aa49e14abc4b0c7",
         ),
-        (
-            "architect-drift-guard",
-            "228a8d37f9b0a73de888918c4e2fb5bf9b4b3f055f69d5861d1d9b5713c42deb",
-        ),
-        (
-            "architect-improver",
-            "f55bd138d925ae6866d42c8c5dc8cfaf759aef8049012ba6914c48c1a59bf631",
-        ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 6] = [
+    // #11896: the drift-guard and improver skills moved into their agents.
+    const FIRST_RELEASE: [&str; 4] = [
         "architect-github",
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
-        "architect-drift-guard",
-        "architect-improver",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

@@ -182,8 +182,10 @@ async fn run_scoped(
     if !req.dry_run {
         // Best-effort: a failed stamp costs one repeated sweep, which reports
         // its own failures, so it must not turn a successful cleanup red.
-        if let Err(e) =
-            CleanupRegistry::production().mark_cleaned(&repo, req.pr, chrono::Utc::now())
+        // #11821: an unresolved config dir stamps nothing; no `$HOME` fallback.
+        if let Err(e) = CleanupRegistry::production()
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r.mark_cleaned(&repo, req.pr, chrono::Utc::now()))
         {
             eprintln!("tm pr cleanup: could not stamp the cleanup registry: {e:#}");
         }

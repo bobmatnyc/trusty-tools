@@ -29,9 +29,10 @@ const RAW_PANE_TAIL_LINES: usize = 3;
 /// What: `live_count` is the number of sessions in `group` whose `state` is
 /// `"active"` or `"provisioning"`; `total_count` is `group.sessions.len()`.
 /// A project with no matching fleet group (never spawned a session) gets
-/// `0`/`0`.
+/// `0`/`0`. `decommissioned` copies [`Project::is_decommissioned`] (#10990).
 /// Test: `project_to_row_counts_live_and_total`,
-/// `project_to_row_missing_group_is_zeroed`.
+/// `project_to_row_missing_group_is_zeroed`,
+/// `project_to_row_carries_the_decommissioned_flag`.
 pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>) -> ProjectRow {
     let (live_count, total_count) = match group {
         Some(g) => (
@@ -48,6 +49,7 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
         repo_url: p.repo_url.clone(),
         live_count,
         total_count,
+        decommissioned: p.is_decommissioned(), // #10990
     }
 }
 
@@ -288,6 +290,17 @@ mod tests {
         let rows = visible_project_rows(&[live, archived], &[]);
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["widget"]);
+    }
+
+    /// #10990: the registry's decommission stamp reaches the row.
+    #[test]
+    fn project_to_row_carries_the_decommissioned_flag() {
+        assert!(!project_to_row(&project("widget"), None).decommissioned);
+        let gone = Project {
+            decommissioned_at: Some(chrono::Utc::now()),
+            ..project("widget")
+        };
+        assert!(project_to_row(&gone, None).decommissioned);
     }
 
     #[test]

@@ -311,8 +311,10 @@ pub fn build_system_prompt(prompts: &ReviewerPrompts, voice_config: &VoiceConfig
 /// Why: the runner calls this with `coverage_gating_enabled = config.coverage.enabled`
 /// so the system prompt accurately reflects whether coverage can gate the verdict.
 /// What: selects the stock base via `reviewer_system_prompt_with_coverage`, then
-/// appends the principles and voice addenda exactly as `build_system_prompt` does.
-/// Test: `build_system_prompt_coverage_gating_on`.
+/// appends the principles and voice addenda exactly as `build_system_prompt` does,
+/// then (#11899) the fenced repo-skills block, when one was loaded.
+/// Test: `build_system_prompt_coverage_gating_on`,
+/// `skills_block_follows_the_template_and_restates_authority`.
 pub fn build_system_prompt_with_coverage(
     prompts: &ReviewerPrompts,
     voice_config: &VoiceConfig,
@@ -320,10 +322,21 @@ pub fn build_system_prompt_with_coverage(
 ) -> String {
     let stock = reviewer_system_prompt_with_coverage(prompts, coverage_gating_enabled);
     let addendum = voice_config.combined_addendum();
-    if addendum.is_empty() {
-        return stock.to_string();
+    let mut system = if addendum.is_empty() {
+        stock.to_string()
+    } else {
+        format!("{stock}\n\n{addendum}")
+    };
+    // #11899: repo skills go last, after the template, in their own fenced block.
+    if let Some(block) = voice_config
+        .repo_skills
+        .as_deref()
+        .filter(|b| !b.is_empty())
+    {
+        system.push_str("\n\n");
+        system.push_str(block);
     }
-    format!("{stock}\n\n{addendum}")
+    system
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────

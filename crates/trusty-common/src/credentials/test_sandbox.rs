@@ -38,6 +38,7 @@
 //! Test: `the_sandbox_clears_credentials_and_restores_them`,
 //! `the_sandbox_reads_no_env_local`, `the_sandbox_hides_env_local_and_the_keychain`,
 //! `the_sandbox_clears_git_config_injection_and_restores_it`,
+//! `the_sandbox_clears_the_git_config_count_before_its_pairs`,
 //! `a_failed_secret_assert_never_prints_the_value`.
 
 use std::ffi::{OsStr, OsString};
@@ -78,6 +79,9 @@ fn looks_secret(name: &str, value: &OsStr) -> bool {
         || value.to_str().is_some_and(has_url_userinfo)
 }
 
+/// The count that tells git how many `GIT_CONFIG_KEY_<n>` pairs to read.
+const GIT_CONFIG_COUNT: &str = "GIT_CONFIG_COUNT";
+
 /// Whether a variable injects git config: `GIT_CONFIG_COUNT`, its numbered
 /// `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` pairs, or
 /// `GIT_CONFIG_PARAMETERS`.
@@ -85,7 +89,7 @@ fn looks_secret(name: &str, value: &OsStr) -> bool {
 // `GIT_CONFIG_COUNT=2` failed every sandboxed git with "missing config key".
 fn injects_git_config(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    upper == "GIT_CONFIG_COUNT"
+    upper == GIT_CONFIG_COUNT
         || upper == "GIT_CONFIG_PARAMETERS"
         || upper.starts_with("GIT_CONFIG_KEY_")
         || upper.starts_with("GIT_CONFIG_VALUE_")
@@ -161,10 +165,14 @@ impl CredentialSandbox {
             root,
             saved: Vec::new(),
         };
-        let ambient: Vec<OsString> = std::env::vars_os()
+        let mut ambient: Vec<OsString> = std::env::vars_os()
             .filter(|(k, v)| k.to_str().is_none_or(|k| clears(k, v)))
             .map(|(k, _)| k)
             .collect();
+        // #11877: remove `GIT_CONFIG_COUNT` before its pairs, so drop (reverse
+        // touch order) restores it after them; a concurrent git never sees a
+        // count with a missing `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`.
+        ambient.sort_by_key(|name| name.as_os_str() != OsStr::new(GIT_CONFIG_COUNT));
         for name in ambient {
             sandbox.remove_os(&name);
         }
@@ -389,6 +397,63 @@ mod tests {
         for (k, v) in INJECTED {
             assert_eq!(std::env::var(k).as_deref(), Ok(*v), "{k} not restored");
         }
+        for (k, prior) in caller {
+            // SAFETY: as above.
+            unsafe {
+                match prior {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    /// Why: #11877 — a sandbox that removed `GIT_CONFIG_VALUE_0` while
+    /// `GIT_CONFIG_COUNT` stood failed a concurrent, unserialized git with
+    /// "missing config value GIT_CONFIG_VALUE_0". A first sandbox's restore
+    /// appends the count last, so the second sandbox met it last.
+    /// What: puts the count after its pairs in the environment, enters, and
+    /// checks the count was touched first, so drop restores it last.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn the_sandbox_clears_the_git_config_count_before_its_pairs() {
+        clears_git_config_count_first();
+    }
+
+    #[serial(dotenv_credential_env, inference_env)]
+    fn clears_git_config_count_first() {
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        const PAIRS: &[(&str, &str)] = &[
+            ("GIT_CONFIG_VALUE_0", "zero"),
+            ("GIT_CONFIG_KEY_0", "trusty.probe11877"),
+        ];
+        let names = ["GIT_CONFIG_COUNT", PAIRS[0].0, PAIRS[1].0];
+        let caller: Vec<_> = names.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        // SAFETY: `#[serial]`; the caller's values are put back below.
+        unsafe {
+            for k in names {
+                std::env::remove_var(k);
+            }
+            for (k, v) in PAIRS {
+                std::env::set_var(k, v);
+            }
+            std::env::set_var("GIT_CONFIG_COUNT", "1");
+        }
+        {
+            let sandbox = CredentialSandbox::enter();
+            let touched: Vec<_> = sandbox
+                .saved
+                .iter()
+                .filter_map(|(k, _)| k.to_str())
+                .filter(|k| names.contains(k))
+                .collect();
+            assert_eq!(touched.first(), Some(&"GIT_CONFIG_COUNT"), "{touched:?}");
+            assert_eq!(touched.len(), names.len(), "{touched:?}");
+        }
+        assert_eq!(std::env::var("GIT_CONFIG_COUNT").as_deref(), Ok("1"));
         for (k, prior) in caller {
             // SAFETY: as above.
             unsafe {

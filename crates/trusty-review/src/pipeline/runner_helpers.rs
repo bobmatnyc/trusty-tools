@@ -40,6 +40,15 @@ use crate::{
 
 use super::runner::{ReviewDeps, ReviewInput};
 
+/// The PR's GitHub URL; empty for a local source (moved from `run_pipeline`, #11899).
+pub(super) fn pr_url_of(owner: &str, repo: &str, pr: u64, is_local: bool) -> String {
+    if is_local {
+        String::new()
+    } else {
+        format!("https://github.com/{owner}/{repo}/pull/{pr}")
+    }
+}
+
 /// The review subject a diff source names: `(owner, repo, pr, is_local)`.
 ///
 /// Why: moved from `run_pipeline` step 1 for `runner.rs` SLOC headroom (#9194).
@@ -251,6 +260,7 @@ pub(super) async fn fetch_github_pr_meta(
     let head = crate::pipeline::optional_context::seams::PrHead {
         sha: meta.head.sha.clone(),
         fork: head_is_fork(meta.head.label.as_deref(), meta.base.label.as_deref()), // #9193
+        base_sha: meta.base.sha.clone(),                                            // #11899
     };
     Ok((
         ReviewPrMeta {

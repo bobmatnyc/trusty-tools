@@ -140,6 +140,7 @@ pub fn build_voice_config(
         voice_name,
         review_template,
         review_template_name,
+        repo_skills: None, // #11899: attached later, at the base sha
     })
 }
 

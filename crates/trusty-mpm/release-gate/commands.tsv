@@ -157,6 +157,15 @@ dbatg close	SAFE	$H/proj	DBATG_SESSION=s1 dbatg close --project $H/proj --sessio
 dbatg batch	SAFE	$H/proj	DBATG_SESSION=s1 dbatg batch --project $H/proj --session s1 --file $FX/dbatg-ops.json	-	0	-	
 dbatg prune	SAFE	$H/proj	DBATG_SESSION=s1 dbatg prune --project $H/proj --session s1	-	0	-	
 dbatg show	SAFE	$H/proj	DBATG_SESSION=s1 dbatg show --brief --project $H/proj --session s1	-	0	-	
+il config show	SAFE	$H	il config show --dir $H	-	0	session_example	prints the built-in preset; writes nothing (#11001)
+il config enroll	SAFE	$H	il config enroll gate-s --project $H/proj --dir $H	-	0	enrolled: gate-s	writes only $H/local/il-schedule.json
+il config set	SAFE	$H	il config set --session gate-s thresholds.floor_ctx 180000 --dir $H	-	0	set: gate-s.thresholds.floor_ctx	after enroll
+il config remove	SAFE	$H	il config remove gate-s --dir $H	-	0	removed: gate-s	after set
+il config diff	SAFE	$H	il config diff --dir $H	-	0	preset: built in	reads only; compares with the preset (#11002)
+il config update	SAFE	$H	il config update --dir $H	-	0	unchanged: schema_version	the file is current after remove (#11002)
+il config reset	SAFE	$H	il config reset --force --dir $H	-	0	reset:	restores the preset in $H/local/il-schedule.json
+paths show	SAFE	$H	paths show	-	0	projects_root	prints the resolved paths; writes nothing (#11821)
+paths set	SKIP	-	-	-	-	-	owner-only: refused inside a Claude Code session and while tm sessions are live (#11821)
 env set	SKIP	-	-	-	-	-	value comes from the login Keychain; needs the Architect binding and a pm-guard grant
 env keys	SKIP	-	-	-	-	-	refused without the Architect binding and a pm-guard grant
 secrets set	SKIP	-	-	-	-	-	value from the clipboard; trusty-secrets backend / Keychain

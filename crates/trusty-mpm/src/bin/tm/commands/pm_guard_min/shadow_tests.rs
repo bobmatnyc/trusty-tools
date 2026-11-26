@@ -31,38 +31,98 @@ fn a_would_refuse_logs_one_line_without_the_command_text() {
     assert_eq!(line["fact"]["argv0"], "rm");
     assert_eq!(line["sha256"].as_str().map(str::len), Some(64));
     assert!(!line.to_string().contains("sentinel-prose-xyz"));
+    assert_eq!(line["enforced"], false, "#10690: rule 2 only records");
     append_log(home.path(), &line);
     append_log(home.path(), &line);
     let log = std::fs::read_to_string(home.path().join(LOG_PATH)).unwrap();
     assert_eq!(log.lines().count(), 2);
 }
 
+/// #10690 (ruling D0u): a call rule 1 cannot judge is refused, never allowed.
+/// Before the fix each arm returned `None` (no line, exit 0, no deny).
 #[test]
-fn malformed_and_huge_payloads_yield_no_line() {
+fn every_rule1_error_arm_refuses() {
     let home = tempfile::tempdir().unwrap();
-    assert_eq!(judge(b"{not json", home.path(), &test_env), None);
-    assert_eq!(judge(b"", home.path(), &test_env), None);
     let huge = json!({ "tool_name": "Bash", "tool_input": { "command": format!("rm -rf ~ {}", "a".repeat(2 << 20)) } });
-    assert_eq!(
-        judge(huge.to_string().as_bytes(), home.path(), &test_env),
-        None
-    );
-    let deep = format!("{}rm -rf ~{}", "$(".repeat(5000), ")".repeat(5000));
-    let raw = json!({ "tool_name": "Bash", "tool_input": { "command": deep } });
-    // Bounded recursion: no stack overflow; the answer itself does not matter.
-    let _ = judge(raw.to_string().as_bytes(), home.path(), &test_env);
+    let no_tool = json!({ "tool_input": { "file_path": "/tmp/x" } });
+    for (raw, kind) in [
+        (b"{not json".to_vec(), "unparseable"),
+        (Vec::new(), "unparseable"),
+        (huge.to_string().into_bytes(), "oversized"),
+        (no_tool.to_string().into_bytes(), "no_tool_name"),
+    ] {
+        let line = judge(&raw, home.path(), &test_env).expect(kind);
+        assert_eq!(line["rule"], "R1", "{kind}");
+        assert_eq!(line["fact"]["error"], kind);
+        assert_eq!(line["enforced"], true, "{kind}");
+    }
 }
 
+/// #10690 (critic HIGH 2): a Bash call whose parse dropped commands (nesting
+/// past the depth bound) is refused, even when the dropped part is the anchor
+/// write. Before: allowed. The `bash -c` bound: `a_script_past_the_shell_bound_is_dropped`.
 #[test]
-fn a_panicking_judge_is_caught() {
+fn a_dropped_bash_parse_refuses() {
     let home = tempfile::tempdir().unwrap();
-    let raw = json!({ "tool_name": "Bash", "tool_input": { "command": "rm -rf ~" } }).to_string();
-    let mut reached = false;
-    guarded(|| {
-        let _ = judge(raw.as_bytes(), home.path(), &|_, _| panic!("parser panic"));
-        reached = true;
+    let write = "cp x ~/.cargo/bin/tm";
+    let deep = |inner: &str| format!("{}{inner}{}", "$(".repeat(5000), ")".repeat(5000));
+    for cmd in [deep("rm -rf ~"), deep(write)] {
+        let raw = json!({ "tool_name": "Bash", "tool_input": { "command": cmd } });
+        let line = judge(raw.to_string().as_bytes(), home.path(), &test_env).expect("refused");
+        assert_eq!(line["rule"], "R1");
+        assert_eq!(line["fact"]["error"], "bash_unjudged", "{line}");
+    }
+}
+
+/// #10690 (critic LOW): an edit tool with no string target path is refused.
+#[test]
+fn an_edit_with_no_target_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    for input in [json!({ "content": "x" }), json!({ "file_path": 7 })] {
+        let raw = json!({ "tool_name": "Write", "tool_input": input });
+        let line = judge(raw.to_string().as_bytes(), home.path(), &test_env).expect("refused");
+        assert_eq!(line["fact"]["error"], "no_target");
+    }
+}
+
+/// #10690 (critic HIGH 1): a FIFO planted at the log path never blocks the
+/// log write. Before: the open waited for a reader forever.
+#[test]
+fn a_fifo_at_the_log_path_never_blocks() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(LOG_PATH);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path; mkfifo reads it only.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = home.path().to_path_buf();
+    std::thread::spawn(move || {
+        append_log(&dir, &json!({ "rule": "R1" }));
+        let _ = tx.send(());
     });
-    assert!(!reached, "the panic unwound out of judge and was caught");
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "append_log blocked on a FIFO"
+    );
+}
+
+/// #10690: a panic before rule 1 answers is a refusal, not an unwind or an allow.
+#[test]
+fn a_panic_in_rule1_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    let raw = json!({ "tool_name": "Write", "tool_input": { "file_path": "/tmp/x" } }).to_string();
+    let line = guarded_judge(raw.as_bytes(), home.path());
+    assert_eq!(
+        line.as_ref().map(|l| l["fact"]["error"].clone()),
+        Some(json!("panic"))
+    );
+}
+
+fn guarded_judge(raw: &[u8], home: &Path) -> Option<Value> {
+    let mut out = None;
+    guarded(|| out = judge(raw, home, &|_, _| panic!("parser panic")));
+    out
 }
 
 #[test]

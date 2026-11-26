@@ -47,6 +47,8 @@ use tokio::sync::RwLock as TokioRwLock;
 /// `0` is the "no reclaim yet this pressure episode" sentinel — the first
 /// crossing of the high-water mark must always reclaim, regardless of RSS.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn hysteresis_first_crossing_always_reclaims() {
     assert!(should_reclaim_now(500, 0));
     assert!(
@@ -59,6 +61,7 @@ fn hysteresis_first_crossing_always_reclaims() {
 /// re-trigger a sweep — this is the thrash guard the #2846 PR review asked
 /// for (reclaim → rehydrate → reclaim every tick with no memory benefit).
 #[test]
+#[serial_test::parallel]
 fn hysteresis_skips_when_rss_has_not_risen() {
     assert!(
         !should_reclaim_now(500, 500),
@@ -73,6 +76,7 @@ fn hysteresis_skips_when_rss_has_not_risen() {
 /// Once RSS climbs past where the last sweep left it, caches have measurably
 /// repopulated — the next sweep must fire.
 #[test]
+#[serial_test::parallel]
 fn hysteresis_reclaims_again_once_rss_has_risen() {
     assert!(should_reclaim_now(501, 500));
     assert!(should_reclaim_now(10_000, 500));
@@ -96,6 +100,7 @@ fn hysteresis_reclaims_again_once_rss_has_risen() {
 /// skips, exactly as it always has (issue #2846's original hysteresis
 /// design, unaffected by this fix).
 #[test]
+#[serial_test::parallel]
 fn hysteresis_survives_early_stop_sweep_even_when_rss_is_flat() {
     let after = 9_500u64; // tick 1's post-trim RSS; still over an assumed high-water mark
 

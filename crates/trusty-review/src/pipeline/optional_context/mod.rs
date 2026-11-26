@@ -232,6 +232,11 @@ pub struct ReviewOptions {
     /// Reviewer prompts the caller already loaded (#9015); `None` loads them
     /// from content when the review starts.
     pub(crate) prompts: Option<Arc<ReviewerPrompts>>,
+    /// #11899: the repo-named review skills to load at the base sha; `None`
+    /// loads none and leaves the prompt and the record unchanged.
+    pub(crate) repo_skills: Option<crate::pipeline::repo_skills::RepoSkillsInput>,
+    /// #11899 step 2: how `repo_skills` reads the base commit.
+    pub(crate) repo_skills_reader: crate::pipeline::repo_skills::SkillsReader,
 }
 
 /// Builds the external context sources a review gathers from (#9194 seam).
@@ -247,7 +252,39 @@ impl ReviewOptions {
             external_sources: None,
             ticket_fetcher: None,
             prompts: None,
+            repo_skills: None, // #11899
+            repo_skills_reader: Default::default(),
         }
+    }
+
+    /// Reviews with the base repo's skills read through the Contents API.
+    ///
+    /// Why: #11899 step 2 — the hosted webhook path has no checkout (DOC-93 RS-38).
+    /// What: the `[[review.skills]]` entries and each `SKILL.md` are read at
+    /// the PR base SHA from the reviewed repository through the
+    /// contents-at-ref reader, under the same rules as the checkout path.
+    /// Test: `hosted_review_options_read_through_the_contents_api`,
+    /// `runner_hosted_review_loads_base_skill_into_the_system_prompt`.
+    pub(crate) fn with_hosted_repo_skills(mut self) -> Self {
+        let input = crate::pipeline::repo_skills::RepoSkillsInput::from_repo_config(None);
+        self.repo_skills = Some(input);
+        self.repo_skills_reader = crate::pipeline::repo_skills::SkillsReader::ContentsAtRef;
+        self
+    }
+
+    /// Reviews with the repo-named skills in `input` (#11899).
+    ///
+    /// Why: the seam the `.trusty-review.toml` `[[review.skills]]` adapter
+    /// plugs into; the pipeline never reads the config itself.
+    /// What: each requested skill is read from `.claude/skills/<name>/SKILL.md`
+    /// at the PR base sha, capped, validated and appended to the system prompt.
+    /// Test: `runner_loads_base_skill_into_the_system_prompt`.
+    pub fn with_repo_skills(
+        mut self,
+        input: crate::pipeline::repo_skills::RepoSkillsInput,
+    ) -> Self {
+        self.repo_skills = Some(input);
+        self
     }
 
     /// Reviews with `prompts` instead of loading them from content (#9015).

@@ -77,6 +77,7 @@ pub(super) fn console_tools() -> Vec<Value> {
                 "additionalProperties": false
             }),
         ),
+        // #11821: config_read also returns the read-only install paths.
         tool(
             "config_read",
             "Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 \
@@ -86,7 +87,10 @@ pub(super) fn console_tools() -> Vec<Value> {
              untracked/secret-file sync allowlist (#2196), and the full `projects` \
              list (each entry may carry its own `github`/`commit_name`/`commit_email`/ \
              `untracked_sync` per-project override). An absent file returns the \
-             defaults (all null/empty). Backs the trusty-console Config tab.",
+             defaults (all null/empty). `install_paths` (#11821) is read-only: the \
+             resolved `projects_root` and `config_dir`, each `{path, source}`, or \
+             `error` naming a broken `install.toml` with both paths null. Backs the \
+             trusty-console Config tab.",
             json!({
                 "type": "object",
                 "properties": {},

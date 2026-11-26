@@ -112,6 +112,31 @@ fn teardown_tmux_server() {
     trusty_mpm::core::tmux_test_isolation::teardown_for_this_process();
 }
 
+/// The default stack of every thread this test binary spawns (#11926): 8 MiB,
+/// the stack the real `tm` main thread parses its CLI on.
+pub(crate) const TEST_THREAD_STACK_BYTES: usize = 8 << 20;
+
+/// Give every libtest thread in this binary an 8 MiB stack, before `main` (#11926).
+///
+/// Why: a debug-build parse of the full `tm` CLI needs about 2 MiB of stack,
+/// because clap's derived `augment_subcommands` for `Command` and for
+/// `SessionAction` are single frames of about 1.1 MiB and 0.8 MiB that grow
+/// with every verb. Every test that parses the CLI ran within tens of KiB of
+/// libtest's 2 MiB default thread stack.
+/// What: sets `RUST_MIN_STACK` to [`TEST_THREAD_STACK_BYTES`] when it is unset.
+/// std reads that variable at the first thread spawn, so it covers libtest's
+/// test threads and tokio's runtime threads under `cargo test`, nextest and a
+/// directly run binary alike. An operator-set value is kept, so a run can still
+/// measure the real need by lowering it.
+/// Test: `tests::test_threads_get_the_cli_parse_stack_11926`.
+#[ctor::ctor]
+fn raise_test_thread_stack() {
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: a pre-`main` constructor; no other thread exists yet.
+        unsafe { std::env::set_var("RUST_MIN_STACK", TEST_THREAD_STACK_BYTES.to_string()) };
+    }
+}
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
@@ -278,6 +303,16 @@ mod tests {
             std::env::var_os("TMUX").is_none(),
             "the host's $TMUX must not reach a test"
         );
+    }
+
+    /// #11926: the constructor ran, so `RUST_MIN_STACK` was set before libtest
+    /// spawned this thread. Fails if the constructor is removed, unless the
+    /// operator exported the variable, whose value is then kept as given.
+    #[test]
+    fn test_threads_get_the_cli_parse_stack_11926() {
+        let raw = std::env::var("RUST_MIN_STACK").expect("RUST_MIN_STACK is set before main");
+        let bytes: usize = raw.parse().expect("RUST_MIN_STACK is a byte count");
+        assert!(bytes > 0, "RUST_MIN_STACK={raw}");
     }
 
     /// #10785: `TM_TEST_TMP` sets the root; an empty value falls back to `/tmp`.

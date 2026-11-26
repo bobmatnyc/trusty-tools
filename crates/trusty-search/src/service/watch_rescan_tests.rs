@@ -79,6 +79,8 @@ fn fixture(dir: &std::path::Path) -> (IndexId, Arc<RwLock<CodeIndexer>>, Indexed
 /// filesystem syscall rejects a NUL byte in a path, so a genuine event can
 /// never carry this value.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn rescan_sentinel_cannot_collide_with_a_real_path() {
     let sentinel = rescan_sentinel_path();
     assert!(
@@ -92,6 +94,7 @@ fn rescan_sentinel_cannot_collide_with_a_real_path() {
 /// debouncer. A fix that only handled one backend would leave the other silently
 /// losing writes.
 #[test]
+#[serial_test::parallel]
 fn tag_rescan_marks_both_backend_event_shapes() {
     let dir = tempfile::tempdir().expect("tempdir");
 
@@ -136,6 +139,7 @@ fn tag_rescan_marks_both_backend_event_shapes() {
 /// Why: tagging must be inert for ordinary events — a watcher that re-walked
 /// the tree on every file save would be far worse than the bug.
 #[test]
+#[serial_test::parallel]
 fn tag_rescan_leaves_ordinary_events_untouched() {
     let ev = Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
         .add_path(std::path::PathBuf::from("/tmp/example.rs"));
@@ -148,6 +152,7 @@ fn tag_rescan_leaves_ordinary_events_untouched() {
 /// distinguishes writes from deletions would classify it as a deletion of a
 /// file that was never indexed. It has to be tested first.
 #[test]
+#[serial_test::parallel]
 fn classify_debounced_maps_each_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let existing = dir.path().join("present.rs");
@@ -177,6 +182,7 @@ fn classify_debounced_maps_each_shape() {
 /// nothing. The `is_dir` assertion names the guard that discarded it:
 /// `watch_loop::handle_modified` returns immediately for a directory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn rescan_reconcile_indexes_files_written_during_the_gap() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -247,6 +253,7 @@ async fn rescan_reconcile_indexes_files_written_during_the_gap() {
 /// is reindexed. Fails before the fix: `files_reindexed == 0`.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn rescan_reconcile_keys_files_under_a_symlinked_root_alias() {
     let dir = tempfile::tempdir().expect("tempdir");
     let real = dir.path().join("real");
@@ -269,6 +276,7 @@ async fn rescan_reconcile_keys_files_under_a_symlinked_root_alias() {
 /// Why: an overflow drops deletions as readily as writes. A deletion that is
 /// never applied leaves a phantom file answering searches forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn rescan_reconcile_drops_files_deleted_during_the_gap() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -308,6 +316,7 @@ async fn rescan_reconcile_drops_files_deleted_during_the_gap() {
 /// file the walk skipped must not be mistaken for a deletion. Only absence from
 /// disk may remove anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn rescan_reconcile_keeps_a_tracked_file_the_walk_skipped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -355,6 +364,7 @@ fn write_unreadable_source(root: &std::path::Path, name: &str) -> std::path::Pat
 /// pass that reconciled everything may clear the failure count; an error and a
 /// partial read are both "still out of sync" and must re-arm.
 #[test]
+#[serial_test::parallel]
 fn rescan_follow_up_clears_the_counter_only_when_the_tree_is_in_sync() {
     let clean = RescanStats {
         files_reindexed: 3,
@@ -405,6 +415,7 @@ fn rescan_follow_up_clears_the_counter_only_when_the_tree_is_in_sync() {
 /// itself would need a real kernel queue overflow, which is the one condition
 /// these tests cannot provoke (see the module docs).
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn rescan_partial_pass_schedules_a_retry_that_fires() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -458,6 +469,7 @@ async fn rescan_partial_pass_schedules_a_retry_that_fires() {
 /// file's CONTENT, so editing a file makes the next pass reindex it again even
 /// though the walk and the tree are otherwise identical.
 #[tokio::test]
+#[serial_test::parallel]
 async fn rescan_reconcile_skips_files_whose_content_did_not_change() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -520,6 +532,7 @@ async fn rescan_reconcile_skips_files_whose_content_did_not_change() {
 /// would still re-parse the whole tree. Simulates that restart by clearing the
 /// cache the previous pass populated and asserting the next pass still skips.
 #[tokio::test]
+#[serial_test::parallel]
 async fn rescan_reconcile_warms_the_hash_cache_from_the_corpus() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
@@ -561,6 +574,7 @@ async fn rescan_reconcile_warms_the_hash_cache_from_the_corpus() {
 /// Why: a reconcile that fails leaves the index out of sync, so the retry must
 /// keep coming back rather than backing off to never.
 #[test]
+#[serial_test::parallel]
 fn rescan_retry_backoff_grows_and_saturates() {
     assert_eq!(retry_backoff(1), RETRY_BASE, "first failure waits the base");
     assert_eq!(retry_backoff(2), RETRY_BASE * 2);
@@ -590,6 +604,7 @@ fn rescan_retry_backoff_grows_and_saturates() {
 /// still reconciles the whole root.
 /// Test: this function IS the test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn rescan_without_a_registered_handle_schedules_a_retry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonicalize");

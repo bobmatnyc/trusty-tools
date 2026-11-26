@@ -31,12 +31,14 @@ use crate::service::roots_registry::upsert_root;
 /// missing a new file added in a future schema version. Only files that
 /// are present at the source path are moved — missing files are silently
 /// skipped (so partial indexes migrate safely).
-/// What: the five canonical file names for a colocated index directory.
+/// What: the canonical file names for a colocated index directory.
 /// Test: referenced in migrate::tests to verify all present files moved.
 pub(super) const DATA_FILES: &[&str] = &[
     "index.redb",
     "hnsw.usearch",
     "hnsw.keys.json",
+    // #10303: view-mode removals; left behind, they would come back.
+    "hnsw.tombstones.json",
     "chunks.json",
     "schema_version.json",
 ];
@@ -390,6 +392,33 @@ pub(crate) mod tests {
 
         // The moved file must still be intact.
         assert_eq!(std::fs::read(dst.join("index.redb")).unwrap(), b"idem-redb");
+
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+    }
+
+    /// Why (#10303): a tombstone file left in app-data would bring every
+    /// view-mode removal back once the index loads from the colocated dir.
+    /// Test: `migrate_carries_the_tombstone_file`.
+    #[test]
+    #[serial]
+    fn migrate_carries_the_tombstone_file() {
+        let data_tmp = tempdir().unwrap();
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path()) };
+
+        let root = tempdir().unwrap();
+        let src = data_dir().unwrap().join("indexes").join("tomb-test");
+        write_file(&src, "hnsw.usearch", b"hnsw");
+        write_file(&src, "hnsw.keys.json", b"{}");
+        write_file(&src, "hnsw.tombstones.json", b"tombstones");
+
+        let dst = root.path().join(".trusty-search");
+        let moved = move_data_files(&src, &dst, root.path()).unwrap();
+        assert_eq!(moved, 3);
+        assert_eq!(
+            std::fs::read(dst.join("hnsw.tombstones.json")).unwrap(),
+            b"tombstones"
+        );
+        assert!(!src.join("hnsw.tombstones.json").exists());
 
         unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
     }

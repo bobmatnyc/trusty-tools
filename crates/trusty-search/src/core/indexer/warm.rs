@@ -97,6 +97,8 @@ mod tests {
     /// What: evicts, warms, and asserts the corpus is resident again.
     /// Test: this test.
     #[tokio::test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     async fn warm_corpus_rehydrates_an_evicted_index() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (indexer, _corpus) = indexer_with_corpus(tmp.path()).await;
@@ -116,6 +118,7 @@ mod tests {
     /// `Err` and that the corpus is still evicted.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn warm_corpus_reports_an_unreadable_corpus_as_an_error() {
         const CHUNKS_TABLE: redb::TableDefinition<'static, &str, &[u8]> =
             redb::TableDefinition::new("chunks");

@@ -226,6 +226,7 @@ fn voice_config_review_template_layers_last() {
         voice_name: Some("test".to_string()),
         review_template: Some("TEMPLATE_MARKER".to_string()),
         review_template_name: Some("strict-security".to_string()),
+        repo_skills: None,
     };
     let combined = vc.combined_addendum();
     let p_pos = combined.find("PRINCIPLES_MARKER").unwrap();

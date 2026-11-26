@@ -48,6 +48,8 @@ fn write_registry(path: &Path, entries: &[PersistedIndex]) {
 /// What: an entry idle for exactly 30 days is eligible; 29 days is not.
 /// Test: this test.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn prune_eligibility_boundary() {
     let cfg = default_cfg();
     let now: u64 = 1_000 * DAY;
@@ -73,6 +75,7 @@ fn prune_eligibility_boundary() {
 /// What: entry with both fields None → NotTracked (not Eligible).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_not_tracked_is_not_eligible() {
     let cfg = default_cfg();
     let e = make_entry("x", None, None);
@@ -85,6 +88,7 @@ fn prune_not_tracked_is_not_eligible() {
 /// What: entry with queried=None, indexed=old → should be Eligible.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_falls_back_to_last_indexed() {
     let cfg = default_cfg();
     let now: u64 = 1_000 * DAY;
@@ -101,6 +105,7 @@ fn prune_falls_back_to_last_indexed() {
 /// What: entry whose id is in `protected_indexes` → Protected.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_protected_is_never_eligible() {
     let cfg = AutoPruneConfig {
         protected_indexes: vec!["critical".into()],
@@ -120,6 +125,7 @@ fn prune_protected_is_never_eligible() {
 ///       the entry is still present.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_dry_run_lists_but_does_not_delete() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");
@@ -191,6 +197,7 @@ fn prune_apply_deletes_only_eligible() {
 ///       registry.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_apply_skips_protected() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");
@@ -268,6 +275,7 @@ fn prune_apply_removes_eligible_preserves_protected() {
 /// What: call handle_prune_at on an empty file, assert it returns Ok.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_empty_registry_is_noop() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");
@@ -292,6 +300,7 @@ fn prune_empty_registry_is_noop() {
 ///       the `.trusty-search/` dir is gone and the entry is out of the registry.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_colocated_deletion_removes_colocated_dir() {
     use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 
@@ -340,6 +349,7 @@ fn prune_colocated_deletion_removes_colocated_dir() {
 /// What: checks the formatting for B, KB, MB, GB boundaries.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn format_bytes_display_cases() {
     assert_eq!(format_bytes(512), "512 B");
     assert_eq!(format_bytes(1_024), "1 KB");
@@ -358,6 +368,7 @@ fn format_bytes_display_cases() {
 ///       directory is created at the expected colocated path.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_colocated_absent_root_creates_no_dirs() {
     use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 
@@ -415,6 +426,7 @@ fn prune_colocated_absent_root_creates_no_dirs() {
 ///       `apply=true`, assert the call returns `Err` before touching the registry.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_malformed_config_aborts_apply() {
     let tmp = tempdir().unwrap();
     let config_path = tmp.path().join("config.yaml");
@@ -446,6 +458,7 @@ fn prune_malformed_config_aborts_apply() {
 ///       non-empty registry, assert the call returns `Err`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_max_idle_days_zero_is_rejected() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");

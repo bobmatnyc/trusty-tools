@@ -217,6 +217,7 @@ impl Setup {
             head: PrHead {
                 sha: HEAD.to_string(),
                 fork: false,
+                base_sha: String::new(),
             },
             request,
             fetcher,

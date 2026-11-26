@@ -38,6 +38,8 @@ mod env;
 mod fleet;
 mod generate;
 mod hooks;
+// #11001: `tm il config` — the IL schedule's only writer.
+mod il;
 mod issue;
 mod mcp;
 mod memory;
@@ -46,6 +48,8 @@ mod memory_tools;
 mod meta;
 mod optimizer;
 mod overseer;
+// #11821 P6b: `tm paths show|set` — install.toml's only writer.
+mod paths;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
 mod pr;
 // #8878 PR2a: `tm presence local`.
@@ -82,6 +86,7 @@ pub(crate) use env::EnvAction;
 pub(crate) use fleet::{FleetAction, FleetProjectAction};
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
+pub(crate) use il::{IlAction, IlConfigAction};
 pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
@@ -89,6 +94,7 @@ pub(crate) use memory_tools::{MemoryKgAction, MemoryTaskAction, MemoryToolAction
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
+pub(crate) use paths::PathsAction;
 pub(crate) use pr::{
     PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs, PrWatchArgs, PrWatchCmd,
 };

@@ -75,7 +75,8 @@ pub(crate) const LIVE: Ops = Ops {
     probe: TMUX,
     architect: launch::require_architect,
     panes: pane_count,
-    pane_claude: process::pane_claude,
+    // #10701: read on the fleet's server, never the one `$TMUX` names.
+    pane_claude: launch::pane_claude,
     stop: stop_claude,
     prepare: launch::prepare_restart,
     start_poller: poller::start,
@@ -317,7 +318,8 @@ pub(crate) fn pane_count(name: &str) -> Result<usize, String> {
         "#{pane_id}",
     ]
     .map(str::to_owned);
-    let out = tmux::run_tmux_argv(&argv).map_err(|e| format!("cannot run tmux: {e}"))?;
+    // #10701: on the fleet's server only.
+    let out = launch::run_fleet_argv(&argv).map_err(|e| format!("cannot run tmux: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "tmux list-panes failed: {}",
