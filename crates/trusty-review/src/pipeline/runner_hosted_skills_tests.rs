@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use super::optional_context_off::{BODY, FakePrSource, billing_diff, legacy_caller, observe};
-use super::*;
 use crate::integrations::context::contents_at_ref::DocFetcher;
 use crate::pipeline::repo_skills::hosted_tests::{BASE, Fake};
 
