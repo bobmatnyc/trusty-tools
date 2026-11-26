@@ -163,8 +163,10 @@ pub fn checkout_root(cwd: &Path) -> PathBuf {
 /// the caller must not build in the slot, #8261 round 3, #9045), or when the
 /// marker could not be written.
 ///
+/// #11661: the same checkout is trusted only while its marker's seal
+/// ([`super::marker_seal`]) still matches the fingerprints.
 /// Test: `a_different_checkout_clears_only_workspace_fingerprints`,
-/// `the_same_checkout_touches_nothing`, `a_missing_marker_clears`,
+/// `the_same_checkout_touches_nothing`, `an_unsealed_same_checkout_clears`, `a_missing_marker_clears`,
 /// `an_unreadable_package_list_clears_every_fingerprint`,
 /// `a_failed_removal_is_an_error_and_keeps_the_marker`,
 /// `a_fingerprint_enumeration_error_keeps_the_marker`.
@@ -175,11 +177,14 @@ pub fn invalidate_if_checkout_changed(
 ) -> Result<Invalidation, String> {
     let marker = slot_dir.join(LAST_CHECKOUT_MARKER);
     let current = checkout.display().to_string();
-    let previous = std::fs::read_to_string(&marker)
-        .ok()
-        .map(|s| s.trim().to_string());
+    let (mut previous, seal) = super::marker_seal::read_marker(slot_dir);
     if previous.as_deref() == Some(current.as_str()) {
-        return Ok(Invalidation::SameCheckout);
+        // #11661: the same checkout counts only while its seal still matches;
+        // a build outside the lease never rewrites the marker.
+        match super::marker_seal::verify(slot_dir, seal.as_deref()) {
+            Ok(()) => return Ok(Invalidation::SameCheckout),
+            Err(why) => previous = Some(format!("{current}, but {why}")),
+        }
     }
     let names = packages();
     let all = names.is_err();
@@ -358,6 +363,15 @@ fn fingerprint_dirs(fs: &impl SlotFs, root: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+/// Every fingerprint directory in `root`, over the real filesystem (#11661).
+///
+/// # Errors
+///
+/// As [`fingerprint_dirs`].
+pub(super) fn fingerprint_dirs_of(root: &Path) -> io::Result<Vec<PathBuf>> {
+    fingerprint_dirs(&RealFs, root)
 }
 
 /// The checkout's own workspace package names, via `cargo metadata --no-deps`.

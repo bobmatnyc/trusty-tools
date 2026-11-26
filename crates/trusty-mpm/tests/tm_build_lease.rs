@@ -1721,3 +1721,214 @@ fn build_lease_where_names_every_dir_when_the_binary_is_absent_10835() {
     assert!(err.contains("acme/widget/slot-0/release/widget"), "{err}");
     assert!(err.contains("repo/target/release/widget"), "{err}");
 }
+
+/// A fake `cargo` whose `test` run reports one target: `passed` run and
+/// `filtered` filtered out, with cargo's `Running` line on stderr (#11661).
+fn fake_libtest_cargo(dir: &Path, passed: u32, filtered: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).expect("fake bin dir");
+    let script = dir.join("cargo");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             [ \"$1\" = test ] || exit 1\n\
+             echo '     Running unittests src/lib.rs (/t/debug/deps/widget-d3f97a3eacd4af69)' >&2\n\
+             echo 'running {passed} tests'\n\
+             echo 'test result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; \
+             {filtered} filtered out; finished in 0.00s'\n"
+        ),
+    )
+    .expect("write fake cargo");
+    let mut perms = std::fs::metadata(&script).expect("meta").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).expect("chmod");
+}
+
+/// #11661 (criterion 2): a `cargo test` that exits 0 while a target ran no
+/// test and filtered out every one, with no filter requested, fails the lease
+/// loudly naming the target. A requested filter, or a target that ran tests,
+/// keeps the build's own exit 0.
+#[test]
+fn a_cargo_test_target_that_filters_out_every_test_unasked_fails_11661() {
+    let home = home_with_ceiling_and_cargo(2);
+    let path = |bin: &Path| {
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    };
+    let run = |bin: &Path, cargo_args: &[&str]| {
+        build_lease(home.path())
+            .env("PATH", path(bin))
+            .args(["--wait-secs", "3", "--", "cargo", "test"])
+            .args(cargo_args)
+            .output()
+            .expect("run")
+    };
+    let empty = home.path().join("empty-bin");
+    fake_libtest_cargo(&empty, 0, 1656);
+    let out = run(&empty, &["-p", "widget"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(65), "{err}");
+    assert!(
+        err.contains("widget-d3f97a3eacd4af69") && err.contains("1656 filtered out"),
+        "the empty target is named: {err}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("test result: ok. 0 passed"),
+        "the build's own output is still forwarded"
+    );
+    let out = run(&empty, &["-p", "widget", "some_name"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a requested filter: {}",
+        stderr(&out)
+    );
+    let ran = home.path().join("ran-bin");
+    fake_libtest_cargo(&ran, 18, 0);
+    let out = run(&ran, &["-p", "widget"]);
+    assert_eq!(out.status.code(), Some(0), "tests ran: {}", stderr(&out));
+}
+
+/// #11661 (criterion 1): a kept (pinned, non-shared) `CARGO_TARGET_DIR` gets
+/// the slot's stale-checkout guard. A fingerprint left by another checkout is
+/// cleared, so cargo rebuilds instead of running that checkout's binary; the
+/// same checkout keeps its fingerprints.
+#[test]
+fn a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661() {
+    let home = home_with_ceiling(2, "");
+    let (a, b) = (home.path().join("a"), home.path().join("b"));
+    git_repo(&a, None);
+    git_repo(&b, None);
+    let kept = home.path().join("kept-target");
+    let fingerprint = kept.join("debug/.fingerprint/widget-0123456789abcdef");
+    let run = |dir: &Path| {
+        std::fs::create_dir_all(&fingerprint).expect("fingerprint");
+        let out = build_lease(home.path())
+            .current_dir(dir)
+            .env("CARGO_TARGET_DIR", &kept)
+            .args(["--wait-secs", "3", "--", "true"])
+            .output()
+            .expect("run");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        (fingerprint.exists(), stderr(&out))
+    };
+    let (kept_fp, err) = run(&a);
+    assert!(
+        !kept_fp,
+        "an unrecorded checkout's fingerprints are cleared: {err}"
+    );
+    let (kept_fp, err) = run(&a);
+    assert!(kept_fp, "the same checkout keeps its fingerprints: {err}");
+    let (kept_fp, err) = run(&b);
+    assert!(
+        !kept_fp && err.contains(&a.canonicalize().expect("a").display().to_string()),
+        "another checkout's fingerprints are cleared and the checkout named: {err}"
+    );
+}
+
+/// #11661 (critic item 2): a leased command that wraps its `cargo test` in a
+/// shell cannot have its filter read, so the empty-target check does not run
+/// — and the lease says so on stderr instead of skipping it silently.
+#[test]
+fn a_wrapped_cargo_test_says_the_empty_target_check_did_not_run_11661() {
+    let home = home_with_ceiling(2, "");
+    let out = build_lease(home.path())
+        .args([
+            "--wait-secs",
+            "3",
+            "--",
+            "sh",
+            "-c",
+            "true cargo test -p widget",
+        ])
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        err.contains("empty-test-target check (#11661) did not run"),
+        "the skipped check is named: {err}"
+    );
+}
+
+/// #11661 (critic item 6): with no lease to take, a build that runs UNLEASED
+/// in a kept `CARGO_TARGET_DIR` still gets the stale-checkout guard.
+#[test]
+#[serial_test::serial(lease_processes)]
+fn an_unleased_build_in_a_kept_target_dir_is_still_guarded_11661() {
+    let home = home_with_ceiling(64, "");
+    // The production resolver names the store this test makes unusable.
+    let store = trusty_mpm::core::build_lease::store::canonical_path(home.path());
+    std::fs::write(store, "a file").expect("file");
+    let blocker = home.path().join("tmp-is-a-file");
+    std::fs::write(&blocker, "x").expect("file");
+    let kept = home.path().join("kept-target");
+    let fingerprint = kept.join("debug/.fingerprint/widget-0123456789abcdef");
+    std::fs::create_dir_all(&fingerprint).expect("fingerprint");
+    let out = build_lease(home.path())
+        .env("TMPDIR", blocker.join("sub"))
+        .env("TRUSTY_MPM_TEST_BUILD_SLOT_FALLBACK", blocker.join("store"))
+        .env("CARGO_TARGET_DIR", &kept)
+        .args(["--wait-secs", "3", "--", "true"])
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("UNLEASED"), "the build ran unleased: {err}");
+    assert!(
+        !fingerprint.exists(),
+        "an unrecorded checkout's fingerprints are cleared: {err}"
+    );
+}
+
+/// #11661 (Architect ruling 23:30Z): a build outside the lease, from another
+/// checkout, rewrites a unit's fingerprint in a kept directory whose marker
+/// still names checkout A. A's next lease must not trust the marker alone:
+/// the seal its last lease wrote no longer matches, so it clears. A lease
+/// after only A's own leased builds clears nothing.
+#[test]
+fn an_unleased_build_of_another_checkout_cannot_pass_as_this_one_11661() {
+    let home = home_with_ceiling(2, "");
+    let a = home.path().join("a");
+    git_repo(&a, None);
+    let kept = home.path().join("kept-target");
+    let unit = kept.join("debug/.fingerprint/widget-0123456789abcdef");
+    let file = unit.join("lib-widget");
+    let lease = |build: &[String]| {
+        let out = build_lease(home.path())
+            .current_dir(&a)
+            .env("CARGO_TARGET_DIR", &kept)
+            .args(["--wait-secs", "3", "--"])
+            .args(build)
+            .output()
+            .expect("run");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        stderr(&out)
+    };
+    // A's leased build writes the unit's fingerprint.
+    let build = format!(
+        "mkdir -p '{}' && printf 0123456789abcdef > '{}'",
+        unit.display(),
+        file.display()
+    );
+    lease(&["sh".into(), "-c".into(), build]);
+    assert!(file.exists(), "A's build wrote its fingerprint");
+    let err = lease(&["true".into()]);
+    assert!(
+        file.exists(),
+        "no spurious clear after A's own lease: {err}"
+    );
+    // Checkout B rebuilds the unit with no lease: same name and size, new mtime.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&file, "0123456789abcdef").expect("B's unleased build");
+    let err = lease(&["true".into()]);
+    assert!(
+        !file.exists(),
+        "A's next lease clears what the unleased build wrote: {err}"
+    );
+    assert!(err.contains("changed since"), "the reason is named: {err}");
+}
