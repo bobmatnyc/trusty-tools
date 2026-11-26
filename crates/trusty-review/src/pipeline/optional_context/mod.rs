@@ -235,6 +235,8 @@ pub struct ReviewOptions {
     /// #11899: the repo-named review skills to load at the base sha; `None`
     /// loads none and leaves the prompt and the record unchanged.
     pub(crate) repo_skills: Option<crate::pipeline::repo_skills::RepoSkillsInput>,
+    /// #11899 step 2: how `repo_skills` reads the base commit.
+    pub(crate) repo_skills_reader: crate::pipeline::repo_skills::SkillsReader,
 }
 
 /// Builds the external context sources a review gathers from (#9194 seam).
@@ -251,7 +253,23 @@ impl ReviewOptions {
             ticket_fetcher: None,
             prompts: None,
             repo_skills: None, // #11899
+            repo_skills_reader: Default::default(),
         }
+    }
+
+    /// Reviews with the base repo's skills read through the Contents API.
+    ///
+    /// Why: #11899 step 2 — the hosted webhook path has no checkout (DOC-93 RS-38).
+    /// What: the `[[review.skills]]` entries and each `SKILL.md` are read at
+    /// the PR base SHA from the reviewed repository through the
+    /// contents-at-ref reader, under the same rules as the checkout path.
+    /// Test: `hosted_review_options_read_through_the_contents_api`,
+    /// `runner_hosted_review_loads_base_skill_into_the_system_prompt`.
+    pub(crate) fn with_hosted_repo_skills(mut self) -> Self {
+        let input = crate::pipeline::repo_skills::RepoSkillsInput::from_repo_config(None);
+        self.repo_skills = Some(input);
+        self.repo_skills_reader = crate::pipeline::repo_skills::SkillsReader::ContentsAtRef;
+        self
     }
 
     /// Reviews with the repo-named skills in `input` (#11899).

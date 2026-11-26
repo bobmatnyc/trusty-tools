@@ -161,7 +161,7 @@ fn load_one(
             let why = format!("{path} or a directory above it is not a regular file (mode {mode})");
             return Err((SkipKind::Unreadable, why));
         }
-        BlobRead::Error(e) => return Err((SkipKind::Unreadable, format!("git: {e}"))),
+        BlobRead::Error(e) => return Err((SkipKind::Unreadable, e)), // #11899: the store names its source
     };
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Err((SkipKind::Unreadable, "SKILL.md is not UTF-8".into()));

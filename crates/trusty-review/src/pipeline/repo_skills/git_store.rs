@@ -28,7 +28,7 @@ pub(crate) enum BlobRead {
     TooLarge(usize),
     /// The blob's bytes (at most the cap).
     Bytes(Vec<u8>),
-    /// git failed; carries the first line of its error.
+    /// The read failed; carries the cause, prefixed with its source.
     Error(String),
 }
 
@@ -86,6 +86,16 @@ impl GitObjectStore {
 
 impl BaseTree for GitObjectStore {
     fn read(&self, path: &str, cap: usize) -> BlobRead {
+        // #11899: an error names its source, as the hosted reader's do.
+        match self.read_blob(path, cap) {
+            BlobRead::Error(e) => BlobRead::Error(format!("git: {e}")),
+            read => read,
+        }
+    }
+}
+
+impl GitObjectStore {
+    fn read_blob(&self, path: &str, cap: usize) -> BlobRead {
         // `-z` keeps the path unquoted; the commit is validated hex, so it can
         // never be read as an option.
         let listing = match self.git(&["ls-tree", "-z", &self.commit, "--", path]) {

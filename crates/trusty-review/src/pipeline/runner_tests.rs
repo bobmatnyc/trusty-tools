@@ -2954,3 +2954,7 @@ mod prompts_from_content;
 // #11899: repo-named review skills read at the base commit, end to end.
 #[path = "runner_repo_skills_tests.rs"]
 mod repo_skills;
+
+// #11899 step 2: hosted repo skills read through the Contents API, end to end.
+#[path = "runner_hosted_skills_tests.rs"]
+mod hosted_repo_skills;
