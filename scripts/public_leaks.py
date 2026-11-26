@@ -16,7 +16,8 @@ What: scans `git ls-files` (or the paths given, for the pre-commit hook) with
   baselined: every hit fails unless its (path, sha256 of the matched run) pair
   is listed, with a hit count and a reason, in
   scripts/public_leak_private_allowlist.tsv. No matched text is printed.
-  A PUB_* class applies only under PUBLISHED_PREFIXES (#11720).
+  A PUB_* class applies only under PUBLISHED_PREFIXES (#11720). A file's own
+  path is matched against PRIVATE_NAME only, never a content pattern (#11641).
   Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
 Test: scripts/check_public_leaks_selftest.sh
 """
@@ -228,8 +229,11 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
             continue
         hits[(rel, cls)] += 1
         lines.setdefault((rel, cls), num)
-    for rel, _ in files:  # a path that itself names a private place is a hit too
-        for cls, rx, ok in rules + (pub_rules if rel.startswith(PUBLISHED_PREFIXES) else []):
+    # #11641: a file's own path is matched against PRIVATE_NAME only; the content
+    # patterns read content, so a home/ directory in a source path is no operator path.
+    path_rules = [r for r in rules if r[0] == PRIVATE]
+    for rel, _ in files:  # a path that itself spells a private name is a hit too
+        for cls, rx, ok in path_rules:
             bad = [m.group(0) for m in rx.finditer(rel) if ok is None or not ok.fullmatch(m.group(0))]
             if any(not _excused(allow, cls, rel, tok) for tok in bad):
                 hits[(rel, cls)] += 1

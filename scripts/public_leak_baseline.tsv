@@ -992,24 +992,8 @@ crates/trusty-mpm/src/tui/architect/data.rs	ARCH_ID	1
 crates/trusty-mpm/src/tui/architect/live.rs	ARCH_ID	1
 crates/trusty-mpm/src/tui/architect/mod.rs	ARCH_ID	1
 crates/trusty-mpm/src/tui/architect/tests.rs	ARCH_ID	1
-crates/trusty-mpm/src/tui/home/analyze_probe_tests.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/console.rs	ARCH_ID	1
-crates/trusty-mpm/src/tui/home/console.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/console_fleet_status_tests.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/console_tests.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/machine.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/machine_cards.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/machine_tests.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/metrics_uds.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/metrics_uds_tests.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/mod.rs	ARCH_ID	1
-crates/trusty-mpm/src/tui/home/mod.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/no_uds_endpoint_tests.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/probe.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/render.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/services.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/state.rs	OPERATOR_PATH	1
-crates/trusty-mpm/src/tui/home/tests.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/mod.rs	ARCH_ID	1
 crates/trusty-mpm/src/tui/project_ctl/launch_ops.rs	ARCH_ID	1
 crates/trusty-mpm/src/tui/project_ctl/state/launch.rs	ARCH_ID	1
@@ -1221,7 +1205,6 @@ docs/adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md	
 docs/adr/0069-remote-memory-store-api-spec-location.md	RULING_DATED	1
 docs/adr/0072-probes-run-inside-the-secrets-server-and-a-type-is-index-metadata.md	HOSTNAME	1
 docs/adr/0076-cloud-sled-network-boundary.md	EVO_HOST	2
-docs/briefs/2026-11-17-il-talk-id-and-r-conflict.md	BRIEF_PATH	1
 docs/design/UI/Current UI.dc.html	OPERATOR_PATH	8
 docs/design/UI/Foundry Screens.dc.html	OPERATOR_PATH	10
 docs/design/UI/Foundry Spec.dc.html	OPERATOR_PATH	2
