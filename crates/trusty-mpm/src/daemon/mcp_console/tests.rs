@@ -30,6 +30,8 @@ async fn config_read_returns_resolved_root() {
         got["workspace_root"].is_string() && !got["workspace_root"].as_str().unwrap().is_empty(),
         "workspace_root must be a non-empty resolved path: {got}"
     );
+    // #11821 P5: the install-paths view rides on every config_read.
+    assert!(got["install_paths"].is_object(), "install_paths: {got}");
 }
 
 /// Why: `config_to_json` must surface the #2184 `github`/`projects` fields
@@ -708,4 +710,54 @@ fn config_write_refusal_never_echoes_file_content() {
         err.contains(&path.display().to_string()),
         "the refusal must name the config path: {err}"
     );
+}
+
+/// Why: #11821 P5 — on a broken `install.toml` the Config tab must show the
+/// resolver's error, never the `$HOME` default paths.
+/// Test: this test.
+#[test]
+fn install_paths_json_reports_a_broken_install_file() {
+    let file = std::path::Path::new("/scratch/.trusty-tools/install.toml");
+    let got = install_paths_to_json(Err(crate::test_support::broken_install_error()), Some(file));
+    assert!(
+        got["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("install.toml")),
+        "the error must name the install file: {got}"
+    );
+    assert!(got["projects_root"].is_null(), "no fallback root: {got}");
+    assert!(got["config_dir"].is_null(), "no fallback config dir: {got}");
+    assert_eq!(got["install_file"], file.to_string_lossy().as_ref());
+}
+
+/// Why: #11821 P5 — the Config tab shows each path with the rung that won.
+/// Test: this test.
+#[test]
+fn install_paths_json_reports_paths_and_sources() {
+    use trusty_common::install_paths::{
+        InstallFile, InstallPaths, PathOverrides, write_install_file,
+    };
+    let home = tempfile::tempdir().expect("scratch home");
+    let projects = home.path().join("moved-projects");
+    let values = InstallFile {
+        projects_root: Some(projects.clone()),
+        ..InstallFile::default()
+    };
+    write_install_file(home.path(), &values).expect("write install.toml");
+    let paths = InstallPaths::resolve_with(|_| None, home.path(), &PathOverrides::default());
+
+    let got = install_paths_to_json(paths, None);
+
+    assert!(got["error"].is_null(), "{got}");
+    assert_eq!(
+        got["projects_root"]["path"],
+        projects.to_string_lossy().as_ref()
+    );
+    assert_eq!(got["projects_root"]["source"], "install-file");
+    assert_eq!(
+        got["config_dir"]["path"],
+        home.path().to_string_lossy().as_ref()
+    );
+    assert_eq!(got["config_dir"]["source"], "default");
+    assert!(got["install_file"].is_null(), "{got}");
 }
