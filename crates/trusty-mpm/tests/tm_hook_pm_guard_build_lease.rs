@@ -703,3 +703,30 @@ fn an_unparseable_build_is_refused_not_passed_through_11886() {
         Verdict11886::Refused,
     );
 }
+
+/// #11886 critic round 1: tool paths under an expanded directory and a build
+/// after a `#` comment holding an apostrophe are not refused; the build leases.
+#[test]
+fn expanded_tool_paths_and_commented_builds_pass_11886() {
+    for command in [
+        "$CARGO_TARGET_DIR/debug/tm doctor",
+        "\"$CARGO_TARGET_DIR/debug/tm\" fleet status --tmux",
+        "$HOME/.cargo/bin/cargo fmt",
+        "\"$CARGO_HOME/bin/cargo\" metadata",
+        "$HOME/.cargo/bin/rustup show",
+        // Leased by the classifier (unit: `expansions_are_refused_only_in_a_heavy_position`);
+        // here the #8879 script guard refuses it, as the sandbox has no such file.
+        "$HOME/.cargo/bin/cargo test",
+    ] {
+        assert_ne!(verdict_11886(command), Verdict11886::Refused, "{command}");
+    }
+    assert_all_11886(
+        &[
+            "# run the crate's tests\ncargo test -p trusty-mpm --no-fail-fast",
+            "watch -n 5 'cargo check'",
+            "parallel 'cargo test -p {}' ::: a b",
+            "flock /tmp/l -c 'cargo test'",
+        ],
+        Verdict11886::Leased,
+    );
+}

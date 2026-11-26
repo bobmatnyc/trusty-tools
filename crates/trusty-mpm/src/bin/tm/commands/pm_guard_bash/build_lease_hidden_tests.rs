@@ -148,3 +148,47 @@ fn wrapper_operands_runners_and_coproc_are_leased_in_place() {
         assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
     }
 }
+
+/// #11886 critic round 1: an expanded tool path or a `#` comment holding a
+/// quote is no hidden build.
+#[test]
+fn expanded_tool_paths_and_commented_builds_are_not_refused() {
+    assert_not_refused(&[
+        "$CARGO_TARGET_DIR/debug/tm doctor",
+        "\"$CARGO_TARGET_DIR/debug/tm\" fleet status --tmux",
+        "$HOME/.cargo/bin/cargo fmt",
+        "\"$CARGO_HOME/bin/cargo\" metadata",
+        "$HOME/.cargo/bin/rustup show",
+        "$CARGO fmt",
+    ]);
+    for (input, want) in [
+        (
+            "# run the crate's tests\ncargo test -p trusty-mpm --no-fail-fast",
+            "# run the crate's tests\ntm build-lease -- cargo test -p trusty-mpm --no-fail-fast",
+        ),
+        (
+            "\"$CARGO_HOME/bin/cargo\" test",
+            "tm build-lease -- \"$CARGO_HOME/bin/cargo\" test",
+        ),
+    ] {
+        assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
+    }
+    assert_refused(&["$CARGO test", "$CARGO $verb", "cargo test -p 'x # note"]);
+}
+
+/// #11886 critic round 1: a runner's quoted command operand is leased whole.
+#[test]
+fn a_runners_quoted_command_is_leased_whole() {
+    for input in [
+        "watch -n 5 'cargo check'",
+        "parallel 'cargo test -p {}' ::: a b",
+        "flock /tmp/l -c 'cargo test'",
+    ] {
+        assert_eq!(
+            rw(input),
+            LeaseRewrite::Rewrite(format!("tm build-lease -- {input}")),
+            "{input}"
+        );
+    }
+    assert_eq!(rw("watch -n 5 'git status'"), LeaseRewrite::None);
+}
