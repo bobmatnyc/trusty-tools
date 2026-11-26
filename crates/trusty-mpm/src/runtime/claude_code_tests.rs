@@ -2322,3 +2322,74 @@ fn inplace_relaunch_applies_the_sandbox_and_refuses_an_unverified_one() {
         .expect_err("an unverified sandbox refuses the relaunch");
     assert!(err.to_string().contains("settings.local.json"), "{err}");
 }
+
+/// #10102 critic CRITICAL: with the config base off `$HOME` (#11821 P3), the
+/// spawn, resume and in-place relaunch name the real home's `.ssh` and `.aws`
+/// in `denyRead` and the `Read(...)` deny rules, never the config base's.
+#[test]
+#[serial_test::serial]
+fn a_split_config_base_sandbox_names_the_real_home() {
+    // #9123: every path resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let base_tmp = tempfile::tempdir().expect("config base");
+    let base = base_tmp.path();
+    let root = base.join(".trusty-mpm");
+    let ws = |name: &str| {
+        let dir = home.home().join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir ws");
+        dir
+    };
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &root);
+    let spawned = ws("spawned");
+    adapter
+        .spawn("tm-sess", &spawned, "task", TEST_SESSION_ID, &[])
+        .expect("spawn");
+    let resumed = ws("resumed");
+    adapter
+        .spawn_resume(
+            "tm-sess",
+            None,
+            &resumed,
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("resume");
+    let relaunched = ws("relaunched");
+    let prompts = ws("prompts");
+    let fw = FrameworkPaths::from_root(&root);
+    build_inplace_resume_command_with(&fw, &prompts, &relaunched, None).expect("relaunch");
+
+    for dir in [&spawned, &resumed, &relaunched] {
+        let raw = std::fs::read_to_string(dir.join(".claude/settings.json")).expect("settings");
+        let settings: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        let deny_read = &settings["sandbox"]["filesystem"]["denyRead"];
+        let deny = &settings["permissions"]["deny"];
+        for secret in [".ssh", ".aws"] {
+            let real = home.home().join(secret).display().to_string();
+            let named = |v: &serde_json::Value| {
+                v.as_array()
+                    .expect("array")
+                    .iter()
+                    .any(|e| e.as_str().is_some_and(|s| s.contains(&real)))
+            };
+            assert!(
+                named(deny_read),
+                "{dir:?} denyRead lacks {real}: {deny_read}"
+            );
+            assert!(named(deny), "{dir:?} deny lacks {real}: {deny}");
+            let wrong = base.join(secret).display().to_string();
+            assert!(
+                !raw.contains(&wrong),
+                "{dir:?} names the config base: {raw}"
+            );
+        }
+    }
+}

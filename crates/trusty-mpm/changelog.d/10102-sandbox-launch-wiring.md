@@ -7,3 +7,4 @@ Security
 - `tm run <alias>` writes and verifies the PM sandbox before `claude` starts, like the other launch paths (#10102).
 - A corrupt `.trusty-mpm/sandbox-roles.json` now refuses the launch and names the file, instead of being reset and letting an Architect launch overwrite a recorded PM sandbox (#10102).
 - `tm session start` in place writes and verifies the PM sandbox before it registers the session; with no tm-owned config dir it refuses and points at `tm launch` / `tm connect` (#10102).
+- The sandbox always names your real home's `~/.ssh`, `~/.aws` and `~/.cargo`, even when `TRUSTY_MPM_CONFIG_DIR` or `install.toml` moves tm's config base off `$HOME`; a launch with no resolvable home is refused (#10102).
