@@ -163,7 +163,10 @@ pub fn diff(path: &Path) -> Result<Diff, IlScheduleError> {
 /// the result parses as a [`Schedule`], and publishes it atomically.
 /// Test: `an_edited_v0_file_survives_an_update_and_takes_the_preset_changes`,
 /// `an_update_is_idempotent`, `an_update_of_an_absent_file_writes_the_preset`,
-/// `a_failed_backup_aborts_the_update_and_the_file_is_unchanged`.
+/// `a_failed_backup_aborts_the_update_and_the_file_is_unchanged`,
+/// `a_parse_failure_aborts_the_update_and_the_file_is_unchanged`,
+/// `a_failed_write_aborts_the_update_and_the_file_is_unchanged`,
+/// `a_failed_lock_aborts_the_update_and_the_file_is_unchanged`.
 pub fn upgrade(path: &Path) -> Result<Outcome, IlScheduleError> {
     let write_err = |source| IlScheduleError::Write {
         path: path.to_path_buf(),

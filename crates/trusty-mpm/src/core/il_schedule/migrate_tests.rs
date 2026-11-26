@@ -282,3 +282,56 @@ fn an_edit_keeps_the_schema_version() {
     update(&file, |s| s.enroll("tm-a", &project, None)).expect("enroll");
     assert_eq!(json_of(&file)["schema_version"], json!(SCHEMA_VERSION));
 }
+
+/// The `.v0.bak` path [`upgrade`] backs a v0 `file` up to.
+fn backup_of(file: &Path) -> PathBuf {
+    file.with_file_name("il-schedule.json.v0.bak")
+}
+
+/// #11002: a file `Schedule` refuses is a parse error before any write.
+#[test]
+fn a_parse_failure_aborts_the_update_and_the_file_is_unchanged() {
+    let (_tmp, file) = fixture();
+    let original = "{\"sessions\": 7}\n";
+    std::fs::write(&file, original).expect("seed unparsable v0");
+    let err = upgrade(&file).expect_err("the parse must fail");
+    assert!(matches!(err, IlScheduleError::Parse { .. }), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), original);
+    assert_eq!(json_of(&file).get("schema_version"), None);
+    assert!(!backup_of(&file).exists(), "no backup before validation");
+}
+
+/// #11002: a failed publish is an error and leaves the file at its version.
+#[cfg(unix)] // the symlink below is Unix-only
+#[test]
+fn a_failed_write_aborts_the_update_and_the_file_is_unchanged() {
+    let (tmp, file) = fixture();
+    let original = edited_v0(tmp.path());
+    // `write_atomic` refuses a symlink target; the read and the backup follow it.
+    let real = file.with_file_name("real-il-schedule.json");
+    std::fs::write(&real, &original).expect("seed v0");
+    std::os::unix::fs::symlink(&real, &file).expect("link");
+    let err = upgrade(&file).expect_err("the write must fail");
+    assert!(
+        matches!(&err, IlScheduleError::Write { path, .. } if *path == file),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&real).expect("read"), original);
+    assert_eq!(json_of(&file).get("schema_version"), None);
+    assert!(std::fs::symlink_metadata(&file).expect("meta").is_symlink());
+}
+
+/// #11002: a lock that cannot be taken is an error before any read or write.
+#[test]
+fn a_failed_lock_aborts_the_update_and_the_file_is_unchanged() {
+    let (tmp, file) = fixture();
+    let original = edited_v0(tmp.path());
+    std::fs::write(&file, &original).expect("seed v0");
+    // A directory at the lock sidecar makes the lock open fail.
+    std::fs::create_dir(trusty_common::file_lock::lock_path(&file)).expect("block");
+    let err = upgrade(&file).expect_err("the lock must fail");
+    assert!(matches!(err, IlScheduleError::Write { .. }), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), original);
+    assert_eq!(json_of(&file).get("schema_version"), None);
+    assert!(!backup_of(&file).exists(), "no backup without the lock");
+}
