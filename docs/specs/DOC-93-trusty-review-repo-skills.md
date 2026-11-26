@@ -84,7 +84,11 @@ Validation. Each failure skips the skill:
 
 Other frontmatter keys are ignored. Files beside `SKILL.md` in the skill directory are never read.
 
-- RS-43. A skill whose text contains the word `REPO-SKILL` is skipped with kind `unreadable`. The word delimits skills in the prompt (§7).
+- RS-43. A skill whose text could read as a fence marker is skipped with kind `unreadable`. The word `REPO-SKILL` and the `<<<`/`>>>` runs delimit skills in the prompt (§7). The check normalises the text, then tests it:
+  - Normalisation: fullwidth characters become ASCII, bracket lookalikes become `<` or `>`, zero-width and other format characters are dropped, and the result is lowercased.
+  - Any `<<<` or `>>>` run in the normalised text is rejected.
+  - The text is rejected when it contains `reposkill` once every non-alphanumeric character is removed. `repo-skill`, `REPO_SKILL` and a hyphen lookalike all match.
+  - Known false positive: plain text such as "repo skill" is refused.
 
 ## 4. Source {#SPEC-REVSKILL-04~draft}
 
@@ -100,10 +104,10 @@ Other frontmatter keys are ignored. Files beside `SKILL.md` in the skill directo
 **ID:** SPEC-REVSKILL-05~draft
 
 - RS-20. trusty-review reads `.trusty-review.toml` skill entries and every `SKILL.md` at the base commit of the pull request, the tip of the target branch the pull request merges into. It never reads them from the head commit or the working tree. A pull request cannot change the skill that reviews it.
-- RS-21. A pull request from a fork loads no repository skill. The fork test is `head_is_fork`: the head label owner and the base label owner differ, or a label has no `owner:` prefix. On the local path, when the base commit is present, the configuration is read at the base and every entry is listed as skipped with kind `fork`. The record has `fork: true`. The review states that repository skills were not loaded and why.
+- RS-21. A pull request from a fork loads no repository skill. The fork test is `head_is_fork`: the head label owner and the base label owner differ, or a label has no `owner:` prefix. A fork pull request always records `repo_skills` with `fork: true` and the base sha, whether or not the base commit is readable. When the base commit is readable, the configuration is read at the base and every entry is listed as skipped with kind `fork`. The review body says: "none loaded. This PR comes from a fork, so repository skills were not loaded and no repository skill text was used."
 - RS-22. A same-repository pull request loads skills at the base commit.
 - RS-44. A review of a range, `--base <ref>`, reads the configuration and skills at the commit `<ref>` resolves to in the repository root. A range review has no fork signal, so it never sets `fork`. An empty `<ref>`, or one starting with `-`, is refused and no skill loads.
-- RS-45. Reading the base commit needs a local checkout that holds it. A GitHub pull request review with no checkout, or whose base commit is not fetched, reads nothing. So does a review of a diff file or standard input. The configuration cannot be read, so no skill loads and no record is written. A review given an explicit request list records every request as skipped with kind `no_base`.
+- RS-45. Reading the base commit needs a local checkout that holds it. A GitHub pull request review with no checkout, or whose base commit is not fetched, reads nothing. So does a review of a diff file or standard input. The configuration cannot be read, so no skill loads and no record is written. A fork pull request is the exception: RS-21 still records it. A review given an explicit request list records every request as skipped with kind `no_base`.
 
 Reading the base commit rather than the head means the skills are the ones the target branch already accepted. A skill added by the pull request itself takes effect for later pull requests, after it merges.
 
@@ -122,13 +126,14 @@ Reading the base commit rather than the head means the skills are the ones the t
 | `invalid glob` | `invalid_glob` | An `apply_to` entry does not parse. |
 | `not applicable` | `not_applicable` | No changed file matches `apply_to`. |
 | `not found` | `not_found` | No `SKILL.md` at that path at the base commit. |
-| `unreadable` | `unreadable` | A read error, a directory, a symlink, text that is not UTF-8, or text containing `REPO-SKILL`. |
+| `unreadable` | `unreadable` | A read error, a directory, a symlink, text that is not UTF-8, or text that matches the fence rule (RS-43). |
 | `invalid frontmatter` | `invalid_frontmatter` | RS-11, RS-12, RS-13 or RS-15 fails. |
 | `over per-skill cap` | `over_skill_cap` | The file exceeds 8 KiB. |
 | `over total cap` | `over_total_cap` | Adding the skill exceeds 24 KiB. |
 | `malformed entry` | `malformed_entry` | RS-41. |
 | `fork pull request` | `fork` | RS-21. |
 | `no base commit` | `no_base` | RS-45. |
+| `over entry cap` | `over_entry_cap` | RS-51. |
 
 Each skipped skill carries a one-line reason beside its kind.
 
@@ -136,6 +141,9 @@ Each skipped skill carries a one-line reason beside its kind.
 - RS-27. A skill never makes the review fail. Every skill error is a skip, and the review completes with the skills that loaded.
 
 - RS-46. The `.trusty-review.toml` read at the base commit is capped at 64 KiB. A larger file is treated as absent: no skill loads and no record is written.
+- RS-50. The review-body notice renders each name, reason and sha as one code span. Backticks and control or invisible characters are removed from the text, and each field is at most 160 characters. The notice is at most 8,000 characters. It is cut at a line boundary, and a final line reads "N more line(s) omitted; the review record lists them all".
+- RS-51. At most 32 `[[review.skills]]` entries are processed. The rest become one skip of kind `over_entry_cap`, labelled "over entry cap" and named `entries 33-N`, where N is the entry count.
+- RS-52. Each git read has a 10-second timeout. A timeout is a skipped read (RS-27), never a review failure.
 
 ## 7. Prompt placement {#SPEC-REVSKILL-07~draft}
 
