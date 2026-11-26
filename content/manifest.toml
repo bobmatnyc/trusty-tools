@@ -264,7 +264,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/agents/drift-guard.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/agents/event-extractor.md"
@@ -276,7 +276,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/agents/improver.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/agents/runner.md"
@@ -295,10 +295,6 @@ path = "instructions/architect/skills/architect-drift-check.md"
 version = "0.1.0"
 
 [[member]]
-path = "instructions/architect/skills/architect-drift-guard.md"
-version = "0.1.0"
-
-[[member]]
 path = "instructions/architect/skills/architect-github.md"
 version = "0.1.0"
 
@@ -309,10 +305,6 @@ version = "0.2.1"
 [[member]]
 path = "instructions/architect/skills/architect-improvements.md"
 version = "0.3.1"
-
-[[member]]
-path = "instructions/architect/skills/architect-improver.md"
-version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-macos.md"
