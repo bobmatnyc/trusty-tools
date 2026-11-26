@@ -262,7 +262,11 @@ fn reset_refuses_a_newer_schema_without_force() {
 #[test]
 fn reset_force_still_repairs_a_malformed_file() {
     let (_tmp, file) = fixture();
-    for bad in ["not json", "{\"schema_version\": 1, \"sessions\": 7}", "[2]"] {
+    for bad in [
+        "not json",
+        "{\"schema_version\": 1, \"sessions\": 7}",
+        "[2]",
+    ] {
         std::fs::write(&file, bad).expect("seed malformed");
         assert!(reset(&file, true).expect("force").changed, "{bad}");
         assert_eq!(std::fs::read_to_string(&file).expect("read"), PRESET);
