@@ -1,6 +1,6 @@
 //! Size caps on `POST /indexes` / `search.index.create` (#11655).
 //!
-//! Why: caps apply when an index is registered (Architect ruling 2026-11-26),
+//! Why: caps apply when an index is registered (see #11655),
 //! and a re-registration of an existing id returns early. Without a signal, a
 //! user who adds caps to the yaml for an existing index gets no effect and no
 //! warning.

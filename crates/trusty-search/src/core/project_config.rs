@@ -93,7 +93,7 @@ pub struct ProjectConfig {
     /// (`walker::MAX_FILE_BYTES`).
     ///
     /// Why: a project with large source or text files can index them without
-    /// raising the cap for every index (owner option A on #11655).
+    /// raising the cap for every index (#11655).
     /// What: `1..=size_caps::MAX_CONFIGURABLE_FILE_BYTES` (256 MiB); 0 or a
     /// larger value fails config loading. Sent to the daemon when the index
     /// is registered; an already-registered index keeps the caps it was

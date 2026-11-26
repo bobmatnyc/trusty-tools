@@ -1,7 +1,7 @@
 //! Configurable size caps (#11655).
 //!
 //! Why: the source (1 MiB) and office/PDF (10 MiB) caps were constants; the
-//! owner's option-A ruling makes both settable per index, with the defaults
+//! #11655 makes both settable per index, with the defaults
 //! unchanged and a hard ceiling. A cap raised at one gate and still enforced
 //! at the old value at another is the defect these tests guard against.
 //! What: a raised source cap indexes a file over the old default end to end;

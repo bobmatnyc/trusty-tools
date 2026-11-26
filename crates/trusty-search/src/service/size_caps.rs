@@ -2,7 +2,7 @@
 //!
 //! Why: the 1 MiB source cap and the 10 MiB office/PDF cap were constants, so
 //! a project with legitimately large documents could not index them (#11651).
-//! The owner chose option A on #11655: keep both defaults, make each settable
+//! #11655 keeps both defaults, makes each settable
 //! per index in project config, and keep a hard ceiling so the #3373 DoS bound
 //! still holds.
 //! What: [`FileSizeCaps`] carries the two resolved caps. Every size gate reads

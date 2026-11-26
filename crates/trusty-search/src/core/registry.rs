@@ -369,7 +369,7 @@ pub struct IndexHandle {
     /// #11655: the per-index source and office/PDF size caps.
     ///
     /// Why: a project with large documents must be able to index them
-    /// without lifting the cap for every index (#11651, option A).
+    /// without lifting the cap for every index (#11651, #11655).
     /// What: resolved from `PersistedIndex::{source,office}_file_max_bytes`
     /// (`None` = 1 MiB / 10 MiB) and read by every size gate through
     /// `WalkOptions::size_caps` and `core::extract::read_content_with_cap`.
