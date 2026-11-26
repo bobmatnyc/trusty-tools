@@ -169,6 +169,7 @@ mod tests {
                 repo_url: "https://github.com/acme/widget".to_string(),
                 live_count: 1,
                 total_count: 1,
+                decommissioned: false,
             }],
             ..Default::default()
         };
