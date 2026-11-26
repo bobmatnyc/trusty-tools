@@ -12,6 +12,8 @@
 //! shape, or `None`. [`unparseable_build_refusal`] is the fail-closed arm: a
 //! command whose quoting or here-document the scan cannot read, and whose raw
 //! words still name a heavy build, is refused, never passed through.
+//! [`unleased_build_refusal`] is the catch-all: a heavy build named by an
+//! unquoted word that no lease insertion covers is refused.
 //! Test: `wrapper_operands_runners_and_coproc_are_leased_in_place` and its
 //! siblings in `build_lease_hidden_tests.rs`; the `*_11886` cases in
 //! `tests/tm_hook_pm_guard_build_lease.rs`.
@@ -87,6 +89,78 @@ pub(super) fn unparseable_build_refusal(
     let unreadable = bodies.is_unscannable() || !balanced_outside_bodies(command, bodies);
     (unreadable && mentions_heavy(command, heavy))
         .then(|| refusal("quoting or a here-document the hook cannot parse"))
+}
+
+/// The fail-closed refusal for a heavy build no lease insertion covers.
+///
+/// Why: #11886 owner ruling (2026-11-26, one fail-closed rule). The checks
+/// above name the shapes they know. Any other shape that names a heavy build
+/// and gets no lease would run bare in the shared target directory.
+/// What: walks every simple command of `command` and of each closed
+/// substitution body in `spans`. A word outside a here-document body whose
+/// basename is a heavy program, and whose words from there on
+/// [`heavy_program_offset`] reads as a heavy build, needs one of `inserts`
+/// inside its simple command; a `build-lease` word before it counts as
+/// leased. Otherwise the command is refused. A quoted word stays data, and a
+/// build a program starts without naming it (`make`, a script) is not seen.
+/// Test: `an_unleased_heavy_build_is_refused_whatever_its_shape`,
+/// `leased_builds_and_builds_named_by_no_word_are_not_refused`,
+/// `an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886`.
+pub(super) fn unleased_build_refusal(
+    command: &str,
+    heavy: &Heavy,
+    bodies: &HeredocBodies,
+    spans: &[(usize, Option<usize>)],
+    inserts: &[usize],
+) -> Option<String> {
+    let bodies_text = spans
+        .iter()
+        .filter_map(|&(start, end)| end.map(|end| (start, &command[start..end])));
+    for (base, text) in std::iter::once((0, command)).chain(bodies_text) {
+        let origin = text.as_ptr() as usize;
+        for seg in split_shell_segments_raw(text) {
+            let seg_at = base + (seg.as_ptr() as usize - origin);
+            let covered = |at: &usize| (seg_at..seg_at + seg.len()).contains(at);
+            if unleased_heavy_word(seg, seg_at, heavy, bodies) && !inserts.iter().any(covered) {
+                return Some(unleased_refusal(seg.trim()));
+            }
+        }
+    }
+    None
+}
+
+/// Whether a word of `seg` (at absolute `seg_at`) starts a heavy build that
+/// no `build-lease` word before it already leases.
+fn unleased_heavy_word(seg: &str, seg_at: usize, heavy: &Heavy, bodies: &HeredocBodies) -> bool {
+    for word in words(seg) {
+        if word.text == "build-lease" {
+            return false;
+        }
+        if bodies.contains(seg_at + word.start) {
+            continue;
+        }
+        let base = basename(&word.text);
+        if heavy.iter().any(|(p, _)| p == base)
+            && heavy_program_offset(&seg[word.start..], heavy).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The fail-closed rule's refusal, quoting the simple command it refused.
+fn unleased_refusal(seg: &str) -> String {
+    let shown: String = seg.chars().take(80).collect();
+    format!(
+        "Build lease (#11886): `{shown}` names a heavy build (cargo build/test/clippy/check/\
+         doc/install/run/bench, or `builders.heavy_build_commands`) in a shape the hook could \
+         not lease, so it refuses the command rather than run the build unleased. An unleased \
+         build in the shared target directory can run a test binary built from another \
+         worktree's sources. Run the build as its own command, program and subcommand spelled \
+         out (`cargo test -p <crate> --no-fail-fast`), and the hook leases it. If the words \
+         are data, quote them."
+    )
 }
 
 /// The shape name for one simple command that hides a heavy build.
