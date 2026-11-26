@@ -204,6 +204,8 @@ mod tests {
     /// #8922: both copies of the hash go, so a re-admitted file is re-read.
     /// Fails with either removal in `forget_file_hash` deleted.
     #[tokio::test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     async fn forget_file_hash_drops_the_cached_and_persisted_hash() {
         let dir = tempfile::tempdir().unwrap();
         let corpus = crate::core::corpus::CorpusStore::open(&dir.path().join("i.redb")).unwrap();

@@ -505,6 +505,8 @@ fn block_legacy_index_data_dir(data_dir: &Path) {
 /// surfaced via `corpus_open_failed` rather than silently swallowed.
 /// Test: this IS the test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn build_indexer_from_entry_flags_corpus_open_failed_when_storage_path_unresolvable() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -558,6 +560,7 @@ async fn build_indexer_from_entry_flags_corpus_open_failed_when_storage_path_unr
 /// calls `build_store_for_entry` directly, and asserts `load_failed`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn build_store_for_entry_flags_load_failure_when_storage_path_unresolvable() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -891,6 +894,7 @@ async fn failed_json_to_redb_migration_is_recorded_on_the_indexer() {
 /// `json_to_redb` fault names the snapshot and the load error.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_redb_load_never_imports_and_records_a_fault() {
     let root = tempdir().unwrap();
     let store_dir = tempdir().unwrap();
@@ -958,6 +962,7 @@ async fn a_failed_redb_load_never_imports_and_records_a_fault() {
 /// and records one `json_to_redb` fault naming the snapshot.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothing() {
     let root = tempdir().unwrap();
     let store_dir = tempdir().unwrap();

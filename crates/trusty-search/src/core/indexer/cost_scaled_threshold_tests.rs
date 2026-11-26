@@ -46,6 +46,8 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
 /// `spawn_detached_rehydrate` scan) over the chunk-count-based estimate,
 /// exactly as documented.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn rehydrate_cost_estimate_ms_prefers_measured_over_estimated() {
     let dir = tempfile::tempdir().unwrap();
     let idx = make_indexer_with_corpus(&dir.path().join("index.redb"));
@@ -68,6 +70,7 @@ async fn rehydrate_cost_estimate_ms_prefers_measured_over_estimated() {
 /// measurement is available yet, and returns `0` for an indexer with no
 /// durable corpus wired at all (nothing to rehydrate, nothing to cost).
 #[tokio::test]
+#[serial_test::parallel]
 async fn rehydrate_cost_estimate_ms_falls_back_to_corpus_chunk_count_estimate() {
     // No durable corpus wired: must be 0, not panic or estimate from thin air.
     let bare = make_indexer();

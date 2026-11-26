@@ -315,6 +315,8 @@ fn fresh_chunk_count(root: &std::path::Path) -> usize {
 }
 
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn m005_advances_exactly_one_version() {
     let m = M005ChunkIdEndLine;
     assert_eq!(m.source_version(), 4);
@@ -324,6 +326,7 @@ fn m005_advances_exactly_one_version() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn identical_text_hashes_equal() {
     assert_eq!(text_hash("fn a() {}"), text_hash("fn a() {}"));
     assert_ne!(text_hash("fn a() {}"), text_hash("fn b() {}"));
@@ -334,6 +337,7 @@ fn identical_text_hashes_equal() {
 /// would — which is MORE than it held before, because the collisions #6571
 /// dropped are recovered.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_rechunks_the_whole_corpus() {
     let f = fixture().await;
     let before = {
@@ -376,6 +380,7 @@ async fn m005_rechunks_the_whole_corpus() {
 /// vector store must come out the same size with its vectors re-pointed at the
 /// new ids.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_reuses_the_existing_vectors() {
     let f = fixture().await;
     let vectors_before = f.store.len().await.unwrap();
@@ -421,6 +426,7 @@ async fn m005_reuses_the_existing_vectors() {
 /// churn count. One removal leaves churn far below the threshold, so only the
 /// unconditional compaction clears it; the vector count must not change.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_compacts_the_graph_after_dropping_orphans() {
     let f = fixture().await;
     f.store
@@ -444,6 +450,7 @@ async fn m005_compacts_the_graph_after_dropping_orphans() {
 /// Running `apply` twice must leave the second run with nothing to do — the
 /// crash-retry contract every migration owes.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_is_a_no_op_on_an_already_migrated_corpus() {
     let f = fixture().await;
     M005ChunkIdEndLine.apply(&f.handle).await.expect("first");
@@ -483,6 +490,7 @@ async fn m005_is_a_no_op_on_an_already_migrated_corpus() {
 /// cap below what the tree needs, the migration commits up to the cap and says
 /// so rather than committing past it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_honours_the_chunk_cap() {
     let f = fixture_with_cap(Some(2)).await;
     assert!(
@@ -520,6 +528,7 @@ async fn m005_honours_the_chunk_cap() {
 /// The ruling's item 3, per index: an index below the M005 marker matches both
 /// named shapes, one at or above it matches only the new one.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_suffix_policy_narrows_per_index() {
     let legacy = "src/auth.rs::Function::login::10";
     let current = "src/auth.rs::Function::login::10::40";
@@ -572,6 +581,7 @@ async fn the_suffix_policy_narrows_per_index() {
 /// Incremental reindex after the migration must keep an unchanged declaration's
 /// id stable — parent/child references and `Test:` pointers both rely on it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn ids_are_stable_across_a_reindex_of_unchanged_files() {
     let f = fixture().await;
     M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
@@ -641,6 +651,7 @@ async fn simulate_crash_after_clear(fx: &Fixture) -> plan::M005Plan {
 /// What: stores a plan, reads it back, compares, then clears it.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_plan_roundtrips_through_the_corpus_meta_table() {
     let fx = fixture().await;
     let stored = simulate_crash_after_clear(&fx).await;
@@ -671,6 +682,7 @@ async fn m005_plan_roundtrips_through_the_corpus_meta_table() {
 /// fully re-chunked in the new id shape with the marker retired.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_resumes_after_a_crash_before_the_first_batch() {
     let fx = fixture().await;
     simulate_crash_after_clear(&fx).await;
@@ -718,6 +730,7 @@ async fn m005_resumes_after_a_crash_before_the_first_batch() {
 /// and re-runs `apply`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_resumes_after_a_crash_between_the_remap_and_the_flush() {
     let fx = fixture().await;
     M005ChunkIdEndLine
@@ -775,6 +788,7 @@ async fn m005_resumes_after_a_crash_between_the_remap_and_the_flush() {
 /// index only reaches 5 WITH its chunks restored.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_never_advances_the_schema_over_missing_chunks() {
     let fx = fixture().await;
     simulate_crash_after_clear(&fx).await;
@@ -808,6 +822,7 @@ async fn m005_never_advances_the_schema_over_missing_chunks() {
 /// then asserts the guard's drop reopens the index.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_search_during_the_migration_window_is_refused_not_empty() {
     let fx = fixture().await;
     let flag = {
@@ -859,6 +874,7 @@ async fn a_search_during_the_migration_window_is_refused_not_empty() {
 /// held; then releases and asserts the pass completes fully.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_waits_for_the_index_permit_before_clearing_the_corpus() {
     let fx = fixture().await;
     let corpus = {
@@ -924,6 +940,7 @@ async fn m005_waits_for_the_index_permit_before_clearing_the_corpus() {
 /// migration REFUSES rather than recording success, leaving the version at 4.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unreadable_plan_over_a_cleared_corpus_fails_closed() {
     let fx = fixture().await;
     let corpus = {
@@ -983,6 +1000,7 @@ fn release_cancel(id: &crate::core::registry::IndexId) {
 /// clears the cancel and asserts the pass resumes to completion.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_stops_before_the_clear_when_a_delete_signals_cancel() {
     let fx = fixture_named("m005-cancel-before-clear").await;
     let corpus = {
@@ -1057,6 +1075,7 @@ async fn m005_stops_before_the_clear_when_a_delete_signals_cancel() {
 /// boundary then aborts. Asserts the typed abort and that nothing was committed.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn rechunk_all_stops_at_a_batch_boundary_when_a_delete_signals_cancel() {
     let fx = fixture_named("m005-cancel-at-batch").await;
     let corpus = {
@@ -1127,6 +1146,7 @@ async fn corpus_chunks(fx: &Fixture) -> Vec<RawChunk> {
 /// the file contributes no chunks, the corpus loses every one it had, and the
 /// sweep drops their vectors as orphans.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_rechunks_office_documents_through_the_extractor() {
     let f = fixture_with_office("m005-office-extract").await;
     let before = ids_for_file(&corpus_chunks(&f).await, "notes.docx");
@@ -1166,6 +1186,7 @@ async fn m005_rechunks_office_documents_through_the_extractor() {
 /// warn; the operator recovers the corpus rows with a reindex.
 /// Test: this test — the error-arm regression the Fail-Open Check asks for.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_keeps_the_vectors_of_a_file_it_cannot_extract() {
     let f = fixture_with_office("m005-office-unreadable").await;
     let broken = ids_for_file(&corpus_chunks(&f).await, "broken.docx");
@@ -1188,6 +1209,7 @@ async fn m005_keeps_the_vectors_of_a_file_it_cannot_extract() {
 /// The other half of the same decision: removal stays correct for a file that
 /// genuinely no longer exists, so the fix does not turn the orphan sweep off.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_drops_the_vectors_of_a_file_deleted_from_disk() {
     let f = fixture_with_office("m005-office-deleted").await;
     let deleted = ids_for_file(&corpus_chunks(&f).await, "notes.docx");
@@ -1215,6 +1237,7 @@ async fn m005_drops_the_vectors_of_a_file_deleted_from_disk() {
 /// docx here stands in for that PDF: same `Ok`-with-no-text shape, same M005
 /// branch, and a fixture the migration tests can build without a PDF writer.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing() {
     let f = fixture_with_office("m005-office-empty-extract").await;
     let scanned = ids_for_file(&corpus_chunks(&f).await, "scanned.docx");
@@ -1243,6 +1266,7 @@ async fn m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing() {
 /// fails `ENOTDIR` — deterministic, and independent of the uid the suite runs
 /// as, unlike a chmod-based fixture.
 #[tokio::test]
+#[serial_test::parallel]
 async fn file_is_gone_answers_no_when_the_probe_cannot_tell() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let a_file = tmp.path().join("not-a-directory");
@@ -1265,6 +1289,7 @@ async fn file_is_gone_answers_no_when_the_probe_cannot_tell() {
 /// The retention rule itself: only ids whose file is in the unreadable set are
 /// held back, and a claimed id is never an orphan either way.
 #[test]
+#[serial_test::parallel]
 fn orphan_partition_retains_only_unreadable_files() {
     let old: Vec<String> = vec![
         "notes.docx:1:3".to_string(),

@@ -213,6 +213,8 @@ async fn bm25_entities_idle_eviction_drops_and_lazily_rehydrates() {
 /// durable corpus) is NEVER evicted, mirroring
 /// `tests::idle_eviction_skips_indexers_without_corpus` for chunks.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn bm25_entities_idle_eviction_skips_indexers_without_corpus() {
     let idx = make_indexer(); // embedder + store, but corpus: None
     idx.add_chunk(raw("a", "src/a.rs", "fn a() {}"))
@@ -355,6 +357,7 @@ async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
 /// mode by the same idle sweep that drives chunk/BM25/entity eviction, and
 /// search returns identical results before and after.
 #[tokio::test]
+#[serial_test::parallel]
 async fn hnsw_idle_demotion_reviews_clean_promoted_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hnsw.usearch");
@@ -550,6 +553,7 @@ async fn memory_pressure_reclaim_now_clears_caches() {
 /// `reclaim_memory_now()`, assert it returns 0 and BM25 is untouched.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn memory_pressure_reclaim_now_is_noop_without_corpus() {
     let idx = make_indexer(); // no CorpusStore wired
     {
@@ -597,6 +601,7 @@ async fn memory_pressure_reclaim_now_is_noop_without_corpus() {
 /// check (no RSS sampling, no allocator introspection needed here).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn idle_eviction_releases_chunk_map_backing_allocation() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
