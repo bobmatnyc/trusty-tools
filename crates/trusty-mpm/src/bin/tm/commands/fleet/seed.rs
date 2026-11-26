@@ -324,28 +324,6 @@ fn publish(
     .with_context(|| format!("cannot lock {}", path.display()))?
 }
 
-/// Test seam between the unlocked read and the locked write of [`publish`].
-#[cfg(test)]
-pub(crate) mod hook {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static BEFORE_LOCK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
-    }
-
-    /// Run `f` once, at the next schedule publish on this thread.
-    pub(crate) fn set(f: impl FnOnce() + 'static) {
-        BEFORE_LOCK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
-    }
-
-    /// Run and clear the pending hook, if any.
-    pub(super) fn run() {
-        if let Some(f) = BEFORE_LOCK.with(|h| h.borrow_mut().take()) {
-            f();
-        }
-    }
-}
-
 /// Write `file`'s shipped bytes to `path` atomically; mode `0755` for a script.
 fn write_seed(path: &Path, file: &Seeded<'_>) -> anyhow::Result<()> {
     trusty_common::atomic_file::write_atomic(path, file.contents.as_bytes())
@@ -368,4 +346,26 @@ fn make_executable(path: &Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> anyhow::Result<()> {
     Ok(())
+}
+
+/// Test seam between the unlocked read and the locked write of [`publish`].
+#[cfg(test)]
+pub(crate) mod hook {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BEFORE_LOCK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Run `f` once, at the next schedule publish on this thread.
+    pub(crate) fn set(f: impl FnOnce() + 'static) {
+        BEFORE_LOCK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    /// Run and clear the pending hook, if any.
+    pub(super) fn run() {
+        if let Some(f) = BEFORE_LOCK.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
 }
