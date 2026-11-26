@@ -413,3 +413,35 @@ async fn prune_route_refuses_on_a_broken_install_file() {
     );
     assert!(body.contains("install.toml"), "got: {body}");
 }
+
+/// #11821 P4-f1: a relative `TRUSTY_MPM_REPOS_ROOT` is refused by name, never
+/// joined to the cwd; the reader logs it and keeps the default root.
+#[test]
+fn relative_repos_root_env_is_refused_11821_p4f1() {
+    use trusty_common::install_paths::{InstallPaths, InstallPathsError, PathSource};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let home = tmp.path().canonicalize().expect("canonical");
+    let _env = EnvGuard::install(&home);
+    // SAFETY: `env_serial`; `EnvGuard` restores the var.
+    unsafe { std::env::set_var("TRUSTY_MPM_REPOS_ROOT", "rel/repos") };
+
+    let err = try_base_clone_path("acme", "widget").expect_err("a relative root must refuse");
+    match &err {
+        InstallPathsError::Relative { key, origin, value } => {
+            assert_eq!(*key, "TRUSTY_MPM_REPOS_ROOT");
+            assert_eq!(*origin, PathSource::Env);
+            assert_eq!(value, Path::new("rel/repos"));
+        }
+        other => panic!("expected InstallPathsError::Relative, got {other:?}"),
+    }
+    assert!(err.to_string().contains("rel/repos"), "got: {err}");
+    let default_root = InstallPaths::resolve().expect("resolve").projects_root;
+    assert_eq!(default_root.source, PathSource::Default);
+    assert!(default_root.path.starts_with(&home), "{default_root:?}");
+    assert_eq!(
+        base_clone_path("acme", "widget"),
+        default_root.path.join("acme").join("widget"),
+        "the reader must not resolve the relative value against the cwd"
+    );
+}

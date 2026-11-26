@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use trusty_common::install_paths::{InstallPathsError, PathSource};
+
 /// Environment variable that overrides the managed repos root.
 ///
 /// Why: operators need an escape hatch (tests, non-standard layouts) that wins
@@ -36,13 +38,22 @@ pub const DEFAULT_REPOS_DIR: &str = "trusty-mpm-projects";
 /// (which races other threads). Exposing the override as a parameter lets callers
 /// supply the value directly without `set_var` / `remove_var`.
 /// What: `env_override` wins over the `TRUSTY_MPM_REPOS_ROOT` env var, which
-/// wins over `workspace_root()`. Falls back to `/tmp/trusty-mpm-projects` only
-/// when the home directory is unresolvable AND nothing absolute was supplied.
-/// Test: `repos_root_default_ends_with_canonical_segment`; `base_clone_path_respects_repos_root_override` (integration).
+/// wins over `workspace_root()`. A relative override or env value is logged
+/// and skipped, never joined to the cwd (#11821 P4-f1). Falls back to
+/// `/tmp/trusty-mpm-projects` only when the home directory is unresolvable
+/// AND nothing absolute was supplied.
+/// Test: `repos_root_default_ends_with_canonical_segment`;
+/// `relative_repos_root_override_is_not_used_11821_p4f1`;
+/// `base_clone_path_respects_repos_root_override` (integration).
 pub fn repos_root_from(env_override: Option<&str>) -> PathBuf {
+    // #11821 P4-f1: readers log a relative value and keep the workspace root.
+    let hit = repos_root_override(env_override).unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "ignoring the repos root override; using the workspace root");
+        None
+    });
     // Delegate to the canonical workspace root resolver (TRUSTY_MPM_WORKSPACE_ROOT
     // > config template > ~/trusty-mpm-projects).
-    repos_root_override(env_override).unwrap_or_else(|| {
+    hit.unwrap_or_else(|| {
         let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
         crate::core::trusty_tools_config::workspace_root(&config)
     })
@@ -52,12 +63,14 @@ pub fn repos_root_from(env_override: Option<&str>) -> PathBuf {
 ///
 /// Why: df-D1t (#11821): a base clone must not land under the default root
 /// because the operator's install file is broken.
-/// What: `TRUSTY_MPM_REPOS_ROOT` wins as before; otherwise
+/// What: `TRUSTY_MPM_REPOS_ROOT` wins as before, and a relative value is
+/// [`InstallPathsError::Relative`] (#11821 P4-f1); otherwise
 /// [`crate::core::trusty_tools_config::try_workspace_root`], whose error is
 /// returned unchanged.
-/// Test: `broken_install_file_fails_the_workspace_root_closed` (env_serial).
-pub fn try_repos_root() -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
-    match repos_root_override(None) {
+/// Test: `broken_install_file_fails_the_workspace_root_closed`,
+/// `relative_repos_root_env_is_refused_11821_p4f1` (env_serial).
+pub fn try_repos_root() -> Result<PathBuf, InstallPathsError> {
+    match repos_root_override(None)? {
         Some(root) => Ok(root),
         None => crate::core::trusty_tools_config::try_workspace_root(
             &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
@@ -66,20 +79,36 @@ pub fn try_repos_root() -> Result<PathBuf, trusty_common::install_paths::Install
 }
 
 /// The in-process override and `TRUSTY_MPM_REPOS_ROOT` rungs, `~`-expanded;
-/// `None` when neither is set.
-fn repos_root_override(env_override: Option<&str>) -> Option<PathBuf> {
+/// `None` when neither is set, `Relative` when the winner is not absolute.
+fn repos_root_override(env_override: Option<&str>) -> Result<Option<PathBuf>, InstallPathsError> {
     // Direct in-process override (highest priority — used by tests to avoid env
     // mutation), then TRUSTY_MPM_REPOS_ROOT (backward compat, wins over
     // workspace_root).
     let from_env = std::env::var(REPOS_ROOT_ENV).ok();
-    let raw = env_override
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| from_env.as_deref().map(str::trim).filter(|s| !s.is_empty()))?;
-    Some(match dirs::home_dir() {
+    let picked = match env_override.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some((raw, PathSource::Flag)),
+        None => from_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|raw| (raw, PathSource::Env)),
+    };
+    let Some((raw, origin)) = picked else {
+        return Ok(None);
+    };
+    let path = match dirs::home_dir() {
         Some(h) => expand_tilde_repos(raw, &h),
         None => PathBuf::from(raw),
-    })
+    };
+    // #11821 P4-f1: a relative root is refused, never resolved against the cwd.
+    if !path.is_absolute() {
+        return Err(InstallPathsError::Relative {
+            key: REPOS_ROOT_ENV,
+            origin,
+            value: path,
+        });
+    }
+    Ok(Some(path))
 }
 
 /// Resolve the absolute root for base clones.
@@ -148,10 +177,7 @@ pub fn base_clone_path_in(repos_root: &Path, owner: &str, repo: &str) -> PathBuf
 /// What: [`try_repos_root`] joined with the same canonical segments.
 /// Test: `broken_install_file_fails_the_workspace_root_closed`,
 /// `cold_start_refuses_on_a_broken_install_file` (env_serial).
-pub fn try_base_clone_path(
-    owner: &str,
-    repo: &str,
-) -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+pub fn try_base_clone_path(owner: &str, repo: &str) -> Result<PathBuf, InstallPathsError> {
     Ok(base_clone_path_in(&try_repos_root()?, owner, repo))
 }
 
@@ -189,5 +215,13 @@ mod tests {
                 root.join("bobmatnyc/trusty-tools")
             );
         }
+    }
+
+    /// #11821 P4-f1: a relative in-process override is never handed back.
+    #[test]
+    fn relative_repos_root_override_is_not_used_11821_p4f1() {
+        let root = repos_root_from(Some("relative/override"));
+        assert!(root.is_absolute(), "{root:?}");
+        assert_ne!(root, Path::new("relative/override"));
     }
 }
