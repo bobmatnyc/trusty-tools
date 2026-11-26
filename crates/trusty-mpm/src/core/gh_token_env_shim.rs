@@ -69,7 +69,7 @@ pub(crate) struct TokenEnvSeams<'a> {
 pub(crate) fn shim_token_env_with(env: &GhEnv, seams: TokenEnvSeams<'_>) -> Result<GhEnv, String> {
     // #10487 review: only a `github.token_env` binding is shimmed; the
     // local-only clamp's empty `GH_TOKEN` must make no network call.
-    let (Some(token), Some(_)) = (env.var(GH_TOKEN), env.token_source()) else {
+    let Some(token) = bound_token(env) else {
         return Ok(env.clone());
     };
     let refuse = |step: &str, reason: String| {
@@ -126,17 +126,38 @@ pub(crate) fn shim_token_env_with(env: &GhEnv, seams: TokenEnvSeams<'_>) -> Resu
     })
 }
 
+/// The `GH_TOKEN` of a `github.token_env` binding, the only env this module
+/// shims; `None` passes `env` through unchanged (#10487).
+fn bound_token(env: &GhEnv) -> Option<&str> {
+    env.token_source().and(env.var(GH_TOKEN))
+}
+
 /// Production entry point: [`shim_token_env_with`] with the real `GET /user`,
 /// gh, keyring, this process's `PATH` and tm's state root (#10487).
 ///
 /// What: blocking (HTTPS, gh and keyring calls). A unit-test build refuses at
-/// `GET /user`, so it never touches a real keyring.
-/// Test: none directly (real gh, keyring and network); the decisions are
-/// [`shim_token_env_with`]'s.
+/// `GET /user`, so it never touches a real keyring. An env with no
+/// `token_env` binding passes through; otherwise an unresolved config dir (a
+/// broken `install.toml`) refuses before any step, so nothing is written
+/// under `$HOME` (#11821).
+/// Test: `token_env_shim_fails_closed_on_a_broken_install_file` (env_serial);
+/// the decisions are [`shim_token_env_with`]'s.
 pub fn shim_token_env(env: &GhEnv) -> Result<GhEnv, String> {
     use crate::core::gh_account_proof::{CliTokenProbe, HttpUserCheck};
     use crate::core::gh_session_shim::{find_real_gh, shim_root};
-    let state_root = crate::core::paths::FrameworkPaths::default().root;
+    if bound_token(env).is_none() {
+        return Ok(env.clone());
+    }
+    // #11821: a token writer fails closed; no `$HOME` fallback, no partial write.
+    let state_root = crate::core::paths::FrameworkPaths::try_default()
+        .map_err(|e| {
+            format!(
+                "tm: cannot hand this project's github.token_env token to the session's gh \
+                 shim: the config dir is unresolved: {e}. No token was injected into the \
+                 session's environment."
+            )
+        })?
+        .root;
     let path = std::env::var_os("PATH");
     shim_token_env_with(
         env,

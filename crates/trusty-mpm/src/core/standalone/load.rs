@@ -276,7 +276,7 @@ fn pull_ff_only(repo_dir: &Path) {
 /// remote no longer feeds a pin written into the workspace: the palace is
 /// exported at spawn by [`crate::core::mcp_session_env::session_mcp_env`], and
 /// the remote's remaining job here is the #1939 alias healing
-/// ([`crate::core::session_launch::maybe_register_palace_alias`]), which uses it
+/// ([`crate::core::session_launch::palace_create::launch_palace_steps`]), which uses it
 /// to decide whether the derived `owner-repo` palace should resolve to a
 /// pre-existing bare-repo one. `None` falls back to probing the checkout.
 ///
