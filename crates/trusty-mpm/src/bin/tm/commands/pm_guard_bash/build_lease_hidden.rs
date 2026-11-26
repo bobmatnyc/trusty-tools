@@ -93,24 +93,27 @@ pub(super) fn unparseable_build_refusal(
 
 /// The fail-closed refusal for a heavy build no lease insertion covers.
 ///
-/// Why: #11886 owner ruling (2026-11-26, one fail-closed rule). The checks
-/// above name the shapes they know. Any other shape that names a heavy build
-/// and gets no lease would run bare in the shared target directory.
+/// Why: #11886. The checks above name the shapes they know. Any other shape
+/// that names a heavy build and gets no lease would run bare in the shared
+/// target directory.
 /// What: walks every simple command of `command` and of each closed
 /// substitution body in `spans`. A word outside a here-document body whose
 /// basename is a heavy program, and whose words from there on
 /// [`heavy_program_offset`] reads as a heavy build, needs one of `inserts`
 /// inside its simple command and outside any closed `$(…)` nested in it; a
-/// `build-lease` word before it, or a [`REMOTE_RUNNERS`] program word, counts
-/// as leased. Otherwise the command is refused. A quoted word stays data, and a
-/// build a program starts without naming it (`make`, a script) is not seen.
+/// `build-lease` word before it, or a program word equal to one of `runners`
+/// (the settings file's remote runners), counts as leased. Otherwise the
+/// command is refused. A quoted word stays data, and a build a program starts
+/// without naming it (`make`, a script) is not seen.
 /// Test: `an_unleased_heavy_build_is_refused_whatever_its_shape`,
+/// `only_a_listed_runner_as_the_exact_program_word_passes`,
 /// `leased_builds_and_builds_named_by_no_word_are_not_refused`,
 /// `a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command`,
 /// `an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886`.
 pub(super) fn unleased_build_refusal(
     command: &str,
     heavy: &Heavy,
+    runners: &[String],
     bodies: &HeredocBodies,
     spans: &[(usize, Option<usize>)],
     inserts: &[usize],
@@ -132,7 +135,8 @@ pub(super) fn unleased_build_refusal(
             };
             let skip = |at: usize| bodies.contains(at) || nested(at);
             let covered = |at: &usize| (seg_at..seg_end).contains(at) && !nested(*at);
-            if unleased_heavy_word(seg, seg_at, heavy, &skip) && !inserts.iter().any(covered) {
+            let unleased = unleased_heavy_word(seg, seg_at, heavy, runners, &skip);
+            if unleased && !inserts.iter().any(covered) {
                 return Some(unleased_refusal(seg.trim()));
             }
         }
@@ -140,45 +144,19 @@ pub(super) fn unleased_build_refusal(
     None
 }
 
-// #11886: option (a), Architect ruling — a build after one of these runs on
-// another host, so it takes no local slot.
-/// Words that run the rest of a simple command on a remote host.
-///
-/// Why: the fail-closed rule refused the EVO gate forms (`$EVO cargo test`,
-/// `"$S/evo-gate-log" --tag t "$S/evo" cargo test`), which build on EVO, not
-/// in this machine's shared target directory.
-/// What: a fixed list, no config key; [`unleased_heavy_word`] skips a simple
-/// command whose program word is exactly an entry (#11886 r3: not a basename,
-/// not any word, so `/tmp/evo` and `GIT_SSH=/usr/bin/ssh` do not match).
-/// Test: `a_build_after_a_remote_runner_is_not_refused`,
-/// `a_remote_runner_counts_only_as_the_exact_program_word`,
-/// `the_evo_gate_log_program_word_is_a_remote_runner`,
-/// `a_remote_runner_build_is_not_refused_11886`.
-const REMOTE_RUNNERS: &[&str] = &[
-    "$EVO",
-    "${EVO}",
-    "evo",
-    "ssh",
-    // #11886: the evo-gate-log spellings; `words` drops the quotes, so
-    // `"$S/evo-gate-log"` arrives as `$S/evo-gate-log`.
-    "$S/evo-gate-log",
-    "${S}/evo-gate-log",
-    "evo-gate-log",
-];
-
 /// Whether a word of `seg` (at absolute `seg_at`, `skip`ped offsets aside)
 /// starts a heavy build that no `build-lease` word before it leases, in a
-/// simple command whose program word is not a [`REMOTE_RUNNERS`] entry.
+/// simple command whose program word is not exactly one of `runners`.
 fn unleased_heavy_word(
     seg: &str,
     seg_at: usize,
     heavy: &Heavy,
+    runners: &[String],
     skip: &dyn Fn(usize) -> bool,
 ) -> bool {
     let seg_words = words(seg);
-    if program_index(&seg_words)
-        .is_some_and(|i| REMOTE_RUNNERS.contains(&seg_words[i].text.as_str()))
-    {
+    // #11886: exact program-word match only, never a basename or a prefix.
+    if program_index(&seg_words).is_some_and(|i| runners.contains(&seg_words[i].text)) {
         return false;
     }
     for word in seg_words {

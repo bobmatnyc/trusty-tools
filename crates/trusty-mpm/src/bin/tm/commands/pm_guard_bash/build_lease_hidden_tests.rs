@@ -1,6 +1,6 @@
 //! Tests for `build_lease_hidden` (#11886).
 
-use super::super::{LeaseRewrite, rewrite_for_lease};
+use super::super::{LeaseRewrite, rewrite_for_lease, rewrite_for_lease_with};
 
 fn heavy() -> Vec<(String, Option<String>)> {
     trusty_mpm::core::build_lease::config::BuildLeaseConfig::default()
@@ -286,4 +286,46 @@ fn a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command() {
     ] {
         assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
     }
+}
+
+/// [`rw`] with `runners` as the settings file's remote runners (#11886).
+fn rw_with(command: &str, runners: &[&str]) -> LeaseRewrite {
+    let runners: Vec<String> = runners.iter().map(|r| r.to_string()).collect();
+    rewrite_for_lease_with(command, &heavy(), &runners, &|_| {
+        Ok("tm build-lease --".to_string())
+    })
+}
+
+/// #11886: a build whose program word is exactly a listed runner passes; an
+/// unlisted runner, a path to a listed name, a listed name in an assignment,
+/// and any runner when none is listed are refused.
+#[test]
+fn only_a_listed_runner_as_the_exact_program_word_passes() {
+    let runners = [
+        "remote-runner-x",
+        "$REMOTE_X",
+        "${REMOTE_X}",
+        "$R/remote-log",
+    ];
+    for command in [
+        "remote-runner-x cargo test -p x --no-fail-fast",
+        "\"$REMOTE_X\" cargo +1.99.0 test -p x",
+        "${REMOTE_X} cargo check -p x",
+        "\"$R/remote-log\" --tag t remote-runner-x cargo clippy -p x",
+    ] {
+        assert_eq!(rw_with(command, &runners), LeaseRewrite::None, "{command}");
+    }
+    for command in [
+        "other-runner-y cargo test",
+        "./remote-runner-x cargo test",
+        "/tmp/remote-runner-x cargo test",
+        "GIT_X=/usr/bin/remote-runner-x entr cargo test",
+        "/tmp/remote-log cargo test",
+    ] {
+        assert!(
+            matches!(rw_with(command, &runners), LeaseRewrite::Refuse(_)),
+            "{command}"
+        );
+    }
+    assert_refused(&["remote-runner-x cargo test"]);
 }

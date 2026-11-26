@@ -141,7 +141,7 @@ fn an_unresolvable_cd_refuses_the_build() {
     let heavy = trusty_mpm::core::build_lease::config::BuildLeaseConfig::default()
         .effective_heavy_build_commands();
     let command = "cd \"$WT\" && cargo test";
-    let verdict = rewrite_for_lease_with(command, &heavy, &|at| {
+    let verdict = rewrite_for_lease_with(command, &heavy, &[], &|at| {
         lease_prefix("tm build-lease", command, at, Some(Path::new(BASE)))
     });
     let LeaseRewrite::Refuse(reason) = verdict else {
@@ -156,7 +156,7 @@ fn an_unresolvable_cd_refuses_the_build() {
         "{reason}"
     );
     let wrapped = "cd \"$WT\" && tm build-lease --chdir /wt -- cargo test";
-    let verdict = rewrite_for_lease_with(wrapped, &heavy, &|at| {
+    let verdict = rewrite_for_lease_with(wrapped, &heavy, &[], &|at| {
         lease_prefix("tm build-lease", wrapped, at, Some(Path::new(BASE)))
     });
     assert_eq!(verdict, LeaseRewrite::None);

@@ -142,6 +142,7 @@ fn a_configured_target_dir_wins_over_the_remote_default() {
         cargo_target_dir: Some("~/elsewhere/target".to_string()),
         build_jobs: Some(3),
         sccache: Some(true),
+        ..BuildConfig::default()
     };
     let resolved = resolve_build_env(Some(&config), home, Some(&identity()), 16).expect("resolves");
 
@@ -204,6 +205,7 @@ fn build_config_yaml_round_trips() {
         cargo_target_dir: Some("/shared/target".to_string()),
         build_jobs: Some(8),
         sccache: Some(false),
+        ..BuildConfig::default()
     };
     let yaml = serde_yaml::to_string(&config).expect("serialises");
     let back: BuildConfig = serde_yaml::from_str(&yaml).expect("round-trips");

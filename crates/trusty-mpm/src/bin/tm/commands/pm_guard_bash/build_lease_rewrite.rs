@@ -75,18 +75,21 @@ pub(crate) fn rewrite_for_lease(
     heavy: &[(String, Option<String>)],
     prefix: &str,
 ) -> LeaseRewrite {
-    rewrite_for_lease_with(command, heavy, &|_| Ok(prefix.to_string()))
+    rewrite_for_lease_with(command, heavy, &[], &|_| Ok(prefix.to_string()))
 }
 
 /// [`rewrite_for_lease`] with a per-insertion prefix (#8969).
 ///
 /// What: `prefix_at(offset)` names the lease invocation for the heavy build
 /// at `offset` in `command`; an `Err(reason)` refuses the whole command.
+/// #11886: `runners` are the remote-runner program words from the settings
+/// file; [`rewrite_for_lease`] passes none.
 /// Test: `a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969`
 /// in `tests/tm_hook_pm_guard_build_lease.rs`.
 pub(crate) fn rewrite_for_lease_with(
     command: &str,
     heavy: &[(String, Option<String>)],
+    runners: &[String],
     prefix_at: &dyn Fn(usize) -> Result<String, String>,
 ) -> LeaseRewrite {
     if command.trim().is_empty() || heavy.is_empty() {
@@ -126,7 +129,8 @@ pub(crate) fn rewrite_for_lease_with(
         inserts.extend(inner.into_iter().filter(|at| !bodies.contains(*at)));
     }
     // #11886: a heavy build no insertion leases is refused, never run bare.
-    if let Some(reason) = unleased_build_refusal(command, heavy, &bodies, &spans, &inserts) {
+    let unleased = unleased_build_refusal(command, heavy, runners, &bodies, &spans, &inserts);
+    if let Some(reason) = unleased {
         return LeaseRewrite::Refuse(reason);
     }
     if inserts.is_empty() {
