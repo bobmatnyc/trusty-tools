@@ -1,7 +1,7 @@
 //! `tm il config` — the IL schedule's verbs (#11001, ADR-0077 D3).
 //!
 //! What: [`IlAction`] (one group, `config`) and [`IlConfigAction`]: `show`,
-//! `enroll`, `remove`, `set`, `reset`.
+//! `enroll`, `remove`, `set`, `diff`, `update` (#11002), `reset`.
 //! Test: `cli_parses_every_il_config_verb`.
 
 use std::path::PathBuf;
@@ -56,6 +56,11 @@ pub(crate) enum IlConfigAction {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Compare the schedule with the current built-in preset; writes nothing.
+    // #11002: ADR-0077 D6, each difference is a preset change or an edit.
+    Diff,
+    /// Migrate the schedule to the current preset version, keeping your edits.
+    Update,
     /// Restore the built-in preset; an edited file needs `--force`.
     Reset {
         /// Replace a file that differs from the preset.
