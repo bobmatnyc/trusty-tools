@@ -94,6 +94,10 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
         footer,
     );
 
+    // #11947: the list window is sized to the rows this frame can draw.
+    if let Some(flow) = state.new_session_mut() {
+        flow.fit_window(new_session_list_rows(area));
+    }
     match state.mode() {
         Mode::Browse => {}
         Mode::Help => overlay(frame, area, "keys", help_body(architect, enter_refused)),
@@ -281,6 +285,31 @@ fn overlay(frame: &mut Frame, area: Rect, title: &str, body: Vec<Line<'static>>)
     );
 }
 
+/// How many picker rows the new-session overlay can draw in `area` (#11947).
+///
+/// Why: the overlay is 60% of the terminal tall, so on a short terminal a
+/// fixed eight-row window ran past its bottom border and the highlight could
+/// land on a row that was never drawn.
+/// What: the overlay's inner height (its rect less the two border rows) less
+/// the [`pick_header`] lines drawn above the rows. Rows are cut to one line
+/// each by [`fit`], so a row is exactly one line. The flow clamps the result.
+/// Test: `new_session_window_draws_the_highlight_on_a_short_terminal`,
+/// `new_session_window_scrolls_across_both_edges_at_every_height`.
+fn new_session_list_rows(area: Rect) -> usize {
+    let popup = overlay_rect(area);
+    let inner = popup.height.saturating_sub(2) as usize;
+    let header = pick_header(popup.width.saturating_sub(2) as usize).len();
+    inner.saturating_sub(header)
+}
+
+/// The lines above the picker rows; [`new_session_list_rows`] counts them.
+fn pick_header(width: usize) -> Vec<Line<'static>> {
+    vec![
+        Line::from(fit("Start a new session in:", width)),
+        Line::from(String::new()),
+    ]
+}
+
 /// The centered modal's rect: 60% of the height, 80% of the width.
 ///
 /// #7406: split out of [`overlay`] so a body can be built to the width it will
@@ -395,10 +424,8 @@ fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> 
             Line::from("Enter registers it and starts a session, Esc cancels."),
         ];
     }
-    let mut lines = vec![
-        Line::from("Start a new session in:"),
-        Line::from(String::new()),
-    ];
+    // #11947: one header, so the row budget counts what is drawn.
+    let mut lines = pick_header(width);
     lines.extend(flow.rows().iter().map(|r| Line::from(fit(r, width))));
     // #7421: without this the rows past the eighth simply looked absent.
     let hint = new_session_hint(flow);
