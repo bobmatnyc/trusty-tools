@@ -29,9 +29,12 @@ TEST_PREFIX = "drift-dream-test-"
 class FakeDaemon:
     """In-memory trusty-memory: palaces of drawers with access counts, plus a rulings leg."""
 
-    def __init__(self, palaces, rulings=(), fail_texts=(), ignore_scope=False, off_wing=(), unlisted=()):
+    def __init__(self, palaces, rulings=(), fail_texts=(), ignore_scope=False, off_wing=(), unlisted=(),
+                 secret_texts=()):
         self.palaces = {p: {d: self._drawer(c) for d, c in ds.items()} for p, ds in palaces.items()}
         self.rulings, self.fail_texts, self.ignore_scope = list(rulings), set(fail_texts), ignore_scope
+        # secret_texts: refused by the secret gate unless the write sets allow_secret_like (#11902).
+        self.secret_texts, self.secret_optins = set(secret_texts), []
         # off_wing: seeded into a room outside the `default` wing; unlisted: also missing from memory_list.
         self.off_wing, self.unlisted = set(off_wing), set(unlisted)
         self.served, self.clients, self.n, self.recalls = [], [], 0, 0
@@ -65,6 +68,11 @@ class FakeDaemon:
         elif name == "memory_remember":
             if a["text"] in self.fail_texts:
                 raise ValueError("content rejected")
+            if a.get("allow_secret_like"):
+                self.secret_optins.append(a["text"])
+            elif a["text"] in self.secret_texts:
+                raise ValueError("Content rejected: contains a likely secret/credential token at byte offset 0 "
+                                 "(rule: base64_blob)")
             self.n += 1
             self.palaces[pal][f"t{self.n}"] = self._drawer(
                 a["text"], "other" if a["text"] in self.off_wing else "default", a["text"] not in self.unlisted)
@@ -117,6 +125,8 @@ def live_daemon(**kw):
     return FakeDaemon({"cto": cto, "supervisor": sup}, rulings=["supervisor", "cto"], **kw)
 
 
+# #11902: one of the cto drawer ids in SECRET_SEED_ALLOWLIST.
+ALLOWED_ID = "d40c3b60-4df8-4395-af33-9b595829c977"
 GOLDEN = {"search": [], "memory": [{"id": "q1", "palace": "cto", "query": "q", "expected": ["cto-0001"]}]}
 
 
@@ -188,6 +198,27 @@ class Run(unittest.TestCase):
         for did in ("cto-0002", "cto-0003"):
             self.assertIn(did, text, f"unseeded drawer {did} not named")
         self.assertEqual(rows, [], "a partial seed produced a recorded, scored run")
+        self.assertFalse([p for p in d.palaces if p.startswith(TEST_PREFIX)], "test palace not deleted")
+
+    def test_secret_like_drawer_seeds_verbatim_and_is_listed(self):
+        # #11902: an allowlisted drawer the base64_blob rule flags must seed, and only it gets the opt-in.
+        d = live_daemon(secret_texts={"flagged path"})
+        d.palaces["cto"][ALLOWED_ID] = d._drawer("flagged path")
+        code, text, rows = self.run_main(d, "--lanes", "memory")
+        self.assertNotEqual(code, 3, f"a secret-gate refusal aborted the seed: {text}")
+        row = json.loads(rows[0])["memory_palaces"]["cto"]
+        self.assertEqual(row["seeded"], 5)
+        self.assertEqual(row["seed_secret_like"], [ALLOWED_ID])
+        self.assertEqual(d.secret_optins, ["flagged path"], "allow_secret_like sent for a drawer the gate passed")
+
+    def test_secret_like_drawer_off_allowlist_aborts(self):
+        # #11902: a secret-gate refusal for a drawer not in SECRET_SEED_ALLOWLIST keeps the gate and aborts.
+        d = live_daemon(secret_texts={"cto drawer 2"})
+        code, text, rows = self.run_main(d, "--lanes", "memory")
+        self.assertEqual(code, 3, f"an off-allowlist secret-gate refusal did not abort: {text}")
+        self.assertIn("cto-0002", text)
+        self.assertEqual(rows, [], "an aborted run was recorded")
+        self.assertEqual(d.secret_optins, [], "allow_secret_like sent for a drawer not on the allowlist")
         self.assertFalse([p for p in d.palaces if p.startswith(TEST_PREFIX)], "test palace not deleted")
 
     def assert_aborted_unscored(self, d, code, text, rows, why):
