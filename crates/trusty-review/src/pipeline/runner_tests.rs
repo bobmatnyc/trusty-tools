@@ -2950,3 +2950,7 @@ mod linked_issues_failure;
 // #9015: the reviewer prompts come from content, or the review never starts.
 #[path = "runner_prompts_tests.rs"]
 mod prompts_from_content;
+
+// #11899: repo-named review skills read at the base commit, end to end.
+#[path = "runner_repo_skills_tests.rs"]
+mod repo_skills;

@@ -1,0 +1,244 @@
+//! Repo-named review skills, read at the PR base commit (#11899, DOC-93).
+//!
+//! Why: a repository names the review skills trusty-review applies to its own
+//! pull requests. A skill comes only from the repository under review
+//! (`.claude/skills/<name>/SKILL.md`), is read with its `[[review.skills]]`
+//! entry at the base commit (a PR can edit both), is never read for a fork
+//! PR, and never fails a review.
+//! What: [`RepoSkillsInput`] is what a caller passes through
+//! `ReviewOptions::with_repo_skills`: read the entries from the repo's
+//! `.trusty-review.toml` at the base commit ([`RepoSkillsInput::from_repo_config`],
+//! what CLI `run` and MCP `review_pr` use), or take an explicit request list.
+//! [`SkillsCall`] finds the base commit from the diff source and PR head, and
+//! `load::load_skills` applies the rules. Step 1 reads a local checkout's git
+//! object store; the hosted webhook path (step 2) is not wired and passes no
+//! input, so it loads nothing.
+//! Test: `tests.rs` in this directory.
+
+mod git_store;
+mod load;
+mod render;
+mod skill_format;
+
+use std::path::{Path, PathBuf};
+
+use crate::config::repo_config::REPO_CONFIG_FILENAME;
+use crate::config::review_skills::{SkillEntry, parse_skill_entries};
+use crate::models::ReviewResult;
+use crate::pipeline::diff::{DiffSource, extract_changed_files};
+use crate::pipeline::optional_context::{ReviewOptions, seams::PrHead};
+use crate::voice::VoiceConfig;
+pub(crate) use git_store::{BaseTree, BlobRead, GitObjectStore};
+pub(crate) use load::{SkillOrigin, load_skills};
+pub(crate) use render::body_notice;
+
+/// Largest `SKILL.md` loaded, in bytes (about 2k tokens) — DOC-93 RS-23.
+pub const SKILL_CAP_BYTES: usize = 8 * 1024;
+/// Largest total of loaded `SKILL.md` bytes per review (about 6k tokens) — RS-24.
+pub const TOTAL_CAP_BYTES: usize = 24 * 1024;
+/// Largest `.trusty-review.toml` read at the base commit.
+const CONFIG_CAP_BYTES: usize = 64 * 1024;
+
+/// One requested skill: one `[[review.skills]]` entry (#11899, DOC-93 §2).
+///
+/// What: `name` is the `.claude/skills/<name>` directory; `apply_to`, when
+/// set and non-empty, is a list of path globs, and the skill applies only
+/// when a changed path matches one.
+/// Test: `apply_to_gates_the_skill_on_changed_paths`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRequest {
+    /// The skill directory name; must be a bare identifier.
+    pub name: String,
+    /// Path globs (`*` stays within one segment, `**` crosses segments).
+    pub apply_to: Option<Vec<String>>,
+}
+
+/// Where a review's skill requests come from (#11899).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillsSource {
+    /// Read `[[review.skills]]` from `.trusty-review.toml` at the base commit.
+    RepoConfig,
+    /// Use these requests as given.
+    Requests(Vec<SkillRequest>),
+}
+
+/// The repo skills one review asks for, and where to read them (#11899).
+///
+/// What: `checkout` is the local repository a GitHub PR's base commit is read
+/// from; a `--base` git-range review reads its own repository root instead.
+/// Test: `runner_loads_base_skill_into_the_system_prompt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSkillsInput {
+    /// Where the requests come from.
+    pub source: SkillsSource,
+    /// The local checkout for a GitHub-PR review; `None` loads nothing there.
+    pub checkout: Option<PathBuf>,
+}
+
+impl RepoSkillsInput {
+    /// Read the entries from the repo config at the base commit of `checkout`.
+    pub fn from_repo_config(checkout: Option<PathBuf>) -> Self {
+        Self {
+            source: SkillsSource::RepoConfig,
+            checkout,
+        }
+    }
+
+    /// The CLI and local-MCP input: the git root of the working directory.
+    ///
+    /// Why: DOC-93 RS-37 — the configuration is found at the git root of the
+    /// working directory; the same root `.trusty-review.toml` discovery uses.
+    pub fn from_cwd() -> Self {
+        let root = std::env::current_dir()
+            .ok()
+            .map(|cwd| crate::config::find_git_root(&cwd));
+        Self::from_repo_config(root)
+    }
+}
+
+/// The runner's call into the repo-skills loader (#11899).
+///
+/// Why: keeps the runner to two lines; mirrors `DocsCall`/`FilesCall`.
+/// What: [`Self::attach`] reads the entries and skills at the base commit,
+/// sets `VoiceConfig::repo_skills` and `ReviewResult::repo_skills`. With no
+/// input, or no configured skill, it changes nothing (DOC-93 RS-32, RS-36).
+/// Test: `runner_loads_base_skill_into_the_system_prompt`,
+/// `runner_without_skills_leaves_prompt_and_record_unchanged`.
+pub(crate) struct SkillsCall<'a> {
+    input: Option<&'a RepoSkillsInput>,
+    source: &'a DiffSource,
+    head: &'a PrHead,
+    raw_diff: &'a str,
+}
+
+impl<'a> SkillsCall<'a> {
+    /// Capture what the loader needs from the running review.
+    pub(crate) fn new(
+        options: &'a ReviewOptions,
+        source: &'a DiffSource,
+        head: &'a PrHead,
+        raw_diff: &'a str,
+    ) -> Self {
+        Self {
+            input: options.repo_skills.as_ref(),
+            source,
+            head,
+            raw_diff,
+        }
+    }
+
+    /// Load the skills into `voice` and record them on `result`.
+    pub(crate) fn attach(self, mut voice: VoiceConfig, result: &mut ReviewResult) -> VoiceConfig {
+        let Some(input) = self.input else {
+            return voice;
+        };
+        let base = find_base(self.source, self.head, input.checkout.as_deref());
+        let entries: Vec<SkillEntry> = match &input.source {
+            SkillsSource::Requests(requests) => requests.iter().cloned().map(Ok).collect(),
+            SkillsSource::RepoConfig => match &base.store {
+                Some(store) => config_entries(store),
+                None => Vec::new(), // no base commit: the entries are unknowable
+            },
+        };
+        if entries.is_empty() {
+            return voice;
+        }
+        let origin = match (&base.store, base.fork) {
+            (_, true) => SkillOrigin::Fork {
+                base_sha: base.sha.clone(),
+            },
+            (Some(store), false) => SkillOrigin::Base {
+                base_sha: base.sha.clone(),
+                tree: store,
+            },
+            (None, false) => SkillOrigin::NoBase(base.why.clone()),
+        };
+        let changed = extract_changed_files(self.raw_diff);
+        let (block, record) = load_skills(&entries, &origin, &changed);
+        tracing::info!(
+            loaded = record.loaded.len(),
+            skipped = record.skipped.len(),
+            fork = record.fork,
+            "repo review skills resolved (#11899)"
+        );
+        voice.repo_skills = (!block.is_empty()).then_some(block);
+        result.repo_skills = Some(record);
+        voice
+    }
+}
+
+/// The `[[review.skills]]` entries of the config at the base commit; none
+/// when the file is absent, unreadable or not valid TOML (as today, a
+/// malformed file is ignored with a warning).
+fn config_entries(store: &GitObjectStore) -> Vec<SkillEntry> {
+    let BlobRead::Bytes(bytes) = store.read(REPO_CONFIG_FILENAME, CONFIG_CAP_BYTES) else {
+        return Vec::new();
+    };
+    let parsed = std::str::from_utf8(&bytes)
+        .map_err(|e| e.to_string())
+        .and_then(parse_skill_entries);
+    parsed.unwrap_or_else(|e| {
+        tracing::warn!("{REPO_CONFIG_FILENAME} at the base commit is not valid TOML: {e}");
+        Vec::new()
+    })
+}
+
+/// The base commit of this review and the object store holding it.
+struct Base {
+    store: Option<GitObjectStore>,
+    sha: String,
+    fork: bool,
+    /// Why `store` is `None`.
+    why: String,
+}
+
+/// Find the base commit: a `--base` range resolves its ref in its own
+/// repository (the local path cannot tell a fork; the operator named the
+/// base); a GitHub PR uses its base SHA from the API, read in `checkout`, and
+/// its fork flag (`head_is_fork`); a diff file or stdin has no base commit.
+fn find_base(source: &DiffSource, head: &PrHead, checkout: Option<&Path>) -> Base {
+    let none = |why: &str, sha: &str, fork: bool| Base {
+        store: None,
+        sha: sha.to_string(),
+        fork,
+        why: why.to_string(),
+    };
+    match source {
+        DiffSource::GitRange {
+            repo_root, base, ..
+        } => match git_store::resolve_base_commit(repo_root, base) {
+            Ok(sha) => Base {
+                store: Some(GitObjectStore::new(repo_root, &sha)),
+                sha,
+                fork: false,
+                why: String::new(),
+            },
+            Err(why) => none(&why, "", false),
+        },
+        DiffSource::Github { .. } => {
+            let (sha, fork) = (head.base_sha.as_str(), head.fork);
+            if !git_store::is_hex_sha(sha) {
+                return none("the pull request base commit is unknown", "", fork);
+            }
+            let Some(root) = checkout else {
+                return none("no local checkout to read the base commit from", sha, fork);
+            };
+            if !git_store::has_commit(root, sha) {
+                let why = "the base commit is not in the local checkout; fetch it first";
+                return none(why, sha, fork);
+            }
+            Base {
+                store: Some(GitObjectStore::new(root, sha)),
+                sha: sha.to_string(),
+                fork,
+                why: String::new(),
+            }
+        }
+        DiffSource::LocalFile { .. } | DiffSource::Stdin => {
+            none("a diff file or stdin carries no base commit", "", false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -19,7 +19,8 @@ use crate::{
     config::{InvocationSurface, ReviewConfig, repo_index::RepoIndexError},
     integrations::github::{AuthStrategy, GithubClient},
     pipeline::{
-        DiffSource, ReviewDeps, ReviewInput, ReviewOptions, ReviewOutcome, run_review_with,
+        DiffSource, RepoSkillsInput, ReviewDeps, ReviewInput, ReviewOptions, ReviewOutcome,
+        run_review_with,
     },
     service::AppState,
 };
@@ -163,7 +164,9 @@ where
 
     info!(owner, repo, pr, reviewer_model, index = %config.search_index, "mcp: review_pr");
     let reported = context.request.ledger_enabled(); // #9194 amendment 3
-    let outcome = run(config, input, deps, ReviewOptions::new(context.request)).await;
+    // #11899: `[[review.skills]]` read at the base commit of the cwd's git root.
+    let options = ReviewOptions::new(context.request).with_repo_skills(RepoSkillsInput::from_cwd());
+    let outcome = run(config, input, deps, options).await;
     Ok(wrap_outcome(&outcome, reported))
 }
 

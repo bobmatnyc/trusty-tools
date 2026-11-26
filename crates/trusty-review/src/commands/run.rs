@@ -33,8 +33,8 @@ use trusty_review::{
     llm::build_provider,
     models::{ContextSourceRecord, ReviewResult, SourceState},
     pipeline::{
-        CallerContext, DiffSource, IssueDoc, OptionalContextRequest, ReviewDeps, ReviewInput,
-        ReviewOptions, TriggerDecision, log_json_path,
+        CallerContext, DiffSource, IssueDoc, OptionalContextRequest, RepoSkillsInput, ReviewDeps,
+        ReviewInput, ReviewOptions, TriggerDecision, log_json_path,
         post::{FinalizeAction, decide_action},
         pr_index::{IndexPin, PrIndex, resolve_pr_index},
         run_review_with,
@@ -399,7 +399,8 @@ pub async fn cmd_run(
         &config_with_overrides,
         input,
         deps,
-        ReviewOptions::new(request),
+        // #11899: `[[review.skills]]` read at the base commit of the cwd's git root.
+        ReviewOptions::new(request).with_repo_skills(RepoSkillsInput::from_cwd()),
     );
     let outcome = outcome.await;
     let result = &outcome.result;

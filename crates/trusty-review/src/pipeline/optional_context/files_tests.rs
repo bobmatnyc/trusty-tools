@@ -147,6 +147,7 @@ fn head() -> PrHead {
     PrHead {
         sha: SHA.to_string(),
         fork: false,
+        base_sha: String::new(),
     }
 }
 
@@ -556,6 +557,7 @@ async fn malformed_sha_never_fetches() {
         head: PrHead {
             sha: "abc".to_string(),
             fork: false,
+            base_sha: String::new(),
         },
         ..Opts::default()
     };
@@ -626,6 +628,7 @@ async fn fork_head_404_is_unavailable_not_absent() {
         head: PrHead {
             sha: SHA.to_string(),
             fork: true,
+            base_sha: String::new(),
         },
         ..Opts::default()
     };

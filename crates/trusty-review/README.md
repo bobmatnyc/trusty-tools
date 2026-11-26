@@ -721,7 +721,8 @@ the code under review (the same git-root walk the trusty-search index
 auto-derive already uses, issue #661) — commit it alongside your source so
 every contributor and CI run picks up the project's review standards with no
 per-machine setup. Supported keys today are `[voice]` (`package`,
-`principles`) and `[review]` (`template`, see below); anything else in the
+`principles`), `[review]` (`template`, see below) and `[[review.skills]]`
+(repo review skills, see below); anything else in the
 global config schema is trivially addable following the same pattern in
 `crates/trusty-review/src/config/`.
 
@@ -781,6 +782,62 @@ stock base prompt → principles → voice addendum → review template
 The review template is the most project-specific layer, so it reads as the
 final word after the broader principles/voice guidance. Wholesale rubric
 replacement is intentionally out of scope.
+
+### Repo review skills
+
+A repository can name review skills that `run` and the MCP `review_pr` tool
+apply to its own pull requests (#11899, spec DOC-93). Each skill is one
+`[[review.skills]]` entry, and its text lives in the same repository at
+`.claude/skills/<name>/SKILL.md`:
+
+```toml
+[[review.skills]]
+name = "rust-error-handling"
+apply_to = ["crates/**/*.rs"]   # optional; omit or leave empty for the whole PR
+
+[[review.skills]]
+name = "release-notes"
+```
+
+```markdown
+---
+name: rust-error-handling
+description: Flags new unwrap and expect calls in non-test Rust code.
+---
+
+When a changed file under `crates/` adds `unwrap()` or `expect()` outside a
+test module, report one finding at the call site.
+```
+
+Rules:
+
+- `name` must be a bare identifier (ASCII letters, digits, `-`, `_`) and must
+  equal the `name` in the skill's frontmatter exactly. `description` and a
+  body are required. Other frontmatter keys are ignored.
+- `apply_to` globs match repository-relative paths: `*` and `?` stay within
+  one path segment, `**` crosses segments. The skill applies when any changed
+  file matches one glob.
+- The config entries and every `SKILL.md` are read through git at the pull
+  request's **base** commit, from the git root of the working directory. A
+  pull request cannot add or edit the skill that reviews it; a new skill takes
+  effect after it merges. The base commit must be present in the local
+  checkout (`git fetch` it first). A `--base <ref>` review reads at that ref.
+- A pull request from a fork loads no skill, and the review says so.
+- Each `SKILL.md` is capped at 8 KiB and all loaded skills together at 24 KiB.
+  A symlinked skill or skill directory is never followed.
+- A skill problem never fails the review. A missing, invalid, over-cap,
+  duplicate or non-matching skill, or a malformed entry (an unknown key, a
+  wrong type), is skipped and named with its reason at the end of the review
+  body. A `.trusty-review.toml` that is not valid TOML is ignored, as before.
+- Loaded skills are appended after the review template as one fenced block
+  labelled as untrusted repository guidance, followed by a statement that the
+  verdict rules and output schema take precedence. The output schema itself
+  is enforced by the model call.
+- The review JSON gains an optional `repo_skills` object: `base_sha`, `fork`,
+  `loaded` (`name`, `sha256` of the exact file bytes, `bytes`) and `skipped`
+  (`name`, `kind`, `reason`). It is absent when no skill is configured.
+
+The hosted webhook path does not load repo skills yet.
 
 ## Report generation
 

@@ -232,6 +232,9 @@ pub struct ReviewOptions {
     /// Reviewer prompts the caller already loaded (#9015); `None` loads them
     /// from content when the review starts.
     pub(crate) prompts: Option<Arc<ReviewerPrompts>>,
+    /// #11899: the repo-named review skills to load at the base sha; `None`
+    /// loads none and leaves the prompt and the record unchanged.
+    pub(crate) repo_skills: Option<crate::pipeline::repo_skills::RepoSkillsInput>,
 }
 
 /// Builds the external context sources a review gathers from (#9194 seam).
@@ -247,7 +250,23 @@ impl ReviewOptions {
             external_sources: None,
             ticket_fetcher: None,
             prompts: None,
+            repo_skills: None, // #11899
         }
+    }
+
+    /// Reviews with the repo-named skills in `input` (#11899).
+    ///
+    /// Why: the seam the `.trusty-review.toml` `[[review.skills]]` adapter
+    /// plugs into; the pipeline never reads the config itself.
+    /// What: each requested skill is read from `.claude/skills/<name>/SKILL.md`
+    /// at the PR base sha, capped, validated and appended to the system prompt.
+    /// Test: `runner_loads_base_skill_into_the_system_prompt`.
+    pub fn with_repo_skills(
+        mut self,
+        input: crate::pipeline::repo_skills::RepoSkillsInput,
+    ) -> Self {
+        self.repo_skills = Some(input);
+        self
     }
 
     /// Reviews with `prompts` instead of loading them from content (#9015).
