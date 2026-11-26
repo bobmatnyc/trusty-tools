@@ -304,7 +304,11 @@ fn hook_request_failure_does_not_change_the_deny_8878() {
         ..bound_env(&fx)
     };
     let reason = assert_presence_denied(&fx, &asked);
-    assert!(reason.starts_with(&plain[..plain.len() / 2]), "{reason}");
+    // #11923: compare whole strings; a byte slice of `plain` panics on a
+    // non-ASCII char boundary, and the plain deny is otherwise unchanged.
+    let suffix = " A device approval was requested (abc123; its action text is labelled \
+         unverified origin); once approved, run `tm presence wait --request abc123`.";
+    assert_eq!(reason, format!("{plain}{suffix}"));
     assert!(
         reason.contains("tm presence wait --request abc123"),
         "{reason}"
