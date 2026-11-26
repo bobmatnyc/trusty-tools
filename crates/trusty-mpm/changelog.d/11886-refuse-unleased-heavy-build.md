@@ -1,0 +1,2 @@
+Fixed
+- The pm-guard hook now refuses any command that names a heavy build (`cargo build`, `test`, `clippy`, `check` and the rest of `builders.heavy_build_commands`) it could not lease, whatever the shape: an unknown runner (`entr cargo test`), a second build in a composed command, a build in a quoted substitution. It used to let such a build run unleased in the shared target directory. A build that `make`, `mise run` or a script starts without naming cargo is not affected (#11886).

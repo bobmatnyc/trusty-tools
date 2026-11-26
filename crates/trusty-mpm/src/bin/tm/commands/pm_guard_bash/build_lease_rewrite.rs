@@ -33,7 +33,8 @@ use crate::commands::hook_rewrite::is_env_assignment;
 #[path = "build_lease_hidden.rs"]
 mod build_lease_hidden;
 use build_lease_hidden::{
-    blank_comments, hidden_build_refusal, runner_operand_hides, unparseable_build_refusal,
+    blank_comments, hidden_build_refusal, runner_operand_hides, unleased_build_refusal,
+    unparseable_build_refusal,
 };
 
 /// What the hook does with one Bash command.
@@ -108,7 +109,8 @@ pub(crate) fn rewrite_for_lease_with(
     }
     let mut inserts = segment_inserts(command, 0, heavy);
     inserts.retain(|at| !bodies.contains(*at));
-    for (start, end) in substitution_spans(command) {
+    let spans = substitution_spans(command);
+    for &(start, end) in &spans {
         if bodies.contains(start) {
             continue;
         }
@@ -122,6 +124,10 @@ pub(crate) fn rewrite_for_lease_with(
         };
         let inner = segment_inserts(&command[start..end], start, heavy);
         inserts.extend(inner.into_iter().filter(|at| !bodies.contains(*at)));
+    }
+    // #11886: a heavy build no insertion leases is refused, never run bare.
+    if let Some(reason) = unleased_build_refusal(command, heavy, &bodies, &spans, &inserts) {
+        return LeaseRewrite::Refuse(reason);
     }
     if inserts.is_empty() {
         return LeaseRewrite::None;
