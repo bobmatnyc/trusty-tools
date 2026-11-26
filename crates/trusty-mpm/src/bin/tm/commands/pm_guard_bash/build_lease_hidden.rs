@@ -144,15 +144,27 @@ pub(super) fn unleased_build_refusal(
 // another host, so it takes no local slot.
 /// Words that run the rest of a simple command on a remote host.
 ///
-/// Why: the fail-closed rule refused the EVO gate form (`$EVO cargo test`),
-/// which builds on EVO, not in this machine's shared target directory.
+/// Why: the fail-closed rule refused the EVO gate forms (`$EVO cargo test`,
+/// `"$S/evo-gate-log" --tag t "$S/evo" cargo test`), which build on EVO, not
+/// in this machine's shared target directory.
 /// What: a fixed list, no config key; [`unleased_heavy_word`] skips a simple
 /// command whose program word is exactly an entry (#11886 r3: not a basename,
 /// not any word, so `/tmp/evo` and `GIT_SSH=/usr/bin/ssh` do not match).
 /// Test: `a_build_after_a_remote_runner_is_not_refused`,
 /// `a_remote_runner_counts_only_as_the_exact_program_word`,
+/// `the_evo_gate_log_program_word_is_a_remote_runner`,
 /// `a_remote_runner_build_is_not_refused_11886`.
-const REMOTE_RUNNERS: &[&str] = &["$EVO", "${EVO}", "evo", "ssh"];
+const REMOTE_RUNNERS: &[&str] = &[
+    "$EVO",
+    "${EVO}",
+    "evo",
+    "ssh",
+    // #11886: the evo-gate-log spellings; `words` drops the quotes, so
+    // `"$S/evo-gate-log"` arrives as `$S/evo-gate-log`.
+    "$S/evo-gate-log",
+    "${S}/evo-gate-log",
+    "evo-gate-log",
+];
 
 /// Whether a word of `seg` (at absolute `seg_at`, `skip`ped offsets aside)
 /// starts a heavy build that no `build-lease` word before it leases, in a
