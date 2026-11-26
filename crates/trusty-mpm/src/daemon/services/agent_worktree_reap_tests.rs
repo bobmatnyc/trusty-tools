@@ -720,6 +720,58 @@ async fn session_end_spares_another_sessions_agent() {
     );
 }
 
+/// #11873 REGRESSION: the fixture's own git leaves no occupant in the tree.
+///
+/// Why: `session_end_reaps_a_finished_agents_released_worktree` kept its tree
+/// about one full lib run in ten. The fixture's `git commit` and `git fetch`
+/// each spawn a detached `git maintenance run --auto` whose cwd is the
+/// worktree unless `maintenance.auto` is false. The operator's global config
+/// sets it; CI's does not (#10558 saw that `git` pid), and a concurrent test
+/// that swaps `$HOME` hides it. The occupant probe then rightly keeps the tree.
+/// What: runs both commands with the global and system config removed — the
+/// ambient state the flake needs — and asserts trace2 records no maintenance
+/// child. Without the fixture's repo-local `maintenance.auto=false` it fails.
+#[test]
+fn fixture_git_spawns_no_maintenance_child_without_ambient_config() {
+    let fx = GitWorktreeFixture::new();
+    let wt = harness_worktree(&fx, "agent-no-maintenance");
+    let trace_dir = tempfile::tempdir().expect("trace dir");
+    let trace = trace_dir.path().join("trace2.json");
+    for args in [
+        &["commit", "--allow-empty", "-m", "work"][..],
+        &["fetch", "origin"][..],
+    ] {
+        // Child-only env: nothing here touches this process's environment.
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TRACE2_EVENT", &trace)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let events = std::fs::read_to_string(&trace).expect("read the trace2 log");
+    assert!(
+        events.contains("\"event\":\"child_start\""),
+        "trace2 recorded no child at all, so it proves nothing: {events}"
+    );
+    let maintenance: Vec<&str> = events
+        .lines()
+        .filter(|l| l.contains("\"event\":\"child_start\"") && l.contains("\"maintenance\""))
+        .collect();
+    assert!(
+        maintenance.is_empty(),
+        "fixture git started an auto-maintenance child in the tree: {maintenance:?}"
+    );
+}
+
 /// #5800: the legitimate reap still runs — known agent, terminal, released.
 ///
 /// Why: #5800 tightened two gates and removed a trigger, and the failure mode of
