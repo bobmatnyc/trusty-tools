@@ -26,7 +26,7 @@
 //! What: [`record_file_change`] is the I/O-performing entry point `pm_guard`
 //! calls once it has already decided a call WOULD be denied as a budget-
 //! eligible file change; it loads (or initializes) the session's
-//! [`BudgetState`] from `<FrameworkPaths::default().root>/state/pm_guard_turn_budget/<session>.json`,
+//! [`BudgetState`] from `<FrameworkPaths::try_default().root>/state/pm_guard_turn_budget/<session>.json`,
 //! runs the pure [`advance_budget`] core, persists the updated state, and
 //! returns a [`BudgetDecision`].
 //!
@@ -240,11 +240,10 @@ fn sanitize_session_id(session_id: &str) -> String {
 
 /// The state directory budget counter files live under.
 ///
-/// What: `<FrameworkPaths::default().root>/state/pm_guard_turn_budget/`.
-fn state_dir() -> PathBuf {
-    FrameworkPaths::default()
-        .root
-        .join("state/pm_guard_turn_budget")
+/// What: `<FrameworkPaths::try_default().root>/state/pm_guard_turn_budget/`;
+/// the error when `install.toml` is broken (#11821).
+fn state_dir() -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    FrameworkPaths::try_default().map(|paths| paths.root.join("state/pm_guard_turn_budget"))
 }
 
 /// Load, advance, and persist the budget counter for `session_id` — the I/O
@@ -255,12 +254,24 @@ fn state_dir() -> PathBuf {
 /// storage-failure/concurrency sections, for the actual fail-toward-deny
 /// posture (code-critic PR #2928 HIGH finding).
 /// What: delegates to [`record_file_change_at`] with [`state_dir`] and
-/// [`now_unix`].
+/// [`now_unix`]. An unresolved config dir is storage trouble: it denies.
 /// Test: `record_file_change_allows_first_three_then_exhausts`,
 /// `record_file_change_isolates_by_session`,
-/// `record_file_change_denies_on_persist_failure`.
+/// `record_file_change_denies_on_persist_failure`,
+/// `pm_guard_budget_denies_patch_and_git_apply_on_a_broken_install_file`.
 pub(crate) fn record_file_change(session_id: &str, budget: usize) -> BudgetDecision {
-    record_file_change_at(&state_dir(), session_id, budget, now_unix())
+    // #11821: no `$HOME` fallback; an unresolved config dir fails toward deny.
+    match state_dir() {
+        Ok(dir) => record_file_change_at(&dir, session_id, budget, now_unix()),
+        Err(err) => {
+            tracing::warn!(
+                session_id,
+                error = %err,
+                "pm_guard_budget: the config dir is unresolved; failing toward deny"
+            );
+            BudgetDecision::Exhausted { budget }
+        }
+    }
 }
 
 /// Testable core of [`record_file_change`] with the state dir and clock

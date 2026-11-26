@@ -70,6 +70,18 @@ pub fn registry_data_dir() -> PathBuf {
     registry_data_dir_under(&crate::core::paths::FrameworkPaths::default().root)
 }
 
+/// [`registry_data_dir`] for a WRITER: the error when `install.toml` is broken.
+///
+/// Why: #11821 — a registry write must never land under the `$HOME`
+/// fallback; readers keep [`registry_data_dir`].
+/// What: `FrameworkPaths::try_default().root` joined with [`REGISTRY_DIR_NAME`].
+/// Test: `registry_writers_fail_closed_on_a_broken_install_file`,
+/// `project_unadopt_refuses_on_a_broken_install_file`.
+pub fn try_registry_data_dir() -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    crate::core::paths::FrameworkPaths::try_default()
+        .map(|paths| registry_data_dir_under(&paths.root))
+}
+
 /// Pure core: is worktree isolation enabled for `origin` given `projects`?
 ///
 /// Why: isolating the matching rule from all I/O makes the two defaults that

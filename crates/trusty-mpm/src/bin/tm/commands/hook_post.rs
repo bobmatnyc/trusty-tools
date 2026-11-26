@@ -252,9 +252,16 @@ pub(crate) fn emit_hook_post_log(outcome: &HookPostOutcome) {
 /// Test: `a_parked_stop_lands_where_the_daemon_drains_it`,
 /// `a_stop_that_cannot_be_parked_fails_the_hook` — both through
 /// [`spool_undelivered_stop_under`], which carries everything this function does
-/// except the `$HOME` lookup.
+/// except the root lookup; `subagent_stop_is_not_parked_on_a_broken_install_file`
+/// covers that lookup's refusal (#11821).
 pub(crate) fn spool_undelivered_stop(body: &serde_json::Value) -> anyhow::Result<()> {
-    let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+    // #11821: a stop parked under the `$HOME` fallback is never drained, so
+    // an unresolved config dir is a lost stop (exit 1), not a silent park.
+    let root = trusty_mpm::core::paths::FrameworkPaths::try_default()
+        .map_err(|e| {
+            anyhow::anyhow!("the config dir is unresolved: {e}; the SubagentStop was not parked")
+        })?
+        .root;
     eprintln!("{}", spool_undelivered_stop_under(&root, body)?);
     Ok(())
 }

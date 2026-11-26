@@ -55,6 +55,10 @@ pub struct VoiceConfig {
     pub review_template: Option<String>,
     /// Name of the loaded review template for diagnostics / health reporting.
     pub review_template_name: Option<String>,
+    /// #11899: the fenced block of repo-named review skills, appended to the
+    /// system prompt AFTER every addendum above and outside
+    /// `combined_addendum`. `None` = no repo skill loaded.
+    pub repo_skills: Option<String>,
 }
 
 impl VoiceConfig {

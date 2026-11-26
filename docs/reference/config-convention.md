@@ -96,6 +96,16 @@ workspace root. For the config dir, not every writer refuses yet:
   the daemon's session spawn (`session_spawn_env_cli`, #11821 row P3-f2). The
   daemon never blocks a spawn, so its refusal gives the session's gh a token
   that authenticates as nobody and logs the error.
+- The state ledgers refuse too (#11821 row P3-f2): the `.mcp.json` provenance
+  ledger and the `tm doctor` quarantine that releases its claims, the `tm pr`
+  cleanup registry (`tm pr merge` refuses before merging; the daemon's sweep
+  skips), `tm project unadopt`, the PM guard's file-change budget (it denies
+  the shell edits the trust-anchor floor cannot see, such as `patch` and `git
+  apply`), the `SubagentStop` spool (the hook exits 1), the prompt-feedback
+  capture and the `tm hook` SessionStart savings sweep (both write nothing),
+  `tm repair savings-ledger`, `tm supervisor` and `tm meta run`. The gh login
+  probe and verify, the reclaim sweep's gh env, the session-ref identity and
+  the gh shim `PATH` filter only read, so they keep the `$HOME` fallback.
 - The build-lease store does not use `$HOME`'s store. It falls back to its
   per-uid store under `/tmp`.
 - Readers, caches, logs and derived data still log the error and fall back

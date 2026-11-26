@@ -23,6 +23,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `tally` — Print the open-item counts line, the only source for counts
     - `update` — Merge keys into an existing document
     - `validate` — Check every document against the schemas; exit 1 on an error
+  - `drift` — Report how each managed file differs from this binary's bundle (#11773)
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
@@ -89,6 +90,13 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `hook` — Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop)
 - `hooks` — Project-settings hook hygiene: detect and remove tm hook contamination (issue #2940)
   - `clean` — Remove tm-owned hook entries from project-level `.claude/settings.json` / `settings.local.json` files
+- `il` — The Architect IL schedule: `tm il config show|enroll|remove|set|reset`
+  - `config` — Show and edit the IL schedule, `<architect>/local/il-schedule.json`
+    - `enroll` — Enroll a session for IL clearing
+    - `remove` — Remove an enrolled session
+    - `reset` — Restore the built-in preset; an edited file needs `--force`
+    - `set` — Set `thresholds.<key>`, or a session field with `--session`
+    - `show` — Print the schedule; the built-in preset when the file is absent
 - `install` — Install the bundled framework artifacts to `~/.trusty-mpm/framework/`
 - `internal-spawn-disclaimed` — \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)

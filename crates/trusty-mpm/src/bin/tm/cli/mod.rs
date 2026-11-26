@@ -970,6 +970,13 @@ pub(crate) enum Command {
     /// store is written in-process under the same lock.
     // #9758. Test: `cli_parses_every_dbatg_verb`.
     Dbatg(DbatgArgs),
+    /// The Architect IL schedule: `tm il config show|enroll|remove|set|reset`.
+    // #11001 (ADR-0077). Test: `cli_parses_every_il_config_verb`.
+    Il {
+        /// IL action to perform.
+        #[command(subcommand)]
+        action: IlAction,
+    },
     /// Edit a dotenv file without printing a value: `set` and `keys`.
     ///
     /// Only the bound Architect may run either verb.

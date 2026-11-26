@@ -131,6 +131,7 @@ fn build_system_prompt_full_pipeline_with_review_template_ordering() {
         voice_name: Some("test".to_string()),
         review_template: Some("## TEMPLATE_MARKER".to_string()),
         review_template_name: Some("strict-security".to_string()),
+        repo_skills: None,
     };
     let result = build_system_prompt(prompts(), &vc);
     let stock_pos = result.find("senior software engineer").unwrap();

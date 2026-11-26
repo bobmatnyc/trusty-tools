@@ -6,7 +6,9 @@
 //! What: [`up`] resolves the directory ([`fleet::resolve_dir`]) and the
 //! recorded session names, runs [`fleet::up::up`], sends the daemon
 //! registration, prints the report and attaches unless told not to or run
-//! inside Claude Code, where it prints the attach command instead.
+//! inside Claude Code, where it prints the attach command instead. #11773:
+//! `--strict` first runs the read-only drift gate
+//! ([`super::architect_drift::strict_check`]) and exits 1 on an edited script.
 //! Test: `tests/tm_architect_up.rs`; the logic in `fleet/up_tests.rs`.
 
 use crate::cli::UpArgs;
@@ -25,6 +27,13 @@ pub(crate) async fn up(args: UpArgs) -> i32 {
             return 2;
         }
     };
+    // #11773: --strict refuses an edited managed script before the lock and init.
+    if args.strict
+        && let Err(msg) = super::architect_drift::strict_check(&dir)
+    {
+        eprint!("{msg}");
+        return 1;
+    }
     let names = match fleet::recorded_names(&home) {
         Ok(n) => n,
         Err(e) => {

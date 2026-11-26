@@ -60,6 +60,40 @@ pub(crate) enum DocFetchError {
 pub(crate) trait DocFetcher: Send + Sync {
     /// The text of `path` at commit `sha`.
     async fn fetch(&self, path: &str, sha: &str) -> Result<Option<String>, DocFetchError>;
+
+    /// The entry at `path` and commit `sha`, with its type, size and bytes.
+    ///
+    /// Why: #11899 — a repo skill must not load through a symlink and must be
+    /// size-checked; `fetch` hides both.
+    /// What: `Ok(None)` is a 404 for the path. The default wraps `fetch` as a
+    /// regular file at the requested path; [`GithubDocFetcher`] reads the
+    /// API's own `type`, `path` and `size`.
+    /// Test: `classify_entry_maps_each_response_shape`.
+    async fn fetch_entry(
+        &self,
+        path: &str,
+        sha: &str,
+    ) -> Result<Option<ContentsEntry>, DocFetchError> {
+        Ok(self.fetch(path, sha).await?.map(|text| ContentsEntry {
+            path: path.to_string(),
+            kind: "file".to_string(),
+            size: text.len(),
+            content: Some(text.into_bytes()),
+        }))
+    }
+}
+
+/// One Contents API entry at one commit (#11899).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContentsEntry {
+    /// The path the API answered for; a followed symlink answers its target.
+    pub(crate) path: String,
+    /// The API `type`: `file`, `dir`, `symlink` or `submodule`.
+    pub(crate) kind: String,
+    /// The API `size` in bytes.
+    pub(crate) size: usize,
+    /// The decoded bytes; `None` when the API sent no inline base64 content.
+    pub(crate) content: Option<Vec<u8>>,
 }
 
 /// Whether `sha` is a full lowercase hex commit SHA (40, or 64 for SHA-256).
@@ -159,22 +193,9 @@ pub(crate) fn contents_url(
 /// Test: `classify_maps_each_response_shape`,
 /// `fork_head_sha_unresolvable_is_unavailable_not_absent`.
 pub(crate) fn classify_response(status: u16, body: &str) -> Result<Option<String>, DocFetchError> {
-    let short: String = body.chars().take(300).collect();
-    if matches!(status, 404 | 422) && body.to_ascii_lowercase().contains("no commit found") {
-        return Err(DocFetchError::MissingCommit(short));
-    }
-    match status {
-        404 => return Ok(None),
-        200 => {}
-        _ => {
-            return Err(DocFetchError::Api {
-                status,
-                body: short,
-            });
-        }
-    }
-    let value: Value =
-        serde_json::from_str(body).map_err(|e| DocFetchError::Transport(format!("JSON: {e}")))?;
+    let Some(value) = ok_json(status, body)? else {
+        return Ok(None);
+    };
     if value.is_array() {
         return Err(DocFetchError::Directory);
     }
@@ -189,6 +210,74 @@ pub(crate) fn classify_response(status: u16, body: &str) -> Result<Option<String
     decode_base64_content(field("content"))
         .map(Some)
         .map_err(DocFetchError::Undecodable)
+}
+
+/// The status rules both classifiers share: `Ok(None)` for a plain 404, the
+/// parsed JSON for a 200, else the error `classify_response` documents.
+fn ok_json(status: u16, body: &str) -> Result<Option<Value>, DocFetchError> {
+    let short: String = body.chars().take(300).collect();
+    if matches!(status, 404 | 422) && body.to_ascii_lowercase().contains("no commit found") {
+        return Err(DocFetchError::MissingCommit(short));
+    }
+    match status {
+        404 => return Ok(None),
+        200 => {}
+        _ => {
+            return Err(DocFetchError::Api {
+                status,
+                body: short,
+            });
+        }
+    }
+    serde_json::from_str(body)
+        .map(Some)
+        .map_err(|e| DocFetchError::Transport(format!("JSON: {e}")))
+}
+
+/// Map one Contents API response to an entry (#11899).
+///
+/// Why: the repo-skills reader needs the entry's type, answered path and size
+/// to refuse a symlink and an over-cap file; `classify_response` keeps text only.
+/// What: the status rules of [`classify_response`]; a 200 array is
+/// [`DocFetchError::Directory`]; a 200 object is an entry whose `content` is
+/// the decoded bytes only for a `file` with `base64` encoding.
+///
+/// # Errors
+///
+/// As [`classify_response`], plus [`DocFetchError::Undecodable`] for bad base64.
+///
+/// Test: `classify_entry_maps_each_response_shape`.
+pub(crate) fn classify_entry_response(
+    status: u16,
+    body: &str,
+) -> Result<Option<ContentsEntry>, DocFetchError> {
+    let Some(value) = ok_json(status, body)? else {
+        return Ok(None);
+    };
+    if value.is_array() {
+        return Err(DocFetchError::Directory);
+    }
+    let field = |k: &str| value.get(k).and_then(Value::as_str).unwrap_or("");
+    let size = value.get("size").and_then(Value::as_u64).unwrap_or(0);
+    let content = if field("type") == "file" && field("encoding") == "base64" {
+        let stripped: String = field("content")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        // Fully qualified: the tests module imports `base64::Engine` itself.
+        let engine = &base64::engine::general_purpose::STANDARD;
+        let bytes = base64::Engine::decode(engine, stripped.as_bytes())
+            .map_err(|e| DocFetchError::Undecodable(format!("base64 decode error: {e}")))?;
+        Some(bytes)
+    } else {
+        None
+    };
+    Ok(Some(ContentsEntry {
+        path: field("path").to_string(),
+        kind: field("type").to_string(),
+        size: usize::try_from(size).unwrap_or(usize::MAX),
+        content,
+    }))
 }
 
 /// The production [`DocFetcher`]: `GET /repos/{owner}/{repo}/contents/{path}?ref={sha}`.
@@ -225,9 +314,9 @@ impl GithubDocFetcher {
     }
 }
 
-#[async_trait]
-impl DocFetcher for GithubDocFetcher {
-    async fn fetch(&self, path: &str, sha: &str) -> Result<Option<String>, DocFetchError> {
+impl GithubDocFetcher {
+    /// `GET` the Contents API for `path` at `sha`: `(status, body)`.
+    async fn get(&self, path: &str, sha: &str) -> Result<(u16, String), DocFetchError> {
         let url = contents_url(&self.owner, &self.repo, path, sha)?;
         let response = self
             .client
@@ -244,7 +333,25 @@ impl DocFetcher for GithubDocFetcher {
             .text()
             .await
             .map_err(|e| DocFetchError::Transport(e.without_url().to_string()))?;
+        Ok((status, body))
+    }
+}
+
+#[async_trait]
+impl DocFetcher for GithubDocFetcher {
+    async fn fetch(&self, path: &str, sha: &str) -> Result<Option<String>, DocFetchError> {
+        let (status, body) = self.get(path, sha).await?;
         classify_response(status, &body)
+    }
+
+    // #11899: the entry form keeps the API's type, path and size.
+    async fn fetch_entry(
+        &self,
+        path: &str,
+        sha: &str,
+    ) -> Result<Option<ContentsEntry>, DocFetchError> {
+        let (status, body) = self.get(path, sha).await?;
+        classify_entry_response(status, &body)
     }
 }
 

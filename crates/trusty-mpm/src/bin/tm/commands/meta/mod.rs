@@ -112,16 +112,18 @@ pub(crate) async fn run(
         "meta run: launching a real Claude Code session via the existing machinery"
     );
 
+    // #8233: this command entry point plays the role `DaemonState` plays on a
+    // daemon route — it names the ambient `~/.trusty-mpm` state root ONCE and
+    // hands it down, so the launch ritual never resolves a layout of its own
+    // (#4203). #11821: resolved first and fail-closed, before any write.
+    let framework_root = trusty_mpm::core::paths::FrameworkPaths::try_default()
+        .context("meta run: the config dir is unresolved; nothing was launched")?
+        .root;
+
     let state_dir = launch::state_dir(&project);
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create state dir: {}", state_dir.display()))?;
     let mgr = launch::new_session_manager(&state_dir).await?;
-
-    // #8233: this command entry point plays the role `DaemonState` plays on a
-    // daemon route — it names the ambient `~/.trusty-mpm` state root ONCE and
-    // hands it down, so the launch ritual never resolves a layout of its own
-    // (#4203).
-    let framework_root = trusty_mpm::core::paths::FrameworkPaths::default().root;
 
     if demo {
         run_demo(&mgr, &project, &framework_root, timeout).await

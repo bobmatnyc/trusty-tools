@@ -28,6 +28,8 @@ pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
         None => super::architect_up::up(crate::cli::UpArgs::default()).await,
         Some(ArchitectAction::Up(args)) => super::architect_up::up(args).await,
         Some(ArchitectAction::Attach) => super::architect_up::attach(),
+        // #11773: the read-only drift report.
+        Some(ArchitectAction::Drift { json, dir }) => super::architect_drift::run(json, dir),
         Some(ArchitectAction::Restart {
             wait,
             dir,
@@ -120,8 +122,9 @@ fn execute(
         ArchitectAction::Dashboard(_)
         | ArchitectAction::Up(_)
         | ArchitectAction::Attach
+        | ArchitectAction::Drift { .. }
         | ArchitectAction::Restart { .. } => Err(VerbError::Usage(
-            "dashboard, up and attach run through `run_any`, never `execute`".to_owned(),
+            "dashboard, up, attach and drift run through `run_any`, never `execute`".to_owned(),
         )),
     };
     match result {

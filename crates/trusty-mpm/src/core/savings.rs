@@ -352,10 +352,13 @@ pub fn savings_log_in(root: &Path) -> PathBuf {
 /// Why: producers run inside the library, where the `--root`/`TRUSTY_MPM_ROOT`
 /// override the `tm` binary resolves is not in scope; they use the same
 /// home-relative root every other `FrameworkPaths` consumer does.
-/// What: [`savings_log_in`] against `FrameworkPaths::default().root`.
-/// Test: `default_savings_log_is_under_the_framework_root`.
-pub fn default_savings_log() -> PathBuf {
-    savings_log_in(&crate::core::paths::FrameworkPaths::default().root)
+/// What: [`savings_log_in`] against `FrameworkPaths::try_default().root`; a
+/// broken `install.toml` is an error, never the `$HOME` fallback (#11821).
+/// Test: `default_savings_log_is_under_the_framework_root`,
+/// `default_savings_log_fails_closed_on_a_broken_install_file`.
+pub fn default_savings_log() -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    // #11821: a ledger path for a writer; no `$HOME` fallback.
+    crate::core::paths::FrameworkPaths::try_default().map(|paths| savings_log_in(&paths.root))
 }
 
 /// Append one row to the ledger, creating the `usage/` directory if absent.

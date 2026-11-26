@@ -30,12 +30,17 @@ const SAMPLE_ROWS: usize = 5;
 ///
 /// Why: `--root` is what lets an operator rehearse the repair against a copy,
 /// and what lets the behaviour tests run without touching a real ledger.
-/// What: `--root` when given, else [`FrameworkPaths::default`].
-/// Test: `repair_savings_ledger_dry_run_writes_nothing`.
-pub(crate) fn resolve_root(explicit: Option<String>) -> PathBuf {
+/// What: `--root` when given, else [`FrameworkPaths::try_default`]; a broken
+/// `install.toml` is an error, never the `$HOME` fallback (#11821).
+/// Test: `repair_savings_ledger_dry_run_writes_nothing`,
+/// `repair_savings_ledger_refuses_on_a_broken_install_file`.
+pub(crate) fn resolve_root(explicit: Option<String>) -> Result<PathBuf> {
     match explicit {
-        Some(root) => PathBuf::from(root),
-        None => FrameworkPaths::default().root,
+        Some(root) => Ok(PathBuf::from(root)),
+        // #11821: the repair rewrites the ledger; no `$HOME` fallback.
+        None => Ok(FrameworkPaths::try_default()
+            .context("the config dir is unresolved; the savings ledger was not touched")?
+            .root),
     }
 }
 
@@ -58,7 +63,7 @@ pub(crate) fn repair_savings_ledger(
     apply_it: bool,
     markers: bool,
 ) -> Result<()> {
-    let root = resolve_root(root);
+    let root = resolve_root(root)?;
     let ledger = savings_log_in(&root);
     let planned =
         plan(&ledger).with_context(|| format!("reading savings ledger {}", ledger.display()))?;

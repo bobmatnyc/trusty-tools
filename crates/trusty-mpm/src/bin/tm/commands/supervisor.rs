@@ -88,7 +88,11 @@ pub(crate) async fn run_supervisor(
     }
 
     // Build the session manager over the real tmux driver (or a no-op fallback).
-    let data_dir = FrameworkPaths::default().root.join("session-manager");
+    // #11821: the session store fails closed; no `$HOME` fallback.
+    let data_dir = FrameworkPaths::try_default()
+        .map_err(|e| anyhow::anyhow!("tm supervisor: the config dir is unresolved: {e}"))?
+        .root
+        .join("session-manager");
     std::fs::create_dir_all(&data_dir)?;
     let tmux: Arc<dyn ManagedTmuxDriver> = match RealTmuxDriver::discover() {
         Ok(d) => Arc::new(d),

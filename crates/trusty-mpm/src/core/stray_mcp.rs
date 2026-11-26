@@ -447,6 +447,19 @@ fn quarantine_destination(path: &Path) -> PathBuf {
     dest
 }
 
+/// The refusal for a quarantine whose ledger root cannot be resolved.
+///
+/// Why: #11821 — a quarantine releases the ledger claim under the framework
+/// root, so a broken `install.toml` refuses it rather than act on `$HOME`.
+/// What: a [`StepStatus::Refused`] step for `path` naming `err`.
+/// Test: `doctor_quarantine_mcp_refuses_on_a_broken_install_file`.
+pub fn refuse_unresolved_root(path: &Path, err: &dyn std::fmt::Display) -> RepairStep {
+    refuse(
+        path,
+        &format!("the config dir is unresolved: {err}; nothing was quarantined"),
+    )
+}
+
 /// A refusal step naming the path and the reason.
 fn refuse(path: &Path, why: &str) -> RepairStep {
     RepairStep {
