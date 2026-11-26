@@ -293,6 +293,20 @@ pub const RATE_LIMIT_REFUSAL_MARKER: &str =
 /// Test: `classify_reads_the_shim_refusal_and_its_reset_epoch`.
 pub const RATE_LIMIT_RESET_EPOCH_OPEN: &str = "(epoch ";
 
+/// The fixed opening of the shim's refusal line when the hourly GraphQL quota
+/// still has points left (#11233).
+///
+/// Why: GitHub also refuses on a short-window or secondary limit (seen on
+/// Projects V2 reads with 4061 of 5000 points left). Naming that the primary
+/// limit made `tm wait` sleep to an hourly reset while other calls worked.
+/// What: the line carries the remaining count and no reset epoch, so
+/// [`crate::core::gh_rate_limit::classify`] reads it as a short backoff.
+/// Shell-safe, like [`RATE_LIMIT_REFUSAL_MARKER`], and never contains it.
+/// Test: `a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary`,
+/// `classify_reads_the_short_window_line_as_a_backoff_with_no_reset`.
+pub const RATE_LIMIT_SHORT_WINDOW_MARKER: &str =
+    "tm: GitHub refused this gh call on a short-window or secondary GraphQL rate limit";
+
 /// The shim's tail: run the real gh, refusing a primary GraphQL rate-limit
 /// refusal cleanly (#10550, ruling D8f, option A).
 ///
@@ -304,12 +318,14 @@ pub const RATE_LIMIT_RESET_EPOCH_OPEN: &str = "(epoch ";
 /// buffers stdout and stderr in a `mktemp -d` dir (a file, so no size bound;
 /// `exec` when `mktemp` fails). On exit 1 with the rate-limit text and no
 /// `HTTP <status>` (a REST quota, 403 or 429, passes through; #10550) it
-/// prints one line naming the primary GraphQL limit and the reset from one
-/// bounded
-/// `gh api rate_limit --jq .resources.graphql.reset` (a REST core call), or
-/// "unknown", and exits 1 with no stdout. The call is never retried: the limit
-/// holds until the reset. Otherwise it replays stdout, then stderr, and the
-/// exit status.
+/// reads `remaining` and `reset` from one bounded REST `gh api rate_limit`
+/// call. With `remaining > 0` it prints one line naming a short-window or
+/// secondary limit and the remaining count (#11233). Otherwise, or when the
+/// lookup fails, it prints one line naming the primary GraphQL limit and the
+/// reset, or "unknown". Either line ends with gh's own first rate-limit
+/// stderr line, verbatim, and the shim exits 1 with no stdout. The call is
+/// never retried. Otherwise it replays stdout, then stderr, and the exit
+/// status.
 /// The buffered gh runs as a background child so a HUP, INT or TERM to the
 /// shim is acted on at once — sh defers a trap until a foreground child exits.
 /// The trap runs [`REAP_FN`], removes the buffer dir and exits 129, 130 or
@@ -320,6 +336,7 @@ pub const RATE_LIMIT_RESET_EPOCH_OPEN: &str = "(epoch ";
 /// `a_buffered_call_still_reads_the_callers_stdin`,
 /// `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
 /// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
+/// `a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary`,
 /// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
 /// `a_non_rate_limit_graphql_error_passes_through_unchanged`,
 /// `a_large_buffered_output_passes_through_whole`,
@@ -327,6 +344,8 @@ pub const RATE_LIMIT_RESET_EPOCH_OPEN: &str = "(epoch ";
 fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
     // #10550: gh runs in the background and the traps forward, bound and reap,
     // so a TERM-then-KILL supervisor never orphans gh or leaks the buffer dir.
+    // #11233: one REST lookup reads `remaining` and `reset`; quota left means
+    // a short-window limit, not the primary one, and gh's own line is kept.
     format!(
         "[ -t 1 ] && exec \"$real\" \"$@\"\n\
          case \" $* \" in *' --watch '*|*' --watch='*) exec \"$real\" \"$@\" ;; esac\n\
@@ -343,8 +362,9 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          wait \"$child\"\n\
          status=$?\n\
          if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -Eq 'HTTP [0-9][0-9][0-9]' \"$out/2\"; then\n\
-         \x20 reset=$(\n\
-         \x20   \"$real\" api rate_limit --jq .resources.graphql.reset </dev/null 2>/dev/null &\n\
+         \x20 said=$(grep -E -m 1 'API rate limit (already )?exceeded' \"$out/2\")\n\
+         \x20 looked=$(\n\
+         \x20   \"$real\" api rate_limit --jq .resources.graphql.remaining,.resources.graphql.reset </dev/null 2>/dev/null &\n\
          \x20   pid=$!\n\
          \x20   (sleep {bound_secs}; kill \"$pid\") >/dev/null 2>&1 &\n\
          \x20   watchdog=$!\n\
@@ -352,13 +372,21 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          \x20   looked=$?\n\
          \x20   kill \"$watchdog\" 2>/dev/null\n\
          \x20   exit \"$looked\"\n\
-         \x20 ) || reset=\n\
+         \x20 ) || looked=\n\
+         \x20 set -f; set -- $looked; set +f\n\
+         \x20 remaining=; reset=\n\
+         \x20 if [ \"$#\" -eq 2 ]; then remaining=$1; reset=$2; fi\n\
+         \x20 case \"$remaining\" in *[!0-9]*) remaining= ;; esac\n\
+         \x20 if [ -n \"$remaining\" ] && [ \"$remaining\" -gt 0 ]; then\n\
+         \x20   printf '%s\\n' \"{RATE_LIMIT_SHORT_WINDOW_MARKER} (gh account '{login}' on {shown}); the hourly GraphQL quota still has $remaining points left, so this is not the primary limit. tm did not retry it. gh said: $said\" >&2\n\
+         \x20   exit 1\n\
+         \x20 fi\n\
          \x20 case \"$reset\" in\n\
          \x20   ''|*[!0-9]*) when='the reset time is unknown (gh api rate_limit did not answer)' ;;\n\
          \x20   *) utc=$(date -u -r \"$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -d \"@$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)\n\
          \x20      when=\"it resets at ${{utc:-an unknown UTC time}} {RATE_LIMIT_RESET_EPOCH_OPEN}$reset)\" ;;\n\
          \x20 esac\n\
-         \x20 echo \"{RATE_LIMIT_REFUSAL_MARKER} (gh account '{login}' on {shown}); $when. tm did not retry it.\" >&2\n\
+         \x20 printf '%s\\n' \"{RATE_LIMIT_REFUSAL_MARKER} (gh account '{login}' on {shown}); $when. tm did not retry it. gh said: $said\" >&2\n\
          \x20 exit 1\n\
          fi\n\
          cat \"$out/1\"\n\

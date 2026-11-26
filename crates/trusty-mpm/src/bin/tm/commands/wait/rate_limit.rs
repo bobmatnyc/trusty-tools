@@ -7,5 +7,5 @@
 #[cfg(test)]
 pub(crate) use trusty_mpm::core::gh_rate_limit::RateLimited;
 pub(crate) use trusty_mpm::core::gh_rate_limit::{
-    MAX_CONSECUTIVE_RATE_LIMITED, backoff_secs, classify,
+    MAX_CONSECUTIVE_RATE_LIMITED, backoff_secs, classify, limit_name,
 };
