@@ -88,7 +88,7 @@
       template = config.workspace_root_template ?? '';
       autoResume = config.auto_resume ?? false;
       defaultModel = config.default_model ?? '';
-      saveMsg = 'Saved to ~/.trusty-tools/trusty-mpm/config.yaml';
+      saveMsg = 'Saved.';
     } catch (e) {
       error = e.message;
     } finally {
@@ -129,13 +129,13 @@
       <input
         type="text"
         bind:value={template}
-        placeholder="~/trusty-mpm-projects"
+        placeholder={installView.showEffectiveRoot ? config.workspace_root : ''}
         autocomplete="off"
       />
       <span class="hint">
         New sessions are provisioned under
         <code>&lt;root&gt;/&lt;owner&gt;/&lt;repo&gt;/&lt;session-id&gt;</code>.
-        Leave blank for the default <code>~/trusty-mpm-projects</code>.
+        Leave blank to use the configured project home.
         {#if installView.showEffectiveRoot}Effective root: <code>{config.workspace_root}</code>{/if}
       </span>
     </label>
@@ -150,7 +150,7 @@
       <input
         type="text"
         bind:value={defaultModel}
-        placeholder="(unset — uses ~/.trusty-mpm/config.toml)"
+        placeholder="(unset — uses the trusty-mpm default)"
         autocomplete="off"
       />
       <span class="hint">Model id or tier alias (<code>haiku</code>/<code>sonnet</code>/<code>opus</code>) for launched sessions.</span>
