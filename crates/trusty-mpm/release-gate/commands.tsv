@@ -246,6 +246,7 @@ meta run	SKIP	-	-	-	-	-	boots PM plus sub-agents against an LLM; `--demo` canned
 statusline	SAFE	$H	statusline	$FX/empty.json	0	-	stdin JSON
 commit-trailers	SAFE	$H	commit-trailers	-	0	-	reads local stores
 banner	SAFE	$H	banner	-	0	-	seeds $H/.trusty-mpm/banner.txt
+whats-new	SAFE	$H	whats-new	-	0	What's new in trusty-mpm	prints embedded text; writes nothing (#11003)
 mcp share	SAFE	$H	mcp share gate-m	-	0	-	retired (#7892), prints why
 mcp unshare	SAFE	$H	mcp unshare gate-m	-	0	-	retired
 mcp list	SAFE	$H	mcp list --json	-	0	-	

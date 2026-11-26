@@ -43,7 +43,8 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
 /// rows over the machine-wide settings list (#10263), the `notification_hook`
 /// row over the managed settings (#10885), and folds every status
-/// into one overall verdict. When
+/// into one overall verdict, then prints the once-per-release whats-new
+/// notice (#11003). When
 /// `prune_stale_skills` is set (hidden `--prune-stale-skills` flag), also runs
 /// `prune_stale_skills_locally` as a manual troubleshooting escape hatch —
 /// normal operation cleans up pre-rename `mpm-*` skill directories
@@ -143,6 +144,8 @@ pub(crate) async fn doctor(
             CheckStatus::Fail => "one or more checks failed",
         },
     );
+    // #11003: once per release; a store failure never fails doctor.
+    super::whats_new::print_doctor_notice();
 
     // #4948: every opt-in local action the report can be followed by lives in
     // `doctor_repair`, so this file stays the report and the actions stay
