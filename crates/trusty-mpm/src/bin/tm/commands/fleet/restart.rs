@@ -20,7 +20,9 @@
 //! request (exit 4 on timeout, always); `--no-checkpoint` skips the request
 //! and keeps the #11365 gate as it was, never bypassing it. A failed relaunch step types nothing and reports
 //! "NOT restarted". [`resolve_architect`] finds the Architect by its fleet
-//! role. Only the Architect's pane and its relaunch are touched.
+//! role. Only the Architect's pane and its relaunch are touched. #11368: after
+//! the gates and before the final ledger and idle re-check, `ops.deploy` runs
+//! the bundle deploy (`super::launch_deploy`); a failure stops nothing (exit 1).
 //! Test: `restart_tests.rs`, `restart_checkpoint_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -33,6 +35,7 @@ use trusty_architect::poller::capture;
 use trusty_architect::{PaneId, Tmux, input_state_for_send, send_line_guarded};
 use trusty_mpm::session_manager::ArchitectRegistration;
 
+use super::Step;
 use super::relaunch::RelaunchReport;
 use super::session_name::SessionNames;
 
@@ -79,6 +82,8 @@ pub(crate) struct Ops<'a> {
     pub(crate) tmux: &'a dyn Tmux,
     /// Stop and relaunch bound; see [`super::relaunch::relaunch`].
     pub(crate) relaunch: &'a dyn Fn() -> anyhow::Result<RelaunchReport>,
+    /// #11368: the bundle deploy, run before the relaunch.
+    pub(crate) deploy: &'a dyn Fn() -> anyhow::Result<Vec<Step>>,
     /// Wall clock, epoch seconds.
     pub(crate) now: fn() -> f64,
     /// Sleeps between reads.
@@ -120,7 +125,9 @@ impl RestartReport {
 /// `an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line`,
 /// `a_held_up_lock_refuses_the_restart_before_any_tmux_call`,
 /// `a_box_busy_just_before_relaunch_refuses`,
-/// `a_failed_stop_types_no_resume_line_and_reports_not_restarted`.
+/// `a_failed_stop_types_no_resume_line_and_reports_not_restarted`,
+/// `restart_deploys_the_bundle_before_the_relaunch_11368`,
+/// `a_failed_restart_deploy_stops_nothing_11368`.
 /// G0b: the CLI calls [`restart_with`]; this `--no-checkpoint` form is the
 /// tests' entry.
 #[cfg(test)]
@@ -226,6 +233,20 @@ fn restart_inner(
             return RestartReport::done(2, early);
         }
     }
+    // #11368: deploy before the stop; a failed deploy stops nothing (Q8).
+    let deployed = (ops.deploy)();
+    let failed = match &deployed {
+        Ok(steps) => steps.iter().any(|s| matches!(s, Step::Failed(_))),
+        Err(_) => true,
+    };
+    match deployed {
+        Ok(steps) => early.extend(steps.iter().map(|s| s.render_line().trim().to_owned())),
+        Err(e) => early.push(format!("FAILED  bundle deploy: {e:#}")),
+    }
+    if failed {
+        early.push("the bundle deploy failed, so claude was not stopped".to_owned());
+        return RestartReport::done(1, early);
+    }
     // As `self-clear.sh`: the ledger may have changed during the idle wait.
     if let Some(r) = il_refusal(dir, session, ops) {
         return r;
@@ -291,9 +312,16 @@ pub(crate) fn restart_live(
 ) -> RestartReport {
     let tmux = trusty_architect::SystemTmux::new();
     let relaunch = || super::relaunch::relaunch(dir, home, names, super::relaunch::LIVE);
+    // #11368: `restart` refuses inside Claude Code, so it may restart the poller.
+    let mode = super::launch_deploy::Mode {
+        dry_run: false,
+        restart: !inside,
+    };
+    let deploy = || super::launch_deploy::live(dir, names, mode);
     let ops = Ops {
         tmux: &tmux,
         relaunch: &relaunch,
+        deploy: &deploy,
         now: || {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

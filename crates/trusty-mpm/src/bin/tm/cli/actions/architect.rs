@@ -113,7 +113,11 @@ pub(crate) enum ArchitectAction {
     ///
     /// Idempotent and locked: starts what is missing, never stops or
     /// restarts a live `claude`. Inside Claude Code it only ensures a bound
-    /// Architect. Exit codes: 0 up, 1 a step failed, 2 refused.
+    /// Architect. Before any launch it deploys this binary's Architect bundle
+    /// (#11368), keeps each replaced file for `tm architect restore`, and
+    /// restarts a running poller or dashboard once when one of its scripts
+    /// changed (never inside Claude Code). A failed deploy launches nothing.
+    /// Exit codes: 0 up, 1 a step failed, 2 refused.
     Up(UpArgs),
     /// Attach to the Architect's tmux session (switch-client inside tmux).
     Attach,
@@ -134,6 +138,25 @@ pub(crate) enum ArchitectAction {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// The Architect directory (default: the one `tm fleet init` recorded).
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Put back the files the last launch deploy replaced (#11368).
+    ///
+    /// Every `tm architect up` and `restart` deploys this binary's bundle and
+    /// keeps the bytes of each file it replaced under
+    /// `.trusty-mpm/architect-bundle/<tm version>/` (one release; older ones
+    /// are pruned). This restores them: a file holding the bytes that deploy
+    /// wrote, or absent, gets the kept copy back; an edited file is left as
+    /// is and reported. Writes files only; restarts nothing. The next `up`
+    /// with the same tm deploys its bundle again. Exit codes: 0 restored,
+    /// 1 a file was edited or failed, or there is no kept copy, 2 the
+    /// directory cannot be resolved.
+    Restore {
+        /// The release to restore from (default: the one kept release).
+        #[arg(long)]
+        version: Option<String>,
         /// The Architect directory (default: the one `tm fleet init` recorded).
         #[arg(long)]
         dir: Option<String>,
