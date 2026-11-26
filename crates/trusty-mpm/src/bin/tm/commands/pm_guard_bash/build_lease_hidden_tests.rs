@@ -262,3 +262,48 @@ fn a_build_after_a_remote_runner_is_not_refused() {
     ]);
     assert_refused(&["entr cargo test -p x"]);
 }
+
+/// #11886 critic round 3: only the program word, matched exactly, is a
+/// remote runner; an `ssh` path in an assignment or a local `./ssh` is not.
+#[test]
+fn a_remote_runner_counts_only_as_the_exact_program_word() {
+    assert_refused(&[
+        "GIT_SSH=/usr/bin/ssh entr cargo test",
+        "./ssh cargo test",
+        "/tmp/evo cargo test",
+    ]);
+    assert_not_refused(&[
+        "$EVO cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
+        "\"${EVO}\" cargo check",
+        "ssh host cargo test",
+    ]);
+}
+
+/// #11886 critic round 3: a `-c` string the rule would refuse is a hidden
+/// heavy build, so the wrapper is leased whole.
+#[test]
+fn a_dash_c_string_the_rule_refuses_is_leased_whole() {
+    assert_eq!(
+        rw("bash -c 'entr cargo test'"),
+        LeaseRewrite::Rewrite("tm build-lease -- bash -c 'entr cargo test'".into())
+    );
+}
+
+/// #11886 critic round 3: a lease inside a nested `$(…)` does not cover the
+/// simple command around it.
+#[test]
+fn a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command() {
+    assert_refused(&["entr cargo test $(cargo check)"]);
+    for (input, want) in [
+        (
+            "echo $( cargo build)",
+            "echo $( tm build-lease -- cargo build)",
+        ),
+        (
+            "cargo test $(cargo check)",
+            "tm build-lease -- cargo test $(tm build-lease -- cargo check)",
+        ),
+    ] {
+        assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
+    }
+}
