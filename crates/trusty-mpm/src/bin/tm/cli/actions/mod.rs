@@ -48,6 +48,8 @@ mod memory_tools;
 mod meta;
 mod optimizer;
 mod overseer;
+// #11821 P6b: `tm paths show|set` — install.toml's only writer.
+mod paths;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
 mod pr;
 // #8878 PR2a: `tm presence local`.
@@ -92,6 +94,7 @@ pub(crate) use memory_tools::{MemoryKgAction, MemoryTaskAction, MemoryToolAction
 pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
+pub(crate) use paths::PathsAction;
 pub(crate) use pr::{
     PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs, PrWatchArgs, PrWatchCmd,
 };
