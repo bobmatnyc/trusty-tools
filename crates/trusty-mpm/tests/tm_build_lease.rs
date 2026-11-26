@@ -1861,7 +1861,9 @@ fn a_wrapped_cargo_test_says_the_empty_target_check_did_not_run_11661() {
 #[serial_test::serial(lease_processes)]
 fn an_unleased_build_in_a_kept_target_dir_is_still_guarded_11661() {
     let home = home_with_ceiling(64, "");
-    std::fs::write(home.path().join(".trusty-mpm/build-slots"), "a file").expect("file");
+    // The production resolver names the store this test makes unusable.
+    let store = trusty_mpm::core::build_lease::store::canonical_path(home.path());
+    std::fs::write(store, "a file").expect("file");
     let blocker = home.path().join("tmp-is-a-file");
     std::fs::write(&blocker, "x").expect("file");
     let kept = home.path().join("kept-target");
