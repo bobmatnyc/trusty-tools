@@ -39,6 +39,8 @@ fn raw(id: &str) -> RawChunk {
 /// In-memory fallback path: no durable corpus. Paging forward by `next_cursor`
 /// must cover every chunk exactly once, in ascending id order, and terminate.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn test_enumerate_chunks_after_cursor_in_memory_fallback() {
     let idx = CodeIndexer::new("cursor-mem", "/tmp/cursor-mem");
     for id in ["a:1:1", "b:1:1", "c:1:1", "d:1:1", "e:1:1"] {
@@ -77,6 +79,7 @@ async fn test_enumerate_chunks_after_cursor_in_memory_fallback() {
 /// Verifies full coverage, termination, ascending `chunk_id` key order, and no
 /// duplicates.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_enumerate_chunks_after_cursor_pages_via_redb() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -279,6 +282,7 @@ async fn scoped_corpus(name: &str) -> CodeIndexer {
 /// Offset mode: `path_prefix` scopes the page AND `total`, so a client can
 /// enumerate one directory in a single call without a seed cursor.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_chunks_path_prefix_scopes_the_page() {
     let idx = scoped_corpus("scope-offset").await;
 
@@ -305,6 +309,7 @@ async fn list_chunks_path_prefix_scopes_the_page() {
 /// The prefix matches at a path-segment boundary: `foo` must not drag in the
 /// sibling directory `foobar/`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_chunks_path_prefix_rejects_a_sibling_prefix() {
     let idx = scoped_corpus("scope-sibling").await;
 
@@ -340,6 +345,7 @@ async fn list_chunks_path_prefix_rejects_a_sibling_prefix() {
 /// Cursor mode: `total` and `next_cursor` describe the scoped set, so a walk
 /// over one directory terminates when that directory is exhausted.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_chunks_path_prefix_cursor_pages_within_the_scope() {
     let idx = scoped_corpus("scope-cursor").await;
 

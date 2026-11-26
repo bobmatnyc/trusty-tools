@@ -61,6 +61,8 @@ fn p50(mut samples: Vec<std::time::Duration>) -> std::time::Duration {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "measurement harness: 100k-chunk build; run in release with the caps raised"]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn exact_match_lane_p50_at_100k() {
     let idx = CodeIndexer::new("perf-7675", "/tmp/perf-7675");
     for i in 0..CORPUS_CHUNKS {

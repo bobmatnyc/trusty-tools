@@ -73,6 +73,8 @@ pub(crate) use self::status::status;
 // #11364: what `tm architect up|attach|restart` reuse.
 pub(crate) use self::register::register as register_architect;
 pub(crate) use self::session_name::recorded_names;
+// #11821 P6b: `tm paths set` refuses a hooked session with the same markers.
+pub(crate) use self::inside_claude::refuse_command_inside_claude_code;
 
 /// Whether this process runs inside a Claude Code session (#10033 markers).
 pub(crate) fn inside_claude_code() -> bool {

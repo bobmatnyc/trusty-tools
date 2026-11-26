@@ -22,6 +22,7 @@
 //! exactly to an existing pane, window or session
 //! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
 //! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`); since
+//! #11821 P6b, any `tm paths set` (`pm_guard_paths_set`); since
 //! #10665, a tmux kill of the fleet's server or of a `tm-` session
 //! (`pm_guard_bash::kill_server`); since #8878 PR2a, a write of the presence
 //! key's Keychain item (`pm_guard_presence_key`); its other findings are log-only (ruling
@@ -62,6 +63,7 @@ use crate::commands::pm_guard_bash::{
     evaluate_tmux_exact_target, unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, record_would_refuse};
+use crate::commands::pm_guard_paths_set::evaluate_paths_set;
 use crate::commands::pm_guard_presence::evaluate_presence_verbs;
 use crate::commands::pm_guard_presence_key::evaluate_presence_key_write;
 use crate::commands::pm_guard_refusal::refuse;
@@ -216,7 +218,8 @@ pub(crate) async fn deny_floors(
 /// Test: `the_universal_floors_bind_the_architect`,
 /// `the_architect_is_exempt_from_the_d4_remainder`,
 /// `every_identity_failure_denies_the_d4_remainder`,
-/// `fleet_relaunch_binds_every_caller_on_every_path`.
+/// `fleet_relaunch_binds_every_caller_on_every_path`,
+/// `paths_set_binds_every_caller_on_every_path`.
 pub(crate) fn evaluate_floors(
     payload: &Value,
     hook_cwd: &Path,
@@ -289,6 +292,14 @@ pub(crate) fn evaluate_floors(
     if let Some(reason) = command.and_then(evaluate_fleet_relaunch) {
         return Some(FloorDeny {
             rule: FLEET_RELAUNCH_RULE,
+            reason,
+        });
+    }
+    // #11821 P6b: `tm paths set` writes install.toml, a trust anchor; no
+    // hooked session runs it, the Architect included, so no gate is asked.
+    if let Some(reason) = command.and_then(evaluate_paths_set) {
+        return Some(FloorDeny {
+            rule: TRUST_ANCHOR_RULE,
             reason,
         });
     }

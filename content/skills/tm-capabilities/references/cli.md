@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-73 top-level commands.
+74 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -167,6 +167,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `overseer` — Inspect the session overseer
   - `status` — Show the overseer's enabled status and handler type
 - `path` — Print the stable repo path for a loaded alias (DOC-24 IDE-attach)
+- `paths` — The install's host paths: `tm paths show|set` (install.toml)
+  - `set` — Write install.toml: absolute paths only, from an operator terminal
+  - `show` — Print projects_root and config_dir with their source
 - `pr` — Deterministic pull-request gates: open a PR, merge one, or check the merge queue
   - `cleanup` — Reclaim everything a merged PR made obsolete: branches, worktrees, claims
   - `merge` — Squash-merge a PR with its validated body as the commit message

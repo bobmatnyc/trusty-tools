@@ -45,6 +45,8 @@ use super::*;
 /// asserts the `path_prefix`-scoped query returns it.
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn test_path_prefix_filter_survives_top_k_truncation() {
     let idx = make_indexer();
 
@@ -139,6 +141,7 @@ async fn test_path_prefix_filter_survives_top_k_truncation() {
 /// BM25 cleanly no matter how the query classifies.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_path_prefix_filter_recovers_bm25_match_beyond_want() {
     let idx = make_indexer();
     for i in 0..15 {
@@ -200,6 +203,7 @@ async fn test_path_prefix_filter_recovers_bm25_match_beyond_want() {
 /// `repos` filter: same pre-truncation guarantee, keyed on a path segment
 /// rather than a prefix.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_repos_filter_matches_path_segment() {
     let idx = make_indexer();
     for i in 0..20 {
@@ -252,6 +256,7 @@ async fn test_repos_filter_matches_path_segment() {
 /// Composition: `path_prefix` + `exclude_archived` — both must apply
 /// (independent hard filters), neither silently disables the other.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_path_prefix_composes_with_exclude_archived() {
     let idx = make_indexer();
     let live = "vendor/acme/live.rs";
@@ -306,6 +311,7 @@ async fn test_path_prefix_composes_with_exclude_archived() {
 /// Composition: `path_prefix` + branch boost — the filter and the boost are
 /// independent passes; a chunk can be both in-scope and branch-boosted.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_path_prefix_composes_with_branch_boost() {
     let idx = make_indexer();
     let on_branch = "vendor/acme/on_branch.rs";
@@ -379,6 +385,7 @@ async fn test_path_prefix_composes_with_branch_boost() {
 /// (21 candidate field names all returned HTTP 200 with an identical result
 /// set before this fix).
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_search_query_rejects_unknown_field() {
     let with_typo = serde_json::json!({
         "text": "foo",
@@ -406,6 +413,7 @@ async fn test_search_query_rejects_unknown_field() {
 /// `path_prefix: "vendor/foo"` must not also match the sibling directory
 /// `vendor/foobar/...`, which a bare `starts_with` would silently allow.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_path_prefix_rejects_sibling_directory() {
     let idx = make_indexer();
     let in_scope = "vendor/foo/src/lib.rs";
@@ -448,6 +456,7 @@ async fn test_path_prefix_rejects_sibling_directory() {
 /// resolved to an absolute host path) must get the same results as a caller
 /// who already knew to pass the root-relative form.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_path_prefix_accepts_absolute_form_from_a_prior_result() {
     let idx = make_indexer();
     let in_scope = "vendor/acme/lib.rs";

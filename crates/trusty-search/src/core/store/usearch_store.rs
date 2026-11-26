@@ -416,6 +416,8 @@ pub struct UsearchStore {
     /// #9450: churn since the last graph rebuild, and the heal marker.
     /// Persisted in the sidecar; see [`super::usearch_compact`].
     pub(super) compact: super::usearch_compact::CompactState,
+    /// #10303: keys a view-mode removal tombstoned; see `usearch_tombstones`.
+    pub(super) tombstones: tokio::sync::Mutex<super::usearch_tombstones::TombstoneState>,
 }
 
 impl UsearchStore {
@@ -484,6 +486,7 @@ impl UsearchStore {
             removed_since_save: Arc::new(AtomicU64::new(0)),
             compact: super::usearch_compact::CompactState::fresh(),
             promotions: AtomicU64::new(0),
+            tombstones: tokio::sync::Mutex::new(Default::default()),
         })
     }
 
@@ -761,6 +764,8 @@ impl UsearchStore {
         // #9450: the sidecar names the binary it is published with.
         key_map.graph = super::usearch_compact::graph_stamp(&tmp_hnsw);
         publish(hnsw_path, &key_map)?;
+        // #10303: the published pair carries every removal; its tombstones go.
+        self.clear_tombstones_after_publish(hnsw_path).await;
         // Only a published pair establishes a new baseline for shrink credit.
         self.removed_since_save.store(0, Ordering::Release);
 
@@ -1012,6 +1017,13 @@ impl UsearchStore {
                 }
             }
         }
+        // #10303: drop tombstoned ids; an untrustworthy tombstone file is an error.
+        if let Some(mut tomb) = super::usearch_tombstones::read_tombstones(hnsw_path, &json)
+            .inspect_err(|e| tracing::error!("usearch: {e} — refusing the snapshot (#10303)"))?
+        {
+            super::usearch_tombstones::drop_tombstoned(&mut key_map.id_to_key, &mut tomb);
+            *store.tombstones.lock().await = tomb;
+        }
         store.is_view.store(true, Ordering::Release);
         *store.hnsw_path.write().await = Some(hnsw_path.to_path_buf());
 
@@ -1080,6 +1092,8 @@ impl UsearchStore {
             .to_str()
             .ok_or_else(|| anyhow!("non-utf8 hnsw path: {}", path.display()))?
             .to_string();
+        // #10303: read before the graph lock; unlinked once the graph is mutable.
+        let tombstoned = self.tombstones_to_apply().await;
 
         let index = self.index.write().await;
         // Double-check under the write lock so racing writers promote once.
@@ -1092,12 +1106,14 @@ impl UsearchStore {
             // it. Rebuild from the mapping we still hold rather than failing
             // this and every future write forever.
             self.rebuild_mutable_from_view(&index, &path, &e.to_string())?;
+            self.apply_tombstones_to_graph(&index, &tombstoned).await?;
             self.is_view.store(false, Ordering::Release);
             self.promotions.fetch_add(1, Ordering::Relaxed); // #10195
                                                              // Nothing on disk matches the rebuilt graph until the next save.
             self.mark_dirty();
             return Ok(());
         }
+        let applied = self.apply_tombstones_to_graph(&index, &tombstoned).await?;
         let size = index.size();
         if index.capacity() < size {
             index
@@ -1109,6 +1125,9 @@ impl UsearchStore {
                                                          // A fresh `Index::load` is byte-for-byte the on-disk snapshot, so
                                                          // there is nothing unpersisted yet (issue #2164 dirty tracking).
         self.dirty.store(false, Ordering::Release);
+        if applied > 0 {
+            self.mark_dirty(); // #10303: the unlinked tombstones are not on disk yet.
+        }
         tracing::info!(
             "usearch: promoted view → mutable for {} ({} vectors)",
             path.display(),

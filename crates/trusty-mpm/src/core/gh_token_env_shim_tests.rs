@@ -19,6 +19,7 @@ const SENTINEL: &str = "ghp_10487TokenEnvSentinelNeverInEnv";
 const SOURCE: &str = "TM_TEST_10487_TOKEN_ENV";
 
 /// The `GH_TOKEN` binding `resolve_gh_env` builds for `token_env = SOURCE`.
+// #11923: every caller is `#[serial]`, the guard the sandbox tests hold.
 fn token_env_binding(host: Option<&str>) -> GhEnv {
     let _g = crate::core::trusty_tools_config::env_test_lock();
     // SAFETY: guarded by env_test_lock; removed before the lock drops.
@@ -143,6 +144,8 @@ fn a_local_only_env_passes_through_with_no_get_user_10487() {
 /// 🔴 #10487 Fail-Open Check: a keyring that refuses the write refuses the
 /// launch; nothing hands the token to the env instead.
 #[test]
+// #11923: sets SOURCE, which the serial sandbox tests here verify is unset.
+#[serial_test::serial]
 fn a_token_env_keyring_failure_refuses_and_injects_no_token_10487() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = token_env_binding(None);
@@ -164,6 +167,8 @@ fn a_token_env_keyring_failure_refuses_and_injects_no_token_10487() {
 
 /// 🔴 #10487: a token `GET /user` cannot prove refuses, and nothing is stored.
 #[test]
+// #11923: sets SOURCE, which the serial sandbox tests here verify is unset.
+#[serial_test::serial]
 fn an_unproven_token_env_token_refuses_and_stores_nothing_10487() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = token_env_binding(None);
@@ -181,6 +186,8 @@ fn an_unproven_token_env_token_refuses_and_stores_nothing_10487() {
 /// 🔴 #10487: with no real gh to shim, the launch refuses rather than keep
 /// the token in the env.
 #[test]
+// #11923: sets SOURCE, which the serial sandbox tests here verify is unset.
+#[serial_test::serial]
 fn a_token_env_launch_with_no_gh_refuses_10487() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = token_env_binding(None);
@@ -194,6 +201,8 @@ fn a_token_env_launch_with_no_gh_refuses_10487() {
 
 /// #10487: the binding names the variable its token came from, never a value.
 #[test]
+// #11923: sets SOURCE, which the serial sandbox tests here verify is unset.
+#[serial_test::serial]
 fn a_token_env_binding_names_its_source_variable_10487() {
     let env = token_env_binding(Some("ghe.example.com"));
     assert_eq!(env.token_source(), Some(SOURCE));

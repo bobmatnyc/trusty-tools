@@ -19,6 +19,8 @@ fn pretty_json(entries: usize) -> String {
 
 /// Fails against 889f555fc3: the large file left the corpus empty.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn index_file_on_large_json_lands_chunks() {
     let idx = CodeIndexer::new("zero-chunk-8976", "/tmp/zero-chunk-8976");
     idx.index_file("config/big.json", &pretty_json(600))
@@ -43,6 +45,7 @@ async fn index_file_on_large_json_lands_chunks() {
 
 /// Blank content has nothing to index; it is reported, never `Indexed`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_file_on_blank_content_reports_empty() {
     let idx = CodeIndexer::new("zero-chunk-8976-blank", "/tmp/zero-chunk-8976-blank");
     for content in ["", "\n  \n"] {
@@ -58,6 +61,7 @@ async fn index_file_on_blank_content_reports_empty() {
 /// Owner ruling item 232, Q1(b): JSON above the 50-window ceiling lands no
 /// chunks and reports `TooLarge`. Fails against fe7e377e35, which windowed it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_file_on_json_above_the_window_ceiling_reports_too_large() {
     let idx = CodeIndexer::new("zero-chunk-8976-huge", "/tmp/zero-chunk-8976-huge");
     let outcome = idx

@@ -170,6 +170,12 @@ impl GitWorktreeFixture {
         git_ok(&repo, &["config", "user.email", "ci@test.invalid"]);
         git_ok(&repo, &["config", "user.name", "CI"]);
         git_ok(&repo, &["config", "commit.gpgsign", "false"]);
+        // #11873: with no ambient `maintenance.auto=false` (CI, or a $HOME a
+        // concurrent test swapped), the fixture's commit and fetch leave a
+        // detached `git maintenance run --auto` whose cwd is the worktree, and
+        // the reap's occupant probe then keeps the tree. Repo-local, so every
+        // linked worktree shares it.
+        git_ok(&repo, &["config", "maintenance.auto", "false"]);
         std::fs::write(repo.join("README.md"), "base\n").expect("fixture: write README");
         git_ok(&repo, &["add", "README.md"]);
         git_ok(&repo, &["commit", "-m", "base"]);

@@ -372,7 +372,10 @@ fn spawn_sh_sibling(links: &Path, argv: &[&str], env: &[(&str, &OsString)]) -> C
     let bin = links.join("sh-bin");
     std::fs::create_dir_all(&bin).expect("sh bin dir");
     let sh = bin.join(BINARY);
-    std::fs::copy("/bin/sh", &sh).expect("copy /bin/sh");
+    // #11911: install the copy through the shared helper so this process never
+    // holds a write fd to the exec'd file (replaces the ETXTBSY retry loop).
+    let sh_bytes = std::fs::read("/bin/sh").expect("read /bin/sh");
+    trusty_common::exec_stub::write_executable(&sh, sh_bytes).expect("copy /bin/sh");
     let script = format!(
         "i=0; while [ -d \"${FIX_DIR}\" ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done"
     );
@@ -387,17 +390,7 @@ fn spawn_sh_sibling(links: &Path, argv: &[&str], env: &[(&str, &OsString)]) -> C
     for (k, v) in env {
         cmd.env(k, v);
     }
-    // A parallel test's fork can hold the copy's write fd until its exec.
-    let mut tries = 0;
-    loop {
-        match cmd.spawn() {
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            other => break other.expect("spawn sh sibling"),
-        }
-    }
+    cmd.spawn().expect("spawn sh sibling")
 }
 
 /// Show the scan `pid`'s real `/proc` entry in the table under `table`.

@@ -96,6 +96,8 @@ pub enum TreeRowKind {
         name: String,
         total: usize,
         live: usize,
+        /// #10990: decommissioned and no session live, so the row draws dim.
+        dim: bool,
     },
     /// The Architect's project: top level, above every owner bar, marked
     /// privileged (#11554).
@@ -173,8 +175,10 @@ fn is_live(state: &str) -> bool {
 /// first seen on any poll starts open. Counters count the polled (non-
 /// terminal) session rows: `total` is all of them, `live` those `active` or
 /// `provisioning`; an owner sums its projects. #10754: two-column MPM pane
-/// (Bob 11-06) — no session rows; a project is a leaf.
+/// (Bob 11-06) — no session rows; a project is a leaf. #10990: a project row
+/// is `dim` while decommissioned with no live session.
 /// Test: `counts_total_and_live_per_project_and_owner`,
+/// `decommissioned_project_dims_until_a_session_is_live`,
 /// `collapsed_owner_hides_projects`, `left_column_draws_no_session_rows`,
 /// `owner_expand_state_survives_first_seen_spelling_change`,
 /// `fresh_state_shows_every_node_expanded_without_sessions`,
@@ -249,6 +253,9 @@ pub(crate) fn build_tree(
                     name: project.name.clone(),
                     total,
                     live,
+                    // #10990: a live session clears the dim on this poll,
+                    // before the registry's own clear (#10988) is read back.
+                    dim: project.decommissioned && live == 0,
                 },
             });
         }

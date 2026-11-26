@@ -33,6 +33,8 @@ fn make_branch_query(text: &str, files: Vec<String>, boost: f32) -> SearchQuery 
 }
 
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn test_branch_boost_applied_to_matching_chunks() {
     // Why: chunks whose file is in `branch_files` must out-rank otherwise
     // equivalent chunks. We use two files with the same BM25-relevant
@@ -85,6 +87,7 @@ async fn test_branch_boost_applied_to_matching_chunks() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_branch_boost_clamped_to_3x() {
     // Why: callers must not be able to drown out all off-branch results by
     // passing wild multipliers (e.g. 10x). The pipeline must clamp.
@@ -115,6 +118,7 @@ async fn test_branch_boost_clamped_to_3x() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_on_branch_set_correctly() {
     // Why: every returned chunk must carry an accurate `on_branch` flag so
     // clients can highlight branch work in UI without re-doing the lookup.
@@ -161,6 +165,7 @@ async fn test_on_branch_set_correctly() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_no_boost_when_branch_files_absent() {
     // Why: a vanilla query with no branch context must not pay any branch
     // overhead and must report `on_branch: false` on every result.
@@ -219,6 +224,7 @@ use crate::core::corpus::CorpusStore;
 /// Phase 2 + 3: a committed batch must persist to redb, and a fresh indexer
 /// pointed at the same redb file must rehydrate the corpus on warm-boot.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_corpus_store_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -266,6 +272,7 @@ async fn test_corpus_store_roundtrip() {
 /// Phase 3: warm-boot from an empty / missing redb corpus must yield zero
 /// chunks (the first-run / post-upgrade fallback that triggers a reindex).
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_corpus_store_warm_boot_empty_is_zero() {
     let dir = tempfile::tempdir().unwrap();
     let idx = make_indexer_with_corpus(&dir.path().join("fresh.redb"));
@@ -280,6 +287,7 @@ async fn test_corpus_store_warm_boot_empty_is_zero() {
 /// Phase 2: `remove_file` / `remove_chunk_ids_committed` must evict from the durable redb
 /// corpus too — otherwise a warm-boot resurrects the deleted chunks.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_corpus_store_deletes_on_remove() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -325,6 +333,7 @@ async fn test_corpus_store_deletes_on_remove() {
 /// populated `chunks.json` and an empty `index.redb`. `migrate_corpus_to_redb`
 /// must seed redb so the next restart uses the fast path.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_corpus_store_migrates_from_json() {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("chunks.json");
@@ -363,6 +372,7 @@ async fn test_corpus_store_migrates_from_json() {
 /// orchestrator the ability to stage a rebuilt corpus in a temp file and then
 /// restore the indexer's durable store — without losing the original.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_corpus_store_swap_and_take() {
     let dir = tempfile::tempdir().unwrap();
     let live_path = dir.path().join("index.redb");
@@ -428,6 +438,7 @@ async fn test_corpus_store_swap_and_take() {
 /// in-memory load is skipped).
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_true_warm_boot_never_loads_persisted_graph() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -486,6 +497,7 @@ async fn skip_kg_true_warm_boot_never_loads_persisted_graph() {
 /// is non-empty.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_false_warm_boot_still_loads_persisted_graph() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -532,6 +544,7 @@ async fn skip_kg_false_warm_boot_still_loads_persisted_graph() {
 /// the planted chunk otherwise).
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired() {
     let mut idx = make_indexer();
     idx.skip_kg = true;
@@ -576,6 +589,7 @@ async fn skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired() {
 /// stays empty.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_true_legacy_json_restore_skips_graph_rebuild() {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("chunks.json");
@@ -634,6 +648,7 @@ async fn skip_kg_true_legacy_json_restore_skips_graph_rebuild() {
 /// same redb path and confirming its warm-boot graph is non-empty.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn runtime_kg_disable_clears_symbol_graph_in_memory() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -682,6 +697,7 @@ async fn runtime_kg_disable_clears_symbol_graph_in_memory() {
 /// is restored to its original node/edge counts.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn runtime_kg_catch_up_prefers_load_from_corpus() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -727,6 +743,7 @@ async fn runtime_kg_catch_up_prefers_load_from_corpus() {
 /// asserts the graph was rebuilt from those chunks (non-empty).
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn runtime_kg_catch_up_falls_back_to_rebuild_without_corpus() {
     let idx = make_indexer();
     assert!(!idx.has_corpus_store(), "precondition: no corpus wired");
@@ -765,6 +782,7 @@ async fn runtime_kg_catch_up_falls_back_to_rebuild_without_corpus() {
 /// that the corpus now carries the current stamp.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stale_persisted_graph_is_detected_and_rebuilt() {
     use crate::core::corpus::{PersistedKgNode, KG_GRAPH_FORMAT_VERSION};
 
@@ -852,6 +870,7 @@ async fn stale_persisted_graph_is_detected_and_rebuilt() {
 /// reflects the full corpus size.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn embed_deferred_chunks_skips_already_embedded_chunks() {
     let idx = make_indexer();
     let parsed = ParsedBatch {
@@ -916,6 +935,7 @@ async fn embed_deferred_chunks_skips_already_embedded_chunks() {
 /// proving the count reflects only the un-embedded delta.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn pending_embed_count_matches_delta_not_total_chunk_count() {
     let idx = make_indexer();
     let parsed = ParsedBatch {
@@ -960,6 +980,7 @@ async fn pending_embed_count_matches_delta_not_total_chunk_count() {
 /// case, where a fresh reindex has embedded nothing yet.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn pending_embed_count_equals_total_on_a_cold_index() {
     let idx = make_indexer();
     let parsed = ParsedBatch {
@@ -1008,6 +1029,7 @@ async fn pending_embed_count_equals_total_on_a_cold_index() {
 /// evicted immediately at commit time.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stale_vector_evicted_when_chunk_recommitted_without_embedding() {
     use crate::core::embed::{Embedder, MockEmbedder};
 
@@ -1082,6 +1104,7 @@ async fn stale_vector_evicted_when_chunk_recommitted_without_embedding() {
 /// vector matches `MockEmbedder`'s hash of the CURRENT (edited) content.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stale_vector_eviction_then_catch_up_reembeds_current_content() {
     use crate::core::embed::{Embedder, MockEmbedder};
 
@@ -1153,6 +1176,7 @@ async fn stale_vector_eviction_then_catch_up_reembeds_current_content() {
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]
+#[serial_test::parallel]
 fn test_compute_match_reason_fallback_label() {
     // Why: the `(false,false,false)` arm used to return the bare "fallback"
     // string. Issue #75 renamed it to `"fallback:ripgrep"` so grep-fallback
@@ -1173,6 +1197,7 @@ fn test_compute_match_reason_fallback_label() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_grep_fallback_returns_substring_hits() {
     // Why: when both primary lanes return nothing, an exact-substring scan
     // over the in-memory corpus should still surface relevant chunks. The
@@ -1195,6 +1220,7 @@ async fn test_grep_fallback_returns_substring_hits() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_grep_fallback_treats_query_as_literal() {
     // Why: user input must never be treated as a regex. A query containing
     // regex metacharacters should match literally (or not at all) — never
@@ -1218,6 +1244,7 @@ async fn test_grep_fallback_treats_query_as_literal() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn test_merge_grep_lane_appends_new_ids() {
     // Why: merge_grep_lane must add brand-new ids to the fused list without
     // dropping any of the existing fused entries, and the resulting order
@@ -1235,6 +1262,7 @@ fn test_merge_grep_lane_appends_new_ids() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_archive_downrank_demotes_deprecated_chunks() {
     // Why: chunks whose file path matches an archive keyword (here: "legacy")
     // should be demoted below comparable clean-path chunks via the post-MMR
@@ -1298,6 +1326,7 @@ async fn test_archive_downrank_demotes_deprecated_chunks() {
 /// and asserts only the live chunk survives.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_exclude_archived_drops_archive_chunks() {
     let idx = make_indexer();
     idx.add_chunk(raw("live", "src/auth.rs", "fn authenticate_user_xyz() {}"))
@@ -1357,6 +1386,7 @@ async fn test_exclude_archived_drops_archive_chunks() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_archive_downrank_skips_clean_chunks() {
     // Why: a chunk with no archive signals must not receive an
     // `archive_reason`, and its score must be unchanged by the downrank pass.
@@ -1379,6 +1409,7 @@ async fn test_archive_downrank_skips_clean_chunks() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_search_result_preserves_line_numbers() {
     // Why: issue #75 requires every search result to carry start_line and
     // end_line. They are already on RawChunk; this guards against a future
@@ -1456,6 +1487,7 @@ async fn seed_mode_filter_corpus(idx: &CodeIndexer) {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_mode_filter_code_returns_only_source() {
     // Why: code mode (the default) must return strictly source-code
     // extensions for genuinely code-shaped intents. Prose docs, named
@@ -1503,6 +1535,7 @@ async fn test_mode_filter_code_returns_only_source() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_mode_filter_text_returns_only_prose_and_named_docs() {
     // Why: text mode must return only prose extensions and path-based
     // named docs (README*, LICENSE*, CHANGELOG*, …). Source, config,
@@ -1543,6 +1576,7 @@ async fn test_mode_filter_text_returns_only_prose_and_named_docs() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_mode_filter_data_returns_only_structured_data() {
     // Why: data mode must return only structured-data / config / schema
     // files. Source and prose must be excluded.
@@ -1581,6 +1615,7 @@ async fn test_mode_filter_data_returns_only_structured_data() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_mode_filter_all_returns_everything() {
     // Why: `all` mode is the escape hatch — no file-type filter applies.
     // Every seeded chunk must appear in results.
@@ -1631,6 +1666,7 @@ const GATE_FIXTURE: &str = "pub fn alpha() { beta(); }\npub fn beta() {}\n";
 /// fails this on the `vectors == 0` assertion.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_vector_index_file_never_embeds() {
     let mut idx = make_indexer();
     idx.skip_vector = true;
@@ -1667,6 +1703,7 @@ async fn skip_vector_index_file_never_embeds() {
 /// the vector store DID gain vectors.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_vector_false_index_file_still_embeds() {
     let idx = make_indexer();
     assert!(!idx.skip_vector, "default must be false");
@@ -1701,6 +1738,7 @@ async fn skip_vector_false_index_file_still_embeds() {
 /// otherwise produce nodes.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_index_file_never_rebuilds_the_symbol_graph() {
     let mut idx = make_indexer();
     idx.skip_kg = true;
@@ -1725,6 +1763,7 @@ async fn skip_kg_index_file_never_rebuilds_the_symbol_graph() {
 
 /// #3048 control for the skip_kg parity gate — see the test above.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_false_index_file_still_rebuilds_the_symbol_graph() {
     let idx = make_indexer();
     assert!(!idx.skip_kg, "default must be false");

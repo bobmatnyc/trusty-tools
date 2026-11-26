@@ -283,8 +283,9 @@ pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
 /// entry already carries its own optional `untracked_sync` override via its
 /// own `Serialize` impl, so no separate top-level field is needed for that).
 /// What: returns `{ workspace_root_template, auto_resume, default_model, github,
-/// untracked_sync, projects, workspace_root }` where `workspace_root` is
-/// [`trusty_tools_config::workspace_root`].
+/// untracked_sync, projects, workspace_root, install_paths }` where
+/// `workspace_root` is [`trusty_tools_config::workspace_root`] and
+/// `install_paths` is [`install_paths_json`] (#11821 P5).
 /// Test: `config_read_returns_resolved_root`,
 /// `config_to_json_includes_github_and_projects`,
 /// `config_to_json_includes_untracked_sync`.
@@ -304,7 +305,73 @@ fn config_to_json(config: &TrustyToolsConfig) -> Value {
         "projects": config.projects,
         // #11821: defaulting resolver kept — display only.
         "workspace_root": trusty_tools_config::workspace_root(config).to_string_lossy(),
+        // #11821 P5: the project home and config dir from InstallPaths, with
+        // the winning source, or the error on a broken install.toml.
+        "install_paths": install_paths_json(config),
     })
+}
+
+/// The Config tab's read-only view of the install paths (#11821 P5).
+///
+/// Why: the console must show the project home and config dir the resolver
+/// actually uses, and must say so when `install.toml` is broken instead of
+/// showing the `$HOME` default.
+/// What: [`InstallPaths::resolve_overridden`] with the config's
+/// `workspace_root_template` as the template rung, rendered by
+/// [`install_paths_to_json`].
+/// Test: `install_paths_json_reports_a_broken_install_file`,
+/// `install_paths_json_reports_paths_and_sources`.
+///
+/// [`InstallPaths::resolve_overridden`]: trusty_common::install_paths::InstallPaths::resolve_overridden
+fn install_paths_json(config: &TrustyToolsConfig) -> Value {
+    use trusty_common::install_paths::{InstallPaths, PathOverrides, install_file_path};
+    let overrides = PathOverrides {
+        projects_root_template: config.workspace_root_template.clone(),
+        ..PathOverrides::default()
+    };
+    let install_file = dirs::home_dir().map(|home| install_file_path(&home));
+    install_paths_to_json(
+        InstallPaths::resolve_overridden(&overrides),
+        install_file.as_deref(),
+    )
+}
+
+/// Render a resolved (or failed) [`InstallPaths`] as the `install_paths` object.
+///
+/// Why: a pure seam, so the error arm is tested without rewriting `$HOME`.
+/// What: `{ install_file, projects_root, config_dir, error }`. On success each
+/// path is `{ path, source }`, `source` being the [`PathSource`] display name,
+/// and `error` is `null`. On failure both paths are `null` and `error` carries
+/// the resolver's message: no rung below the broken one is shown (#11821).
+/// Test: `install_paths_json_reports_a_broken_install_file`,
+/// `install_paths_json_reports_paths_and_sources`.
+///
+/// [`InstallPaths`]: trusty_common::install_paths::InstallPaths
+/// [`PathSource`]: trusty_common::install_paths::PathSource
+pub(crate) fn install_paths_to_json(
+    paths: Result<
+        trusty_common::install_paths::InstallPaths,
+        trusty_common::install_paths::InstallPathsError,
+    >,
+    install_file: Option<&Path>,
+) -> Value {
+    let one = |r: &trusty_common::install_paths::ResolvedPath| json!({ "path": r.path.to_string_lossy(), "source": r.source.to_string() });
+    let install_file = install_file.map(|p| p.to_string_lossy().into_owned());
+    match paths {
+        Ok(paths) => json!({
+            "install_file": install_file,
+            "projects_root": one(&paths.projects_root),
+            "config_dir": one(&paths.config_dir),
+            "error": Value::Null,
+        }),
+        // #11821: fail closed — never fall back to the `$HOME` default here.
+        Err(e) => json!({
+            "install_file": install_file,
+            "projects_root": Value::Null,
+            "config_dir": Value::Null,
+            "error": e.to_string(),
+        }),
+    }
 }
 
 /// Back the `config_read` tool: load and return the config-convention file.

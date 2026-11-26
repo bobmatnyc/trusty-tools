@@ -29,11 +29,11 @@ fn root_with_ledger() -> (tempfile::TempDir, std::path::PathBuf) {
 #[test]
 fn resolve_root_honours_the_override() {
     assert_eq!(
-        resolve_root(Some("/tmp/rehearsal".to_string())),
+        resolve_root(Some("/tmp/rehearsal".to_string())).expect("explicit root"),
         std::path::PathBuf::from("/tmp/rehearsal")
     );
     assert_eq!(
-        resolve_root(None),
+        resolve_root(None).expect("the host's config dir resolves"),
         trusty_mpm::core::paths::FrameworkPaths::default().root
     );
 }

@@ -119,8 +119,6 @@ skills/architect-macos.md|content/instructions/architect/skills/architect-macos.
 skills/architect-improvements.md|content/instructions/architect/skills/architect-improvements.md
 skills/architect-host-admin.md|content/instructions/architect/skills/architect-host-admin.md
 skills/architect-dashboard.md|content/instructions/architect/skills/architect-dashboard.md
-skills/architect-drift-guard.md|content/instructions/architect/skills/architect-drift-guard.md
-skills/architect-improver.md|content/instructions/architect/skills/architect-improver.md
 agents/runner.md|content/instructions/architect/agents/runner.md
 agents/event-extractor.md|content/instructions/architect/agents/event-extractor.md
 agents/improver.md|content/instructions/architect/agents/improver.md

@@ -394,8 +394,8 @@ source_file_max_bytes: 2097152    # 2 MiB
 office_file_max_bytes: 52428800   # 50 MiB
 ```
 
-The caps are set when the index is registered (`search.index.create`, which
-takes the same two fields). An index registered before the caps were set keeps
+The caps are set when the index is registered (`search.index.create` and the
+MCP `create_index` tool, which take the same two fields). An index registered before the caps were set keeps
 its old caps: re-registering it answers `size_caps_applied: false` with the
 registered and requested caps, and `trusty-search index` prints a warning. To
 change the caps, delete the index and run `trusty-search index` again.
@@ -631,7 +631,7 @@ this table is generated from it, not maintained by hand.
 | `add_root` | `index_id`, `roots` | Add one or more directory trees to an existing index, so one index covers several roots. |
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
-| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
+| `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?`, `office_file_max_bytes?`, `source_file_max_bytes?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `embed_missing` | `index_id`, `dry_run?` | Embed only the chunks of an index that have no vector, then settle its semantic stage. |
 | `ensure_project` | `project_key`, `name`, `root`, `exclude?`, `profile?` | Find or create the one index of a trusty-mpm project and pin it for its group. |

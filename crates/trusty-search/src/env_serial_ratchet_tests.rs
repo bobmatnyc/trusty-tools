@@ -24,6 +24,8 @@
 //! a file that names a [`REGISTRY_REACHING`] function carries a group tag, and
 //! so does every test in a module that file mounts (`#[path]` or `mod x;`),
 //! because a child reaches the registry through its parent's harness.
+//! [`IDENTITY_REACHING`] widens the same scan to the index-identity file
+//! (#11445), which every corpus attach writes into the data dir.
 //! Test: this file IS the test module.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -203,6 +205,36 @@ const REGISTRY_REACHING: &[&str] = &[
     "build_router",
 ];
 
+/// Functions whose call writes `<data_dir>/index-identity/<id>.json` on a
+/// path resolved from `TRUSTY_DATA_DIR` at write time (#11445).
+///
+/// Why: every corpus attach reconciles the index identity (#10738), and a
+/// fresh tempdir corpus always bumps it. An untagged test attaching one beside
+/// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`, which
+/// points `TRUSTY_DATA_DIR` at `<repo>/data`, left `?? data/` in that repo:
+/// a Linux CI-host run caught `shutdown_close_tests.rs` writing six identity files
+/// there. The identity is minted, bumped or retired by these functions.
+/// What: matched exactly as [`REGISTRY_REACHING`] is, and joined with it.
+const IDENTITY_REACHING: &[&str] = &[
+    "index_identity",
+    "bump_generation",
+    "bump_generation_logged",
+    "bump_with_pending",
+    "reconcile_on_attach",
+    "set_corpus_store",
+    "reattach_corpus",
+    "quarantine_detached_corpus",
+    "record_migration_failure",
+    "run_migrations",
+    "clear_persisted",
+    "resolve_corpus_swap",
+    "rollback_staged_corpus_swap",
+    "build_indexer_from_entry",
+    "index_status_report",
+    "index_file_report",
+    "file_status_report",
+];
+
 /// Attributes that put a test in the unnamed `serial_test` group.
 const GROUP_TAGS: &[&str] = &[
     "#[serial]",
@@ -234,7 +266,8 @@ fn registry_reaching_tests_join_the_unnamed_group() {
         "these tests sit in a file that reaches the index registry, and carry no \
          `#[serial_test::parallel]` / `#[serial_test::serial]` tag (#9684). An untagged test \
          runs beside a `#[serial]` test that repoints `TRUSTY_DATA_DIR`, and its registry write \
-         lands `indexes.toml.lock` in that test's data dir. Tag each one `parallel`, or \
+         lands `indexes.toml.lock` (or `index-identity/`, #11445) in that test's data dir. \
+         Tag each one `parallel`, or \
          `serial` when it writes the environment.\n  {}",
         offenders.join("\n  ")
     );
@@ -259,6 +292,10 @@ fn the_registry_ratchet_detects_an_untagged_test() {
         "#[test]\nfn bare() {}\n",
     );
     assert_eq!(check("src/a_tests.rs", mixed), ["bare", "named_key"]);
+
+    // #11445: a corpus attach writes the identity file into the data dir.
+    let identity = "fn h(i: &mut CodeIndexer) { i.set_corpus_store(c); }\n#[test]\nfn t() {}\n";
+    assert_eq!(check("src/a_tests.rs", identity), ["t"]);
 
     let explicit_path = "fn h() { upsert_index_registry_entry_at(p, e); }\n#[test]\nfn t() {}\n";
     assert!(
@@ -445,11 +482,14 @@ fn join(base: &str, path: &str) -> String {
     segs.join("/")
 }
 
-/// Does this stripped file's test code name a [`REGISTRY_REACHING`] function?
+/// Does this stripped file's test code name a [`REGISTRY_REACHING`] or
+/// [`IDENTITY_REACHING`] function?
 fn reaches_registry(rel: &str, code: &str) -> bool {
     let tests = test_code(rel, code);
+    // #11445: an identity write lands in the data dir as a registry write does.
     REGISTRY_REACHING
         .iter()
+        .chain(IDENTITY_REACHING)
         .any(|name| names_identifier(tests, name))
 }
 

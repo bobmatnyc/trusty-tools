@@ -13,7 +13,10 @@ use trusty_architect::poller::{Config, TranscriptCtx, self_ctx_alerts};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn config(dir: &Path, vars: &[(&str, &str)]) -> Result<Config, trusty_architect::ConfigError> {
+fn config(
+    dir: &Path,
+    vars: &[(&str, &str)],
+) -> Result<Config, trusty_architect::install_paths::InstallPathsError> {
     let mut all: Vec<(String, String)> = [
         ("SUPERVISOR_INBOX_DIR", "inbox"),
         ("SESSIONS_DIR", "sessions"),

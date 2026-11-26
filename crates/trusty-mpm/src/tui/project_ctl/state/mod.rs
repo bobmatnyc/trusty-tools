@@ -100,6 +100,9 @@ pub struct ProjectRow {
     pub live_count: usize,
     /// Every session bound to this project, any lifecycle state.
     pub total_count: usize,
+    /// #10990: the registry record carries `decommissioned_at` (#10988).
+    /// The tree draws the row dim while no session of it is live.
+    pub decommissioned: bool,
 }
 
 /// One managed session as rendered by the Sessions pane.
@@ -615,6 +618,7 @@ mod tests {
             repo_url: format!("https://github.com/acme/{name}"),
             live_count: 0,
             total_count: 0,
+            decommissioned: false,
         }
     }
 

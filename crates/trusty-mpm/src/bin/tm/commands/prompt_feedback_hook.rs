@@ -78,9 +78,17 @@ const FAILURE_MARKERS: [&str; 4] = ["needs attention", "failed", "failure", "blo
 /// binary's exit status is 0 whatever happened; every failure is a `warn`.
 /// Test: `an_unreadable_transcript_writes_nothing`,
 /// `a_stop_payload_writes_a_pm_row`, `a_subagent_stop_payload_records_its_type`,
-/// `a_subagent_stop_without_an_agent_type_is_not_the_pm`.
+/// `a_subagent_stop_without_an_agent_type_is_not_the_pm`,
+/// `prompt_feedback_hook_writes_no_row_on_a_broken_install_file`.
 pub(crate) async fn prompt_feedback_hook() -> anyhow::Result<()> {
-    let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+    // #11821: no `$HOME` fallback; an unresolved config dir writes no row.
+    let root = match trusty_mpm::core::paths::FrameworkPaths::try_default() {
+        Ok(paths) => paths.root,
+        Err(e) => {
+            tracing::warn!(error = %e, "the config dir is unresolved; no prompt-feedback row");
+            return Ok(());
+        }
+    };
     let payload = read_stdin_payload();
     capture_into(&root, payload.as_ref());
     Ok(())

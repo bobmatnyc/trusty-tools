@@ -176,6 +176,8 @@ impl Drop for Armed {
 /// `vendor/acmebar/`, leaves an unrelated query's answer unchanged, and
 /// leaves no trace after a reopen.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn prefix_removal_clears_every_store_and_spares_a_sibling() {
     let dir = tempfile::tempdir().expect("tempdir");
     let redb = dir.path().join("index.redb");
@@ -246,6 +248,7 @@ async fn prefix_removal_clears_every_store_and_spares_a_sibling() {
 /// A1, list form: exactly the named files go, a file whose name extends a
 /// named one stays.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_removal_removes_exactly_the_named_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (idx, _) = indexer("batch-10110-list", &dir.path().join("index.redb"));
@@ -317,6 +320,7 @@ async fn removal_on_an_evicted_index_does_not_rehydrate_and_stamps_one_mark() {
 /// F3: entity rows leave in the chunks' transaction, so a reopened index
 /// rebuilds a graph without the removed symbols.
 #[tokio::test]
+#[serial_test::parallel]
 async fn batch_remove_leaves_no_entity_rows_after_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let redb = dir.path().join("index.redb");
@@ -354,6 +358,7 @@ async fn batch_remove_leaves_no_entity_rows_after_reopen() {
 /// error, not a warning; the orphan vectors answer no search; and a retry,
 /// which finds no row, still removes them.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_vector_removal_is_an_error_and_a_retry_removes_the_orphans() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (idx, flaky) = indexer("batch-10110-vectors", &dir.path().join("index.redb"));
@@ -395,6 +400,7 @@ async fn a_failed_vector_removal_is_an_error_and_a_retry_removes_the_orphans() {
 /// F4: a dirty mark that cannot be stamped fails the call before anything
 /// leaves any store; a retry then completes.
 #[tokio::test]
+#[serial_test::parallel]
 async fn batch_remove_refuses_when_the_dirty_mark_cannot_be_stamped() {
     const ID: &str = "batch-10110-mark";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -456,6 +462,7 @@ async fn dry_run_mutates_nothing_and_matches_the_real_run() {
 /// F9: a corpus closed for shutdown refuses the removal, so it never reports
 /// success for rows redb kept, and memory keeps every chunk.
 #[tokio::test]
+#[serial_test::parallel]
 async fn batch_remove_is_refused_on_a_corpus_closed_for_shutdown() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut idx, flaky) = indexer("batch-10110-shutdown", &dir.path().join("index.redb"));
@@ -484,6 +491,7 @@ async fn batch_remove_is_refused_on_a_corpus_closed_for_shutdown() {
 /// error reports the one committed file; the refused file keeps its rows and
 /// its map ids; a retry removes it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_refused_later_slice_reports_what_committed_and_keeps_the_rest() {
     const ID: &str = "batch-10110-slices";
     let dir = tempfile::tempdir().expect("tempdir");

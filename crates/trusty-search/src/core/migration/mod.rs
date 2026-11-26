@@ -800,6 +800,8 @@ mod tests {
     ///       `chain_from(1)` returns only 1→2 and 2→3;
     ///       `chain_from(3)` returns empty.
     #[test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     fn test_migration_registry_chain_computation() {
         // Three migrations: 0→1, 1→2, 2→3.
         let reg = registry_from(vec![(0, 1), (1, 2), (2, 3)]);
@@ -827,6 +829,7 @@ mod tests {
 
     /// Why: ensures an empty registry is handled gracefully.
     #[test]
+    #[serial_test::parallel]
     fn test_registry_empty() {
         let reg = MigrationRegistry {
             migrations: Vec::new(),
@@ -838,6 +841,7 @@ mod tests {
     /// Why: verifies `current_version` matches the global constant when the
     /// production registry is used.
     #[test]
+    #[serial_test::parallel]
     fn test_production_registry_current_version_matches_constant() {
         let reg = MigrationRegistry::new();
         assert_eq!(reg.current_version(), CURRENT_SCHEMA_VERSION);
@@ -854,6 +858,7 @@ mod tests {
     /// runner skips all work when `CURRENT_SCHEMA_VERSION == 0`. We use an
     /// empty registry to simulate "no migrations needed".
     #[tokio::test]
+    #[serial_test::parallel]
     async fn test_run_migrations_no_op_on_empty_registry() {
         let empty_reg = MigrationRegistry {
             migrations: Vec::new(),
@@ -870,6 +875,7 @@ mod tests {
     /// would try to apply them but fail at `write_schema_version` because there
     /// is no corpus. Verify the no-corpus path returns `Err(MigrationError::Io)`.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn test_run_migrations_no_corpus_returns_io_err_when_migrations_pending() {
         let reg = registry_from(vec![(0, 1)]);
         let handle = make_test_handle(); // no corpus
@@ -887,6 +893,7 @@ mod tests {
     /// Why: validates the `read_schema_version` / `write_schema_version`
     /// pair that the runner relies on for crash-safe version advancement.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn test_schema_version_roundtrip_no_corpus() {
         let handle = make_test_handle();
         // No corpus → always reads 0.

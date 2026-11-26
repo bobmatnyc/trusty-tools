@@ -23,6 +23,8 @@ const NEW: &str = "fn walrus_pelican_new() {\n    let marker = 2;\n}\n";
 /// stays in the corpus, BM25, HNSW and the rebuilt graph, and a search for
 /// its symbol returns it. Uses only APIs that exist on main.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn index_file_replaces_a_files_prior_chunks() {
     let idx = make_indexer();
     idx.index_file(PATH, OLD).await.expect("first write");
@@ -113,6 +115,7 @@ async fn index_file_replaces_a_files_prior_chunks() {
 /// A JSON path, because blank JSON parses into zero chunks; a blank `.rs`
 /// file still gets the AST chunker's whole-file fallback chunk.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_file_with_blank_content_drops_the_files_old_chunks() {
     const JSON: &str = "config/zoo.json";
     let idx = make_indexer();
@@ -133,6 +136,7 @@ async fn index_file_with_blank_content_drops_the_files_old_chunks() {
 /// graph matching the corpus. Fails with `rebuild_symbol_graph` restored in
 /// either write path: the counter moves before the flush.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_file_and_remove_file_defer_the_symbol_graph_rebuild() {
     let idx = make_indexer();
     let files = vec![
@@ -192,6 +196,7 @@ async fn index_file_and_remove_file_defer_the_symbol_graph_rebuild() {
 /// The debounce rule: fresh never fires; stale fires after the quiet window
 /// or, under a continuous write stream, after the max wait.
 #[test]
+#[serial_test::parallel]
 fn rebuild_due_waits_for_quiet_or_max_wait() {
     // (stale_since, last_write, now, quiet, max_wait, due)
     let cases = [
@@ -214,6 +219,7 @@ fn rebuild_due_waits_for_quiet_or_max_wait() {
 /// second never leaves a 2 s quiet window, so only the 60 s cap fires the
 /// rebuild; after it, a quiet burst rebuilds 2 s after its last write.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn continuous_writes_still_rebuild_at_the_max_wait_cap() {
     use std::time::Duration;
 
@@ -301,6 +307,7 @@ impl Drop for FailChunkDelete {
 /// so the reopened index booted the old persisted graph as current and never
 /// rebuilt it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_deferred_rebuild_survives_a_reopen() {
     const ID: &str = "lifecycle-8959-reopen";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -356,6 +363,7 @@ async fn a_deferred_rebuild_survives_a_reopen() {
 /// index booted the old persisted graph as current and served the purged
 /// file's symbol.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_purge_without_its_rebuild_is_rebuilt_after_a_reopen() {
     const ID: &str = "lifecycle-8959-purge-reopen";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -401,6 +409,7 @@ async fn a_purge_without_its_rebuild_is_rebuilt_after_a_reopen() {
 /// a retry then succeeds. Fails at 35ccee8252: the failure was only logged,
 /// so the write answered `Ok`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_superseded_delete_fails_the_write_and_stays_retryable() {
     const ID: &str = "lifecycle-8959-delete-err";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -438,6 +447,7 @@ async fn a_failed_superseded_delete_fails_the_write_and_stays_retryable() {
 /// 35ccee8252: the failed write dropped the old ids from memory only, the
 /// retry found nothing to remove, and the reopen loaded them back.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_rewrite_after_a_failed_delete_leaves_no_old_ids_after_reopen() {
     const ID: &str = "lifecycle-8959-delete-reopen";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -516,6 +526,7 @@ async fn fail_then_retry_removal(
 /// and a retry removes the ids for good. Fails with the arm on the warn-only
 /// removal: the write answered `Ok` and the reopen loaded the old ids back.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen() {
     const TOMBSTONE: &str = "---\nsource_id: zoo-8959\nsource_status: deleted\n---\n";
     let (old_ids, held) =
@@ -531,6 +542,7 @@ async fn a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_r
 /// for good. Fails with the arm on the warn-only purge: the write answered
 /// `Ok` and the reopen loaded the plaintext chunks back.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen() {
     let (old_ids, held) = fail_then_retry_removal(
         "lifecycle-8959-sops-err",
@@ -585,6 +597,7 @@ async fn wait_started(embedder: &GatedEmbedder, n: usize) {
 /// snapshotted the first version's ids, so the earlier writer's chunks were
 /// never superseded and both versions stayed indexed.
 #[tokio::test]
+#[serial_test::parallel]
 async fn concurrent_writes_to_one_path_keep_only_the_last_version() {
     use std::sync::Arc;
 
@@ -661,6 +674,7 @@ async fn ids_and_rows(
 /// the explicit `WarnOnly` control shows the old split; a clean retry
 /// removes both. Fails against d6529ca1f5: `remove_file` answered `Ok`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn remove_file_fails_closed_on_a_refused_redb_delete() {
     let dir = tempfile::tempdir().expect("tempdir");
     let id = "remove-file-fail-closed-9212";
@@ -717,6 +731,7 @@ fn indexer_with(
 /// Fails at f1a833c75f: the guard was taken only after the embed, so the
 /// seed write's quiet window looked elapsed and the ticker rebuilt mid-write.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_quiet_rebuild_waits_while_a_write_is_embedding() {
     use std::sync::Arc;
 
@@ -779,6 +794,7 @@ impl crate::core::embed::Embedder for SlowEmbedder {
 /// rebuilds exactly once. Fails at f1a833c75f: every embed outlasted the 2 s
 /// quiet window, so the ticker rebuilt about once per write.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_serial_burst_of_slow_writes_rebuilds_at_most_once_per_max_wait() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -874,6 +890,7 @@ impl crate::core::embed::Embedder for FailingEmbedder {
 /// the quiet rebuild. Fails with the active-write guard's decrement removed:
 /// the count stays above zero and the quiet rebuild never fires again.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_failed_or_panicked_write_does_not_hold_back_the_quiet_rebuild() {
     use std::sync::Arc;
 
@@ -903,6 +920,7 @@ async fn a_failed_or_panicked_write_does_not_hold_back_the_quiet_rebuild() {
 /// #10159: a `skip_kg` write never counts as active, since it never marks
 /// the graph; every other write does.
 #[test]
+#[serial_test::parallel]
 fn a_skip_kg_write_is_not_counted_active() {
     let mut idx = crate::core::indexer::CodeIndexer::new("lifecycle-10159-skip", "/tmp/l-10159");
     assert!(

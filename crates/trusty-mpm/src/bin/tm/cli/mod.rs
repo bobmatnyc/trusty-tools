@@ -640,8 +640,9 @@ pub(crate) enum Command {
         turn_task: bool,
         /// Run the minimal pm-guard in shadow mode (#11431): judge a
         /// `PreToolUse` call on parsed facts (rules 1-3, 5) and log each
-        /// would-refuse to `~/.trusty-mpm/guard/shadow.jsonl`. Never blocks;
-        /// always exits 0.
+        /// hit to `~/.trusty-mpm/guard/shadow.jsonl`. Rule 1 (trust-anchor
+        /// writes) and a call it cannot judge are refused (#10690); rules
+        /// 2, 3 and 5 only log. Always exits 0.
         #[arg(long)]
         pm_guard_shadow: bool,
         /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
@@ -976,6 +977,15 @@ pub(crate) enum Command {
         /// IL action to perform.
         #[command(subcommand)]
         action: IlAction,
+    },
+    /// The install's host paths: `tm paths show|set` (install.toml).
+    ///
+    /// `set` is owner-only: refused inside a Claude Code session or agent.
+    // #11821 P6b. Test: `cli_parses_paths_show_and_set`.
+    Paths {
+        /// Paths action to perform.
+        #[command(subcommand)]
+        action: PathsAction,
     },
     /// Edit a dotenv file without printing a value: `set` and `keys`.
     ///

@@ -37,6 +37,8 @@ mod decimal_table;
 mod error;
 mod fake;
 mod input;
+// #11821 P4-f2: the local install.toml reader, parity-tested against trusty-common.
+pub mod install_paths;
 // #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
 pub mod il;
 pub mod ledger;

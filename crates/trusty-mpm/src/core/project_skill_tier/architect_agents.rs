@@ -60,10 +60,24 @@ const fn first_release(name: &'static str) -> ShippedAgent {
 pub const SHIPPED_AGENTS: &[ShippedAgent] = &[
     first_release("runner"),
     first_release("event-extractor"),
-    first_release("improver"),
+    IMPROVER,
     first_release("improvement-curator"),
-    first_release("drift-guard"),
+    DRIFT_GUARD,
 ];
+
+/// `improver`; #11896 folded the `architect-improver` skill into it (D2f).
+const IMPROVER: ShippedAgent = ShippedAgent {
+    name: "improver",
+    // #10161 D3c: the text that pointed at the `architect-improver` skill.
+    previous: &["3c1cde4b226291e68591defd73fbf9121ff5a7ab188ec14aa81b846f6d8fa124"],
+};
+
+/// `drift-guard`; #11896 folded the `architect-drift-guard` skill into it (D2f).
+const DRIFT_GUARD: ShippedAgent = ShippedAgent {
+    name: "drift-guard",
+    // #10161 D3c: the text that pointed at the `architect-drift-guard` skill.
+    previous: &["1e94d54d878bfe88c37a1a9319b94bf576f1a0aae9234aa9cd4ab1612b222b66"],
+};
 
 /// The Architect's agent tier: `<project_dir>/.claude/agents`.
 pub fn agents_tier(project_dir: &Path) -> PathBuf {

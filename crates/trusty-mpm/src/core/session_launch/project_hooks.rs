@@ -242,7 +242,7 @@ pub(super) fn project_managed_hook_additions_for_profile(
     // groups, so turning `[divert] enabled` on still only appends (#6887).
     if let Some(hooks_obj) = hooks.as_object_mut() {
         push_egress_guard_group(hooks_obj, &exe);
-        // #11431: the log-only minimal guard, every profile, right after the
+        // #11431: the minimal guard (rule 1 enforces, #10690), every profile, after the
         // egress guard so every toggled group below still only appends;
         // independent of `pm_guard_enabled`.
         push_shadow_guard_group(hooks_obj, &exe);

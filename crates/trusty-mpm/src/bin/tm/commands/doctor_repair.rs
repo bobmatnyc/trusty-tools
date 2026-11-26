@@ -143,12 +143,11 @@ fn quarantine_one_mcp(target: &std::path::Path, apply: bool) {
         }
     );
     let workspace = std::env::current_dir().ok();
-    let step = quarantine_explicit(
-        &trusty_mpm::core::mcp_provenance::default_framework_root(),
-        workspace.as_deref(),
-        target,
-        mode,
-    );
+    // #11821: a quarantine forgets the ledger claim; no `$HOME` fallback.
+    let step = match trusty_mpm::core::mcp_provenance::try_default_framework_root() {
+        Ok(root) => quarantine_explicit(&root, workspace.as_deref(), target, mode),
+        Err(e) => trusty_mpm::core::stray_mcp::refuse_unresolved_root(target, &e),
+    };
     print_steps(&[step], apply, &quarantine_apply_hint(target));
 }
 
