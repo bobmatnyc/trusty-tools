@@ -153,7 +153,8 @@ pub(crate) enum Mode {
     /// The key reference.
     Help,
     /// The new-session flow: pick a registered project, or type a path (#7395).
-    New(NewSessionFlow),
+    /// #11822: boxed — the flow outgrew clippy's `large_enum_variant` bound.
+    New(Box<NewSessionFlow>),
 }
 
 /// Severity of the one-line message under the table.
@@ -337,7 +338,7 @@ impl TuiState {
     /// true no-op (#7395 requirement 4).
     /// Test: `new_session_escape_leaves_the_state_identical`.
     pub(crate) fn open_new_session(&mut self, flow: NewSessionFlow) {
-        self.mode = Mode::New(flow);
+        self.mode = Mode::New(Box::new(flow));
     }
 
     /// Step the open new-session flow and translate its outcome.

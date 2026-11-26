@@ -210,7 +210,7 @@ pub(crate) fn request_for_entry_with(
             checkout,
         } => (*name == entry.name || *repo == entry.repo_url)
             .then(|| (name.clone(), repo.clone(), checkout.clone())),
-        Target::Other => None,
+        Target::Cwd(_) | Target::Other => None,
     });
     // Already registered: start the session in the row the registry holds
     // rather than cloning a second copy of it. #7887: in that row's DIRECTORY —
