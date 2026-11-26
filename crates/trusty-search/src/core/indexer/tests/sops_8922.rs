@@ -15,6 +15,8 @@ const PLAIN: &str = "db_password: hunter2\nhost: db.internal\n";
 /// Fails with the sops branch in `index_file_outcome` removed: the write
 /// lands chunks and the plaintext chunks stay searchable.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn index_file_refuses_sops_content_and_drops_its_old_chunks() {
     let idx = CodeIndexer::new("sops-8922", "/tmp/sops-8922");
     idx.index_file("config/secrets.yaml", PLAIN)
@@ -43,6 +45,7 @@ async fn index_file_refuses_sops_content_and_drops_its_old_chunks() {
 /// The batch path every reindex and rescan uses lands no chunk for sops
 /// content. Fails with the sops arm in `parse_files_parallel` removed.
 #[tokio::test]
+#[serial_test::parallel]
 async fn batch_write_of_sops_content_lands_nothing() {
     let idx = CodeIndexer::new("sops-8922-batch", "/tmp/sops-8922-batch");
     let added = idx

@@ -49,6 +49,8 @@ fn make_indexer_with_pool(with_pool: bool) -> CodeIndexer {
 }
 
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn query_embeds_route_through_interactive_lane_when_pool_installed() {
     let indexer = make_indexer_with_pool(true);
     let vec = indexer
@@ -65,6 +67,7 @@ async fn query_embeds_route_through_interactive_lane_when_pool_installed() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn query_embeds_fall_back_to_direct_embedder_without_pool() {
     let indexer = make_indexer_with_pool(false);
     let vec = indexer
@@ -81,6 +84,7 @@ async fn query_embeds_fall_back_to_direct_embedder_without_pool() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn embed_text_routes_through_interactive_lane_when_pool_installed() {
     let indexer = make_indexer_with_pool(true);
     let vec = indexer
@@ -96,6 +100,7 @@ async fn embed_text_routes_through_interactive_lane_when_pool_installed() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn catchup_embeds_route_through_background_lane_when_pool_installed() {
     let indexer = make_indexer_with_pool(true);
     let chunks = vec![
@@ -123,6 +128,7 @@ async fn catchup_embeds_route_through_background_lane_when_pool_installed() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn catchup_embeds_fall_back_to_direct_embedder_without_pool() {
     let indexer = make_indexer_with_pool(false);
     let chunks = vec![
@@ -152,6 +158,7 @@ async fn catchup_embeds_fall_back_to_direct_embedder_without_pool() {
 /// `embed_pool_tests::interactive_preempts_queued_background_wave`, which
 /// proves priority ordering within one pool.
 #[tokio::test]
+#[serial_test::parallel]
 async fn both_call_sites_dispatch_to_the_same_pool_instance() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -227,6 +234,7 @@ async fn both_call_sites_dispatch_to_the_same_pool_instance() {
 /// is now `true`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_self_heals_onto_pool_installed_after_construction() {
     let direct: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIRECT_DIM));
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIRECT_DIM).expect("usearch new"));
@@ -313,6 +321,7 @@ async fn index_self_heals_onto_pool_installed_after_construction() {
 /// (`SKIP_UI_BUILD=1 cargo test -p trusty-search -- \
 /// catchup_wave_concurrency`).
 #[tokio::test]
+#[serial_test::parallel]
 async fn catchup_wave_concurrency_survives_pool_sized_to_default_inflight() {
     let peak = probe_catchup_wave_peak_concurrency(2).await;
     assert_eq!(
@@ -324,6 +333,7 @@ async fn catchup_wave_concurrency_survives_pool_sized_to_default_inflight() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn catchup_wave_concurrency_collapses_with_single_worker_pool() {
     let peak = probe_catchup_wave_peak_concurrency(1).await;
     assert_eq!(

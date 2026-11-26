@@ -34,6 +34,8 @@ use crate::core::store::{UsearchStore, VectorStore};
 /// binary has no env writers.
 /// Test: this IS the test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn hnsw_write_cooldown_demotion_persists_and_reviews_dirty_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hnsw.usearch");
@@ -110,6 +112,7 @@ async fn hnsw_write_cooldown_demotion_persists_and_reviews_dirty_store() {
 /// `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS` is `0` / `off` — must leave an
 /// otherwise-eligible store exactly as it found it, saving nothing.
 #[tokio::test]
+#[serial_test::parallel]
 async fn hnsw_write_cooldown_demotion_skips_when_cooldown_disabled() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hnsw.usearch");

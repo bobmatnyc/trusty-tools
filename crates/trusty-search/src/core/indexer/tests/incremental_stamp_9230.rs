@@ -63,6 +63,8 @@ pub(crate) fn break_chunk_writes(idx: &CodeIndexer) {
 /// Fails on origin/main: the stamp stays `None`.
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn index_file_stamps_the_corpus_it_commits() {
     let (_dir, idx) = indexer("stamp-9230-file");
     assert_eq!(stamp(&idx), None, "a fresh corpus is unstamped");
@@ -76,6 +78,7 @@ async fn index_file_stamps_the_corpus_it_commits() {
 /// Fails on origin/main: the planted stamp does not move.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_files_batch_stamps_the_corpus_it_commits() {
     let (_dir, idx) = indexer("stamp-9230-batch");
     plant(&idx, OLD_STAMP);
@@ -95,6 +98,7 @@ async fn index_files_batch_stamps_the_corpus_it_commits() {
 /// Fails on origin/main at the tombstone assertion.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_tombstone_that_removes_rows_stamps_and_a_noop_write_does_not() {
     let (_dir, idx) = indexer("stamp-9230-noop");
     // A blank `.json` lands no chunk (`IndexFileOutcome::Empty`).
@@ -123,6 +127,7 @@ async fn a_tombstone_that_removes_rows_stamps_and_a_noop_write_does_not() {
 /// the stamp still. Fails with the stamp moved above the `dropped_by_cap` bail.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_write_the_chunk_cap_refuses_does_not_stamp() {
     let probe = CodeIndexer::new("stamp-9230-cap-count", "/tmp/stamp-9230");
     probe.index_file("src/a.rs", FILE_A).await.expect("probe");
@@ -156,6 +161,7 @@ async fn a_write_the_chunk_cap_refuses_does_not_stamp() {
 /// or the resolver would rank a corpus missing the write as the freshest.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_redb_write_logged_as_a_warning_does_not_stamp() {
     let (_dir, idx) = indexer("stamp-9230-persist");
     plant(&idx, OLD_STAMP);
@@ -174,6 +180,7 @@ async fn a_redb_write_logged_as_a_warning_does_not_stamp() {
 /// index as older, never as fresher than it is.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_stamp_write_leaves_the_previous_stamp() {
     let tag = "stamp-9230-stamp-fault";
     let (_dir, idx) = indexer(tag);

@@ -63,6 +63,8 @@ fn embedded(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
 /// A long function parses into windows that each fit, the catch-up gives each a
 /// vector, and the unsplit parent id is gone.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_deferred_index_splits_a_new_long_chunk_once_the_window_is_known() {
     let r = rig(Some(WINDOW));
     let whole = r
@@ -108,6 +110,7 @@ async fn a_deferred_index_splits_a_new_long_chunk_once_the_window_is_known() {
 /// With the window not yet reported, the embedder's assumed split window still
 /// splits the deferred parse, and the same window reaches the inline path.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_deferred_parse_splits_on_the_assumed_window_before_the_embedder_reports() {
     let indexer = assumed(Ok(Some(WINDOW)));
     let parsed = indexer
@@ -125,6 +128,7 @@ async fn a_deferred_parse_splits_on_the_assumed_window_before_the_embedder_repor
 /// No window, or a tokenizer that cannot load: today's output.
 /// Guard: passes before the change too, since nothing splits there.
 #[tokio::test]
+#[serial_test::parallel]
 async fn with_no_window_and_no_tokenizer_a_deferred_parse_does_not_split() {
     for indexer in [assumed(Ok(None)), assumed(Err(())), rig(None).indexer] {
         let parsed = indexer
@@ -139,6 +143,7 @@ async fn with_no_window_and_no_tokenizer_a_deferred_parse_does_not_split() {
 /// The catch-up embeds every window with the header; storage and BM25 never
 /// carry it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_catch_up_embeds_each_window_with_the_header_and_stores_none() {
     let r = rig(Some(WINDOW));
     let parsed = r
@@ -173,6 +178,7 @@ async fn the_catch_up_embeds_each_window_with_the_header_and_stores_none() {
 /// A window cut headerless (the header left under half the window) is not
 /// given a header by the catch-up either.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_window_cut_without_a_header_is_embedded_without_one() {
     let r = rig(Some(WINDOW));
     let mut parent = long_chunk("p", &text(10));
@@ -187,6 +193,7 @@ async fn a_window_cut_without_a_header_is_embedded_without_one() {
 
 /// A short owed chunk is headed; an old oversize one is left as stored.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_short_owed_chunk_gets_a_header_and_an_oversize_old_one_does_not() {
     let r = rig(Some(WINDOW));
     let short = long_chunk("s", &text(2));
@@ -205,6 +212,7 @@ async fn a_short_owed_chunk_gets_a_header_and_an_oversize_old_one_does_not() {
 /// The kill switch: only 0, false and off turn the split off, and `split`
 /// false parses as before.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_kill_switch_off_parses_deferred_unsplit() {
     assert!(parse_switch(None) && parse_switch(Some("1")) && parse_switch(Some("")));
     for off in ["0", "false", " OFF "] {
@@ -223,6 +231,7 @@ async fn a_kill_switch_off_parses_deferred_unsplit() {
 /// A catch-up that fails leaves windows, BM25 and corpus agreeing, and the
 /// next pass embeds exactly the windows still owed.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_catch_up_leaves_a_consistent_state_and_resumes() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct Flaky {
@@ -307,6 +316,7 @@ async fn a_failed_catch_up_leaves_a_consistent_state_and_resumes() {
 /// A chunk stored before the change keeps its id and is embedded bare, while a
 /// new file parsed beside it splits (guard for the old chunk: the same before).
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_pre_upgrade_oversize_chunk_keeps_its_id_and_is_not_split() {
     let r = rig(Some(WINDOW));
     let old = r
@@ -349,6 +359,7 @@ async fn a_pre_upgrade_oversize_chunk_keeps_its_id_and_is_not_split() {
 
 /// Switch off: the catch-up adds no header, switch on it does.
 #[tokio::test]
+#[serial_test::parallel]
 async fn with_the_switch_off_the_catch_up_adds_no_header() {
     let r = rig(Some(WINDOW));
     let short = long_chunk("s", &text(2));
@@ -364,6 +375,7 @@ async fn with_the_switch_off_the_catch_up_adds_no_header() {
 /// With no reported window (the assumed fallback is off or unavailable),
 /// `index_file` stores the function whole.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_index_file_with_no_reported_window_does_not_split() {
     let indexer = assumed(Ok(None));
     indexer
@@ -379,6 +391,7 @@ async fn an_index_file_with_no_reported_window_does_not_split() {
 
 /// The `index_file` reply counts the windows committed, not the parse's chunks.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_index_file_reply_counts_the_windows_it_committed() {
     let r = rig(Some(WINDOW));
     let outcome = r
@@ -397,6 +410,7 @@ async fn an_index_file_reply_counts_the_windows_it_committed() {
 /// A window of 0 to 4 tokens neither panics nor loops: the chunk stays whole or splits.
 /// Guard: green before and after, there is no code change behind it.
 #[test]
+#[serial_test::parallel]
 fn a_tiny_window_neither_panics_nor_loops() {
     let tok = tokenizer();
     for window in 0..=4 {

@@ -145,6 +145,8 @@ async fn a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persis
 /// Red before the fix: the idle path compacted whatever the reindex state.
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn the_idle_persist_never_compacts_during_a_reindex() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("hnsw.usearch");

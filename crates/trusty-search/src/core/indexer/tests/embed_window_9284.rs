@@ -72,6 +72,8 @@ fn capture() -> (Capture, tracing::subscriber::DefaultGuard) {
 
 /// One token past the window is one truncated chunk.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_chunk_over_the_window_counts_exactly_once() {
     let indexer = chunking_indexer();
     // 7 words + 2 specials = 9 tokens, one past the window of 8.
@@ -84,6 +86,7 @@ async fn a_chunk_over_the_window_counts_exactly_once() {
 
 /// A chunk that fills the window exactly is not truncated.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_chunk_within_the_window_does_not_count() {
     let indexer = chunking_indexer();
     let chunks = [
@@ -100,6 +103,7 @@ async fn a_chunk_within_the_window_does_not_count() {
 
 /// One warning per file, naming the index, the file and tokens vs window.
 #[tokio::test]
+#[serial_test::parallel]
 async fn truncation_warns_once_per_file_naming_index_file_and_tokens() {
     let (cap, _guard) = capture();
     let indexer = chunking_indexer();
@@ -126,6 +130,7 @@ async fn truncation_warns_once_per_file_naming_index_file_and_tokens() {
 
 /// A pass names at most eight files, then one summary carries the rest.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_large_pass_names_eight_files_and_summarises_the_rest() {
     let (cap, _guard) = capture();
     let indexer = chunking_indexer();
@@ -154,6 +159,7 @@ async fn a_large_pass_names_eight_files_and_summarises_the_rest() {
 
 /// Fail-open check: a window with no tokenizer is unmeasured, not "within".
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_window_without_a_tokenizer_counts_every_chunk_as_unmeasured() {
     let indexer = indexer_with(Arc::new(MockEmbedder::new(DIM).with_input_window(WINDOW)));
     let chunks = [
@@ -191,6 +197,7 @@ impl Embedder for BrokenTokenizerEmbedder {
 
 /// Fail-open check: a tokenizer error is counted and warned, never "within".
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_tokenizer_error_counts_as_unmeasured_not_within() {
     let (cap, _guard) = capture();
     let indexer = indexer_with(Arc::new(BrokenTokenizerEmbedder));
@@ -209,6 +216,7 @@ async fn a_tokenizer_error_counts_as_unmeasured_not_within() {
 
 /// An embedder that reports no window (a sidecar today) counts nothing.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_embedder_with_no_window_counts_nothing() {
     let indexer = indexer_with(Arc::new(MockEmbedder::new(DIM)));
     embed(&indexer, &[raw("a", "src/a.rs", &words(30))]).await;
@@ -220,6 +228,7 @@ async fn an_embedder_with_no_window_counts_nothing() {
 
 /// Counting changes no vector: a truncated chunk embeds as it did before.
 #[tokio::test]
+#[serial_test::parallel]
 async fn counting_leaves_the_vectors_unchanged() {
     let mock = MockEmbedder::new(DIM).with_chunking(WINDOW);
     let text = words(20);
@@ -234,6 +243,7 @@ async fn counting_leaves_the_vectors_unchanged() {
 
 /// Fail-open check: a chunk the wave produced no measure for is unmeasured.
 #[test]
+#[serial_test::parallel]
 fn a_chunk_without_a_measure_counts_as_unmeasured() {
     use super::super::ingest::truncation::{Measure, PassTally};
     let stats = EmbedWindowStats::default();
@@ -246,6 +256,7 @@ fn a_chunk_without_a_measure_counts_as_unmeasured() {
 
 /// Cumulative, not distinct: re-embedding a cut chunk counts it again.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_second_embed_of_the_same_chunk_counts_again() {
     let indexer = chunking_indexer();
     let chunks = [raw("a", "src/a.rs", &words(20))];
@@ -287,6 +298,7 @@ fn assert_all_unmeasured(indexer: &CodeIndexer, cap: &Capture, n: u64, cause: &s
 
 /// Error arm of `measure`: a failed token count is unmeasured, not within.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_forced_count_failure_counts_every_chunk_as_unmeasured() {
     use super::super::ingest::truncation::FORCE_COUNT_ERROR;
     let (cap, _guard) = capture();
@@ -299,6 +311,7 @@ async fn a_forced_count_failure_counts_every_chunk_as_unmeasured() {
 /// Error arm of `PendingMeasure::finish`: a panicking count task is
 /// unmeasured, and the panic does not reach the embed pass.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_panicking_count_task_counts_every_chunk_as_unmeasured() {
     use super::super::ingest::truncation::FORCE_COUNT_PANIC;
     let (cap, _guard) = capture();
@@ -350,6 +363,7 @@ impl Embedder for LateWindowEmbedder {
 /// #9284: a sidecar that reports its window only after its first answer still
 /// yields a real window and a real count on the very first pass.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_window_learned_after_the_first_wave_is_reported_and_counted() {
     let indexer = indexer_with(Arc::new(LateWindowEmbedder {
         inner: MockEmbedder::new(DIM).with_chunking(WINDOW),

@@ -70,6 +70,8 @@ async fn evict_and_rehydrate(idx: &CodeIndexer) {
 
 /// Over the cap, the ingest path reports every chunk BM25 refused.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn ingest_over_the_bm25_cap_reports_truncation() {
     if !crate::service::test_isolation::run_isolated(
         "core::indexer::bm25_truncation_tests::ingest_over_the_bm25_cap_reports_truncation",
@@ -89,6 +91,7 @@ async fn ingest_over_the_bm25_cap_reports_truncation() {
 
 /// Under the cap, the ingest path reports no truncation.
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_under_the_bm25_cap_reports_no_truncation() {
     if !crate::service::test_isolation::run_isolated(
         "core::indexer::bm25_truncation_tests::ingest_under_the_bm25_cap_reports_no_truncation",
@@ -109,6 +112,7 @@ async fn ingest_under_the_bm25_cap_reports_no_truncation() {
 /// Over the cap, the report is right while evicted (predicted from redb) and
 /// after the rehydrate rebuilds BM25 (measured).
 #[tokio::test]
+#[serial_test::parallel]
 async fn rehydrate_over_the_bm25_cap_reports_truncation() {
     if !crate::service::test_isolation::run_isolated(
         "core::indexer::bm25_truncation_tests::rehydrate_over_the_bm25_cap_reports_truncation",
@@ -140,6 +144,7 @@ async fn rehydrate_over_the_bm25_cap_reports_truncation() {
 /// Under the cap, eviction and rehydrate report no truncation — an empty
 /// evicted BM25 beside resident chunks is not a drop.
 #[tokio::test]
+#[serial_test::parallel]
 async fn rehydrate_under_the_bm25_cap_reports_no_truncation() {
     if !crate::service::test_isolation::run_isolated(
         "core::indexer::bm25_truncation_tests::rehydrate_under_the_bm25_cap_reports_no_truncation",
@@ -171,6 +176,7 @@ async fn rehydrate_under_the_bm25_cap_reports_no_truncation() {
 /// lock parks the eviction exactly there: it empties BM25, then waits on that
 /// lock to set `bm25_entities_evicted`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_reclaim_between_the_reads_does_not_report_truncation_under_the_cap() {
     if !crate::service::test_isolation::run_isolated(
         "core::indexer::bm25_truncation_tests::a_reclaim_between_the_reads_does_not_report_truncation_under_the_cap",

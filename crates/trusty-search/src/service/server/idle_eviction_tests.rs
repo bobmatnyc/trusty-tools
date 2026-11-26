@@ -45,6 +45,8 @@ fn bare_corpus_handle(id: &str, redb_path: &std::path::Path) -> IndexHandle {
 /// longest-idle index must sort first, and ties must preserve their original
 /// relative order (a stable sort).
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn oldest_idle_first_orders_most_idle_index_first_ties_stable() {
     let mut candidates = vec![
         (IndexId::new("recent"), Duration::from_millis(10)),
@@ -63,6 +65,7 @@ fn oldest_idle_first_orders_most_idle_index_first_ties_stable() {
 
 /// An empty snapshot must not panic and must stay empty.
 #[test]
+#[serial_test::parallel]
 fn oldest_idle_first_handles_empty_input() {
     let mut candidates: Vec<(IndexId, Duration)> = Vec::new();
     oldest_idle_first(&mut candidates);
@@ -77,6 +80,7 @@ fn oldest_idle_first_handles_empty_input() {
 /// must do no work and evict nothing, no matter how many indexes are
 /// registered or how idle they are.
 #[tokio::test]
+#[serial_test::parallel]
 async fn run_idle_eviction_tick_is_noop_when_secs_is_zero() {
     let dir = tempfile::tempdir().unwrap();
     let state = SearchAppState::new(IndexRegistry::new());
@@ -98,6 +102,7 @@ async fn run_idle_eviction_tick_is_noop_when_secs_is_zero() {
 /// production incident: an expensive-to-rehydrate index must NOT be
 /// thrash-evicted on the same cadence as a cheap one.
 #[tokio::test]
+#[serial_test::parallel]
 async fn run_idle_eviction_tick_evicts_cheap_index_but_spares_costly_one() {
     let dir_cheap = tempfile::tempdir().unwrap();
     let dir_costly = tempfile::tempdir().unwrap();
@@ -172,6 +177,7 @@ async fn run_idle_eviction_tick_evicts_cheap_index_but_spares_costly_one() {
 /// evicted and its chunks stay in memory.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn run_idle_eviction_tick_spares_a_warm_pinned_index() {
     let dir = tempfile::tempdir().unwrap();
     let state = SearchAppState::new(IndexRegistry::new());
