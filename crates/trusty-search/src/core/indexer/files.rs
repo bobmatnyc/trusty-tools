@@ -725,9 +725,7 @@ impl CodeIndexer {
             }
         }
         if let Some(store) = &self.store {
-            for id in ids {
-                store.remove(id).await.ok();
-            }
+            store.remove_many(ids).await.ok(); // #10303: one tombstone write
         }
         {
             let mut emb = self.chunk_embeddings.write().await;
