@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::repo_config::REPO_CONFIG_FILENAME;
 use crate::config::review_skills::{SkillEntry, parse_skill_entries};
-use crate::models::ReviewResult;
+use crate::models::{ReviewResult, SkipKind, SkippedSkill};
 use crate::pipeline::diff::{DiffSource, extract_changed_files};
 use crate::pipeline::optional_context::{ReviewOptions, seams::PrHead};
 use crate::voice::VoiceConfig;
@@ -143,9 +143,10 @@ impl<'a> SkillsCall<'a> {
                 None => Vec::new(), // no base commit: the entries are unknowable
             },
         };
-        // #11899: a fork PR always records the withheld skills and says so,
-        // even when its base commit (and so its config) is not readable here.
-        if entries.is_empty() && !base.fork {
+        // #11899: no configured skill is silent, fork or not. A fork whose
+        // base config cannot be read here still records and says so.
+        let config_unknown = input.source == SkillsSource::RepoConfig && base.store.is_none();
+        if entries.is_empty() && !(base.fork && config_unknown) {
             return voice;
         }
         let origin = match (&base.store, base.fork) {
@@ -172,20 +173,37 @@ impl<'a> SkillsCall<'a> {
     }
 }
 
-/// The `[[review.skills]]` entries of the config at the base commit; none
-/// when the file is absent, unreadable or not valid TOML (as today, a
-/// malformed file is ignored with a warning).
+/// The `[[review.skills]]` entries of the config at the base commit.
+///
+/// What: an absent file, or one with no or an empty `[[review.skills]]`
+/// list, is no entries (silent). A file that cannot be read (git error or
+/// timeout, over the cap, not a regular file) or is not UTF-8 TOML is one
+/// `config_unreadable` skip naming the reason (#11899: never a silent drop).
+/// Test: `config_absent_is_silent_fork_or_not`, `config_empty_skill_list_is_silent_fork_or_not`,
+/// `unreadable_base_config_is_a_named_skip`.
 fn config_entries(store: &GitObjectStore) -> Vec<SkillEntry> {
-    let BlobRead::Bytes(bytes) = store.read(REPO_CONFIG_FILENAME, CONFIG_CAP_BYTES) else {
-        return Vec::new();
+    let unreadable = |reason: String| {
+        vec![Err(SkippedSkill {
+            name: REPO_CONFIG_FILENAME.to_string(),
+            kind: SkipKind::ConfigUnreadable,
+            reason,
+        })]
+    };
+    let bytes = match store.read(REPO_CONFIG_FILENAME, CONFIG_CAP_BYTES) {
+        BlobRead::Bytes(bytes) => bytes,
+        BlobRead::Missing => return Vec::new(),
+        BlobRead::TooLarge(n) => {
+            return unreadable(format!("{n} bytes is over the {CONFIG_CAP_BYTES}-byte cap"));
+        }
+        BlobRead::NotRegular(mode) => {
+            return unreadable(format!("not a regular file (mode {mode})"));
+        }
+        BlobRead::Error(e) => return unreadable(format!("git: {e}")),
     };
     let parsed = std::str::from_utf8(&bytes)
         .map_err(|e| e.to_string())
         .and_then(parse_skill_entries);
-    parsed.unwrap_or_else(|e| {
-        tracing::warn!("{REPO_CONFIG_FILENAME} at the base commit is not valid TOML: {e}");
-        Vec::new()
-    })
+    parsed.unwrap_or_else(|e| unreadable(format!("not valid TOML: {e}")))
 }
 
 /// The base commit of this review and the object store holding it.

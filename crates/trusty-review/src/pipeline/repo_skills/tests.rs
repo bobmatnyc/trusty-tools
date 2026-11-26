@@ -629,3 +629,153 @@ fn git_call_past_its_timeout_is_an_error() {
     assert!(err.contains("timed out"), "{err}");
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
+
+// ── Option A: silent when no skill is configured; a named skip when the base
+// config cannot be read (#11899) ──────────────────────────────────────────────
+
+/// Run `attach` for a GitHub PR whose base is `base_sha` in `dir`.
+fn attach_pr(dir: &Path, base_sha: &str, fork: bool) -> (VoiceConfig, ReviewResult) {
+    let options = ReviewOptions::default()
+        .with_repo_skills(RepoSkillsInput::from_repo_config(Some(dir.to_path_buf())));
+    let source = DiffSource::Github {
+        owner: "acme".into(),
+        repo: "billing".into(),
+        pr: 7,
+        token: String::new(),
+    };
+    let head = PrHead {
+        sha: "2".repeat(40),
+        fork,
+        base_sha: base_sha.to_string(),
+    };
+    let mut result = ReviewResult::new("acme", "billing", 7, "t", "");
+    let diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n";
+    let voice =
+        SkillsCall::new(&options, &source, &head, diff).attach(VoiceConfig::default(), &mut result);
+    (voice, result)
+}
+
+/// A repo whose base commit holds `files`; returns the dir and base SHA.
+fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+    let dir = init_repo();
+    write(dir.path(), "src/lib.rs", "fn a() {}\n");
+    for (rel, text) in files {
+        write(dir.path(), rel, text);
+    }
+    let sha = commit_all(dir.path(), "base");
+    (dir, sha)
+}
+
+fn assert_silent(dir: &Path, sha: &str) {
+    for fork in [false, true] {
+        let (voice, result) = attach_pr(dir, sha, fork);
+        assert!(voice.repo_skills.is_none(), "fork={fork}");
+        assert!(
+            result.repo_skills.is_none(),
+            "fork={fork}: {:?}",
+            result.repo_skills
+        );
+        assert_eq!(body_notice(result.repo_skills.as_ref()), "");
+    }
+}
+
+/// No `.trusty-review.toml` at the base: no record and no notice, fork or not.
+#[test]
+fn config_absent_is_silent_fork_or_not() {
+    let (dir, sha) = repo_with(&[]);
+    assert_silent(dir.path(), &sha);
+}
+
+/// An empty `[[review.skills]]` list is the same as none.
+#[test]
+fn config_empty_skill_list_is_silent_fork_or_not() {
+    let (dir, sha) = repo_with(&[(".trusty-review.toml", "[review]\nskills = []\n")]);
+    assert_silent(dir.path(), &sha);
+}
+
+/// A fork of a repo whose config names no skill gets no notice.
+#[test]
+fn fork_of_repo_without_skills_is_silent() {
+    let config = "[review]\ntemplate = \"strict-security\"\n";
+    let (dir, sha) = repo_with(&[(".trusty-review.toml", config)]);
+    let (voice, result) = attach_pr(dir.path(), &sha, true);
+    assert!(voice.repo_skills.is_none() && result.repo_skills.is_none());
+}
+
+/// A fork of a repo that lists skills is told so, and gets no skill text.
+#[test]
+fn fork_of_repo_with_skills_gets_the_notice() {
+    let (dir, sha) = repo_with(&[
+        (
+            ".trusty-review.toml",
+            "[[review.skills]]\nname = \"billing\"\n",
+        ),
+        (
+            ".claude/skills/billing/SKILL.md",
+            &skill_text("billing", "BILLING-RULE"),
+        ),
+    ]);
+    let (voice, result) = attach_pr(dir.path(), &sha, true);
+    assert!(voice.repo_skills.is_none());
+    let record = result
+        .repo_skills
+        .as_ref()
+        .expect("a fork of a skills repo records");
+    assert!(record.fork && record.loaded.is_empty());
+    assert_eq!(kinds(record), vec![("billing".into(), SkipKind::Fork)]);
+    assert!(body_notice(Some(record)).contains("comes from a fork"));
+}
+
+/// A base config that cannot be read or parsed is a recorded skip named in
+/// the body, never a silent drop: invalid TOML, over the cap, a symlink, and
+/// a git error (its blob object deleted from the store).
+#[test]
+fn unreadable_base_config_is_a_named_skip() {
+    let big = "# padding\n".repeat(7_000); // > 64 KiB
+    let mut cases: Vec<(&str, tempfile::TempDir, String)> = Vec::new();
+    let (dir, sha) = repo_with(&[(".trusty-review.toml", "[review\nskills = [")]);
+    cases.push(("not valid TOML", dir, sha));
+    let (dir, sha) = repo_with(&[(".trusty-review.toml", &big)]);
+    cases.push(("over the", dir, sha));
+    let dir = init_repo();
+    write(dir.path(), "real.toml", "[[review.skills]]\nname = \"x\"\n");
+    std::os::unix::fs::symlink("real.toml", dir.path().join(".trusty-review.toml"))
+        .expect("symlink");
+    let sha = commit_all(dir.path(), "symlink");
+    cases.push(("not a regular file", dir, sha));
+    let (dir, sha) = repo_with(&[(".trusty-review.toml", "[[review.skills]]\nname = \"x\"\n")]);
+    let oid = git(
+        dir.path(),
+        &["rev-parse", &format!("{sha}:.trusty-review.toml")],
+    );
+    let object = dir
+        .path()
+        .join(".git/objects")
+        .join(&oid[..2])
+        .join(&oid[2..]);
+    std::fs::remove_file(object).expect("delete the config blob");
+    cases.push(("git:", dir, sha));
+    for (reason, dir, sha) in &cases {
+        for fork in [false, true] {
+            let (voice, result) = attach_pr(dir.path(), sha, fork);
+            assert!(voice.repo_skills.is_none());
+            let record = result
+                .repo_skills
+                .as_ref()
+                .expect("an unreadable config records");
+            assert_eq!(record.fork, fork);
+            let skip = &record.skipped[..];
+            assert!(
+                matches!(skip, [s] if s.name == ".trusty-review.toml"
+                    && s.kind.label() == "config unreadable"
+                    && s.reason.contains(reason)),
+                "{reason}: {skip:?}"
+            );
+            let body = body_notice(Some(record));
+            assert!(
+                body.contains("`.trusty-review.toml` (config unreadable)"),
+                "{body}"
+            );
+        }
+    }
+}

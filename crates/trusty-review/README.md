@@ -822,8 +822,10 @@ Rules:
   pull request cannot add or edit the skill that reviews it; a new skill takes
   effect after it merges. The base commit must be present in the local
   checkout (`git fetch` it first). A `--base <ref>` review reads at that ref.
-- A pull request from a fork loads no skill, and the review says so, even
-  when its base commit is not in the local checkout.
+- A pull request from a fork loads no skill. When the base config lists
+  skills, or cannot be read (including when the fork's base commit is not in
+  the local checkout), the review says so; a repo that configures no skill
+  gets no notice, fork or not.
 - Each `SKILL.md` is capped at 8 KiB and all loaded skills together at 24 KiB.
   At most 32 entries are processed; the rest are skipped as one summary
   entry. A symlinked skill or skill directory is never followed, and each git
@@ -836,8 +838,11 @@ Rules:
   duplicate or non-matching skill, or a malformed entry (an unknown key, a
   wrong type), is skipped and named with its reason at the end of the review
   body, each name and reason inside a code span, so none of it renders as a
-  mention, link or image. The section is capped at 8,000 characters. A
-  `.trusty-review.toml` that is not valid TOML is ignored, as before.
+  mention, link or image. The section is capped at 8,000 characters.
+- A base `.trusty-review.toml` that cannot be read (a git error or timeout,
+  over 64 KiB, a symlink) or is not valid TOML is recorded as a
+  `config_unreadable` skip and named in the body, so configured skills never
+  drop silently. The other `.trusty-review.toml` keys are read as before.
 - Loaded skills are appended after the review template as one fenced block
   labelled as untrusted repository guidance, followed by a statement that the
   verdict rules and output schema take precedence. The output schema itself

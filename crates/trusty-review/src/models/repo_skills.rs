@@ -63,7 +63,8 @@ pub struct SkippedSkill {
 /// Why: a consumer (and the tests) can branch on the class without parsing
 /// the prose reason.
 /// What: the DOC-93 RS-25 reasons, plus `malformed_entry`, `fork`, `no_base`
-/// and `over_entry_cap`, which DOC-93 states in prose or leaves open.
+/// `over_entry_cap` and `config_unreadable`, which DOC-93 states in prose or
+/// leaves open.
 /// Test: `every_skip_reason_is_recorded_and_named_in_the_body`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,6 +96,8 @@ pub enum SkipKind {
     NoBase,
     /// Entries past the per-review entry cap; recorded as one summary entry.
     OverEntryCap,
+    /// `.trusty-review.toml` at the base commit could not be read or parsed.
+    ConfigUnreadable,
 }
 
 impl SkipKind {
@@ -114,6 +117,7 @@ impl SkipKind {
             Self::Fork => "fork pull request",
             Self::NoBase => "no base commit",
             Self::OverEntryCap => "over entry cap",
+            Self::ConfigUnreadable => "config unreadable",
         }
     }
 }
