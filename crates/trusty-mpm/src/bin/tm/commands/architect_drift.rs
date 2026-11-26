@@ -121,7 +121,23 @@ pub(crate) fn strict_refusal(report: &seed_drift::Report) -> Option<String> {
 /// Test: `strict_refuses_an_edited_script_and_writes_nothing`,
 /// `tm_architect_drift_11773::up_strict_refuses_an_edited_script_and_writes_nothing`.
 pub(crate) fn strict_check(dir: &Path) -> Result<(), String> {
-    let seed = ArchitectSeed::resolve_for(dir, Fetch::OnFirstUse)
+    let cwd = std::env::current_dir().ok();
+    let cache = trusty_common::content::default_cache_dir();
+    strict_check_in(dir, cwd.as_deref(), cache.as_deref())
+}
+
+/// [`strict_check`] with the cwd and the content cache named.
+///
+/// Why: #11773 critic — a test needs a seed that cannot resolve (no checkout,
+/// no cache) to prove the gate fails closed.
+/// Test: `strict_fails_closed_on_an_unreadable_script`,
+/// `strict_fails_closed_when_the_seed_cannot_resolve`.
+pub(crate) fn strict_check_in(
+    dir: &Path,
+    cwd: Option<&Path>,
+    cache: Option<&Path>,
+) -> Result<(), String> {
+    let seed = ArchitectSeed::resolve_in(dir, cwd, cache, Fetch::OnFirstUse)
         .map_err(|e| format!("tm architect up --strict: {e}\n"))?;
     let report = seed_drift::classify(dir, &seed)
         .map_err(|e| format!("tm architect up --strict: {e:#}\n"))?;

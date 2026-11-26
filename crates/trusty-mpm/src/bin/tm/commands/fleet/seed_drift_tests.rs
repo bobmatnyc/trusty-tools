@@ -8,7 +8,7 @@ use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
 
 use super::super::seed::{self, refresh};
 use super::{Report, State, classify, classify_with, provenance_key};
-use crate::commands::architect_drift::{json_value, render, strict_refusal};
+use crate::commands::architect_drift::{json_value, render, strict_check_in, strict_refusal};
 
 /// The checkout's seed, read once.
 fn seed() -> &'static ArchitectSeed {
@@ -246,4 +246,102 @@ fn strict_passes_unedited_scripts_and_an_edited_skill() {
     let report = classify(tmp.path(), seed()).unwrap();
     assert_eq!(report.exit(), 1);
     assert_eq!(strict_refusal(&report), None);
+}
+
+/// The checkout root the seed resolves from.
+fn repo_root() -> std::path::PathBuf {
+    trusty_common::test_harness::test_repo_root().expect("resolve the checkout")
+}
+
+/// `f` on another thread, or a panic naming a hang after 20 s.
+///
+/// Why: #11773 — the pre-fix classifier blocked forever in `fs::read` on a
+/// FIFO; a bounded wait turns that hang into a test failure.
+fn within_20s<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .expect("hung: the drift read blocked on a non-regular file")
+}
+
+/// Replace `rel` under `dir` with a FIFO.
+#[cfg(unix)]
+fn fifo_at(dir: &Path, rel: &str) {
+    let path = dir.join(rel);
+    let _ = std::fs::remove_file(&path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+}
+
+/// #11773: a FIFO at a managed script path is an error, not a hang, and
+/// `up --strict`'s gate refuses on it.
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_a_managed_path_fails_closed_without_hanging() {
+    let tmp = seeded_dir();
+    fifo_at(tmp.path(), "scripts/datg.py");
+    let dir = tmp.path().to_path_buf();
+    let (classified, strict) = within_20s(move || {
+        let classified = classify(&dir, seed())
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"));
+        (classified, strict_check_in(&dir, Some(&repo_root()), None))
+    });
+    let err = classified.expect_err("a FIFO is not readable");
+    assert!(err.contains("not a regular file"), "{err}");
+    assert!(err.contains("scripts/datg.py"), "{err}");
+    let msg = strict.expect_err("--strict fails closed");
+    assert!(msg.contains("not a regular file"), "{msg}");
+}
+
+/// #11773: a FIFO under a managed directory is skipped from the extras, and
+/// a symlink to a file is still read, at a managed path and as an extra.
+#[cfg(unix)]
+#[test]
+fn a_fifo_extra_is_skipped_without_hanging() {
+    let tmp = seeded_dir();
+    let dir = tmp.path();
+    fifo_at(dir, "scripts/pipe.py");
+    let real = dir.join("datg-real.py");
+    std::fs::rename(dir.join("scripts/datg.py"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("scripts/datg.py")).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("scripts/linked.py")).unwrap();
+    let owned = dir.to_path_buf();
+    let report = within_20s(move || classify(&owned, seed()).map_err(|e| format!("{e:#}")))
+        .expect("a FIFO extra is not an error");
+    let s = states(&report);
+    assert!(!s.contains_key("scripts/pipe.py"), "{s:?}");
+    assert_eq!(s["scripts/datg.py"], State::Current);
+    assert_eq!(s["scripts/linked.py"], State::Extra);
+}
+
+/// #11773 critic: an unreadable managed script makes the strict gate return
+/// `Err`, never a pass.
+#[cfg(unix)]
+#[test]
+fn strict_fails_closed_on_an_unreadable_script() {
+    use std::os::unix::fs::PermissionsExt;
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipped: root reads a mode-000 file");
+        return;
+    }
+    let tmp = seeded_dir();
+    let path = tmp.path().join("scripts/datg.py");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = strict_check_in(tmp.path(), Some(&repo_root()), None);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let msg = result.expect_err("an unreadable script fails closed");
+    assert!(msg.contains("cannot read"), "{msg}");
+    assert!(msg.contains("scripts/datg.py"), "{msg}");
+}
+
+/// #11773 critic: with no checkout and no content cache the seed cannot
+/// resolve, and the strict gate returns `Err`.
+#[test]
+fn strict_fails_closed_when_the_seed_cannot_resolve() {
+    let tmp = seeded_dir();
+    let msg = strict_check_in(tmp.path(), None, None).expect_err("no seed fails closed");
+    assert!(msg.starts_with("tm architect up --strict: "), "{msg}");
 }
