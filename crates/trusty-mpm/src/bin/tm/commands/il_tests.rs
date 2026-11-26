@@ -47,6 +47,9 @@ fn cli_parses_every_il_config_verb() {
             ..
         }
     ));
+    // #11002: the preset diff and the migration take no arguments.
+    assert!(matches!(parse(&["diff"]).1, IlConfigAction::Diff));
+    assert!(matches!(parse(&["update"]).1, IlConfigAction::Update));
     assert!(matches!(
         parse(&["reset", "--force"]).1,
         IlConfigAction::Reset { force: true }
@@ -101,4 +104,31 @@ fn the_cli_refuses_a_missing_architect_dir() {
     })
     .expect_err("no dir");
     assert!(err.to_string().contains("tm fleet init"), "{err}");
+}
+
+/// #11002: `diff` reads only, and `update` migrates an older file in place.
+#[test]
+fn the_cli_diffs_and_updates_an_older_schedule() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().to_str().expect("utf8").to_owned();
+    let file = il_schedule::path(tmp.path());
+    std::fs::create_dir_all(file.parent().expect("local")).expect("local");
+    let v0 = PRESET.replacen("  \"schema_version\": 1,\n", "", 1);
+    std::fs::write(&file, &v0).expect("seed an unversioned file");
+    let config = |action| IlAction::Config {
+        dir: Some(dir.clone()),
+        action,
+    };
+    run(config(IlConfigAction::Diff)).expect("diff");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        v0,
+        "diff wrote"
+    );
+    run(config(IlConfigAction::Update)).expect("update");
+    let loaded = il_schedule::load(&file).expect("load");
+    assert_eq!(
+        loaded.schedule.schema_version,
+        Some(il_schedule::SCHEMA_VERSION)
+    );
 }
