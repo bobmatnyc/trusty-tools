@@ -7,7 +7,9 @@
 //! What: [`enter`] refuses unless every environment variable is on the closed
 //! [`ENV_ALLOWLIST`], `TRUSTY_DATA_DIR_OVERRIDE` is set, `TRUSTY_SANDBOX` is
 //! exactly `1` ([`Refusal::SandboxFlagNotSet`] otherwise, so trusty-common reads
-//! no `.env.local`, #9178), and `$HOME` is not the account's home. On success
+//! no `.env.local`, #9178), `$HOME` is not the account's home, and the config
+//! dir `$HOME/.trusty-tools/install.toml` resolves to is not the account's
+//! (#11821 P6b). On success
 //! it latches `trusty_mpm::secret_source::enter_sandbox`, so no credential tier
 //! is read. #10721: `--sandbox-credential NAME` admits exactly one provider
 //! key (`ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`) from the process
@@ -24,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
+use trusty_common::install_paths::{InstallPaths, MPM_DIR_NAME, PathOverrides, TOOLS_DIR_NAME};
 use trusty_mpm::secret_source::{self, SANDBOX_CREDENTIAL_NAMES, SandboxCredentialError};
 
 /// The only variables a sandbox daemon may inherit, compared exactly.
@@ -182,6 +185,11 @@ pub(crate) enum Refusal {
     AccountHomeUnknown,
     /// `$HOME` resolves to the account's real home.
     HomeIsAccountHome(PathBuf),
+    /// `$HOME`'s install.toml does not resolve (#11821 P6b); carries the error.
+    InstallPathsUnresolved(String),
+    /// The resolved config dir, or its `.trusty-tools` / `.trusty-mpm`, is the
+    /// account's own (#11821 P6b); carries the resolved config dir.
+    ConfigDirIsAccountHome(PathBuf),
     /// `--sandbox-credential` names a variable off the admission list (#10721).
     CredentialNotAdmissible(String),
     /// `--sandbox-credential NAME` with `NAME` unset or empty (#10721).
@@ -216,6 +224,17 @@ impl fmt::Display for Refusal {
                 f,
                 "$HOME ({}) is this user's real home; a sandbox needs its own",
                 home.display()
+            ),
+            Self::InstallPathsUnresolved(err) => write!(
+                f,
+                "the sandbox's install paths do not resolve ({err}); fix or remove the \
+                 install.toml under the sandbox home"
+            ),
+            Self::ConfigDirIsAccountHome(dir) => write!(
+                f,
+                "the config dir the sandbox home's install.toml names ({}) is this \
+                 user's real config dir; a sandbox needs its own",
+                dir.display()
             ),
             // #10721: the library error owns the wording; names only.
             Self::CredentialNotAdmissible(name) => {
@@ -294,7 +313,10 @@ pub(crate) fn enter_with(
 /// `refuses_when_the_account_home_is_unknown`,
 /// `refuses_when_home_does_not_exist`,
 /// `refuses_a_sandbox_credential_off_the_list`,
-/// `refuses_a_sandbox_credential_that_is_not_set`.
+/// `refuses_a_sandbox_credential_that_is_not_set`,
+/// `refuses_a_broken_install_file_under_home`,
+/// `refuses_a_config_dir_that_is_the_account_home`,
+/// `refuses_a_tools_dir_symlinked_to_the_account_one`.
 pub(crate) fn refusals(env: &SandboxEnv) -> Vec<Refusal> {
     let mut out = Vec::new();
     if !env.disallowed_names.is_empty() {
@@ -320,10 +342,41 @@ pub(crate) fn refusals(env: &SandboxEnv) -> Vec<Refusal> {
     if !sandbox_flag_set(env.sandbox_flag.as_deref()) {
         out.push(Refusal::SandboxFlagNotSet);
     }
-    if let Some(refusal) = home_refusal(env.home.as_deref(), env.account_home.as_deref()) {
+    let (home, account) = (env.home.as_deref(), env.account_home.as_deref());
+    if let Some(refusal) = home_refusal(home, account) {
         out.push(refusal);
+    } else if let (Some(home), Some(account)) = (home, account) {
+        // #11821 P6b: home is the sandbox's own; now the config dir it resolves to.
+        out.extend(config_dir_refusal(home, account));
     }
     out
+}
+
+/// Whether the config dir `home`'s install.toml resolves to is the sandbox's own.
+///
+/// Why: a sandbox daemon writes its state under the resolved config dir
+/// (#11821 P3), not under `$HOME`. An install.toml naming the account home, or
+/// a `.trusty-tools` symlinked to the account's, would write the real config.
+/// What: resolves with no env (the allowlist admits no path variable) and
+/// fails closed on a resolve error. Refuses when the config dir, its
+/// `.trusty-tools` or its `.trusty-mpm` equals the account's after symlinks
+/// resolve; a path that does not resolve is compared as written.
+fn config_dir_refusal(home: &Path, account: &Path) -> Option<Refusal> {
+    let paths = match InstallPaths::resolve_with(|_| None, home, &PathOverrides::default()) {
+        Ok(paths) => paths,
+        Err(err) => return Some(Refusal::InstallPathsUnresolved(err.to_string())),
+    };
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let config = &paths.config_dir.path;
+    let pairs = [
+        (config.clone(), account.to_path_buf()),
+        (paths.tools_dir(), account.join(TOOLS_DIR_NAME)),
+        (paths.mpm_dir(), account.join(MPM_DIR_NAME)),
+    ];
+    pairs
+        .iter()
+        .any(|(ours, theirs)| real(ours) == real(theirs))
+        .then(|| Refusal::ConfigDirIsAccountHome(config.clone()))
 }
 
 /// Whether `home` is a home of its own, compared after resolving symlinks.

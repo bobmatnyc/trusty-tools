@@ -439,3 +439,71 @@ fn an_admissible_present_sandbox_credential_enters() {
         assert_eq!(latched.get(), 1, "{name}");
     }
 }
+
+/// Write `body` as `home`'s `.trusty-tools/install.toml`.
+fn install_toml(home: &Path, body: &str) {
+    let tools = home.join(TOOLS_DIR_NAME);
+    std::fs::create_dir_all(&tools).expect("create .trusty-tools");
+    std::fs::write(tools.join("install.toml"), body).expect("write install.toml");
+}
+
+/// `config_dir = "<dir>"` as one install.toml line.
+fn config_line(dir: &Path) -> String {
+    format!("config_dir = {:?}\n", dir.display().to_string())
+}
+
+/// Why (#11821 P6b): a broken install.toml under the sandbox home must refuse,
+/// never fall back to `$HOME` as the config dir.
+/// Test: this test.
+#[test]
+fn refuses_a_broken_install_file_under_home() {
+    let (home, account) = two_dirs();
+    install_toml(home.path(), "config_dir = [not a string\n");
+
+    let refused = refusals(&isolated(home.path(), account.path()));
+
+    assert!(
+        matches!(refused.as_slice(), [Refusal::InstallPathsUnresolved(_)]),
+        "{refused:?}"
+    );
+}
+
+/// Why (#11821 P6b): install.toml naming the account home as config dir would
+/// point the sandbox daemon's writes at the real config. A config dir of the
+/// sandbox's own passes, so the check is not a blanket refusal.
+/// Test: this test.
+#[test]
+fn refuses_a_config_dir_that_is_the_account_home() {
+    let (home, account) = two_dirs();
+    install_toml(home.path(), &config_line(account.path()));
+
+    assert_eq!(
+        refusals(&isolated(home.path(), account.path())),
+        vec![Refusal::ConfigDirIsAccountHome(
+            account.path().to_path_buf()
+        )]
+    );
+
+    install_toml(home.path(), &config_line(&home.path().join("cfg")));
+    assert_eq!(refusals(&isolated(home.path(), account.path())), vec![]);
+}
+
+/// Why (#11821 P6b): a config dir whose `.trusty-tools` is a symlink to the
+/// account's reaches the real config dir by a path that differs as written.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn refuses_a_tools_dir_symlinked_to_the_account_one() {
+    let (home, account) = two_dirs();
+    let own = home.path().join("cfg");
+    let theirs = account.path().join(TOOLS_DIR_NAME);
+    std::fs::create_dir_all(&own).expect("create cfg");
+    std::fs::create_dir_all(&theirs).expect("account tools");
+    std::os::unix::fs::symlink(&theirs, own.join(TOOLS_DIR_NAME)).expect("symlink");
+    install_toml(home.path(), &config_line(&own));
+
+    assert_eq!(
+        refusals(&isolated(home.path(), account.path())),
+        vec![Refusal::ConfigDirIsAccountHome(own)]
+    );
+}
