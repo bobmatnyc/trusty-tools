@@ -20,6 +20,7 @@
 #   own-path-home         a file under a home/ dir, no baseline row  OK (#11641)
 #   own-path-content-hit  an operator path in that file's content    FAIL
 #   private-path          a path spelling the private name           FAIL PRIVATE_NAME
+#   brief-path            a clean file under the briefs dir          FAIL BRIEF_PATH
 #   private-<form>        the name camel, glued, with digits, plural, hyphen,
 #                         underscore, URL and @ forms         FAIL PRIVATE_NAME
 #   private-near-miss     a different word                    OK
@@ -183,6 +184,9 @@ expect own-path-content-hit 1 "FAIL OPERATOR_PATH: $HOME_FILE:1: 1 hit(s), basel
 new_repo private-path
 w zorp/notes.md '# a clean page'
 expect private-path 1 "FAIL PRIVATE_NAME: zorp/notes.md:0" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
+new_repo brief-path
+w "docs/${J}briefs/x.md" '# a clean page'
+expect brief-path 1 "FAIL BRIEF_PATH: docs/${J}briefs/x.md:0"
 
 # The private-name class: every glued form of the synthetic name.
 while IFS='|' read -r form line; do

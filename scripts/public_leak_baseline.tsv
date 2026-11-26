@@ -1205,6 +1205,7 @@ docs/adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md	
 docs/adr/0069-remote-memory-store-api-spec-location.md	RULING_DATED	1
 docs/adr/0072-probes-run-inside-the-secrets-server-and-a-type-is-index-metadata.md	HOSTNAME	1
 docs/adr/0076-cloud-sled-network-boundary.md	EVO_HOST	2
+docs/briefs/2026-11-17-il-talk-id-and-r-conflict.md	BRIEF_PATH	1
 docs/design/UI/Current UI.dc.html	OPERATOR_PATH	8
 docs/design/UI/Foundry Screens.dc.html	OPERATOR_PATH	10
 docs/design/UI/Foundry Spec.dc.html	OPERATOR_PATH	2
