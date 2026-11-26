@@ -550,6 +550,8 @@ pub mod twin_identity;
 pub mod uncommitted_changes;
 pub mod update_check;
 pub mod version_staleness;
+// #11003: per-release highlights for `tm whats-new` and the doctor notice.
+pub mod whats_new;
 pub mod workspace_liveness;
 pub mod workspace_scan;
 // #7889: route (c) of the landing admission — HEAD inside a merged PR's history.
