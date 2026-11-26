@@ -1,6 +1,6 @@
 # 0077. Features with semantic options ship a pre-canned default, the CLI is the only writer, and a selection test decides UI surfaces
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-10
 - **Scope:** Workspace-wide
 - **Reversibility Cost:** **Low.** The rule governs new features and the config of existing ones as they are touched. No data format changes by itself; each feature adds its own `schema_version`.
