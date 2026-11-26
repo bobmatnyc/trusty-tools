@@ -507,3 +507,24 @@ fn refuses_a_tools_dir_symlinked_to_the_account_one() {
         vec![Refusal::ConfigDirIsAccountHome(own)]
     );
 }
+
+/// Why (#11821 P6b r1): a config dir of the sandbox's own whose `.trusty-mpm`
+/// is a symlink to the account's carries the daemon's state writes to the real
+/// `.trusty-mpm`, though the config dir and its `.trusty-tools` both differ.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn refuses_an_mpm_dir_symlinked_to_the_account_one() {
+    let (home, account) = two_dirs();
+    let own = home.path().join("cfg");
+    let theirs = account.path().join(MPM_DIR_NAME);
+    std::fs::create_dir_all(own.join(TOOLS_DIR_NAME)).expect("own tools dir");
+    std::fs::create_dir_all(&theirs).expect("account mpm dir");
+    std::os::unix::fs::symlink(&theirs, own.join(MPM_DIR_NAME)).expect("symlink");
+    install_toml(home.path(), &config_line(&own));
+
+    assert_eq!(
+        refusals(&isolated(home.path(), account.path())),
+        vec![Refusal::ConfigDirIsAccountHome(own)]
+    );
+}

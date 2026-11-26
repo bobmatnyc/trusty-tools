@@ -316,7 +316,8 @@ pub(crate) fn enter_with(
 /// `refuses_a_sandbox_credential_that_is_not_set`,
 /// `refuses_a_broken_install_file_under_home`,
 /// `refuses_a_config_dir_that_is_the_account_home`,
-/// `refuses_a_tools_dir_symlinked_to_the_account_one`.
+/// `refuses_a_tools_dir_symlinked_to_the_account_one`,
+/// `refuses_an_mpm_dir_symlinked_to_the_account_one`.
 pub(crate) fn refusals(env: &SandboxEnv) -> Vec<Refusal> {
     let mut out = Vec::new();
     if !env.disallowed_names.is_empty() {
