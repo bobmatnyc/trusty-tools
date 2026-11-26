@@ -160,10 +160,14 @@ fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
         .iter()
         .map(|t| format!("mcp__trusty-mpm__{}", t["name"].as_str().expect("a name")))
         .collect();
-    assert!(
-        tools.contains(&"mcp__trusty-mpm__ask_owner".to_owned()),
-        "{tools:?}"
-    );
+    // #10423: `channel_send` is the Architect's staged org send, allowlisted
+    // like `ask_owner` (#8454): no deny rule may match it.
+    for allowed in [
+        "mcp__trusty-mpm__ask_owner",
+        "mcp__trusty-mpm__channel_send",
+    ] {
+        assert!(tools.contains(&allowed.to_owned()), "{allowed}: {tools:?}");
+    }
     for tool in &tools {
         for rule in &rules {
             assert!(!glob_matches(rule, tool), "{rule} must not match {tool}");

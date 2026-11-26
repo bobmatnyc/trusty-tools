@@ -51,9 +51,9 @@ pub mod session_context;
 /// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), the four
 /// session-manager proxy tools (#2550), the Disk survey (#6927), and
 /// `secrets_get_ref` (#7522), `ask_owner` (#9856), `sessions_chat` (#9979)
-/// and `dbatg` (#9758).
+/// `dbatg` (#9758) and `channel_send` (#10423).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 39] = [
+pub const TOOL_CATALOG: [&str; 40] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -104,6 +104,8 @@ pub const TOOL_CATALOG: [&str; 39] = [
     "secrets_get_ref",
     // ── 1 channel tool (#9856, #8433 P4) ────────────────────────────────────
     "ask_owner",
+    // #10423: `channel_send`, a staged org send behind the owner's Approve.
+    "channel_send",
     // ── 1 chat tool (#9979, mirrors `mpm.sessions.chat`) ────────────────────
     "sessions_chat",
     // ── 1 ledger tool (#9758, mirrors `mpm.dbatg.*`) ────────────────────────
@@ -171,9 +173,9 @@ mod tests {
         // #6927 adds disk_survey → 35.
         // #7522 adds secrets_get_ref → 36.
         // #9856 adds ask_owner → 37; #9979 adds sessions_chat → 38.
-        // #9758 adds dbatg → 39.
-        assert_eq!(tool_catalog().len(), 39);
-        assert_eq!(TOOL_CATALOG.len(), 39);
+        // #9758 adds dbatg → 39; #10423 adds channel_send → 40.
+        assert_eq!(tool_catalog().len(), 40);
+        assert_eq!(TOOL_CATALOG.len(), 40);
     }
 
     #[test]
@@ -377,6 +379,18 @@ mod tests {
     /// #9856: the schema stays closed, so no argument can name the asker, a
     /// kind or a channel; only a recipient, the question text and (#10127)
     /// the optional option labels, bounded per Architect ruling Q5.
+    #[test]
+    fn channel_send_tool_schema_is_closed() {
+        let catalog = tool_catalog();
+        let tool = catalog
+            .iter()
+            .find(|t| t["name"] == "channel_send")
+            .expect("channel_send must be in the catalog");
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], serde_json::json!(["user", "text"]));
+    }
+
     #[test]
     fn ask_owner_tool_schema_is_closed() {
         let catalog = tool_catalog();

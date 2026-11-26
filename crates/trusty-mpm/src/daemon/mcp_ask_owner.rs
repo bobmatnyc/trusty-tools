@@ -51,3 +51,37 @@ pub async fn ask_owner(
 ) -> Result<Value, String> {
     Err("ask_owner: this build has no channels feature".to_owned())
 }
+
+/// Stage a `channel_send` (#10423); the JSON result or the rule's text.
+///
+/// What: `managed_routes::channel_send::send_op`; the error text is the
+/// rule code and its message, never the message text.
+/// Test: `dispatch_channel_send_tool` (mock); the body in
+/// `managed_routes/channel_send_tests.rs`.
+#[cfg(feature = "channels")]
+pub async fn channel_send(
+    state: &Arc<DaemonState>,
+    user: &str,
+    text: &str,
+    via_org: Option<String>,
+) -> Result<Value, String> {
+    use super::managed_routes::channel_send::{SendRequest, send_op};
+    let req = SendRequest {
+        user: user.to_owned(),
+        text: text.to_owned(),
+        via_org,
+    };
+    let staged = send_op(state, req).await.map_err(|e| e.to_string())?;
+    serde_json::to_value(staged).map_err(|_| "channel_send: encode failed".to_owned())
+}
+
+/// Without the `channels` feature there is no org routing to send through.
+#[cfg(not(feature = "channels"))]
+pub async fn channel_send(
+    _state: &Arc<DaemonState>,
+    _user: &str,
+    _text: &str,
+    _via_org: Option<String>,
+) -> Result<Value, String> {
+    Err("channel_send: this build has no channels feature".to_owned())
+}

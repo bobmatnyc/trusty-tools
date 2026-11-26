@@ -31,6 +31,8 @@ pub(crate) struct ChannelHold {
     inbound_limiter: InboundLimiter,
     // #9923 Q3: the Socket Mode event claim log, opened on first use.
     inbound_claims: ClaimHold,
+    // #10423: the staged-send table, loaded on first use.
+    pub(super) sends: super::channel_send::SendTableHold,
 }
 
 impl DaemonState {

@@ -1,10 +1,13 @@
-//! The channel MCP tool descriptor: `ask_owner` (#9856, #8433 P4).
+//! The channel MCP tool descriptors: `ask_owner` (#9856, #8433 P4) and
+//! `channel_send` (#10423).
 //!
 //! Why: the Architect asks its owner a question over Slack through the
 //! daemon, which holds the bot token and the route policy.
-//! What: [`channels_tools`] returns the one `ask_owner` descriptor with a
-//! closed schema. No argument names the asker: the daemon proves it.
+//! What: [`channels_tools`] returns the `ask_owner` and `channel_send`
+//! descriptors with closed schemas. No argument names the asker or the
+//! approver: the daemon proves them.
 //! Test: `super::tests::ask_owner_tool_schema_is_closed`,
+//! `super::tests::channel_send_tool_schema_is_closed`,
 //! `super::tests::catalog_names_match_constant`.
 
 use serde_json::{Value, json};
@@ -17,9 +20,10 @@ use super::tool;
 /// `options` list (#10127), closed schema.
 /// Test: `super::tests::ask_owner_tool_schema_is_closed`.
 pub(super) fn channels_tools() -> Vec<Value> {
-    vec![tool(
-        "ask_owner",
-        "Ask the owner one question as a Slack DM, through the daemon's bot. \
+    vec![
+        tool(
+            "ask_owner",
+            "Ask the owner one question as a Slack DM, through the daemon's bot. \
          Only the live managed Architect session may ask: the daemon proves \
          the caller from the calling process, and refuses everyone else. The \
          recipient must be a Slack user id (`U…`) that a channel route names; \
@@ -33,30 +37,61 @@ pub(super) fn channels_tools() -> Vec<Value> {
          `no_route`, `snapshot_stale`, `user_token_refused`, \
          `table_unavailable`, ...). `send_outcome_unknown` means the question \
          may have been posted; its id is never reused.",
-        json!({
-            "type": "object",
-            "properties": {
-                "recipient": {
-                    "type": "string",
-                    "description": "The Slack user id (U…) a channel route names."
+            json!({
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "description": "The Slack user id (U…) a channel route names."
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The question text, 1 to 4000 bytes."
+                    },
+                    // #10127: Architect ruling Q5; `ask_owner` enforces the rest.
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 6,
+                        "items": { "type": "string", "minLength": 1, "maxLength": 80 },
+                        "description": "Optional answer labels, 2 to 6, each 1 to 80 bytes \
+                                        with no control character, unique ignoring case, and \
+                                        none equal to another option's number."
+                    }
                 },
-                "question": {
-                    "type": "string",
-                    "description": "The question text, 1 to 4000 bytes."
+                "required": ["recipient", "question"],
+                "additionalProperties": false
+            }),
+        ),
+        // #10423: staged only; nothing posts until the owner approves the text.
+        tool(
+            "channel_send",
+            "Stage one message to a configured user through their own org's \
+         channel (orgs.toml). Nothing is posted until the owner approves the \
+         exact text: the approval request goes to the owner's Slack DM, or the \
+         dashboard. Returns `{ id, digest, org, approval }`. Every refusal \
+         posts nothing and names its rule (`no_route`, `cross_org`, \
+         `text_invalid`, `config_unavailable`, `table_unavailable`, \
+         `audit_unavailable`, `persist_failed`, ...).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "user": {
+                        "type": "string",
+                        "description": "The configured user name (a `users` key in orgs.toml)."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The exact text, 1 to 4000 bytes."
+                    },
+                    "via_org": {
+                        "type": "string",
+                        "description": "Optional: the org expected; any org but the user's own is refused."
+                    }
                 },
-                // #10127: Architect ruling Q5; `ask_owner` enforces the rest.
-                "options": {
-                    "type": "array",
-                    "minItems": 2,
-                    "maxItems": 6,
-                    "items": { "type": "string", "minLength": 1, "maxLength": 80 },
-                    "description": "Optional answer labels, 2 to 6, each 1 to 80 bytes \
-                                    with no control character, unique ignoring case, and \
-                                    none equal to another option's number."
-                }
-            },
-            "required": ["recipient", "question"],
-            "additionalProperties": false
-        }),
-    )]
+                "required": ["user", "text"],
+                "additionalProperties": false
+            }),
+        ),
+    ]
 }
