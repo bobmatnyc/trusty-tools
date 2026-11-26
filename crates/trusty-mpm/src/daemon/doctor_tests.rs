@@ -1242,6 +1242,30 @@ fn a_root_with_no_file_name_yields_no_ids_and_no_panic() {
     );
 }
 
+/// #11885: the battery `run_doctor_for_manager` runs bounds the inventory.
+/// An inventory that never finishes costs the `worktrees` row, which becomes
+/// the timeout row; the outer guard turns a missing bound into a failure.
+#[tokio::test]
+async fn a_never_finishing_inventory_yields_the_worktrees_timeout_row() {
+    let root = tempfile::tempdir().expect("repos root");
+    let active = LiveClaims::foreign(Vec::new());
+    let battery = battery_with_inventory(
+        None,
+        root.path(),
+        &active,
+        std::future::pending::<Option<WorktreeOrphanCounts>>(),
+        std::time::Duration::from_millis(50),
+    );
+    let checks = tokio::time::timeout(std::time::Duration::from_secs(60), battery)
+        .await
+        .expect("the battery waited on the inventory: the call site is unbounded");
+
+    let rows: Vec<&DoctorCheck> = checks.iter().filter(|c| c.name == "worktrees").collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].status, CheckStatus::Unknown);
+    assert!(rows[0].message.contains("timed out"), "{}", rows[0].message);
+}
+
 /// #11885: a timeout row replaces the `worktrees` row that read the missing
 /// count as "unavailable", and a row with no namesake is appended.
 #[test]

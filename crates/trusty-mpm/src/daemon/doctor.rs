@@ -893,28 +893,49 @@ pub async fn run_doctor_for_manager(
     // it takes them as a parameter.
     let adopted = crate::project::default_adopted_anchors();
     let inventory = gather_worktree_counts(mgr, &repos_root, &adopted);
-    // #11885: the inventory runs git per worktree and took 70 s+ on a busy host
-    // before `tm doctor` printed a line; past the bound it is a timeout row.
-    let (worktree_counts, inventory_timeout) = match crate::core::doctor_bounded::within(
-        "worktrees",
-        WORKTREE_INVENTORY_TIMEOUT,
+    let mut checks = battery_with_inventory(
+        project_dir,
+        &repos_root,
+        &active,
         inventory,
+        WORKTREE_INVENTORY_TIMEOUT,
     )
-    .await
-    {
-        Ok(counts) => (counts, None),
-        Err(row) => (None, Some(row)),
-    };
-    let report =
-        run_doctor_with_claims(project_dir, Some(&repos_root), &active, worktree_counts).await;
+    .await;
     // #9238: needs the manager's records and tmux driver, so it is added here.
-    let mut checks = report.checks;
-    if let Some(row) = inventory_timeout {
-        replace_row(&mut checks, row);
-    }
     checks.push(doctor_session_names::check_session_names(mgr).await);
     checks.push(doctor_channel_taint::check_channel_taint(mgr).await);
     DoctorReport::from_checks(checks)
+}
+
+/// The check battery over an inventory bounded by `limit` (#11885).
+///
+/// Why: the inventory runs git per worktree and took 70 s+ on a busy host
+/// before `tm doctor` printed a line. Taking the inventory as a future lets a
+/// test hand in one that never finishes.
+/// What: awaits `inventory` for at most `limit`, runs
+/// [`run_doctor_with_claims`] over its counts, and on expiry puts the
+/// `worktrees` timeout row in place of the row that read the count as missing.
+/// Test: `a_never_finishing_inventory_yields_the_worktrees_timeout_row`.
+async fn battery_with_inventory(
+    project_dir: Option<&Path>,
+    repos_root: &Path,
+    active: &LiveClaims,
+    inventory: impl std::future::Future<Output = Option<WorktreeOrphanCounts>>,
+    limit: std::time::Duration,
+) -> Vec<crate::core::doctor::DoctorCheck> {
+    // #11885: past the bound the inventory is a timeout row, never a hang.
+    let (counts, timeout) =
+        match crate::core::doctor_bounded::within("worktrees", limit, inventory).await {
+            Ok(counts) => (counts, None),
+            Err(row) => (None, Some(row)),
+        };
+    let mut checks = run_doctor_with_claims(project_dir, Some(repos_root), active, counts)
+        .await
+        .checks;
+    if let Some(row) = timeout {
+        replace_row(&mut checks, row);
+    }
+    checks
 }
 
 /// How long the doctor waits for the reconciled worktree inventory (#11885).
