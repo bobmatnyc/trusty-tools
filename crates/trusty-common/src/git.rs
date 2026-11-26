@@ -54,6 +54,43 @@ use std::process::Command;
 /// Test: `command_disables_maintenance_and_gc`.
 pub const MAINTENANCE_DISABLE_ARGS: &[&str] = &["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
 
+/// Environment variables that point git at a repository other than `-C`'s.
+///
+/// Why: `git -C <dir>` obeys `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR` over
+/// its own `-C`, and a daemon inherits whatever environment launched it, so
+/// an ambient redirect makes git answer for another repository (#4118,
+/// #11217). `GIT_CONFIG_COUNT` is listed because env-injected config would
+/// otherwise compete with a caller's pinned `-c` args.
+/// What: the names [`remove_redirects`] strips. Moved here from
+/// trusty-mpm's `worktree_safety` (#11217) so the trusty-common origin read
+/// can share the one list; the contents are unchanged.
+/// Test: `git_command_strips_repository_redirecting_env` (trusty-mpm),
+/// `origin_read_ignores_an_inherited_git_dir_11217`.
+pub const GIT_ENV_REDIRECTS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG_COUNT",
+];
+
+/// Remove every [`GIT_ENV_REDIRECTS`] name from `cmd`'s child environment.
+///
+/// Why: #11217 — one scrub shared by trusty-mpm's hardened `git_command` and
+/// [`crate::github_path`]'s origin read, rather than two copies.
+/// What: `cmd.env_remove(name)` for each name; nothing else changes.
+/// Test: `git_command_strips_repository_redirecting_env` (trusty-mpm),
+/// `origin_read_ignores_an_inherited_git_dir_11217`.
+pub fn remove_redirects(cmd: &mut Command) {
+    for key in GIT_ENV_REDIRECTS {
+        cmd.env_remove(key);
+    }
+}
+
 /// Build a bare `git` [`std::process::Command`] with automatic
 /// maintenance/gc disabled.
 ///

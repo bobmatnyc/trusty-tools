@@ -272,9 +272,20 @@ pub fn derive_github_path(dir: &Path) -> Option<GithubPath> {
 /// parent repo, and inside a SUBDIRECTORY of a repo, where git walks up to the
 /// enclosing checkout. Returns `None` when git is absent, `dir` is not in a
 /// repo, or there is no origin remote.
-/// Test: `derive_github_path_reads_origin`, `derive_remote_repo_reads_origin`.
+/// #11217: an inherited `GIT_DIR`/`GIT_COMMON_DIR` is removed, so the origin
+/// is always `dir`'s own, never another repository's.
+/// Test: `derive_github_path_reads_origin`, `derive_remote_repo_reads_origin`,
+/// `origin_read_ignores_an_inherited_git_dir_11217`.
 fn origin_remote_url(dir: &Path) -> Option<String> {
-    let output = Command::new("git")
+    origin_remote_url_from(Command::new("git"), dir)
+}
+
+/// [`origin_remote_url`] on a caller-built `git` command; the test seam that
+/// injects a redirect into the child env without touching the process env.
+fn origin_remote_url_from(mut cmd: Command, dir: &Path) -> Option<String> {
+    // #11217: the shared scrub, so `-C dir` alone picks the repository.
+    crate::git::remove_redirects(&mut cmd);
+    let output = cmd
         .arg("-C")
         .arg(dir)
         .arg("config")
@@ -582,6 +593,49 @@ mod tests {
         let gp = derive_github_path(dir).expect("derived from origin");
         assert_eq!(gp.owner, "bobmatnyc");
         assert_eq!(gp.repo, "trusty-tools");
+    }
+
+    /// Why: #11217 — a daemon that inherits `GIT_DIR`/`GIT_COMMON_DIR` naming
+    /// repo X must still read repo A's own origin, or A is keyed as X.
+    /// What: the redirects ride on the child command (the seam), never the
+    /// process env, so parallel tests cannot observe them.
+    /// Test: itself.
+    #[test]
+    fn origin_read_ignores_an_inherited_git_dir_11217() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = |name: &str, origin: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).expect("mkdir repo");
+            for args in [
+                &["init", "-q"][..],
+                &["remote", "add", "origin", origin][..],
+            ] {
+                let ok = Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(args)
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_COMMON_DIR")
+                    .status()
+                    .is_ok_and(|s| s.success());
+                assert!(ok, "git {args:?} failed");
+            }
+            dir
+        };
+        let repo_a = repo("a", "https://github.com/acme/a");
+        let repo_x = repo("x", "https://github.com/acme/x");
+        let x_git = repo_x.join(".git");
+
+        for var in ["GIT_DIR", "GIT_COMMON_DIR"] {
+            let mut cmd = Command::new("git");
+            cmd.env(var, &x_git);
+            let url = origin_remote_url_from(cmd, &repo_a);
+            assert_eq!(
+                url.as_deref().map(str::trim),
+                Some("https://github.com/acme/a"),
+                "{var} redirected the origin read"
+            );
+        }
     }
 
     /// Why: a directory that is not a git repo must yield `None`, not panic, so
