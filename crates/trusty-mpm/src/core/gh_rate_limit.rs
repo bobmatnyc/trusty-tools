@@ -14,7 +14,9 @@
 //! `loop_*rate_limit*` tests in `tm wait`'s `tests.rs`;
 //! `a_rate_limited_read_pauses_the_watch_until_the_reset`.
 
-use crate::core::gh_session_shim::{RATE_LIMIT_REFUSAL_MARKER, RATE_LIMIT_RESET_EPOCH_OPEN};
+use crate::core::gh_session_shim::{
+    RATE_LIMIT_REFUSAL_MARKER, RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER,
+};
 
 /// Consecutive rate-limited polls that end the wait with an error.
 ///
@@ -27,7 +29,7 @@ pub const MAX_CONSECUTIVE_RATE_LIMITED: u32 = 5;
 /// Upper bound, in seconds, on the backoff when the reset time is unknown.
 const UNKNOWN_RESET_BACKOFF_CAP_SECS: u64 = 300;
 
-/// A probe error the shim marked as a primary GraphQL rate-limit refusal.
+/// A probe error the shim marked as a GraphQL rate-limit refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimited {
     /// Unix seconds at which the limit resets, when the shim could read it.
@@ -40,12 +42,21 @@ pub struct RateLimited {
 /// a REST `HTTP 403` quota, stays a generic probe error.
 /// What: finds [`RATE_LIMIT_REFUSAL_MARKER`] in the full error chain, then
 /// reads the digits between [`RATE_LIMIT_RESET_EPOCH_OPEN`] and `)` after it.
-/// No marker gives `None`; a marker with no readable epoch gives
-/// `reset_epoch: None`.
-/// Test: `classify_reads_the_shim_refusal_and_its_reset_epoch`.
+/// A marker with no readable epoch gives `reset_epoch: None`. The shim's
+/// short-window line ([`RATE_LIMIT_SHORT_WINDOW_MARKER`]) also gives
+/// `reset_epoch: None`, so [`backoff_secs`] backs off exponentially instead
+/// of sleeping to the hourly reset. No marker gives `None`.
+/// Test: `classify_reads_the_shim_refusal_and_its_reset_epoch`,
+/// `classify_reads_the_short_window_line_as_a_backoff_with_no_reset`.
 pub fn classify(err: &anyhow::Error) -> Option<RateLimited> {
     let text = format!("{err:#}");
-    let tail = &text[text.find(RATE_LIMIT_REFUSAL_MARKER)?..];
+    let Some(at) = text.find(RATE_LIMIT_REFUSAL_MARKER) else {
+        // #11233: quota left — a short-window limit, never a sleep to the reset.
+        return text
+            .contains(RATE_LIMIT_SHORT_WINDOW_MARKER)
+            .then_some(RateLimited { reset_epoch: None });
+    };
+    let tail = &text[at..];
     let reset_epoch = tail
         .find(RATE_LIMIT_RESET_EPOCH_OPEN)
         .map(|at| &tail[at + RATE_LIMIT_RESET_EPOCH_OPEN.len()..])
@@ -110,6 +121,27 @@ pub fn backoff_secs(hit: RateLimited, now: u64, interval_s: u64, consecutive: u3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #11233: the shim's quota-left line is a short backoff with no reset,
+    /// for both classifiers, even though it carries gh's own limit text.
+    #[test]
+    fn classify_reads_the_short_window_line_as_a_backoff_with_no_reset() {
+        let line = format!(
+            "`gh project item-list 45` failed (exit status: 1): \
+             {RATE_LIMIT_SHORT_WINDOW_MARKER} (gh account 'bot' on github.com); the hourly \
+             GraphQL quota still has 4186 points left, so this is not the primary limit. tm \
+             did not retry it. gh said: GraphQL: API rate limit already exceeded for user ID 1."
+        );
+        let err = anyhow::anyhow!(line);
+        let short = Some(RateLimited { reset_epoch: None });
+        assert_eq!(classify(&err), short);
+        assert_eq!(classify_any(&err), short);
+        assert_eq!(
+            backoff_secs(RateLimited { reset_epoch: None }, 1_000, 20, 1),
+            20
+        );
+        assert!(!RATE_LIMIT_SHORT_WINDOW_MARKER.contains(RATE_LIMIT_REFUSAL_MARKER));
+    }
 
     #[test]
     fn classify_any_reads_real_gh_rate_limit_stderr() {

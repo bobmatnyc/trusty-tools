@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use super::{
     GH_SHIM_ENV, LaunchSeams, PinnedCredential, RATE_LIMIT_REFUSAL_MARKER,
-    RATE_LIMIT_RESET_EPOCH_OPEN, REAP_FN, find_real_gh, launch_pinned_login, prefixed_path,
-    shim_dir, shim_root, shim_script, write_gh_shim,
+    RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER, REAP_FN, find_real_gh,
+    launch_pinned_login, prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_dir::AccountDirSources;
@@ -926,7 +926,10 @@ fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
 fn a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary() {
     let calls = tempfile::NamedTempFile::new().expect("call log");
     let log = calls.path().display();
-    let lookup = format!("echo lookup >> '{log}'; {}", rate_limit_answer(4186, 1_767_225_600));
+    let lookup = format!(
+        "echo lookup >> '{log}'; {}",
+        rate_limit_answer(4186, 1_767_225_600)
+    );
     let call = format!("echo call >> '{log}'; {GRAPHQL_REFUSAL}");
     let (_tmp, dir) = rate_limit_shim(&lookup, &call);
     let out = run_shim_args(&dir, &["project", "item-list", "45"]);
@@ -934,13 +937,41 @@ fn a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary() {
     assert!(out.stdout.is_empty(), "partial stdout leaked: {out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
-    assert!(!stderr.contains("primary"), "claimed the primary limit: {stderr}");
+    assert!(
+        !stderr.contains("primary GraphQL rate limit"),
+        "claimed the primary limit: {stderr}"
+    );
     assert!(!stderr.contains(RATE_LIMIT_RESET_EPOCH_OPEN), "{stderr}");
-    for part in ["short-window or secondary GraphQL rate limit", "4186", GH_LIMIT_LINE] {
+    for part in [
+        "short-window or secondary GraphQL rate limit",
+        "4186",
+        GH_LIMIT_LINE,
+    ] {
         assert!(stderr.contains(part), "{part} missing: {stderr}");
     }
+    assert!(
+        stderr.starts_with(RATE_LIMIT_SHORT_WINDOW_MARKER),
+        "{stderr}"
+    );
     let ran = std::fs::read_to_string(calls.path()).expect("call log");
     assert_eq!(ran, "call\nlookup\n", "one call, one REST lookup");
+}
+
+/// 🔴 #11233: the shim's own two lines, as the classifiers read them: quota
+/// left is a backoff with no reset, `remaining: 0` sleeps to the real reset.
+#[cfg(unix)]
+#[test]
+fn the_shim_refusal_lines_classify_as_short_backoff_or_sleep_to_reset() {
+    use crate::core::gh_rate_limit::{RateLimited, classify, classify_any};
+    for (remaining, want) in [(4186, None), (0, Some(1_767_225_600))] {
+        let lookup = rate_limit_answer(remaining, 1_767_225_600);
+        let (_tmp, dir) = rate_limit_shim(&lookup, GRAPHQL_REFUSAL);
+        let out = run_shim_args(&dir, &["pr", "view", "7"]);
+        let err = anyhow::anyhow!("{}", String::from_utf8_lossy(&out.stderr));
+        let hit = Some(RateLimited { reset_epoch: want });
+        assert_eq!(classify(&err), hit, "remaining {remaining}: {err}");
+        assert_eq!(classify_any(&err), hit, "remaining {remaining}: {err}");
+    }
 }
 
 /// 🔴 #10550: a call that is not a primary GraphQL refusal keeps its stdout,
