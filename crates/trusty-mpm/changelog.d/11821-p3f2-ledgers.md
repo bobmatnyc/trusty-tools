@@ -1,0 +1,2 @@
+Fixed
+- With a broken `install.toml`, tm's state ledgers refuse with an error naming the file instead of writing under `$HOME/.trusty-mpm`: the `.mcp.json` provenance ledger and `tm doctor`'s quarantine, the `tm pr` cleanup registry (`tm pr merge` refuses before merging), `tm project unadopt`, the `SubagentStop` spool, the prompt-feedback capture, the SessionStart savings sweep, `tm repair savings-ledger`, `tm supervisor` and `tm meta run` (#11821).

@@ -245,8 +245,10 @@ impl Preflight for FakePreflight {
     fn ownership(&self) -> CrateOwnership {
         self.ownership.clone()
     }
-    fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry {
-        trusty_mpm::core::pr_cleanup::CleanupRegistry::under_root(self.registry_dir.path())
+    fn cleanup_registry(&self) -> anyhow::Result<trusty_mpm::core::pr_cleanup::CleanupRegistry> {
+        Ok(trusty_mpm::core::pr_cleanup::CleanupRegistry::under_root(
+            self.registry_dir.path(),
+        ))
     }
 }
 
@@ -2141,7 +2143,10 @@ fn pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries() {
     assert!(edit.contains("--add-label trusty-mpm"), "{edit}");
     assert!(edit.contains("--add-label ws/tm-test-01"), "{edit}");
     // The PR is real, so it is registered for post-merge cleanup like any other.
-    assert_eq!(pre.cleanup_registry().entries()[0].pr, 7918);
+    assert_eq!(
+        pre.cleanup_registry().expect("registry").entries()[0].pr,
+        7918
+    );
 }
 
 /// REGRESSION (#7869): the same partial create whose retry ALSO fails exits
@@ -2418,7 +2423,7 @@ fn open_records_the_new_pr_for_cleanup() {
         "recording must not cost a gh call beyond the seed and the create"
     );
 
-    let entries = pre.cleanup_registry().entries();
+    let entries = pre.cleanup_registry().expect("registry").entries();
     assert_eq!(entries.len(), 1, "{entries:?}");
     assert_eq!(entries[0].pr, 7275);
     assert_eq!(entries[0].repo, "bobmatnyc/trusty-tools");
@@ -2438,7 +2443,10 @@ fn open_records_nothing_for_an_unparsable_url() {
     let pre = FakePreflight::ok();
     open::run(&gh, &args, &pre).expect("create succeeds");
     assert!(
-        pre.cleanup_registry().entries().is_empty(),
+        pre.cleanup_registry()
+            .expect("registry")
+            .entries()
+            .is_empty(),
         "an unparsable URL must not become a guessed registry entry"
     );
 }

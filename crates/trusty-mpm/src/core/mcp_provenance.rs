@@ -167,6 +167,19 @@ pub fn default_framework_root() -> PathBuf {
     crate::core::paths::FrameworkPaths::default().root
 }
 
+/// The ledger's framework root for a WRITER: [`default_framework_root`], or
+/// the error when `install.toml` is broken.
+///
+/// Why: #11821 — a writer must not record, forget or quarantine against the
+/// `$HOME` fallback; the readers keep [`default_framework_root`].
+/// What: `FrameworkPaths::try_default().root`.
+/// Test: `mcp_provenance_writers_fail_closed_on_a_broken_install_file`,
+/// `doctor_quarantine_mcp_refuses_on_a_broken_install_file`.
+pub fn try_default_framework_root()
+-> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    crate::core::paths::FrameworkPaths::try_default().map(|paths| paths.root)
+}
+
 /// Sidecar lock serialising load-modify-save of the ledger.
 ///
 /// Why: `atomic_write` publishes by `rename`, which discards any lock held on
@@ -210,12 +223,25 @@ pub fn load(framework_root: &Path) -> LedgerLoad {
 /// rather than being restated (and eventually varied) at each call site. The
 /// cost of a lost record is a later REFUSAL to repair, never a wrong deletion,
 /// which is what makes swallowing the error acceptable here.
-/// What: [`record_write`] against [`default_framework_root`]; a failure becomes
-/// a `warn!` naming the path and the consequence.
-/// Test: [`record_write`]'s tests cover the ledger behaviour; this wrapper is
-/// the root lookup and the log line.
+/// What: [`record_write`] against [`try_default_framework_root`]; a failure,
+/// including an unresolved config dir, becomes a `warn!` naming the path and
+/// the consequence.
+/// Test: [`record_write`]'s tests cover the ledger behaviour;
+/// `mcp_provenance_writers_fail_closed_on_a_broken_install_file` covers the root.
 pub fn record_write_best_effort(path: &Path, content: &str) {
-    if let Err(err) = record_write(&default_framework_root(), path, content) {
+    // #11821: no `$HOME` fallback; an unresolved config dir records nothing.
+    let root = match try_default_framework_root() {
+        Ok(root) => root,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                %err,
+                "the config dir is unresolved; no .mcp.json provenance was recorded"
+            );
+            return;
+        }
+    };
+    if let Err(err) = record_write(&root, path, content) {
         tracing::warn!(
             path = %path.display(),
             %err,

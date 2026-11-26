@@ -202,10 +202,13 @@ pub(crate) fn dispatch(id: &str) -> Option<RepairFn> {
         },
         "legacy_sources" => |c| c.with_home(refuse_legacy_sources),
         "stray_mcp_json" => |c| {
-            c.with_home(|h| {
-                let root = trusty_mpm::core::mcp_provenance::default_framework_root();
-                quarantine_strays(&root, c.project.as_deref(), h, c.mode)
-            })
+            // #11821: the sweep forgets ledger claims; no `$HOME` fallback.
+            match trusty_mpm::core::mcp_provenance::try_default_framework_root() {
+                Ok(root) => {
+                    c.with_home(|h| quarantine_strays(&root, c.project.as_deref(), h, c.mode))
+                }
+                Err(e) => RepairRun::NotEvaluated(format!("the config dir is unresolved: {e}")),
+            }
         },
         "launchd_secrets" => |c| {
             c.with_home(|h| {

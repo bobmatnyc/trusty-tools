@@ -90,7 +90,7 @@ pub(crate) trait Preflight {
     /// command's environment rather than resolved at the write site.
     /// Test: `open_records_the_new_pr_for_cleanup`,
     /// `open_creates_and_reports`.
-    fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry;
+    fn cleanup_registry(&self) -> anyhow::Result<trusty_mpm::core::pr_cleanup::CleanupRegistry>;
 }
 
 /// What the changelog-fragment gate said.
@@ -137,8 +137,9 @@ impl Preflight for RealPreflight {
             .or_else(crate::commands::tmux_attach::current_tmux_session_name)
     }
 
-    fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry {
-        trusty_mpm::core::pr_cleanup::CleanupRegistry::production()
+    fn cleanup_registry(&self) -> anyhow::Result<trusty_mpm::core::pr_cleanup::CleanupRegistry> {
+        // #11821: a broken install.toml records nothing; no `$HOME` fallback.
+        Ok(trusty_mpm::core::pr_cleanup::CleanupRegistry::production()?)
     }
 
     fn changelog_gate(&self, base: &str, head: &str) -> anyhow::Result<ChangelogVerdict> {
@@ -840,7 +841,7 @@ fn record_for_cleanup<P: Preflight>(pre: &P, url: &str, number: &str) {
         cleaned_at: None,
         scope: Default::default(),
     };
-    if let Err(e) = pre.cleanup_registry().record_open(entry) {
+    if let Err(e) = pre.cleanup_registry().and_then(|r| r.record_open(entry)) {
         eprintln!("tm pr open: could not record #{pr} for post-merge cleanup: {e:#}");
     }
 }
