@@ -141,7 +141,7 @@ Each skipped skill carries a one-line reason beside its kind.
 - RS-26. The review body names each loaded skill with a short hash, and each skipped skill with its name, label and reason. A `not applicable` skill is listed as "not applied", not as a fault. The notice sits just before the review footer. For a fork pull request it states that no repository skill text was used.
 - RS-27. A skill never makes the review fail. Every skill error is a skip, and the review completes with the skills that loaded.
 
-- RS-46. The `.trusty-review.toml` read at the base commit is capped at 64 KiB. A larger file is treated as absent: no skill loads and no record is written.
+- RS-46. The `.trusty-review.toml` read at the base commit is capped at 64 KiB. A larger file is one skip of kind `config_unreadable` (RS-45): no skill loads, and the cause is the reason.
 - RS-50. The review-body notice renders each name, reason and sha as one code span. Backticks and control or invisible characters are removed from the text, and each field is at most 160 characters. The notice is at most 8,000 characters. It is cut at a line boundary, and a final line reads "N more line(s) omitted; the review record lists them all".
 - RS-51. At most 32 `[[review.skills]]` entries are processed. The rest become one skip of kind `over_entry_cap`, labelled "over entry cap" and named `entries 33-N`, where N is the entry count.
 - RS-52. Each git read has a 10-second timeout. A timeout is a skipped read (RS-27), never a review failure.
