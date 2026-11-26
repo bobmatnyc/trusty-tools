@@ -142,6 +142,7 @@ architect dashboard footer	SAFE	$H	architect dashboard footer --root $H/dash	-	2
 architect dashboard ids	SAFE	$H	architect dashboard ids --root $H/dash P	-	0	-	
 architect up	SKIP	-	-	-	-	-	brings up the Architect session: tmux + claude, then attaches
 architect attach	SKIP	-	-	-	-	-	attaches to the Architect tmux session; TTY
+architect drift	SAFE	$H	architect drift --dir $H/no-architect	-	0	summary:	read-only (#11773): an empty dir reads every managed path absent; exit 1 only on an edited file
 architect restart	SKIP	-	-	-	-	-	restarts the Architect behind a checkpoint gate
 architect serve	SKIP	-	-	-	-	-	long-running poll loop (--once exits); polls tmux and may send Slack when configured (default-off); never run in the gate
 presence local	SKIP	-	-	-	-	-	Touch ID / login password prompt, owner present

@@ -81,6 +81,8 @@ mod tm_doctor_standalone;
 mod tm_register_url_id_10569;
 // #9822: `tm architect <verb>` against the Python goldens, fake tmux.
 mod tm_architect_verbs;
+// #11773: `tm architect drift` and `up --strict` exit codes.
+mod tm_architect_drift_11773;
 // #8436: `tm fleet init|status` through the binary.
 mod tm_fleet;
 mod tm_guided_default_explicit_url;

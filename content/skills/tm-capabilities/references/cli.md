@@ -23,6 +23,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `tally` — Print the open-item counts line, the only source for counts
     - `update` — Merge keys into an existing document
     - `validate` — Check every document against the schemas; exit 1 on an error
+  - `drift` — Report how each managed file differs from this binary's bundle (#11773)
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
