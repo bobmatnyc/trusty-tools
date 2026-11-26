@@ -3,14 +3,26 @@
 //! Why: one `tm wait` invocation must return before the harness ceiling, but
 //! the HARD timeout it enforces has to span every re-run — otherwise an agent
 //! re-issuing the command resets its own deadline and the wait never expires.
-//! The budget therefore lives in a small file keyed by the condition, not in
-//! process memory.
+//! The budget therefore lives in a small file, not in process memory.
+//!
+//! THE KEY (#10668): a budget belongs to the condition spec PLUS, for
+//! `--for check`, the PR head SHA the polls observe. A re-run on the same head
+//! keeps the budget; the first poll that sees a different head starts a fresh
+//! one. Keying by spec alone let a wait on an earlier head of the same PR hand
+//! its `started_at` to the wait on the next push, which reported
+//! `status=timeout` minutes into the new CI run. The head is not known until
+//! the first poll answers, so the file name stays spec-only and the head is a
+//! field of the record, checked by [`Budget::observe_head`].
 //! What: [`Budget`] is the record (`started_at` / `updated_at` / `polls` /
-//! `timeout_s`); [`path_for`] derives its file name from the condition spec;
-//! [`load_or_start`] resumes an existing budget, starts a fresh one, or
-//! ABANDONS a stale one; [`save`] and [`clear`] persist and remove it. Every
-//! function takes `now` so the tests never depend on the wall clock.
-//! Test: `budget_*` in the sibling `tests.rs`.
+//! `timeout_s` / `head`); [`path_for`] derives its file name from the condition
+//! spec; [`load_or_start`] resumes an existing budget, starts a fresh one, or
+//! ABANDONS a stale one; [`Budget::observe_head`] restarts it on a new head;
+//! [`save`] and [`clear`] persist and remove it. Every function takes `now` so
+//! the tests never depend on the wall clock.
+//! Test: `budget_*` in the sibling `tests.rs`; the head key in
+//! `rerun_elapsed_tracks_wall_time_across_a_push`,
+//! `rerun_on_a_new_head_starts_a_fresh_budget`,
+//! `rerun_on_the_same_head_keeps_its_budget`.
 
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
@@ -50,6 +62,12 @@ pub(crate) struct Budget {
     /// ends the wait on the fifth refusal; `default` reads an older state file.
     #[serde(default)]
     pub(crate) rate_limited_streak: u32,
+    /// The PR head SHA this budget was spent on; `None` until a poll reports
+    /// one, and always `None` for `run`/`file`.
+    ///
+    /// #10668: half of the budget key; see the module doc.
+    #[serde(default)]
+    pub(crate) head: Option<String>,
 }
 
 impl Budget {
@@ -66,6 +84,43 @@ impl Budget {
     /// Whether the hard timeout has been exhausted.
     pub(crate) fn expired(&self, now: u64) -> bool {
         self.remaining(now) == 0
+    }
+
+    /// Record the head SHA a successful poll observed, restarting the budget
+    /// when it differs from the head the budget was spent on.
+    ///
+    /// Why: #10668 — a new head is a new CI run, so the wait on it gets the
+    /// whole `--timeout`. A re-run on the same head must keep the budget, or the
+    /// deadline never expires.
+    /// What: `None` (the poll reported no head, or the verb has none) changes
+    /// nothing. The first head a budget sees is adopted without a restart, so
+    /// time already spent on this wait (errored polls included) still counts.
+    /// A head that differs from the recorded one restarts the budget at `at`
+    /// (the start of the poll that saw it): `started_at = updated_at = at`,
+    /// `polls = 1` for that poll, and the rate-limit streak cleared. Returns
+    /// whether it restarted.
+    /// Test: `rerun_on_a_new_head_starts_a_fresh_budget`,
+    /// `rerun_on_the_same_head_keeps_its_budget`,
+    /// `rerun_elapsed_tracks_wall_time_across_a_push`.
+    pub(crate) fn observe_head(&mut self, head: Option<&str>, at: u64) -> bool {
+        let Some(head) = head else {
+            return false;
+        };
+        match self.head.as_deref() {
+            Some(recorded) if recorded == head => false,
+            None => {
+                self.head = Some(head.to_string());
+                false
+            }
+            Some(_) => {
+                self.head = Some(head.to_string());
+                self.started_at = at;
+                self.updated_at = at;
+                self.polls = 1;
+                self.rate_limited_streak = 0;
+                true
+            }
+        }
     }
 }
 
@@ -117,8 +172,12 @@ pub(crate) fn path_for(dir: &Path, spec: &str) -> PathBuf {
 /// wait would make today's first invocation report an instant timeout.
 /// What: reads `path`; returns the stored budget when its spec and timeout
 /// match and it was updated within `abandon_after` seconds, else a fresh one.
-/// An unreadable or corrupt file is treated as absent, never as an error — the
-/// budget is an optimisation for the deadline, not a source of truth to fail on.
+/// The stored `head` comes back with it; this function cannot know the head
+/// yet, so the head half of the key is checked after the first poll by
+/// [`Budget::observe_head`] (#10668).
+/// An unreadable or corrupt file is treated as absent, never as an error: the
+/// wait starts a fresh budget, so it still ends at `timeout_s` from now — never
+/// a pass (only an `Ok` poll is `met`) and never an endless wait.
 /// Test: `budget_resumes_across_invocations`, `budget_restarts_on_timeout_change`,
 /// `budget_abandons_a_stale_record`, `budget_ignores_corrupt_file`.
 pub(crate) fn load_or_start(
@@ -135,6 +194,7 @@ pub(crate) fn load_or_start(
         polls: 0,
         timeout_s,
         rate_limited_streak: 0,
+        head: None,
     };
 
     let Ok(raw) = std::fs::read_to_string(path) else {
