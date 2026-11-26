@@ -373,6 +373,68 @@ fn standalone_launch_sends_the_create() {
     .expect("prep succeeds");
 
     assert_one_create(&daemon.creates(), project.path());
+    assert_no_pin_written(project.path());
+}
+
+/// Assert the launch wrote no `<project>/.trusty-tools/trusty-memory.yaml` pin.
+pub(crate) fn assert_no_pin_written(project: &Path) {
+    let pin = project.join(".trusty-tools/trusty-memory.yaml");
+    assert!(!pin.exists(), "the launch must not write a pin: {pin:?}");
+}
+
+/// Why (#11823): a tm started inside a session inherits `TRUSTY_MEMORY_PALACE`;
+/// when it equals the project palace the create must still be sent.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn a_session_palace_equal_to_the_project_palace_still_sends_the_create() {
+    let daemon = StubDaemon::start(Reply::Created);
+    let _socket = EnvVarGuard::set(TRUSTY_MEMORY_SOCKET_ENV, daemon.socket());
+    let _palace = EnvVarGuard::set("TRUSTY_MEMORY_PALACE", PALACE);
+    let project = widget();
+
+    let out = ensure_launch_palace(project.path());
+
+    assert_eq!(
+        out,
+        LaunchPalace::Created {
+            palace: PALACE.into()
+        }
+    );
+    assert_one_create(&daemon.creates(), project.path());
+}
+
+/// Why (#11823): a differing `TRUSTY_MEMORY_PALACE` is a name mismatch; it
+/// warns naming both palaces and the reason, sends nothing, and never skips
+/// silently.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn a_differing_session_palace_warns_naming_both_and_sends_nothing() {
+    let daemon = StubDaemon::start(Reply::Created);
+    let _socket = EnvVarGuard::set(TRUSTY_MEMORY_SOCKET_ENV, daemon.socket());
+    let _palace = EnvVarGuard::set("TRUSTY_MEMORY_PALACE", "other-palace");
+    let project = widget();
+
+    let out = ensure_launch_palace(project.path());
+
+    assert_eq!(
+        out,
+        LaunchPalace::OverrideMismatch {
+            palace: PALACE.into(),
+            session: "other-palace".into(),
+        }
+    );
+    let warning = out.warning().expect("a mismatch warns");
+    assert!(warning.contains(PALACE), "{warning}");
+    assert!(warning.contains("other-palace"), "{warning}");
+    assert!(warning.contains("TRUSTY_MEMORY_PALACE"), "{warning}");
+    let cwd = project.path().to_str().expect("utf-8");
+    assert!(
+        daemon.creates().iter().all(|c| c["cwd"] != cwd),
+        "no create may be sent: {:?}",
+        daemon.creates()
+    );
 }
 
 /// Why: a daemon spawn runs both launch paths; the second ask for the same

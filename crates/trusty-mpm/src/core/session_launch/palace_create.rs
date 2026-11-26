@@ -8,7 +8,8 @@
 //! What: [`ensure_launch_palace`] names the palace with the env-free resolver
 //! (the name the daemon checks against `cwd`), probes the daemon, sends
 //! `palace_create` with `{name, cwd}` and never `force`, and logs one line per
-//! outcome. It never fails the launch.
+//! outcome. A `TRUSTY_MEMORY_PALACE` naming another palace is a warning naming
+//! both. It never fails the launch.
 //! Test: `palace_create_tests.rs`.
 
 use std::collections::HashMap;
@@ -71,6 +72,8 @@ pub(crate) enum LaunchPalace {
     },
     /// The daemon answered with a reply this client does not read.
     BadReply { palace: String, reply: String },
+    /// `TRUSTY_MEMORY_PALACE` names another palace; nothing was sent.
+    OverrideMismatch { palace: String, session: String },
 }
 
 impl LaunchPalace {
@@ -79,7 +82,8 @@ impl LaunchPalace {
     /// What: names the palace (or the pin path) and the reason; unreachable
     /// and refused read differently. `None` for success and skips.
     /// Test: `a_refusal_warns_naming_the_palace_and_the_reason`,
-    /// `an_unreachable_daemon_warns_and_returns_within_the_budget`.
+    /// `an_unreachable_daemon_warns_and_returns_within_the_budget`,
+    /// `a_differing_session_palace_warns_naming_both_and_sends_nothing`.
     pub(crate) fn warning(&self) -> Option<String> {
         match self {
             Self::Skipped(_) | Self::Created { .. } | Self::Exists { .. } => None,
@@ -107,6 +111,11 @@ impl LaunchPalace {
             Self::BadReply { palace, reply } => Some(format!(
                 "palace `{palace}`: trusty-memory answered palace_create with an \
                  unrecognised reply: {reply}"
+            )),
+            Self::OverrideMismatch { palace, session } => Some(format!(
+                "palace `{palace}` not created: TRUSTY_MEMORY_PALACE names `{session}`, \
+                 not the project palace, so the session uses `{session}`; unset it \
+                 or set it to `{palace}`"
             )),
         }
     }
@@ -162,15 +171,18 @@ pub(crate) fn launch_palace_steps(
 /// Why: see the module docs. The alias step before it handles the older
 /// `owner-repo` → bare-repo case; the daemon's create handles the folder-name
 /// case.
-/// What: skips (debug) when `TRUSTY_MEMORY_PALACE` is set — the operator chose
-/// the session palace, and the daemon would refuse it as a name mismatch — or
-/// when `project_dir` is no project. A pin that cannot be trusted is
-/// [`LaunchPalace::PinBlocked`] with no daemon call. Under a test harness it
+/// What: skips (debug) when `project_dir` is no project. A pin that cannot be
+/// trusted is [`LaunchPalace::PinBlocked`] with no daemon call. A
+/// `TRUSTY_MEMORY_PALACE` equal to the resolved name sends the create as usual;
+/// one naming another palace is [`LaunchPalace::OverrideMismatch`], a warning
+/// with no daemon call. Under a test harness it
 /// runs only against an explicit `TRUSTY_MEMORY_SOCKET`. The same project is
 /// asked at most once per [`REPEAT_WINDOW`]. Never errors; logs its outcome.
 /// Test: `standalone_launch_sends_the_create`,
 /// `ensure_managed_config_dir_sends_the_palace_create` (managed_config_tests),
-/// `a_malformed_pin_blocks_the_create_and_sends_nothing`.
+/// `a_malformed_pin_blocks_the_create_and_sends_nothing`,
+/// `a_session_palace_equal_to_the_project_palace_still_sends_the_create`,
+/// `a_differing_session_palace_warns_naming_both_and_sends_nothing`.
 pub(crate) fn ensure_launch_palace(project_dir: &Path) -> LaunchPalace {
     let outcome = launch_palace_outcome(project_dir);
     outcome.log();
@@ -178,9 +190,6 @@ pub(crate) fn ensure_launch_palace(project_dir: &Path) -> LaunchPalace {
 }
 
 fn launch_palace_outcome(project_dir: &Path) -> LaunchPalace {
-    if trusty_common::palace_override_from_env().is_some() {
-        return LaunchPalace::Skipped("TRUSTY_MEMORY_PALACE names the session palace");
-    }
     let palace = match resolve_palace_for_project(project_dir) {
         Ok(resolution) => resolution.id,
         Err(
@@ -202,6 +211,16 @@ fn launch_palace_outcome(project_dir: &Path) -> LaunchPalace {
     }
     if !first_ask_in_window(project_dir, &palace, Instant::now()) {
         return LaunchPalace::Skipped("already asked for this project in this launch");
+    }
+    // #11823: an inherited TRUSTY_MEMORY_PALACE never silences the create; a
+    // differing one warns naming both palaces, after the window so it warns once.
+    if let Some(session) = trusty_common::palace_override_from_env()
+        && session.trim() != palace
+    {
+        return LaunchPalace::OverrideMismatch {
+            palace,
+            session: session.trim().to_string(),
+        };
     }
     match resolve_memory_dial_socket() {
         Ok(socket) => create_launch_palace_at(&socket, project_dir, &palace, CREATE_BUDGET),

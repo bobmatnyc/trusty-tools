@@ -933,7 +933,7 @@ fn ensure_managed_config_dir_heals_a_bare_repo_palace_alias() {
 #[serial_test::serial]
 fn ensure_managed_config_dir_sends_the_palace_create() {
     use crate::core::session_launch::palace_create::tests::{
-        REMOTE, Reply, StubDaemon, assert_one_create, git_project,
+        REMOTE, Reply, StubDaemon, assert_no_pin_written, assert_one_create, git_project,
     };
     let daemon = StubDaemon::start(Reply::Created);
     let tmp = TempDir::new().unwrap();
@@ -952,6 +952,7 @@ fn ensure_managed_config_dir_sends_the_palace_create() {
     ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
 
     assert_one_create(&daemon.creates(), &workspace);
+    assert_no_pin_written(&workspace);
 }
 
 /// #9540: resume and in-place relaunch reach this choke point, so a deleted

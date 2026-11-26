@@ -1065,6 +1065,7 @@ pub(super) fn prepare_session_inner(
     // and side-effect-only; never fails the launch.
     if plan.inject_trusty_memory {
         // #8311: an injected registry is the only one written.
+        // #11823: `true` sends the missing-palace create after the alias step.
         palace_create::launch_palace_steps(project_dir, repo_url, host.palace_registry, true);
     }
 
