@@ -30,9 +30,9 @@ pub const ANSWER_KINDS: [&str; 3] = ["answered", "cancelled", "architect_do"];
 pub const ANSWER_KEY: &str = "||owner_answer|";
 /// Dedup's key prefix for `owner_wont_do` alerts (#11826).
 pub const WONT_DO_KEY: &str = "||owner_wont_do|";
-/// The `refs` entry of an item the ILIO trial Architect owns (ar-T2f).
+/// The `refs` entry of an item the ILIO trial Architect owns.
 pub const ILIO_REF: &str = "arch:ilio";
-/// The `DASHBOARD_ACTOR` of the ILIO trial session (ar-T2f).
+/// The `DASHBOARD_ACTOR` of the ILIO trial session.
 pub const ILIO_ACTOR: &str = "architect-ilio";
 
 /// Where the answers live: `DASHBOARD_ROOT`, else `<root>/local/owner-queue`,
@@ -142,7 +142,7 @@ pub fn owner_answer_alerts(store: &AnswerStore, now: f64, ever_read: bool) -> An
     let ilio = ilio_ids(snap.get("items").map_or(&[][..], Vec::as_slice));
     let pend = pending(&snap, now);
     // #11826: owner_answers.pending drops the ILIO trial's items for the
-    // live Architect and keeps only them for the trial (ar-T2f).
+    // live Architect and keeps only them for the trial.
     let events: Vec<_> = pend
         .events()
         .iter()
@@ -195,7 +195,7 @@ pub fn owner_answer_alerts(store: &AnswerStore, now: f64, ever_read: bool) -> An
 mod tests {
     use super::*;
 
-    /// ar-T2f: the ILIO trial (`DASHBOARD_ACTOR=architect-ilio`) keeps only
+    /// The ILIO trial (`DASHBOARD_ACTOR=architect-ilio`) keeps only
     /// its own items; the live Architect drops them.
     #[test]
     fn ilio_trial_keeps_only_the_ilio_items() -> Result<(), Box<dyn std::error::Error>> {

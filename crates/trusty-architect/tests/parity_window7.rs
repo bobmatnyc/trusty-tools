@@ -286,7 +286,7 @@ fn window7_owner_answer_rows_match_the_poller_on_its_store() -> TestResult {
 
 /// An answered item of the ILIO trial (`refs` holds `arch:ilio`) is the
 /// trial's to relay; the live Architect's poller raises nothing for it
-/// (`owner_answers.pending`, ar-T2f). Red before the fix.
+/// (`owner_answers.pending`). Red before the fix.
 #[test]
 fn window7_ilio_items_raise_no_owner_alert_for_the_live_architect() -> TestResult {
     let env = Env::new(&[])?;
