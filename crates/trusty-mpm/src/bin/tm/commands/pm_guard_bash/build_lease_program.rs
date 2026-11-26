@@ -15,9 +15,20 @@
 use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment};
 
 /// Shell words that may precede a command without being it.
+///
+/// #11886: `coproc` runs its simple command as a background process.
 pub(super) const LEADING_KEYWORDS: &[&str] = &[
-    "!", "{", "(", "if", "then", "else", "elif", "do", "while", "until",
+    "!", "{", "(", "if", "then", "else", "elif", "do", "while", "until", "coproc",
 ];
+
+/// Programs outside [`COMMAND_WRAPPERS`] that run the argv after their own
+/// options and operands (#11886): `watch` and GNU `parallel` run it through a
+/// shell, BSD `script FILE` runs it on a pty.
+pub(super) const RUNNERS: &[&str] = &["watch", "parallel", "script"];
+
+/// Wrappers that read one operand before the program (#11886): `flock FILE`,
+/// `taskset MASK`, `chrt PRIORITY`, `script FILE`.
+const OPERAND_WRAPPERS: &[&str] = &["flock", "taskset", "chrt", "script"];
 
 /// Cargo global options that take a value before the subcommand.
 const CARGO_VALUE_FLAGS: &[&str] = &["-C", "-Z", "--config", "--color"];
@@ -61,6 +72,38 @@ fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
         "time" => &["-f", "--format", "-o", "--output"],
         "exec" => &["-a"],
         "caffeinate" => &["-t", "-w"],
+        // #11886: the runners' value options.
+        "flock" => &["-w", "--wait", "--timeout", "-E", "--conflict-exit-code"],
+        "watch" => &["-n", "--interval"],
+        "parallel" => &[
+            "-j",
+            "--jobs",
+            "-S",
+            "--sshlogin",
+            "--joblog",
+            "--results",
+            "-a",
+            "--arg-file",
+            "--delay",
+            "--timeout",
+            "-N",
+            "-n",
+            "-L",
+            "--colsep",
+            "-d",
+            "--delimiter",
+            "-I",
+        ],
+        "script" => &[
+            "-t",
+            "-T",
+            "-c",
+            "--command",
+            "-E",
+            "--echo",
+            "-O",
+            "--log-out",
+        ],
         _ => &[],
     }
 }
@@ -122,6 +165,8 @@ pub(super) fn heavy_program_offset(seg: &str, heavy: &[(String, Option<String>)]
     let mut idx = 0;
     let mut wrapper: Option<String> = None;
     let mut outside: Option<usize> = None;
+    // #11886: the one operand an [`OPERAND_WRAPPERS`] word still has to read.
+    let mut operand_due = false;
     while let Some(word) = words.get(idx) {
         let text = word.text.as_str();
         let bare = text.trim_start_matches('(');
@@ -140,12 +185,13 @@ pub(super) fn heavy_program_offset(seg: &str, heavy: &[(String, Option<String>)]
             continue;
         }
         let base = bare.rsplit('/').next().unwrap_or(bare);
-        if is_env_assignment(bare) || COMMAND_WRAPPERS.contains(&base) {
+        if is_env_assignment(bare) || is_wrapper(base) {
             if (base == "sudo" || base == "doas") && outside.is_none() {
                 outside = Some(word.start + lead);
             }
-            if COMMAND_WRAPPERS.contains(&base) {
+            if is_wrapper(base) {
                 wrapper = Some(base.to_string());
+                operand_due = OPERAND_WRAPPERS.contains(&base);
             }
             idx += 1;
             continue;
@@ -166,7 +212,12 @@ pub(super) fn heavy_program_offset(seg: &str, heavy: &[(String, Option<String>)]
                 idx += 2;
                 continue;
             }
-            if bare.starts_with('-') || bare.parse::<f64>().is_ok() || is_duration(bare) {
+            if bare.starts_with('-') {
+                idx += 1;
+                continue;
+            }
+            if operand_due || bare.parse::<f64>().is_ok() || is_duration(bare) {
+                operand_due = false;
                 idx += 1;
                 continue;
             }
@@ -183,6 +234,11 @@ pub(super) fn heavy_program_offset(seg: &str, heavy: &[(String, Option<String>)]
         .any(|(p, s)| p == program && s.as_deref().is_none_or(|s| Some(s) == sub.as_deref()));
     (is_heavy && !invokes_no_compiler(program, sub.as_deref(), &words[idx + 1..]))
         .then_some(outside.unwrap_or(word.start + lead))
+}
+
+/// Whether `base` is a word that runs the argv after it (#11886: or a runner).
+pub(super) fn is_wrapper(base: &str) -> bool {
+    COMMAND_WRAPPERS.contains(&base) || RUNNERS.contains(&base)
 }
 
 /// The commands a `find … -exec …` segment runs, re-joined, one per action.
@@ -248,7 +304,7 @@ fn is_case_label(word: &str) -> bool {
 }
 
 /// The subcommand after a program word, skipping `+toolchain` and global options.
-fn subcommand(rest: &[Word]) -> Option<String> {
+pub(super) fn subcommand(rest: &[Word]) -> Option<String> {
     let mut iter = rest.iter();
     while let Some(word) = iter.next() {
         let text = word.text.as_str();
