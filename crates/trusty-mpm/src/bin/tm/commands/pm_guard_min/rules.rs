@@ -3,8 +3,8 @@
 //!
 //! Why: each rule decides on a structured fact — a canonical path or a
 //! parsed argv — never on words in the command text (brief §2).
-//! What: [`evaluate`] turns one `PreToolUse` payload into facts and returns
-//! the first [`Hit`] of the rules the profile runs, plus the unparsed count.
+//! What: one `PreToolUse` payload becomes facts, judged by rule 1
+//! ([`r1_decide`]) and then by the observe-only rules ([`observed`]).
 //! Rules 2 and 3 live in [`super::rules_git`].
 //! Test: `rules_tests.rs`, the replay in `replay_tests.rs`.
 
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::facts::{Cmd, parse_bash};
+use super::facts::{Cmd, Facts, parse_bash};
 use super::paths::{canon, is_trust_anchor, resolve};
 use super::rules_git::{r2_destructive, r3_cross_repo};
 
@@ -44,12 +44,45 @@ pub(crate) struct Hit {
 /// Bash → rule 1 on every write target, then (PM profile) rule 2 on every
 /// command, rules 3 and 5 on parsed commands only. Other tools → nothing.
 /// Test: `r1_flags_writes_to_each_anchor`, `r5_flags_delete_verbs_unless_allowed`.
+#[cfg(test)]
 pub(crate) fn evaluate(tool: &str, input: &Value, env: &GuardEnv) -> (Option<Hit>, usize) {
+    let (r1, facts) = match r1_decide(tool, input, env) {
+        Ok(decided) => decided,
+        Err(error) => {
+            let fact = json!({ "error": error });
+            return (Some(Hit { rule: "R1", fact }), 0);
+        }
+    };
+    let unparsed = facts.as_ref().map_or(0, |f| f.unparsed);
+    let hit = r1.or_else(|| facts.as_ref().and_then(|f| observed(f, env)));
+    (hit, unparsed)
+}
+
+/// Rule 1 alone, and the parsed Bash facts the observe-only rules reuse.
+///
+/// Why (#10690, owner ruling D0u): rule 1 enforces in every mode while
+/// rules 2, 3 and 5 only record, so the caller must be able to tell a
+/// rule-1 decision that completed from one that did not.
+/// What: the rule-1 [`Hit`] for an edit tool's target or any Bash write
+/// target, plus the Bash [`Facts`] (`None` for other tools). `Err` names
+/// why rule 1 could not judge: `no_target` (an edit tool with no string
+/// path), `bash_unjudged` (the parse dropped part of the command).
+/// Test: `r1_flags_writes_to_each_anchor`, `an_unreadable_project_settings_file_is_an_r1_hit`,
+/// `a_dropped_bash_parse_refuses`, `an_edit_with_no_target_refuses`.
+pub(crate) fn r1_decide(
+    tool: &str,
+    input: &Value,
+    env: &GuardEnv,
+) -> Result<(Option<Hit>, Option<Facts>), &'static str> {
     match tool {
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => (r1_tool_write(input, env), 0),
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => Ok((r1_tool_write(input, env)?, None)),
         "Bash" => {
             let command = input["command"].as_str().unwrap_or("");
             let facts = parse_bash(command, &env.cwd, &env.home);
+            // #10690: commands the parse never walked may write an anchor.
+            if facts.dropped {
+                return Err("bash_unjudged");
+            }
             let r1 = facts
                 .redirects
                 .iter()
@@ -60,40 +93,52 @@ pub(crate) fn evaluate(tool: &str, input: &Value, env: &GuardEnv) -> (Option<Hit
                         .map(move |t| (t, &c.cwd, Some(c)))
                 }))
                 .find_map(|(t, cwd, cmd)| r1_path(&resolve(cwd, t), env, false, cmd));
-            let hit = r1.or_else(|| {
-                if env.architect {
-                    return None;
-                }
-                facts.cmds.iter().find_map(|c| {
-                    r2_destructive(c, env).or_else(|| {
-                        (!c.unparsed)
-                            .then(|| r3_cross_repo(c, env).or_else(|| r5_delete(c, env)))
-                            .flatten()
-                    })
-                })
-            });
-            (hit, facts.unparsed)
+            Ok((r1, Some(facts)))
         }
-        _ => (None, 0),
+        _ => Ok((None, None)),
     }
 }
 
-fn r1_tool_write(input: &Value, env: &GuardEnv) -> Option<Hit> {
+/// The first observe-only hit (rules 2, 3, 5) in parsed Bash facts.
+///
+/// What: none for the Architect (rule 1 only); rule 2 on every command,
+/// rules 3 and 5 on parsed commands only.
+/// Test: `r5_flags_delete_verbs_unless_allowed`.
+pub(crate) fn observed(facts: &Facts, env: &GuardEnv) -> Option<Hit> {
+    if env.architect {
+        return None;
+    }
+    facts.cmds.iter().find_map(|c| {
+        r2_destructive(c, env).or_else(|| {
+            (!c.unparsed)
+                .then(|| r3_cross_repo(c, env).or_else(|| r5_delete(c, env)))
+                .flatten()
+        })
+    })
+}
+
+fn r1_tool_write(input: &Value, env: &GuardEnv) -> Result<Option<Hit>, &'static str> {
+    // #10690: an edit with no target path cannot be judged; refuse it.
     let path = input["file_path"]
         .as_str()
-        .or_else(|| input["notebook_path"].as_str())?;
+        .or_else(|| input["notebook_path"].as_str())
+        .ok_or("no_target")?;
     let real = canon(&resolve(&env.cwd, path));
     // Decide on the canonical path first; only a project-tier settings file is read.
     if is_trust_anchor(&real, &env.home, true) {
-        return r1_path(&real, env, true, None);
+        return Ok(r1_path(&real, env, true, None));
     }
     if !is_trust_anchor(&real, &env.home, false) {
-        return None;
+        return Ok(None);
     }
     // A project-tier settings write is a rule-1 fact only when it touches a guard entry.
-    let existing = std::fs::read_to_string(&real).unwrap_or_default();
-    let touches = input.to_string().contains("--pm-guard") || existing.contains("--pm-guard");
-    r1_path(&real, env, !touches, None)
+    // #10690: a file that exists but cannot be read may hold a guard entry; refuse.
+    let existing = match std::fs::read_to_string(&real) {
+        Ok(text) => text.contains("--pm-guard"),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+    let touches = input.to_string().contains("--pm-guard") || existing;
+    Ok(r1_path(&real, env, !touches, None))
 }
 
 fn r1_path(path: &Path, env: &GuardEnv, no_guard_entry: bool, cmd: Option<&Cmd>) -> Option<Hit> {
