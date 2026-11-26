@@ -52,6 +52,13 @@ def drift_dir():
 REMEMBER_TYPES = {"Ruling", "Decision", "Status", "Turn", "Reference"}
 # #11902: the daemon's secret-gate refusal text (memory_remember); `force` does not bypass it.
 SECRET_GATE = "likely secret/credential token"
+# #11902: the only (source palace, drawer id) pairs the seed re-sends with `allow_secret_like`, each with
+# the reason it is not a credential. Any other secret-gate refusal fails the seed (exit 3).
+SECRET_SEED_ALLOWLIST = {
+    ("cto", "d40c3b60-4df8-4395-af33-9b595829c977"): "base64_blob flagged a Markdown doc path",
+    ("cto", "7d63e0b8-4ade-414c-9bd5-b8ac96685e6e"): "base64_blob flagged a CLAUDE_CONFIG_DIR= path assignment",
+    ("cto", "646dbdb5-96ba-4566-9e71-10412b3a0891"): "base64_blob flagged a Java source path",
+}
 
 
 def load_golden(paths):
@@ -116,9 +123,11 @@ def seed_test_palace(m, guard, source, existing):
     to seed raises RunAborted naming every such drawer, so a partial seed is
     never scored. #11902: the seed is a verbatim copy of drawers the live
     palace already holds, so a drawer the secret gate refuses is re-sent once
-    with `allow_secret_like` and listed in info["seed_secret_like"]; every
-    other drawer keeps the gate. Test: `test_partial_seed_aborts_and_names_drawers`,
-    `test_secret_like_drawer_seeds_verbatim_and_is_listed`."""
+    with `allow_secret_like` only when (source, drawer id) is in
+    SECRET_SEED_ALLOWLIST, and listed in info["seed_secret_like"]; any other
+    refusal fails the seed. Test: `test_partial_seed_aborts_and_names_drawers`,
+    `test_secret_like_drawer_seeds_verbatim_and_is_listed`,
+    `test_secret_like_drawer_off_allowlist_aborts`."""
     pal, t0 = guard.new_name(), time.perf_counter()
     guard.claim(pal, existing)
     _, _, err = m.call("palace_create", {"name": pal, "force": True,
@@ -135,8 +144,12 @@ def seed_test_palace(m, guard, source, existing):
             a["type"] = d["drawer_type"]
         resp, _, err = m.call("memory_remember", a)
         if err and SECRET_GATE in str(err):
+            # #11902: the opt-in is limited to the allowlisted pairs; any other refusal fails the seed.
+            if (source, d["drawer_id"]) not in SECRET_SEED_ALLOWLIST:
+                failed.append(f"{d['drawer_id']} (secret gate, not in SECRET_SEED_ALLOWLIST: {err})")
+                continue
             resp, _, err = m.call("memory_remember", dict(a, allow_secret_like=True))
-            if not err:
+            if not err and resp and resp.get("drawer_id"):  # #11902: record only a retry that seeded
                 secret_like.append(d["drawer_id"])
         if err or not resp or not resp.get("drawer_id"):
             failed.append(f"{d['drawer_id']} ({err or 'no drawer_id'})")

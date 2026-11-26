@@ -125,6 +125,8 @@ def live_daemon(**kw):
     return FakeDaemon({"cto": cto, "supervisor": sup}, rulings=["supervisor", "cto"], **kw)
 
 
+# #11902: one of the cto drawer ids in SECRET_SEED_ALLOWLIST.
+ALLOWED_ID = "d40c3b60-4df8-4395-af33-9b595829c977"
 GOLDEN = {"search": [], "memory": [{"id": "q1", "palace": "cto", "query": "q", "expected": ["cto-0001"]}]}
 
 
@@ -199,14 +201,25 @@ class Run(unittest.TestCase):
         self.assertFalse([p for p in d.palaces if p.startswith(TEST_PREFIX)], "test palace not deleted")
 
     def test_secret_like_drawer_seeds_verbatim_and_is_listed(self):
-        # #11902: a path the base64_blob rule flags must seed, and only that drawer gets the opt-in.
-        d = live_daemon(secret_texts={"cto drawer 2"})
+        # #11902: an allowlisted drawer the base64_blob rule flags must seed, and only it gets the opt-in.
+        d = live_daemon(secret_texts={"flagged path"})
+        d.palaces["cto"][ALLOWED_ID] = d._drawer("flagged path")
         code, text, rows = self.run_main(d, "--lanes", "memory")
         self.assertNotEqual(code, 3, f"a secret-gate refusal aborted the seed: {text}")
         row = json.loads(rows[0])["memory_palaces"]["cto"]
-        self.assertEqual(row["seeded"], 4)
-        self.assertEqual(row["seed_secret_like"], ["cto-0002"])
-        self.assertEqual(d.secret_optins, ["cto drawer 2"], "allow_secret_like sent for a drawer the gate passed")
+        self.assertEqual(row["seeded"], 5)
+        self.assertEqual(row["seed_secret_like"], [ALLOWED_ID])
+        self.assertEqual(d.secret_optins, ["flagged path"], "allow_secret_like sent for a drawer the gate passed")
+
+    def test_secret_like_drawer_off_allowlist_aborts(self):
+        # #11902: a secret-gate refusal for a drawer not in SECRET_SEED_ALLOWLIST keeps the gate and aborts.
+        d = live_daemon(secret_texts={"cto drawer 2"})
+        code, text, rows = self.run_main(d, "--lanes", "memory")
+        self.assertEqual(code, 3, f"an off-allowlist secret-gate refusal did not abort: {text}")
+        self.assertIn("cto-0002", text)
+        self.assertEqual(rows, [], "an aborted run was recorded")
+        self.assertEqual(d.secret_optins, [], "allow_secret_like sent for a drawer not on the allowlist")
+        self.assertFalse([p for p in d.palaces if p.startswith(TEST_PREFIX)], "test palace not deleted")
 
     def assert_aborted_unscored(self, d, code, text, rows, why):
         self.assertEqual(code, 3, f"run not aborted: {text}")
