@@ -1,0 +1,2 @@
+Fixed
+- The MCP `create_index` tool accepts `source_file_max_bytes` and `office_file_max_bytes` and forwards them to `search.index.create`. Before, the schema listed neither field and the tool dropped both, so the index got the default caps without a warning. An out-of-range cap is refused with `invalid_size_cap`, and re-registering an existing index with other caps answers `size_caps_applied: false` with the message, as over the socket. Omitting both fields keeps the defaults (#11903).
