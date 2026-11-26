@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
+  import { installPathsView } from './installPaths.js';
 
   /**
    * Why: The Config tab lets operators edit trusty-mpm's
@@ -30,6 +31,10 @@
   let template = $state('');
   let autoResume = $state(false);
   let defaultModel = $state('');
+
+  // Read-only install paths (#11821 P5); an install.toml error hides the rows
+  // and the effective root so a default path is never shown as if resolved.
+  let installView = $derived(installPathsView(config?.install_paths));
 
   async function load() {
     refreshing = true;
@@ -103,6 +108,21 @@
 {/if}
 
 {#if config}
+  {#if installView.state === 'error'}
+    <div class="msg err" role="alert">
+      Cannot read <code>{installView.installFile}</code>: {installView.error}
+    </div>
+  {:else if installView.rows.length}
+    <dl class="install-paths">
+      {#each installView.rows as row (row.key)}
+        <div class="path-row">
+          <dt class="label">{row.label}</dt>
+          <dd><code>{row.path}</code> <span class="src-badge">{row.sourceLabel}</span></dd>
+        </div>
+      {/each}
+      <p class="hint">These paths are set from an owner-run <code>tm</code> command; they cannot be edited here.</p>
+    </dl>
+  {/if}
   <form class="cfg-form" onsubmit={(e) => { e.preventDefault(); save(); }}>
     <label class="field">
       <span class="label">Workspace root template</span>
@@ -116,7 +136,7 @@
         New sessions are provisioned under
         <code>&lt;root&gt;/&lt;owner&gt;/&lt;repo&gt;/&lt;session-id&gt;</code>.
         Leave blank for the default <code>~/trusty-mpm-projects</code>.
-        Effective root: <code>{config.workspace_root}</code>
+        {#if installView.showEffectiveRoot}Effective root: <code>{config.workspace_root}</code>{/if}
       </span>
     </label>
 
@@ -190,6 +210,19 @@
     background: color-mix(in srgb, var(--trusty-accent) 8%, transparent);
     padding: 0.05rem 0.3rem;
     border-radius: 0.25rem;
+  }
+  .install-paths { max-width: 640px; margin: 0 0 1.25rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .path-row { display: flex; flex-direction: column; gap: 0.2rem; }
+  .path-row dd { margin: 0; }
+  .src-badge {
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--trusty-border);
+    border-radius: 0.25rem;
+    color: var(--trusty-text-secondary);
   }
   .actions {
     display: flex;
