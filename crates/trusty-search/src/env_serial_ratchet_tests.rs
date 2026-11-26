@@ -212,7 +212,7 @@ const REGISTRY_REACHING: &[&str] = &[
 /// fresh tempdir corpus always bumps it. An untagged test attaching one beside
 /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`, which
 /// points `TRUSTY_DATA_DIR` at `<repo>/data`, left `?? data/` in that repo:
-/// an EVO run caught `shutdown_close_tests.rs` writing six identity files
+/// a Linux CI-host run caught `shutdown_close_tests.rs` writing six identity files
 /// there. The identity is minted, bumped or retired by these functions.
 /// What: matched exactly as [`REGISTRY_REACHING`] is, and joined with it.
 const IDENTITY_REACHING: &[&str] = &[
