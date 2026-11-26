@@ -24,6 +24,8 @@ mod architect_turn_active_chain_10571;
 mod catalog_sync_idempotent;
 mod commit_stats_hook_budget;
 mod config_mount;
+// #10153: `dbatg` MCP writes are bound to the bridge's PM session.
+mod dbatg_bridge_owner_10153;
 // #8985: `disk_survey` through a built daemon's `/rpc`.
 mod disk_survey_mcp_smoke;
 #[cfg(feature = "daemon")]

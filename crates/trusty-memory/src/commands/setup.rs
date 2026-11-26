@@ -248,25 +248,29 @@ pub fn handle_setup_gui_client(client: &str) -> Result<()> {
 /// they last hand-edited, including a whole argument vector serialized as one
 /// JSON-looking string. `setup` now owns the Codex file the same way it owns the
 /// Claude settings files.
-/// What: resolves `$HOME`, then upserts `[mcp_servers.trusty-memory]` in
-/// `~/.codex/config.toml` with `command = "trusty-memory"` and
+/// What: resolves the Codex config through the install paths
+/// (`<codex_home>/config.toml`, default `~/.codex/config.toml`, #11821), then
+/// upserts `[mcp_servers.trusty-memory]` in it with `command = "trusty-memory"` and
 /// [`MCP_SERVER_ARGS`], through the shared writer in
 /// `trusty_common::codex_config` — which rewrites an empty, joined, legacy
 /// `--stdio`, or nested-JSON-string vector and leaves every other table and
 /// comment in the operator's config byte-for-byte intact. Prints one status
-/// line either way.
+/// line either way. A broken `install.toml` is an error and nothing is
+/// written (#11821).
 /// Test: `setup_codex_writes_the_serve_entrypoint`,
-/// `setup_codex_repairs_a_legacy_stdio_registration`, `setup_codex_is_idempotent`.
+/// `setup_codex_repairs_a_legacy_stdio_registration`, `setup_codex_is_idempotent`,
+/// `setup_codex_fails_closed_on_broken_install_file`.
 fn setup_codex_phase() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    setup_codex(&home)
+    setup_codex(trusty_common::codex_config::resolve_codex_config_path())
 }
 
-/// [`setup_codex_phase`] against an explicit home directory, so tests never
-/// touch the real `~/.codex/config.toml`.
-fn setup_codex(home: &Path) -> Result<()> {
-    let path = trusty_common::codex_config::codex_config_path(home);
+/// [`setup_codex_phase`] against an already-resolved path, so tests never
+/// touch the real Codex config.
+fn setup_codex(
+    resolved: Result<PathBuf, trusty_common::install_paths::InstallPathsError>,
+) -> Result<()> {
+    // #11821: fail closed, never fall back to `~/.codex`.
+    let path = resolved?;
     let wrote = trusty_common::codex_config::patch_mcp_server(
         &path,
         MCP_SERVER_KEY,

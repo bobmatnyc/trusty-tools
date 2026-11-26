@@ -445,7 +445,6 @@ crates/trusty-memory/src/engine/store/hnsw_store/tests.rs	EVO_HOST	1
 crates/trusty-memory/src/engine/store/kg/error.rs	HOSTNAME	4
 crates/trusty-memory/src/messaging/mod.rs	EMAIL	1
 crates/trusty-memory/src/messaging/mod.rs	OPERATOR_PATH	1
-crates/trusty-memory/src/project_root/pin_file.rs	OPERATOR_PATH	2
 crates/trusty-memory/src/tools/memory_ops.rs	RULING_DATED	1
 crates/trusty-memory/src/tools/mod.rs	RULING_DATED	1
 crates/trusty-memory/src/tools/recall_ops.rs	RULING_DATED	6

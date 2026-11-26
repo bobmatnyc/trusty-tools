@@ -546,7 +546,13 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // self-origins, so the console's own write UI served from that address is
     // not 403'd by the same-origin guard. Loopback stays trusted unconditionally
     // regardless of bind mode.
-    let self_origins = routes::origin_guard::SelfOrigins::from_bind_addrs(&addrs);
+    // #11749: in `--tailscale` mode the write guards also trust this node's
+    // MagicDNS origin, learned below; without it, loopback and bind IPs only.
+    let magic_dns = tailnet_peer::OwnMagicDns::default();
+    let self_origins = routes::origin_guard::WriteOrigins::from_bind_addrs(
+        &addrs,
+        (mode == bind::BindMode::Tailscale).then(|| magic_dns.clone()),
+    );
 
     // ── webhook ingress (#5089 step 3, ADR-0034) ────────────────────────────
     // `?` on purpose: a console that cannot open its spool must not start and
@@ -575,7 +581,6 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // #9792: `tailscale serve` fronts the loopback listener at this node's
     // MagicDNS name; learn it in the background. Until then, or if it is never
     // found, loopback listeners answer to their own `ip:port` and `localhost`.
-    let magic_dns = tailnet_peer::OwnMagicDns::default();
     tailnet_peer::spawn_magic_dns_lookup(
         magic_dns.clone(),
         bind::detect_tailscale_ipv4,

@@ -37,6 +37,8 @@ pub mod memory_rpc;
 // when the machine-status history routes pushed it over the 500-SLOC cap.
 pub mod metrics;
 pub mod origin_guard;
+#[cfg(test)]
+mod origin_guard_tests;
 pub mod sessions;
 pub mod verdict;
 

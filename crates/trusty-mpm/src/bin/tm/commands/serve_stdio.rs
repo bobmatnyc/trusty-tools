@@ -37,6 +37,9 @@
 //! bridge started with `--allow-chat`; every other bridge hides it and refuses
 //! the call locally — see [`chat_gate_refusal`].
 //!
+//! #10153: a `dbatg` write naming another PM session's store, or another
+//! project's, is refused here too (LDG-3.6) — see [`serve_stdio_dbatg`].
+//!
 //! Test: `is_notification_*`, `value_to_mcp_response_*`,
 //! `forward_errors_on_an_absent_socket_naming_it`, and `stamp_*` unit tests
 //! below; end to end in
@@ -47,6 +50,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use trusty_mcp as mcp;
 use trusty_mcp::{DaemonBridgeConfig, Request, Response};
+
+#[path = "serve_stdio_dbatg.rs"]
+mod serve_stdio_dbatg;
+use serve_stdio_dbatg::{BridgeOwner, dbatg_owner_refusal};
 
 /// Per-request forwarding timeout (60 s — headroom for slow tmux/provision ops).
 ///
@@ -402,17 +409,23 @@ fn hide_chat_tool(req: &serde_json::Value, resp: &mut serde_json::Value, allow_c
 /// Why: one function carries the whole per-request path so the `--allow-chat`
 /// gate is testable against a fake socket (#9979).
 /// What: a gated `sessions_chat` call is answered locally with no socket
-/// call; otherwise the request is stamped (#6888, #10476), forwarded to `url`, and the
+/// call; a `dbatg` write not to `owner`'s own store likewise (#10153);
+/// otherwise the request is stamped (#6888, #10476), forwarded to `url`, and the
 /// reply has `sessions_chat` hidden from a `tools/list`.
-/// Test: the `tools_list_*` and `a_chat_call_*` tests below.
+/// Test: the `tools_list_*`, `a_chat_call_*` and `a_dbatg_write_*` tests below.
 async fn handle_request(
     req: Request,
     url: &str,
     managed: Option<&str>,
     allow_chat: bool,
+    owner: &BridgeOwner,
 ) -> Response {
     let mut req_value = req_to_value(&req);
     if let Some(result) = chat_gate_refusal(&req_value, allow_chat) {
+        return Response::ok(req.id.clone(), result);
+    }
+    // #10153: LDG-3.6 — only this process knows the calling PM.
+    if let Some(result) = dbatg_owner_refusal(&req_value, owner) {
         return Response::ok(req.id.clone(), result);
     }
     stamp_caller_session_id(&mut req_value, managed);
@@ -542,16 +555,19 @@ pub(crate) async fn run_stdio_bridge(allow_chat: bool) -> Result<()> {
     // id can be read. Snapshot it once — the pane's environment cannot change
     // under a running bridge.
     let managed_session_id = trusty_common::catchup::session_id::managed_session_id_from_env();
+    // #10153: the PM's own Ledger session and launch directory, read the same way.
+    let owner = std::sync::Arc::new(BridgeOwner::from_env());
 
     // Step 2: forward loop, over the socket re-resolved per request.
     mcp::run_stdio_loop(move |req| {
         let managed_session_id = managed_session_id.clone();
+        let owner = std::sync::Arc::clone(&owner);
         async move {
             if is_notification(&req) {
                 return Response::suppressed();
             }
             let url = trusty_mpm::core::resolve_daemon_url(None);
-            handle_request(req, &url, managed_session_id.as_deref(), allow_chat).await
+            handle_request(req, &url, managed_session_id.as_deref(), allow_chat, &owner).await
         }
     })
     .await
@@ -866,7 +882,7 @@ mod tests {
     #[tokio::test]
     async fn tools_list_without_allow_chat_omits_sessions_chat() {
         let (url, _dir, _calls) = counting_socket(catalog_reply());
-        let resp = handle_request(list_request(), &url, None, false).await;
+        let resp = handle_request(list_request(), &url, None, false, &BridgeOwner::default()).await;
         assert_eq!(tool_names(&resp), ["session_list", "disk_survey"]);
     }
 
@@ -874,7 +890,7 @@ mod tests {
     #[tokio::test]
     async fn tools_list_with_allow_chat_keeps_sessions_chat() {
         let (url, _dir, _calls) = counting_socket(catalog_reply());
-        let resp = handle_request(list_request(), &url, None, true).await;
+        let resp = handle_request(list_request(), &url, None, true, &BridgeOwner::default()).await;
         assert_eq!(
             tool_names(&resp),
             ["session_list", "sessions_chat", "disk_survey"]
@@ -886,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn a_chat_call_without_allow_chat_is_refused_locally() {
         let (url, _dir, calls) = counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
-        let resp = handle_request(chat_request(), &url, None, false).await;
+        let resp = handle_request(chat_request(), &url, None, false, &BridgeOwner::default()).await;
         let result = resp.result.expect("a tool error is a JSON-RPC result");
         assert_eq!(result["isError"], true, "{result}");
         let text = result["content"][0]["text"].as_str().expect("text");
@@ -903,9 +919,37 @@ mod tests {
     async fn a_chat_call_with_allow_chat_reaches_the_daemon() {
         let (url, _dir, calls) =
             counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {"reply": "hello"}}));
-        let resp = handle_request(chat_request(), &url, None, true).await;
+        let resp = handle_request(chat_request(), &url, None, true, &BridgeOwner::default()).await;
         assert_eq!(resp.result.expect("result")["reply"], "hello");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// #10153: a bridge that cannot name its own session answers a `dbatg`
+    /// write locally with a tool error; the daemon is never dialled.
+    #[tokio::test]
+    async fn a_dbatg_write_from_a_bridge_with_no_session_is_refused_locally() {
+        let (url, dir, calls) = counting_socket(json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
+        let project = std::fs::canonicalize(dir.path()).expect("canonical");
+        let owner = BridgeOwner {
+            session: None,
+            launch: Some(project.clone()),
+        };
+        let req = call(
+            "dbatg",
+            json!({"op": "batch", "request_id": "r", "ops": [],
+                   "store": {"project": project, "session": "pm-a"}}),
+        );
+        let resp = handle_request(
+            serde_json::from_value(req).expect("request"),
+            &url,
+            None,
+            false,
+            &owner,
+        )
+        .await;
+        let result = resp.result.expect("a tool error is a JSON-RPC result");
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// #6288: with no daemon socket the forward fails naming the socket, and

@@ -308,7 +308,7 @@ async fn projects_route_refuses_a_malformed_or_unknown_registry() {
 #[test]
 fn registry_file_follows_the_tm_root() {
     use super::projects::registry_file_for;
-    let home = Some(std::path::PathBuf::from("/home/u"));
+    let home = Some(std::path::PathBuf::from("/home/u/.trusty-mpm"));
     assert_eq!(
         registry_file_for(Some("/opt/tm".into()), home.clone()),
         Some("/opt/tm/project-paths.json".into())
@@ -322,6 +322,35 @@ fn registry_file_follows_the_tm_root() {
         Some("/home/u/.trusty-mpm/project-paths.json".into())
     );
     assert_eq!(registry_file_for(None, None), None);
+}
+
+/// #11821: the default tm dir follows a configured config dir, and a broken
+/// `install.toml` reads `~/.trusty-mpm`.
+#[test]
+fn mpm_dir_from_follows_the_config_dir() {
+    use super::projects::mpm_dir_from;
+    use trusty_common::install_paths::{
+        InstallPaths, MPM_DIR_NAME, PathOverrides, install_file_path,
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    let moved = InstallPaths::resolve_with(
+        |name| (name == "TRUSTY_MPM_CONFIG_DIR").then(|| "/srv/cfg".to_string()),
+        home.path(),
+        &PathOverrides::default(),
+    );
+    assert_eq!(
+        mpm_dir_from(moved, Some(home.path().to_path_buf())),
+        Some(std::path::PathBuf::from("/srv/cfg/.trusty-mpm"))
+    );
+    let file = install_file_path(home.path());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "bogus = 1\n").unwrap();
+    let broken = InstallPaths::resolve_with(|_| None, home.path(), &PathOverrides::default());
+    assert!(broken.is_err());
+    assert_eq!(
+        mpm_dir_from(broken, Some(home.path().to_path_buf())),
+        Some(home.path().join(MPM_DIR_NAME))
+    );
 }
 
 /// What a real `secrets.bridge.backends` answers on a Linux host.

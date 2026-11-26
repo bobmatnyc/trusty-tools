@@ -130,7 +130,7 @@ async fn create_aliases_the_folder_named_palace() {
     let root = git_project(
         projects.path(),
         "My_Repo",
-        "git@github.com:Acme/My_Repo.git",
+        "git@example.com:Acme/My_Repo.git",
     );
     let cwd = root.to_string_lossy();
     create(&state, json!({"name": "my-repo", "force": true}))
@@ -175,7 +175,7 @@ async fn create_aliases_through_a_folder_alias_to_its_target() {
     let root = git_project(
         projects.path(),
         "My_Repo",
-        "git@github.com:Acme/My_Repo.git",
+        "git@example.com:Acme/My_Repo.git",
     );
     let cwd = root.to_string_lossy();
     create(&state, json!({"name": "real-x", "force": true}))

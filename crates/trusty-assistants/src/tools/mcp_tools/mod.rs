@@ -52,7 +52,7 @@ mod tests {
 
     /// Read back what the tools wrote, from the shared file itself.
     fn reload() -> Vec<McpServerConfig> {
-        let path = trusty_mcp::config::default_path().unwrap();
+        let path = crate::mcp::shared::shared_path().unwrap();
         McpConfigFile::load_or_default(&path).unwrap().servers
     }
 
@@ -368,7 +368,7 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", &home);
         }
-        let path = trusty_mcp::config::default_path().unwrap();
+        let path = crate::mcp::shared::shared_path().unwrap();
 
         let out = dispatch_mcp_tool("mcp_enable", &json!({"name": "ghost"})).await;
         assert!(out.contains("No MCP server"), "got: {out}");
