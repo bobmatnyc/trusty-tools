@@ -65,7 +65,7 @@ pub(crate) use super::new_session_label::row_labels;
 use super::new_session_name::NameStep;
 use super::state::Input;
 
-/// How many target rows the overlay shows at once.
+/// The most target rows the overlay shows at once; a short terminal shows fewer.
 const PICK_ROWS: usize = 8;
 
 /// One thing the operator can start a session in.
@@ -202,6 +202,10 @@ pub(crate) struct NewSessionFlow {
     naming: Option<NameStep>,
     /// #11822: which target is the cwd repo, for its row reason.
     cwd: Option<usize>,
+    /// #11947: list rows the overlay can draw, set by [`Self::fit_window`].
+    window: usize,
+    /// #11947: first drawn row, kept so moving inside the window holds still.
+    offset: usize,
     resolve: Resolver,
 }
 
@@ -239,6 +243,8 @@ impl NewSessionFlow {
             filter: String::new(),
             naming: None,
             cwd: None,
+            window: PICK_ROWS,
+            offset: 0,
             resolve,
         }
     }
@@ -315,12 +321,37 @@ impl NewSessionFlow {
     }
 
     /// First visible row the window draws, given where the highlight is.
+    ///
+    /// #11947: [`super::layout::visible_window`] from the kept offset, so the
+    /// rows scroll only when the highlight crosses an edge, never pinning it
+    /// to the bottom row.
     fn window_start(&self, visible: &[usize]) -> usize {
-        self.cursor(visible)
-            .saturating_sub(PICK_ROWS.saturating_sub(1))
+        let cursor = self.cursor(visible);
+        super::layout::visible_window(visible.len(), cursor, self.window, self.offset).0
     }
 
-    /// The overlay's visible target rows, at most [`PICK_ROWS`] of them.
+    /// Size the window to the rows the overlay can draw (#11947).
+    ///
+    /// Why: the overlay is a share of the terminal height, so a fixed
+    /// [`PICK_ROWS`] window was clipped on a short terminal and the highlight
+    /// could sit on a row that was never drawn.
+    /// What: sets the window to `rows`, clamped to `1..=PICK_ROWS`, and
+    /// re-seats the offset so the highlight is inside it. The renderer calls
+    /// this each frame with the height it is about to draw.
+    /// Test: `new_session_window_draws_the_highlight_on_a_short_terminal`,
+    /// `new_session_window_scrolls_across_both_edges_at_every_height`.
+    pub(crate) fn fit_window(&mut self, rows: usize) {
+        self.window = rows.clamp(1, PICK_ROWS);
+        self.settle_window();
+    }
+
+    /// Store the window start the highlight now needs (#11947).
+    fn settle_window(&mut self) {
+        let visible = self.visible();
+        self.offset = self.window_start(&visible);
+    }
+
+    /// The overlay's visible target rows, at most the fitted window of them.
     ///
     /// Why: a host with forty registered projects would otherwise draw an
     /// overlay taller than the terminal. The window scrolls only once the
@@ -337,7 +368,7 @@ impl NewSessionFlow {
         visible
             .iter()
             .skip(self.window_start(&visible))
-            .take(PICK_ROWS)
+            .take(self.window)
             .map(|i| {
                 let marker = if *i == self.selected { "▸" } else { " " };
                 let label = labels.get(*i).map_or("", String::as_str);
@@ -361,11 +392,12 @@ impl NewSessionFlow {
     /// Test: `new_session_position_indicator_reports_the_window`.
     pub(crate) fn position(&self) -> Option<String> {
         let visible = self.visible();
-        if visible.len() <= PICK_ROWS {
+        // #11947: the fitted window, the same one `rows` draws.
+        if visible.len() <= self.window {
             return None;
         }
         let start = self.window_start(&visible);
-        let end = (start + PICK_ROWS).min(visible.len());
+        let end = (start + self.window).min(visible.len());
         Some(format!("{}–{} of {}", start + 1, end, visible.len()))
     }
 
@@ -408,8 +440,9 @@ impl NewSessionFlow {
         match input {
             Input::Up => self.move_within(&visible, cursor.saturating_sub(1)),
             Input::Down => self.move_within(&visible, (cursor + 1).min(last)),
-            Input::PageUp => self.move_within(&visible, cursor.saturating_sub(PICK_ROWS)),
-            Input::PageDown => self.move_within(&visible, (cursor + PICK_ROWS).min(last)),
+            // #11947: a page is the window the overlay draws.
+            Input::PageUp => self.move_within(&visible, cursor.saturating_sub(self.window)),
+            Input::PageDown => self.move_within(&visible, (cursor + self.window).min(last)),
             Input::Home => self.move_within(&visible, 0),
             Input::End => self.move_within(&visible, last),
             // #7421: a printable key narrows the list rather than moving over
@@ -488,10 +521,13 @@ impl NewSessionFlow {
 
     /// Move the highlight to a position within the filtered rows.
     fn move_within(&mut self, visible: &[usize], position: usize) -> Step {
-        match visible.get(position) {
+        let step = match visible.get(position) {
             Some(index) => self.move_to(*index),
             None => Step::Ignore,
-        }
+        };
+        // #11947: keep the offset, so the next move scrolls from here.
+        self.settle_window();
+        step
     }
 
     /// Move the highlight, reporting whether anything changed.
@@ -506,10 +542,11 @@ impl NewSessionFlow {
     /// Re-seat the highlight when the filter just hid the row it was on (#7421).
     fn keep_selection_visible(&mut self) {
         let visible = self.visible();
-        if visible.contains(&self.selected) {
-            return;
+        if !visible.contains(&self.selected) {
+            self.selected = visible.first().copied().unwrap_or(0);
         }
-        self.selected = visible.first().copied().unwrap_or(0);
+        // #11947: the filter changed the list the offset indexes into.
+        self.settle_window();
     }
 
     /// Path-entry keys: edit the buffer, then Enter to resolve and confirm.
