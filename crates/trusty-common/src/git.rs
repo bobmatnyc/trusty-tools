@@ -64,8 +64,7 @@ pub const MAINTENANCE_DISABLE_ARGS: &[&str] = &["-c", "maintenance.auto=false", 
 /// What: the names [`remove_redirects`] strips. Moved here from
 /// trusty-mpm's `worktree_safety` (#11217) so the trusty-common origin read
 /// can share the one list; the contents are unchanged.
-/// Test: `git_command_strips_repository_redirecting_env` (trusty-mpm),
-/// `origin_read_ignores_an_inherited_git_dir_11217`.
+/// Test: `origin_read_ignores_an_inherited_git_dir_11217`.
 pub const GIT_ENV_REDIRECTS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -83,8 +82,7 @@ pub const GIT_ENV_REDIRECTS: &[&str] = &[
 /// Why: #11217 — one scrub shared by trusty-mpm's hardened `git_command` and
 /// [`crate::github_path`]'s origin read, rather than two copies.
 /// What: `cmd.env_remove(name)` for each name; nothing else changes.
-/// Test: `git_command_strips_repository_redirecting_env` (trusty-mpm),
-/// `origin_read_ignores_an_inherited_git_dir_11217`.
+/// Test: `origin_read_ignores_an_inherited_git_dir_11217`.
 pub fn remove_redirects(cmd: &mut Command) {
     for key in GIT_ENV_REDIRECTS {
         cmd.env_remove(key);
