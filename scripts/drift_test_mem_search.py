@@ -11,8 +11,11 @@ results file, and prints findings when a metric crosses a threshold. Search
 has two lanes: `search:as-called` (no `mode`, as agents call it) and
 `search:best-mode` (`mode` by target type, see best_mode). The memory lane
 never recalls a live palace, because recall raises `access_count` (#11348):
-it seeds a guarded test palace per source palace, recalls there, and deletes
-it in a `finally` block (see run_memory). Search uses only read-only tools;
+it seeds a guarded test palace per source palace, recalls there scoped to
+the `default` wing so the daemon's user-scope rulings leg stays off, and
+deletes it in a `finally` block (see run_memory). A drawer that fails to seed
+or a recall hit from another palace aborts the run unrecorded, exit 3
+(#11815). `--lanes` runs one lane alone. Search uses only read-only tools;
 there is no reindex or daemon-restart path in this file. An absent lane, a
 missing golden file, a failed seed or an unverified delete is a finding, so
 "no findings" means every expected lane ran (#11351).
@@ -28,9 +31,9 @@ sys.path.insert(0, HERE)  # `-I` drops the script dir from sys.path; the split m
 
 from drift_mem_core import *  # noqa: E402,F401,F403  (re-exported for the test module)
 from drift_mem_core import (DREAM_TOOLS, RULINGS_DEGRADED, SEARCH_LANES, TH_COLD_TOL, TH_DEGRADED,  # noqa: E402
-                            TH_P95_X, TH_RECALL10, TEST_NAME_RE, Mcp, PalaceGuard, best_mode, compare,
-                            list_all, map_expected, memory_degraded, path_match, score_query, search_degraded,
-                            summarize)
+                            TH_P95_X, TH_RECALL10, TEST_NAME_RE, Mcp, PalaceGuard, RunAborted, best_mode,
+                            check_own, check_scope_covers, compare, list_all, map_expected, memory_degraded,
+                            path_match, recall, score_query, search_degraded, summarize)
 from drift_mem_dream import *  # noqa: E402,F401,F403
 from drift_mem_dream import dream_findings, dream_pass, print_dream  # noqa: E402
 
@@ -40,6 +43,7 @@ from install_paths import InstallPathsError, tools_dir  # noqa: E402
 DEF_PUBLIC = os.path.join(HERE, "..", "testdata", "drift", "mem-search", "golden.public.json")
 DEF_BASELINE = os.path.join(HERE, "..", "testdata", "drift", "mem-search", "baseline.json")
 PRIVATE_NAME, RESULTS_NAME = "golden.private.json", "runs.jsonl"
+LANES = ("search", "memory")
 
 
 def drift_dir():
@@ -106,7 +110,9 @@ def seed_test_palace(m, guard, source, existing):
     """Create a guarded test palace and copy `source`'s drawers into it.
 
     Returns (palace, source drawers, live id -> test id map, info). The source
-    is only listed (memory_list), never recalled."""
+    is only listed (memory_list), never recalled. #11815: a drawer that fails
+    to seed raises RunAborted naming every such drawer, so a partial seed is
+    never scored. Test: `test_partial_seed_aborts_and_names_drawers`."""
     pal, t0 = guard.new_name(), time.perf_counter()
     guard.claim(pal, existing)
     _, _, err = m.call("palace_create", {"name": pal, "force": True,
@@ -114,7 +120,7 @@ def seed_test_palace(m, guard, source, existing):
     if err:
         raise RuntimeError(f"palace_create: {err}")
     src = list_all(m, source)
-    idmap, skipped = {}, 0
+    idmap, failed = {}, []
     for d in src.values():
         a = {"palace": pal, "text": d["content"], "force": True}
         if d["_room"]:
@@ -123,10 +129,13 @@ def seed_test_palace(m, guard, source, existing):
             a["type"] = d["drawer_type"]
         resp, _, err = m.call("memory_remember", a)
         if err or not resp or not resp.get("drawer_id"):
-            skipped += 1
+            failed.append(f"{d['drawer_id']} ({err or 'no drawer_id'})")
             continue
         idmap[d["drawer_id"]] = resp["drawer_id"]
-    return pal, src, idmap, {"test_palace": pal, "source_palace": source, "seeded": len(idmap), "seed_skipped": skipped,
+    if failed:
+        raise RunAborted(f"{len(failed)} of {len(src)} drawers of {source} did not seed into {pal}: "
+                         + "; ".join(failed))
+    return pal, src, idmap, {"test_palace": pal, "source_palace": source, "seeded": len(idmap),
                              "seed_s": round(time.perf_counter() - t0, 1)}
 
 
@@ -179,10 +188,11 @@ def run_memory(golden, rows, info, private_path, dream_source=None):
     -> test id map, and (when `dream_source` matches) run the dream pass on
     the same seeding. Every owned palace is deleted in `finally`, each result
     recorded and printed even when the lane raised, and the client always
-    closed. A served hit whose id is not in the test palace came from another
-    palace (the daemon's user-scope rulings leg) and is counted in
-    `foreign_hits`. Test: `test_memory_partial_seed`, `test_memory_delete_on_raise`,
-    `test_stale_sweep`.
+    closed. #11815: every recall is wing-scoped (`recall`), which skips the
+    daemon's user-scope rulings leg; a served hit whose id is not in the test
+    palace raises RunAborted before any further recall. Test:
+    `test_recall_leaves_live_palaces_untouched`, `test_foreign_hit_aborts_the_lane`,
+    `test_memory_delete_on_raise`, `test_stale_sweep`.
     """
     guard = PalaceGuard()
     m = Mcp(["trusty-memory", "serve", "--stdio"])
@@ -201,9 +211,11 @@ def run_memory(golden, rows, info, private_path, dream_source=None):
             pal, src, idmap, pinfo = seed_test_palace(m, guard, source, existing)
             info["memory_palaces"][source] = pinfo
             own = set(list_all(m, pal))
-            _, ms, _ = m.call("memory_recall", {"palace": pal, "query": "warm-up", "top_k": 1})
+            check_scope_covers(m, pal, own)
+            resp, ms, _ = recall(m, pal, "warm-up", 1)
+            check_own(resp, own, pal)
             info["warmup_ms"][f"memory:{source}"] = round(ms)
-            foreign = unmapped = partial = 0
+            unmapped = partial = 0
             queries = [q for q in golden["memory"] if q["palace"] == source]
             for q in queries:
                 exp, missing = map_expected(q["expected"], idmap)
@@ -211,15 +223,15 @@ def run_memory(golden, rows, info, private_path, dream_source=None):
                     unmapped += 1
                     continue
                 partial += bool(missing)
-                resp, ms, err = m.call("memory_recall", {"palace": pal, "query": q["query"], "top_k": 10})
+                resp, ms, err = recall(m, pal, q["query"], 10)
+                check_own(resp, own, pal)
                 ranked = [r["drawer_id"] for r in (resp or {}).get("results", [])]
-                foreign += sum(1 for x in ranked if x not in own)
                 why = ["error"] if err or resp is None else memory_degraded(resp)
                 rows.append({"lane": "memory", "id": q["id"], "ms": ms, "degraded": bool(why), "why": why,
                              "rulings_degraded": bool(resp and resp.get(RULINGS_DEGRADED)),
                              "kind": q.get("kind"), **score_query(ranked, exp, lambda a, b: a == b)})
             targets = {e for q in queries for e in q["expected"]}
-            pinfo.update(foreign_hits=foreign, unmapped_queries=unmapped, partial_queries=partial,
+            pinfo.update(unmapped_queries=unmapped, partial_queries=partial,
                          golden_targets_missing=len(targets - set(idmap)))
             if source == dream_source:
                 dream = dream_pass(m, pal, src, idmap, golden, private_path, source)
@@ -246,14 +258,10 @@ def baseline_payload(row):
 
 
 def memory_findings(info):
-    """Memory-lane findings: leaks, seed failures, shrunk targets, unverified deletes."""
+    """Memory-lane findings: shrunk targets, unverified deletes. Seed failures and
+    foreign hits abort the run instead (#11815)."""
     out = []
     for src, p in info.get("memory_palaces", {}).items():
-        if p.get("foreign_hits"):
-            out.append(f"memory {src}: {p['foreign_hits']} served hits came from a palace other than the test "
-                       "palace (user-scope rulings leg), so a live drawer's access_count rose")
-        if p.get("seed_skipped"):
-            out.append(f"memory {src}: {p['seed_skipped']} drawers failed to seed into the test palace")
         if p.get("golden_targets_missing"):
             out.append(f"memory {src}: {p['golden_targets_missing']} golden targets are missing from the seeded palace")
         if p.get("partial_queries"):
@@ -270,13 +278,13 @@ def memory_findings(info):
     return out
 
 
-def coverage_findings(golden, mt, dream_source, dream):
-    """Findings for a lane that did not run: a missing golden file, a lane the
-    golden set expects with n = 0, or a requested dream that did not run (#11351).
-    Test: `test_coverage_findings`."""
+def coverage_findings(golden, mt, dream_source, dream, lanes=LANES):
+    """Findings for a lane that did not run: a missing golden file, a selected lane
+    the golden set expects with n = 0, or a requested dream that did not run (#11351).
+    Test: `test_coverage_findings`, `test_lane_selector_runs_one_lane`."""
     out = [f"golden file missing: {p}" for p in golden.get("missing", [])]
-    expect = {lane: bool(golden["search"]) for lane in SEARCH_LANES}
-    expect["memory"] = bool(golden["memory"])
+    expect = {lane: "search" in lanes and bool(golden["search"]) for lane in SEARCH_LANES}
+    expect["memory"] = "memory" in lanes and bool(golden["memory"])
     for lane, want in expect.items():
         if want and not (mt.get(lane) or {}).get("n"):
             out.append(f"lane {lane}: golden set has queries but the lane ran none (n=0)")
@@ -285,6 +293,23 @@ def coverage_findings(golden, mt, dream_source, dream):
         why = "not a golden source palace" if dream_source not in srcs else "the dream pass did not complete"
         out.append(f"dream: requested on {dream_source!r} but did not run ({why}; golden palaces: {srcs})")
     return out
+
+
+def parse_lanes(spec):
+    """`--lanes search,memory` -> a tuple in run order; raises ValueError on an unknown lane (#11815)."""
+    got = {x.strip() for x in spec.split(",") if x.strip()}
+    if not got or got - set(LANES):
+        raise ValueError(f"--lanes takes a comma list of {', '.join(LANES)}; got {spec!r}")
+    return tuple(x for x in LANES if x in got)
+
+
+def lane_metrics(mt, lanes):
+    """The metric keys a run over `lanes` produces; `overall` needs both lanes (#11815)."""
+    keep = (set(SEARCH_LANES) | {"search"} if "search" in lanes else set()) | (
+        {"memory", "memory:dated-rulings"} if "memory" in lanes else set())
+    if set(LANES) <= set(lanes):
+        keep.add("overall")
+    return {k: v for k, v in mt.items() if k in keep}
 
 
 def print_table(mt):
@@ -301,7 +326,7 @@ def print_table(mt):
             print(f"rulings_degraded % {lane}: {x['rulings_degraded_share'] * 100:.1f}")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--golden-public", default=DEF_PUBLIC)
     ap.add_argument("--golden-private", default=None, help="default: <drift dir>/golden.private.json")
@@ -312,10 +337,19 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--dream", action="store_true", help="also run the dream lane on the memory lane's seeding")
     ap.add_argument("--dream-source", default="supervisor", help="palace whose test copy is dreamed")
-    a = ap.parse_args()
+    ap.add_argument("--lanes", default=",".join(LANES), help="comma list of lanes to run (default: search,memory)")
+    a = ap.parse_args(argv)
     if a.selftest:
         runpy.run_path(os.path.join(HERE, "test_drift_test_mem_search.py"), run_name="__main__")
         return 0
+    try:
+        lanes = parse_lanes(a.lanes)
+    except ValueError as e:
+        ap.error(str(e))
+    if a.dream and "memory" not in lanes:
+        ap.error("--dream runs on the memory lane's seeding; add memory to --lanes")
+    if a.write_baseline and lanes != LANES:
+        ap.error("--write-baseline needs every lane; drop --lanes")
     if a.golden_private is None or a.results is None:
         # #11821 P6a: the results file is appended to, so a broken install.toml refuses the run.
         try:
@@ -327,28 +361,38 @@ def main():
         a.results = a.results or os.path.join(ddir, RESULTS_NAME)
     golden, digests = load_golden([a.golden_public, a.golden_private])
     rows, info, dream, lane_errors = [], {"versions": {}, "indexes": {}, "palaces": {}, "warmup_ms": {}}, None, []
-    try:
-        run_search(golden, rows, info)
-    except Exception as e:
-        lane_errors.append(f"search lane failed: {type(e).__name__}: {e}")
-    try:
-        dream = run_memory(golden, rows, info, a.golden_private, a.dream_source if a.dream else None)
-    except Exception as e:
-        lane_errors.append(f"memory lane failed: {type(e).__name__}: {e}")
-    mt = metrics(rows)
+    if "search" in lanes:
+        try:
+            run_search(golden, rows, info)
+        except Exception as e:
+            lane_errors.append(f"search lane failed: {type(e).__name__}: {e}")
+    if "memory" in lanes:
+        try:
+            dream = run_memory(golden, rows, info, a.golden_private, a.dream_source if a.dream else None)
+        except RunAborted as e:
+            # #11815: a partial seed or a foreign hit is never scored or recorded.
+            print(f"drift_test_mem_search: ABORTED, nothing scored or recorded: {e}", file=sys.stderr)
+            print("test palace deletes:", info.get("deletes"), file=sys.stderr)
+            return 3
+        except Exception as e:
+            lane_errors.append(f"memory lane failed: {type(e).__name__}: {e}")
+    mt = lane_metrics(metrics(rows), lanes)
     prev = None
     if os.path.exists(a.results):
-        lines = [l for l in open(a.results) if l.strip() and '"lane": "dream"' not in l]
-        prev = json.loads(lines[-1]) if lines else None
+        lines = [json.loads(l) for l in open(a.results) if l.strip() and '"lane": "dream"' not in l]
+        # #11815: the previous run is the last one that covered every selected lane.
+        lines = [r for r in lines if set(lanes) <= set(r.get("lanes", LANES))]
+        prev = lines[-1] if lines else None
     base = json.load(open(a.baseline)) if os.path.exists(a.baseline) else {}
-    findings, skipped = lane_errors + coverage_findings(golden, mt, a.dream_source if a.dream else None, dream), []
+    findings, skipped = lane_errors + coverage_findings(golden, mt, a.dream_source if a.dream else None, dream,
+                                                        lanes), []
     findings += memory_findings(info)
     if base.get("metrics"):
-        findings += compare(mt, base["metrics"], "vs-baseline", skipped)
+        findings += compare(mt, lane_metrics(base["metrics"], lanes), "vs-baseline", skipped)
     if prev:
-        findings += compare(mt, prev["metrics"], "vs-previous", skipped)
+        findings += compare(mt, lane_metrics(prev["metrics"], lanes), "vs-previous", skipped)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    row = {"ts": ts, "golden_sha256": digests, **info,
+    row = {"ts": ts, "lanes": list(lanes), "golden_sha256": digests, **info,
            "thresholds": {"recall10_drop": TH_RECALL10, "p95_x": TH_P95_X, "degraded_rise": TH_DEGRADED,
                           "cold_share_tol": TH_COLD_TOL},
            "embed_cold_share": {k: v.get("embed_cold_share") for k, v in mt.items()},
@@ -379,8 +423,8 @@ def main():
     print_table(mt)
     print("versions:", info["versions"], "| warmup_ms:", info["warmup_ms"])
     print("golden sha256:", digests)
-    print("memory palaces:", {s: {k: p.get(k) for k in ("seeded", "seed_skipped", "golden_targets_missing",
-                                                        "partial_queries", "foreign_hits", "unmapped_queries")}
+    print("memory palaces:", {s: {k: p.get(k) for k in ("seeded", "golden_targets_missing",
+                                                        "partial_queries", "unmapped_queries")}
                               for s, p in info.get("memory_palaces", {}).items()})
     print("test palace deletes:", info.get("deletes"), "| stale swept:", info.get("stale_swept"))
     for s in skipped:
