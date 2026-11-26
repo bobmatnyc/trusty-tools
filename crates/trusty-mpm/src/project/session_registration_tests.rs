@@ -481,7 +481,7 @@ fn committed_checkout(dir: &Path, remote: &str) -> PathBuf {
             "-c",
             "user.name=t",
             "-c",
-            "user.email=t@example.invalid",
+            "user.email=t@example.com",
             "commit",
             "-q",
             "--allow-empty",
@@ -510,7 +510,10 @@ fn linked_worktree(main: &Path, wt: &Path) -> PathBuf {
 async fn a_linked_worktree_session_registers_the_main_checkout_11217() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let registry = tmp.path().join("registry");
-    let main = committed_checkout(&tmp.path().join("widget"), "git@github.com:Acme/Widget.git");
+    let main = committed_checkout(
+        &tmp.path().join("widget"),
+        "https://github.com/Acme/Widget.git",
+    );
     let wt = linked_worktree(&main, &tmp.path().join("widget-wt"));
     let sub = wt.join("src");
     std::fs::create_dir(&sub).expect("mkdir sub");

@@ -529,12 +529,12 @@ async fn a_linked_worktree_session_makes_its_project_an_assign_target_11217() {
     let h = harness().await;
     seed_owner(&h, "GH_PAT", VALUE).await;
     let home = TempDir::new().expect("tmp home");
-    let api = checkout(&h, "api", "git@github.com:Acme/Api.git");
+    let api = checkout(&h, "api", "https://github.com/Acme/Api.git");
     let commit = [
         "-c",
         "user.name=t",
         "-c",
-        "user.email=t@example.invalid",
+        "user.email=t@example.com",
         "commit",
         "-q",
         "--allow-empty",

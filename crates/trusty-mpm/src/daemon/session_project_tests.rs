@@ -94,7 +94,7 @@ async fn a_linked_worktree_session_registers_the_main_checkout_from_the_daemon_1
             "-c",
             "user.name=t",
             "-c",
-            "user.email=t@example.invalid",
+            "user.email=t@example.com",
             "commit",
             "-q",
             "--allow-empty",
