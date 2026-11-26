@@ -336,9 +336,13 @@ fn install_fixture(links: &Path) -> PathBuf {
     let link = bin.join(BINARY);
     if !link.exists() {
         let exe = std::env::current_exe().expect("current exe");
-        std::fs::hard_link(&exe, &link)
-            .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
-            .expect("link the fixture");
+        // #11911: the cross-device fallback installs through the shared helper,
+        // so this process never opens the exec'd file for write. A hard link
+        // writes no bytes and stays as is.
+        if std::fs::hard_link(&exe, &link).is_err() {
+            let bytes = std::fs::read(&exe).expect("read the test binary");
+            trusty_common::exec_stub::write_executable(&link, bytes).expect("copy the fixture");
+        }
     }
     link
 }
