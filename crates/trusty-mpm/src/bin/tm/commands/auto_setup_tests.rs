@@ -76,12 +76,36 @@ fn cargo_install_failure_is_reported() {
     let tmp = tempfile::tempdir().unwrap();
     let env = env_in(tmp.path(), Some(fake_cargo(tmp.path())));
     let out = ensure(&env);
-    // The computer crate is unpublished: skipped, not registered, browser unaffected.
-    assert!(matches!(&out[1].install, Install::Missing(w) if w.contains("failed")));
+    // #11909: the computer crate is unpublished: skipped without cargo, not
+    // registered, browser unaffected.
+    assert!(matches!(&out[1].install, Install::Missing(w) if w == UNPUBLISHED_HOWTO));
     assert_eq!(out[1].register, Register::Skipped);
     assert_eq!(out[0].register, Register::Added);
     assert!(
         mcp_config::get_server(&env.config_dir, "trusty-computer-mcp")
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// #11909: a published server whose `cargo install` exits non-zero is
+/// `Missing` with a "failed" reason, and is not registered.
+#[test]
+fn a_failed_cargo_install_of_a_published_server_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("failing-cargo");
+    std::fs::write(&path, "#!/bin/sh\nexit 101\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env = env_in(tmp.path(), Some(path));
+    let out = ensure(&env);
+    let Install::Missing(why) = &out[0].install else {
+        panic!("want Missing, got {:?}", out[0].install);
+    };
+    assert!(why.contains("failed"), "{why}");
+    assert!(why.contains("cargo install trusty-browser"), "{why}");
+    assert_eq!(out[0].register, Register::Skipped);
+    assert!(
+        mcp_config::get_server(&env.config_dir, "trusty-browser-mcp")
             .unwrap()
             .is_none()
     );
@@ -92,8 +116,13 @@ fn missing_cargo_is_reported_and_registration_skipped() {
     let tmp = tempfile::tempdir().unwrap();
     let env = env_in(tmp.path(), None);
     let out = ensure(&env);
+    assert_eq!(
+        out[0].install,
+        Install::Missing("no `cargo` on PATH".into())
+    );
+    // #11909: an unpublished server names its own reason; cargo is not consulted.
+    assert_eq!(out[1].install, Install::Missing(UNPUBLISHED_HOWTO.into()));
     for o in &out {
-        assert_eq!(o.install, Install::Missing("no `cargo` on PATH".into()));
         assert_eq!(o.register, Register::Skipped);
     }
 }
@@ -185,13 +214,55 @@ fn doctor_rows_report_each_fact() {
     let tmp = tempfile::tempdir().unwrap();
     let env = env_in(tmp.path(), None);
     let rows = doctor_rows(&env);
-    assert!(rows.iter().all(|r| r.status == CheckStatus::Warn));
+    assert_eq!(rows[0].status, CheckStatus::Warn);
     assert!(rows[0].message.contains("installed=false registered=false"));
     place_bins(&env);
     ensure(&env);
     let rows = doctor_rows(&env);
     assert!(rows.iter().all(|r| r.status == CheckStatus::Ok), "{rows:?}");
     assert!(rows[1].message.contains("command-path-exists=true"));
+}
+
+/// #11909 AC1: `tm install` never runs `cargo install` for an unpublished
+/// crate, and the published one still installs.
+#[test]
+fn install_never_runs_cargo_for_an_unpublished_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path(), Some(fake_cargo(tmp.path())));
+    let out = ensure(&env);
+    let log = std::fs::read_to_string(tmp.path().join("cargo.log")).unwrap();
+    // Named, not filtered on `published`, so flipping the flag goes red.
+    assert!(!log.contains("trusty-computer"), "cargo ran: {log}");
+    assert!(log.contains("install trusty-browser --locked"), "{log}");
+    assert_eq!(out[0].install, Install::Installed);
+    let lines = report_lines(&out);
+    let computer = lines.iter().find(|l| l.starts_with("trusty-computer-mcp"));
+    assert!(
+        computer.is_some_and(|l| l.contains("not published to crates.io")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("failed")), "{lines:?}");
+}
+
+/// #11909 AC2: an unpublished server the host never set up is an info line
+/// naming how to get it, never a Warn or Fail; once present it is graded.
+#[test]
+fn doctor_lists_an_absent_unpublished_server_as_optional() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path(), None);
+    let rows = doctor_rows(&env);
+    let computer = &rows[1];
+    assert_eq!(computer.status, CheckStatus::Ok, "{computer:?}");
+    assert!(computer.message.starts_with("info: trusty-computer-mcp"));
+    assert!(
+        computer
+            .message
+            .contains("optional, not published to crates.io")
+    );
+    assert!(computer.message.contains("source checkout"));
+    // A half set-up unpublished server is still a Warn.
+    std::fs::write(env.cargo_bin.join("trusty-computer-mcp"), "#!/bin/sh\n").unwrap();
+    assert_eq!(doctor_rows(&env)[1].status, CheckStatus::Warn);
 }
 
 #[test]
