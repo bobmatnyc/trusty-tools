@@ -28,10 +28,13 @@ use crate::project::{SessionRegistration, SessionRegistrationError, register_ses
 /// and the daemon's repos root, so a canonical clone stores its GitHub URL; an
 /// unresolved root (a broken install.toml) is a warn line and the path form.
 /// A new row is logged at info; a row kept for another clone at warn (the issue's
-/// "reported, not silently kept"); a directory outside any checkout or in a
-/// linked worktree at debug; every error at warn with its cause. The result is
-/// returned for tests and is never turned into a session failure.
+/// "reported, not silently kept"); a directory outside any checkout at debug;
+/// every error at warn with its cause. A linked worktree registers its main
+/// checkout (#11217); one whose main checkout git cannot name is
+/// `MainCheckoutUnresolved`, logged at warn, with no row written. The result
+/// is returned for tests and is never turned into a session failure.
 /// Test: `a_registered_session_registers_its_checkout_as_a_project`,
+/// `a_linked_worktree_session_registers_the_main_checkout_from_the_daemon_11217`,
 /// `a_failed_registry_write_leaves_the_session_registered_and_warns`,
 /// `daemon_registers_by_path_on_a_broken_install_file_11828` (env_serial).
 pub async fn register_seen_session_project(

@@ -8,7 +8,8 @@
 //! What: [`register_session_checkout`] writes one path-form row for the git
 //! root holding the session's directory (the daemon's
 //! [`register_session_checkout_in`] stores a canonical managed clone by its
-//! GitHub URL, #11828), through the locked
+//! GitHub URL, #11828; a linked worktree writes its main checkout's row,
+//! #11217), through the locked
 //! [`ProjectRegistry::register_unless_present`]; [`registered_checkout`] maps an
 //! `owner/repo` key back to that checkout. Both fail closed: every store error
 //! is returned, never read as "registered".
@@ -41,8 +42,6 @@ pub enum SessionRegistration {
     },
     /// The directory is in no git checkout; nothing was written.
     NotACheckout,
-    /// The checkout is a linked worktree; its main checkout is the project.
-    LinkedWorktree,
 }
 
 /// Why [`register_session_checkout`] left the checkout unregistered.
@@ -58,6 +57,11 @@ pub enum SessionRegistrationError {
         "refusing to register {0} as a project: git does not confirm it as a checkout's top level"
     )]
     UnverifiedRoot(PathBuf),
+    /// A linked worktree whose main working tree git cannot name (#11217).
+    #[error(
+        "refusing to register the linked worktree {0}: its main checkout could not be resolved (a bare repository, or a common dir with no working tree)"
+    )]
+    MainCheckoutUnresolved(PathBuf),
     /// Another repository's row already holds the checkout's name.
     #[error("project name {name} already belongs to another repository; {root} was not registered")]
     NameTaken {
@@ -75,9 +79,13 @@ pub enum SessionRegistrationError {
 ///
 /// Why: #10368 — a session started in a checkout must be a registered target
 /// for `tm secrets` with no manual `tm project init`.
-/// What: finds the git root above `cwd`'s canonical path; no root is [`SessionRegistration::NotACheckout`]
-/// and a linked worktree is [`SessionRegistration::LinkedWorktree`], both
-/// without a write. A root that is `/`, `home` or an ancestor of `home` is
+/// What: finds the git root above `cwd`'s canonical path; no root is
+/// [`SessionRegistration::NotACheckout`], without a write. A linked worktree
+/// registers its main checkout instead (#11217, [`main_checkout_of`]): the
+/// main working tree named by `--git-common-dir` goes through every check
+/// below as if the session had started there; a main checkout git cannot
+/// name is [`SessionRegistrationError::MainCheckoutUnresolved`], and the
+/// worktree path is never stored. A root that is `/`, `home` or an ancestor of `home` is
 /// [`SessionRegistrationError::Unregistrable`] (D50). A root git does not
 /// report as its own `--show-toplevel`, or whose git-dir check fails, is
 /// [`SessionRegistrationError::UnverifiedRoot`]. A row already present (same
@@ -96,7 +104,11 @@ pub enum SessionRegistrationError {
 /// `session_start_through_a_symlink_to_home_is_refused`,
 /// `session_start_in_an_old_tilde_record_checkout_is_the_same_repo_10604`,
 /// `session_start_name_collision_with_another_repo_is_name_taken_10604`,
-/// `client_registration_keeps_the_path_form_at_the_canonical_path_11828`.
+/// `client_registration_keeps_the_path_form_at_the_canonical_path_11828`,
+/// `a_linked_worktree_session_registers_the_main_checkout_11217`,
+/// `a_worktree_whose_main_checkout_cannot_be_resolved_writes_nothing_11217`,
+/// `a_bare_repo_worktree_writes_nothing_11217`,
+/// `a_worktree_of_repo_a_never_resolves_to_repo_b_11217`.
 pub async fn register_session_checkout(
     registry_dir: &Path,
     cwd: &Path,
@@ -138,28 +150,95 @@ async fn register_checkout(
     home: Option<&Path>,
     repos_root: Option<&Path>,
 ) -> Result<SessionRegistration, SessionRegistrationError> {
-    use crate::core::project_aliases::{find_git_root, git_dir_differs_from_common};
+    use crate::core::project_aliases::find_git_root;
     // #10368: walk the real path, so a symlink cannot hide home or a parent.
     let cwd = cwd.canonicalize().map_err(ProjectStoreError::Io)?;
     let Some(root) = find_git_root(&cwd) else {
         return Ok(SessionRegistration::NotACheckout);
     };
     let root = root.canonicalize().map_err(ProjectStoreError::Io)?;
+    let root = match verified_root(&root, home)? {
+        Checkout::Main => root,
+        // #11217: owner ruling — a linked worktree registers its main
+        // checkout, which must pass the same D50 and git checks itself.
+        Checkout::LinkedWorktree => {
+            let main = main_checkout_of(&root)
+                .ok_or_else(|| SessionRegistrationError::MainCheckoutUnresolved(root.clone()))?;
+            match verified_root(&main, home)? {
+                Checkout::Main => main,
+                // #11217: a "main" that is itself a worktree is not resolved.
+                Checkout::LinkedWorktree => {
+                    return Err(SessionRegistrationError::MainCheckoutUnresolved(root));
+                }
+            }
+        }
+    };
+    store_checkout(registry_dir, root, repos_root).await
+}
+
+/// Whether a verified root is a main checkout or a linked worktree.
+enum Checkout {
+    Main,
+    LinkedWorktree,
+}
+
+/// The D50 and git checks one canonical `root` must pass before it is stored.
+///
+/// What: `/`, `home` or an ancestor of `home` is `Unregistrable`; a root git
+/// does not report as its own `--show-toplevel`, or whose git-dir probe fails,
+/// is `UnverifiedRoot`. Otherwise says whether `root` is a linked worktree.
+fn verified_root(root: &Path, home: Option<&Path>) -> Result<Checkout, SessionRegistrationError> {
+    use crate::core::project_aliases::git_dir_differs_from_common;
     // #10368: D50 — never the home directory, an ancestor of it, or `/`.
     let home = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
-    if root.parent().is_none() || home.is_some_and(|h| h.starts_with(&root)) {
-        return Err(SessionRegistrationError::Unregistrable(root));
+    if root.parent().is_none() || home.is_some_and(|h| h.starts_with(root)) {
+        return Err(SessionRegistrationError::Unregistrable(root.to_path_buf()));
     }
     // #10368: a `.git` entry is not proof; git must name this root its top
     // level, and any git failure refuses.
-    if git_toplevel(&root).as_ref() != Some(&root) {
-        return Err(SessionRegistrationError::UnverifiedRoot(root));
+    if git_toplevel(root).as_deref() != Some(root) {
+        return Err(SessionRegistrationError::UnverifiedRoot(root.to_path_buf()));
     }
-    match git_dir_differs_from_common(&root) {
-        Some(false) => {}
-        Some(true) => return Ok(SessionRegistration::LinkedWorktree),
-        None => return Err(SessionRegistrationError::UnverifiedRoot(root)),
+    match git_dir_differs_from_common(root) {
+        Some(false) => Ok(Checkout::Main),
+        Some(true) => Ok(Checkout::LinkedWorktree),
+        None => Err(SessionRegistrationError::UnverifiedRoot(root.to_path_buf())),
     }
+}
+
+/// The main working tree of the linked worktree `root`, or `None`.
+///
+/// Why: #11217 — a worktree shares its main checkout's repository, origin and
+/// therefore its secret scopes, so the main checkout is its project row.
+/// What: `git rev-parse --path-format=absolute --git-common-dir`, canonical;
+/// the main tree is that directory's parent, and only when the parent's own
+/// `.git` canonicalizes to the same common dir. A bare repository (whose
+/// common dir has no working tree above it), a missing common dir, a git
+/// failure or non-UTF-8 output is `None`: the caller refuses, never guesses.
+/// Test: `a_linked_worktree_session_registers_the_main_checkout_11217`,
+/// `a_bare_repo_worktree_writes_nothing_11217`,
+/// `a_worktree_whose_main_checkout_cannot_be_resolved_writes_nothing_11217`.
+fn main_checkout_of(root: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let common = String::from_utf8(out.stdout).ok()?;
+    let common = PathBuf::from(common.trim()).canonicalize().ok()?;
+    let main = common.parent()?.to_path_buf();
+    // #11217: fail closed — the parent must hold this very common dir.
+    (main.join(".git").canonicalize().ok()? == common).then_some(main)
+}
+
+/// Store `root`, a verified main checkout, once (#10368, #11828).
+async fn store_checkout(
+    registry_dir: &Path,
+    root: PathBuf,
+    repos_root: Option<&Path>,
+) -> Result<SessionRegistration, SessionRegistrationError> {
     // #11828: a canonical managed clone is stored by its GitHub URL.
     let repo_url = repos_root
         .and_then(|repos_root| canonical_clone_url(&root, repos_root))

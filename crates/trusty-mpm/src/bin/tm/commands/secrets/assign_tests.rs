@@ -521,6 +521,48 @@ async fn a_session_started_checkout_is_an_assign_target() {
     );
 }
 
+/// #11217: a project whose only session started in a linked worktree is an
+/// `assign` target; the session start registered the main checkout, so
+/// `assign` no longer answers "project not registered".
+#[tokio::test]
+async fn a_linked_worktree_session_makes_its_project_an_assign_target_11217() {
+    let h = harness().await;
+    seed_owner(&h, "GH_PAT", VALUE).await;
+    let home = TempDir::new().expect("tmp home");
+    let api = checkout(&h, "api", "git@github.com:Acme/Api.git");
+    let commit = [
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    ];
+    git(&api, &commit);
+    let wt = h.tmp.path().join("api-wt");
+    git(
+        &api,
+        &["worktree", "add", "-q", "-b", "wt", &wt.to_string_lossy()],
+    );
+
+    let notice = project_notice(&wt, Some(home.path())).await;
+
+    assert_eq!(notice, None, "the worktree session registered the project");
+    let registry = RegistryResolver {
+        dir: Some(registry_dir_under_home(home.path())),
+    };
+    let args = ["assign", "trusty/acme:GH_PAT", "--project", "acme/api"];
+    let outcome = assign_run(&h, &registry, person, &args).await;
+    assert_eq!(outcome.err, None);
+    assert_eq!(
+        stored(&h.keychain, API_VAULT, "GH_PAT").as_deref(),
+        Some(VALUE)
+    );
+}
+
 /// #10368 fail closed: a session start against a corrupt registry warns and
 /// registers nothing, and `assign` refuses with a fixed error and writes
 /// nothing.
