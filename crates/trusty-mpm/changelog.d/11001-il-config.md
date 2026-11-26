@@ -1,0 +1,4 @@
+Added
+
+- `tm il config show|enroll|remove|set|reset` edits the Architect IL schedule, `local/il-schedule.json`; it is the file's only writer (ADR-0077). `show` prints the file, or the built-in preset when the file is absent. `enroll <session> --project <dir> [--code <c>]` adds a session, `set thresholds.<key> <n>` sets a global threshold, `set --session <name> <key> <value>` sets a session field, `remove` drops a session, and `reset` restores the preset (`--force` over an edited file). Every verb takes `--dir`. A refused edit or a failed write exits non-zero and leaves the file unchanged (#11001).
+- The il-schedule preset carries a documented `session_example` that no reader acts on. Its reference, `crates/trusty-mpm/docs/il-schedule.md`, is generated from the preset and checked by a test (#11001).

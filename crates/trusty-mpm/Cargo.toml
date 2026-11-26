@@ -620,6 +620,8 @@ trusty-common = { workspace = true, features = [
     # #9123: the shared credential test sandbox; mutates the process
     # environment, so dev-only.
     "credential-test-sandbox",
+    # #11001: `tests/generated_docs.rs` checks the IL schedule reference.
+    "docgen",
 ] }
 # #8341: the `trusty-review` dev-dependency was REMOVED. It existed for the
 # cross-gate AC-18 golden test (DOC-15 C5 / #1362), which now lives in

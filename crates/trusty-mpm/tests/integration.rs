@@ -30,6 +30,8 @@ mod dbatg_bridge_owner_10153;
 mod disk_survey_mcp_smoke;
 #[cfg(feature = "daemon")]
 mod e2e;
+// #11001: generated doc regions (the IL schedule reference).
+mod generated_docs;
 mod inproject_hygiene_test;
 mod local_spawn;
 mod manager_cli_client;
