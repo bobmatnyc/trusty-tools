@@ -8,12 +8,15 @@
 //! `schema_version` (#11002) or a hand-added key survives an edit), [`load`]
 //! for readers, [`update`] for the locked read-modify-write, and [`reset`].
 //! The edits live in `edit`, the field table in `fields`, the generated docs
-//! in `docs`.
-//! Test: `core::il_schedule::tests`, `tests/generated_docs.rs`.
+//! in `docs`, and the preset versions with `diff` and `upgrade` in `migrate`
+//! (#11002).
+//! Test: `core::il_schedule::tests`, `core::il_schedule::migrate_tests`,
+//! `tests/generated_docs.rs`.
 
 mod docs;
 mod edit;
 mod fields;
+mod migrate;
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +26,7 @@ use serde_json::{Map, Value};
 pub use docs::{example_commands, render_docs};
 pub use edit::{Outcome, resolve_project};
 pub use fields::{SESSION_KEYS, THRESHOLDS};
+pub use migrate::{Delta, DeltaKind, Diff, SCHEMA_VERSION, diff, upgrade};
 
 /// The preset: the bytes `tm il config reset` writes and `tm fleet init` seeds.
 pub const PRESET: &str = include_str!("../../assets/architect/templates/local/il-schedule.json");
@@ -109,6 +113,20 @@ pub enum IlScheduleError {
         /// Why the value is refused.
         reason: String,
     },
+    /// #11002: a file written by a newer `tm`; ADR-0067 D3 rule 1, refuse newer.
+    #[error(
+        "{} has schema_version {found}, newer than this tm reads ({supported}); \
+         upgrade tm, the file is unchanged",
+        path.display()
+    )]
+    SchemaTooNew {
+        /// The schedule file.
+        path: PathBuf,
+        /// The file's version.
+        found: u64,
+        /// [`SCHEMA_VERSION`].
+        supported: u64,
+    },
 }
 
 /// The whole schedule file.
@@ -119,6 +137,9 @@ pub enum IlScheduleError {
 /// Test: `an_edit_keeps_unknown_keys_and_the_jobs`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schedule {
+    /// The preset version the file was written to (#11002); absent is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u64>,
     /// Cadence jobs `il-cron.py` runs; opaque to the CLI.
     #[serde(default)]
     pub jobs: Vec<Value>,
@@ -232,12 +253,14 @@ pub fn load(path: &Path) -> Result<Loaded, IlScheduleError> {
 /// A refused edit or a failed write must leave the file byte-identical and
 /// be an error (Fail-Open).
 /// What: under `trusty_common::file_lock` on the file, [`load`] (absent file
-/// = preset), then `f`. An `Err` from `f` writes nothing. `Ok` with
+/// = preset), then `f`. A `schema_version` above [`SCHEMA_VERSION`] is
+/// [`IlScheduleError::SchemaTooNew`] (#11002). An `Err` from `f` writes nothing. `Ok` with
 /// `changed` publishes the new text by `atomic_file::write_atomic`; any
 /// write failure is returned as [`IlScheduleError::Write`].
 /// Test: `enroll_then_set_then_remove_round_trips`,
 /// `a_refused_edit_leaves_the_file_byte_identical`,
-/// `a_write_failure_is_an_error_and_the_file_is_unchanged`.
+/// `a_write_failure_is_an_error_and_the_file_is_unchanged`,
+/// `a_newer_schema_is_refused_and_the_file_is_unchanged`.
 pub fn update(
     path: &Path,
     f: impl FnOnce(&mut Schedule) -> Result<Outcome, IlScheduleError>,
@@ -248,6 +271,8 @@ pub fn update(
     };
     locked(path, || {
         let mut schedule = load(path)?.schedule;
+        // #11002: this binary may drop a newer version's meaning; refuse, write nothing.
+        migrate::refuse_newer(path, schedule.schema_version.unwrap_or(0))?;
         let outcome = f(&mut schedule)?;
         if outcome.changed {
             let text = schedule
@@ -263,11 +288,16 @@ pub fn update(
 ///
 /// Why: issue #11001 AC3. `reset` drops every enrolled session, so an edited
 /// file is replaced only on request. It writes the preset bytes verbatim
-/// and does not parse the old file, so it also repairs a malformed one.
-/// What: under the lock: absent file or `force` writes the preset; a file
-/// equal to the preset is unchanged; any other file is
-/// [`IlScheduleError::Edited`].
-/// Test: `reset_refuses_an_edited_file_without_force`, `reset_force_restores_the_preset_bytes`.
+/// and needs no valid schedule, so it also repairs a malformed one. A file
+/// from a newer `tm` is never overwritten, even with `force` (#11002).
+/// What: under the lock: a file whose JSON carries an integer
+/// `schema_version` above [`SCHEMA_VERSION`] is
+/// [`IlScheduleError::SchemaTooNew`]; text that is not JSON skips that check.
+/// Then an absent file or `force` writes the preset; a file equal to the
+/// preset is unchanged; any other file is [`IlScheduleError::Edited`].
+/// Test: `reset_refuses_an_edited_file_without_force`, `reset_force_restores_the_preset_bytes`,
+/// `reset_force_refuses_a_newer_schema_and_the_file_is_unchanged`,
+/// `reset_refuses_a_newer_schema_without_force`, `reset_force_still_repairs_a_malformed_file`.
 pub fn reset(path: &Path, force: bool) -> Result<Outcome, IlScheduleError> {
     locked(path, || {
         let current = match std::fs::read_to_string(path) {
@@ -280,6 +310,15 @@ pub fn reset(path: &Path, force: bool) -> Result<Outcome, IlScheduleError> {
                 });
             }
         };
+        // #11002: refuse a newer file even with `force`. Only `schema_version`
+        // is read, and unparsable text skips the check, so it is still repaired.
+        let found = current
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .and_then(|doc| doc.get("schema_version").and_then(Value::as_u64));
+        if let Some(found) = found {
+            migrate::refuse_newer(path, found)?;
+        }
         if current.as_deref() == Some(PRESET) {
             return Ok(Outcome::unchanged("unchanged: the schedule is the preset"));
         }
@@ -315,5 +354,7 @@ fn locked<R>(
     trusty_common::file_lock::with_exclusive_lock(path, f).map_err(write_err)?
 }
 
+#[cfg(test)]
+mod migrate_tests;
 #[cfg(test)]
 mod tests;

@@ -13,11 +13,29 @@ at which context thresholds (SPEC-IL-01, section 7), and which cadence jobs
 | `tm il config set thresholds.<key> <n>` | Set a global threshold. |
 | `tm il config set --session <name> <key> <value>` | Set a session field: `project`, `code`, `signals`, `state_path`, `thresholds.<key>`. |
 | `tm il config remove <session>` | Drop a session entry. |
+| `tm il config diff` | Compare the file with the current preset; writes nothing. |
+| `tm il config update` | Migrate the file to the current `schema_version`, keeping your edits. |
 | `tm il config reset [--force]` | Restore the preset; a file that differs needs `--force`. |
 
 Every verb takes `--dir <architect-dir>`; the default is the recorded
 Architect. A refused edit or a failed write leaves the file unchanged and
 exits non-zero.
+
+## Preset updates
+
+The file carries `schema_version` (ADR-0077 D6); a file without it is
+version 0. `tm fleet init` never rewrites an existing schedule, so a newer
+preset reaches an install only through `tm il config update`.
+
+- `diff` compares each key with the current preset. A key that still holds
+  the value of the preset the file was written from is marked `apply`: the
+  update takes the new preset value. Any other difference is marked `edit`:
+  the update keeps it. An enrolled `sessions` list is one edit.
+- `update` copies the file to `il-schedule.json.v<N>.bak` first and stops if
+  the copy fails. It then runs one migration step per version, in order, and
+  writes the result. A file that is already current is left unchanged.
+- A file with a `schema_version` newer than this `tm` reads is refused by
+  every verb except `show` and `reset --force`, and is left unchanged.
 
 ## Reference
 
@@ -31,6 +49,7 @@ Generated from the preset embedded in `tm` (`crates/trusty-mpm/src/assets/archit
 
 | Key | Meaning |
 |---|---|
+| `schema_version` | The preset version the file follows; absent means 0. `tm il config diff` compares the file with the current preset, `tm il config update` migrates it. |
 | `jobs` | Cadence jobs `il-cron.py` runs: `{name, due, every, command}`. Not edited by `tm il config`. |
 | `sessions` | Enrolled sessions, one entry each (see Session fields). Edited by `enroll`, `set --session` and `remove`. |
 | `thresholds` | Global clear thresholds (see Thresholds). Edited by `set thresholds.<key>`. |
