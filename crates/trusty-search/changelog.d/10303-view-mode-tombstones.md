@@ -1,0 +1,4 @@
+Changed
+- Removing chunks from an index served from its mmap view no longer copies the vector index to the heap. The removal writes the removed keys to `hnsw.tombstones.json` beside `hnsw.usearch`; `hnsw.keys.json` and the binary stay unchanged until the next save of a promoted index, which deletes the file. Search, `len` and membership checks skip tombstoned keys (#10303).
+- A batch removal (`search.index.files.remove`) writes one tombstone file per slice instead of promoting the index. Its memory bound drops the "one copy of the vector index" for a view-mode index (#10303).
+- A present but unreadable or corrupt `hnsw.tombstones.json` fails the snapshot load instead of reading as empty. A tombstone file written against another key sidecar is ignored. The reindex swap clears or carries the file, `migrate-storage` moves it, and the staging reaper removes its orphaned temp files. Older binaries ignore the file (#10303).

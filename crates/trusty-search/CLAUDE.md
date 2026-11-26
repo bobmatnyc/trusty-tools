@@ -1130,11 +1130,10 @@ unchanged.
   "matched_chunks", "removed_files", "removed_chunks" }`. A dry run answers the
   counts with `removed_*: 0` and changes nothing; the real run then removes
   what it counted.
-- **Memory bound**: peak memory is baseline plus ONE copy of the vector
-  index per batch call, not per file. The copy comes from a view-mode HNSW
-  index promoted to the heap (`UsearchStore::remove` calls `ensure_mutable`)
-  and is released at the write-cooldown demote. The host needs free memory
-  for one copy of the vector index. The selected rows are read by redb key
+- **Memory bound**: a view-mode HNSW index is not copied (#10303): the
+  removal writes the removed keys to `hnsw.tombstones.json`, one write per
+  slice, and the next save of a promoted index folds them in and deletes the
+  file. An index already on the heap removes in place. The selected rows are read by redb key
   range, so the removal path itself rehydrates no chunks; the one scheduled
   graph rebuild rehydrates the corpus, and if the scan outlasts its bounded
   wait the rebuild is deferred, the durable mark stays set and the ticker

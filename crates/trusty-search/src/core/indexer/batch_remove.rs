@@ -399,21 +399,10 @@ impl CodeIndexer {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        let mut failed = 0usize;
-        let mut first: Option<anyhow::Error> = None;
-        for id in ids {
-            if let Err(e) = store.remove(id).await {
-                failed += 1;
-                first.get_or_insert(e);
-            }
-        }
-        match first {
-            None => Ok(()),
-            Some(e) => Err(e.context(format!(
-                "{failed} of {} vector deletes failed; their redb rows are gone, \
-                 and a retry removes the vectors",
-                ids.len()
-            ))),
-        }
+        // #10303: one call, so a view-mode store writes one tombstone file.
+        store
+            .remove_many(ids)
+            .await
+            .map_err(|e| e.context("their redb rows are gone, and a retry removes the vectors"))
     }
 }
