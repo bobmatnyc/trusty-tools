@@ -33,6 +33,10 @@ pub(crate) enum Reply {
     Created,
     /// `{"status": "exists"}`.
     Exists,
+    /// `{"status": "aliased", "alias_of": "widget"}` — linked to a folder palace.
+    Aliased,
+    /// `{"status": "exists", "alias_of": "widget"}` — a live alias held the id.
+    ExistsAlias,
     /// A -32603 refusal naming the palace and the reason, as the daemon sends.
     Refused,
     /// Never answers within any launch budget.
@@ -64,6 +68,12 @@ impl RpcFallback for Stub {
                 Ok(json!({"palace_id": name, "status": "created", "bootstrap": null}))
             }
             Reply::Exists => Ok(json!({"palace_id": name, "status": "exists", "bootstrap": null})),
+            Reply::Aliased => {
+                Ok(json!({"palace_id": name, "status": "aliased", "alias_of": "widget"}))
+            }
+            Reply::ExistsAlias => {
+                Ok(json!({"palace_id": name, "status": "exists", "alias_of": "widget"}))
+            }
             Reply::Refused => Err(RpcError::new(
                 -32603,
                 format!("palace name '{name}' does not match the project palace 'other'"),
@@ -203,6 +213,34 @@ fn an_existing_palace_is_not_a_warning() {
         }
     );
     assert_eq!(out.warning(), None);
+}
+
+/// Why (#11823): a create the daemon answers by linking to the folder-named
+/// palace, or an id already held by a live alias, is success — never a warning.
+/// Test: itself.
+#[test]
+fn an_alias_reply_is_success_not_a_warning() {
+    let project = widget();
+    for (reply, want) in [
+        (
+            Reply::Aliased,
+            LaunchPalace::Aliased {
+                palace: PALACE.into(),
+                target: "widget".into(),
+            },
+        ),
+        (
+            Reply::ExistsAlias,
+            LaunchPalace::Exists {
+                palace: PALACE.into(),
+            },
+        ),
+    ] {
+        let daemon = StubDaemon::start(reply);
+        let out = create_launch_palace_at(daemon.socket(), project.path(), PALACE, CREATE_BUDGET);
+        assert_eq!(out, want);
+        assert_eq!(out.warning(), None, "{out:?}");
+    }
 }
 
 /// Why: -32603 is both "refused" and "internal fault"; either way the daemon

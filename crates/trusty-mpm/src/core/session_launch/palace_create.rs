@@ -232,7 +232,7 @@ fn first_ask_in_window(project_dir: &Path, palace: &str, now: Instant) -> bool {
 /// runtime can block on it. Probes the socket first, then sends
 /// `palace_create` with `{name, cwd}`; the whole call is bounded by `budget`.
 /// Test: `a_missing_palace_is_created_with_cwd_and_no_force`,
-/// `an_existing_palace_is_not_a_warning`,
+/// `an_existing_palace_is_not_a_warning`, `an_alias_reply_is_success_not_a_warning`,
 /// `a_hung_daemon_is_unreachable_within_the_budget`.
 pub(crate) fn create_launch_palace_at(
     socket: &Path,
