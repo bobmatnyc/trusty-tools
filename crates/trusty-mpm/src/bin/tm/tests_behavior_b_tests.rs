@@ -2601,3 +2601,117 @@ fn a_managed_launch_stamps_its_model_for_the_fable_cap() {
         assert_eq!(deny.is_some(), refused, "{model}: {deny:?}");
     }
 }
+
+/// A provisioned fallback base for the #10102 `tm launch` sandbox tests:
+/// `(repos_root guard, base clone, live checkout, origin)`.
+fn sandbox_launch_fixture(
+    tag: &str,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    tempfile::TempDir,
+    String,
+) {
+    let origin = format!("https://github.com/test-owner-{tag}/test-repo-{tag}.git");
+    let repos_root = tempfile::tempdir().unwrap();
+    let root = repos_root.path().canonicalize().unwrap();
+    let base = root
+        .join(format!("test-owner-{tag}"))
+        .join(format!("test-repo-{tag}"));
+    fallback_git_repo(&base);
+    fallback_git_remote(&base, &origin);
+    let live = tempfile::tempdir().unwrap();
+    fallback_git_repo(live.path());
+    fallback_git_remote(live.path(), &origin);
+    (repos_root, base, live, origin)
+}
+
+/// #10102: `tm launch` writes the PM sandbox into the worktree and tm's user
+/// tier, and the launch goes ahead only once both verify.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_applies_the_pm_sandbox_before_the_session() {
+    let (repos_root, base, live, _origin) = sandbox_launch_fixture("10102a");
+    let _env = ReposRootEnv::set(&repos_root.path().canonicalize().unwrap());
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
+    let client = reqwest::Client::new();
+    let run = run_fallback(
+        &client,
+        &url,
+        live.path(),
+        &empty_disk(),
+        Some(fw_home.path()),
+    )
+    .await;
+    // The test has no terminal, so the final attach fails; the sandbox step
+    // runs well before it and must not be what stopped the launch.
+    if let Err(err) = &run.result {
+        assert!(!format!("{err:#}").contains("#8928"), "{err:#}");
+    }
+    let worktree = std::fs::read_dir(base.join(".worktrees"))
+        .expect(".worktrees")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .next()
+        .expect("one worktree");
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(worktree.join(".claude/settings.json")).expect("settings"),
+    )
+    .expect("json");
+    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
+    assert!(
+        worktree.join(".trusty-mpm/sandbox-roles.json").exists(),
+        "the PM role is recorded"
+    );
+}
+
+/// #10102 Fail-Open Check: a worktree whose sandbox does not verify — a
+/// committed `settings.local.json` turning it off — refuses `tm launch`, and
+/// no session starts.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_refuses_a_sandbox_that_does_not_verify() {
+    let (repos_root, base, live, _origin) = sandbox_launch_fixture("10102b");
+    std::fs::create_dir_all(base.join(".claude")).unwrap();
+    std::fs::write(
+        base.join(".claude/settings.local.json"),
+        r#"{"sandbox":{"enabled":false}}"#,
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&base)
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["add", "-f", ".claude/settings.local.json"]);
+    git(&["commit", "-m", "local override"]);
+    let _env = ReposRootEnv::set(&repos_root.path().canonicalize().unwrap());
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
+    let client = reqwest::Client::new();
+    let run = run_fallback(
+        &client,
+        &url,
+        live.path(),
+        &empty_disk(),
+        Some(fw_home.path()),
+    )
+    .await;
+    let err = run
+        .result
+        .expect_err("an unverified sandbox refuses the launch");
+    assert!(
+        format!("{err:#}").contains("settings.local.json"),
+        "{err:#}"
+    );
+    assert!(
+        run.private_sessions.is_empty(),
+        "{:?}",
+        run.private_sessions
+    );
+}

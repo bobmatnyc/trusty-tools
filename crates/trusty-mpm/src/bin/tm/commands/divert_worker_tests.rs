@@ -238,3 +238,83 @@ fn worker_available_reports_the_resolver() {
         trusty_common::bin_resolve::resolve_binary(WORKER_BINARY).is_some()
     );
 }
+
+/// A scratch workspace, home and tm-owned config dir for the #10102 tests.
+fn sandbox_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let ws = root.join("ws");
+    std::fs::create_dir_all(ws.join(".claude")).unwrap();
+    let config = root.join("home/.trusty-tools/trusty-mpm/claude-config");
+    (tmp, ws, root.join("home"), config)
+}
+
+/// #10102 Fail-Open Check: with no config dir, or a workspace whose sandbox
+/// does not verify, the worker never starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sandboxed_worker_refuses_before_it_starts() {
+    let (tmp, ws, home, config) = sandbox_fixture();
+    let marker = tmp.path().join("started");
+    let fake = tmp.path().join("claude");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        format!("#!/bin/sh\n/usr/bin/touch {}\n", marker.display()),
+    )
+    .expect("install the stand-in worker");
+    let unset = WorkerSandbox {
+        workspace: &ws,
+        home: Some(&home),
+        config_dir: None,
+    };
+    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(5), &unset)
+        .await
+        .expect_err("no config dir refuses");
+    assert!(err.contains("CLAUDE_CONFIG_DIR"), "{err}");
+    std::fs::write(
+        ws.join(".claude/settings.local.json"),
+        r#"{"sandbox":{"enabled":false}}"#,
+    )
+    .unwrap();
+    let set = WorkerSandbox {
+        workspace: &ws,
+        home: Some(&home),
+        config_dir: Some(&config),
+    };
+    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(5), &set)
+        .await
+        .expect_err("an unverified sandbox refuses");
+    assert!(err.contains("settings.local.json"), "{err}");
+    assert!(!marker.exists(), "the worker must not start");
+}
+
+/// #10102: the agent sandbox is written and verified, then the worker runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sandboxed_worker_runs_after_the_sandbox_verifies() {
+    let (tmp, ws, home, config) = sandbox_fixture();
+    let fake = tmp.path().join("claude");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        "#!/bin/sh\ncat >/dev/null\necho '{\"result\":\"ok\"}'\n",
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: Some(&home),
+        config_dir: Some(&config),
+    };
+    let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect("the worker answers");
+    assert_eq!(reply.text, "ok");
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(ws.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
+    assert!(
+        std::fs::read_to_string(ws.join(".trusty-mpm/sandbox-roles.json"))
+            .unwrap()
+            .contains("\"agent\"")
+    );
+}

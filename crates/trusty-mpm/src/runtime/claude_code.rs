@@ -338,6 +338,31 @@ fn owner_settings(
         .map_err(|err| RuntimeError::Spawn(err.to_string()))
 }
 
+/// Write and verify the sandbox for a managed launch in `cwd` (#10102).
+///
+/// Why: #8928 step 6 — a managed spawn, resume or in-place relaunch starts
+/// only inside the sandbox its profile's role asked for.
+/// What: [`crate::core::session_launch::apply_launch_sandbox`] for
+/// `profile`'s role, with `config_dir` as the user tier and the home from
+/// [`crate::core::launch_home::sandbox_launch_home`]. FAIL-CLOSED: an
+/// error, or no resolvable home, refuses the launch.
+/// Test: `spawn_writes_and_verifies_the_sandbox_before_the_line`,
+/// `spawn_refuses_when_the_sandbox_does_not_verify`,
+/// `a_split_config_base_sandbox_names_the_real_home`.
+fn managed_sandbox(
+    cwd: &Path,
+    config_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+) -> Result<(), RuntimeError> {
+    use crate::core::session_launch as sl;
+    // #10102: the real (sandbox-aware) home, never `fw.root`'s parent — that is
+    // the config base, which can sit off `$HOME`. No home refuses the launch.
+    let home = crate::core::launch_home::sandbox_launch_home().map_err(RuntimeError::Spawn)?;
+    let inputs = sl::launch_sandbox_inputs(cwd, &home);
+    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, Some(config_dir))
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))
+}
+
 /// [`prepare_managed_config`] with the hook binary pinned by the caller.
 ///
 /// Why (#7244): provisioning writes the managed hook triad, and that write
@@ -622,6 +647,8 @@ fn build_inplace_resume_command_with(
     let (prompt_file, profile) = build_prompt_file_in(&fw.root, prompt_dir, cwd, None);
     // #8286: a relaunched PM pane never runs without its prompt.
     let prompt_file = prompt_file?;
+    // #10102: the relaunched pane starts only inside its verified sandbox.
+    managed_sandbox(cwd, &config_dir, profile)?;
     let mut args = compose_inplace_args(
         cwd,
         Some(&config_dir),
@@ -872,6 +899,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let (prompt_file, profile) =
             build_prompt_file_in(&self.fw.root, &self.prompt_dir, cwd, Some(session_id));
         let prompt_file = prompt_file?;
+        // #10102: the role's sandbox is written and verified before the line is sent.
+        managed_sandbox(cwd, &config_dir, profile)?;
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -1014,6 +1043,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let (prompt_file, profile) =
             build_prompt_file_in(&self.fw.root, &self.prompt_dir, cwd, Some(session_id));
         let prompt_file = prompt_file?;
+        // #10102: the role's sandbox is written and verified before the line is sent.
+        managed_sandbox(cwd, &config_dir, profile)?;
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to

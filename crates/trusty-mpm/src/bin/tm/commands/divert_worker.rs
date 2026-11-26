@@ -264,7 +264,54 @@ pub(crate) async fn spawn_worker(
 ) -> Result<WorkerReply, String> {
     let program =
         resolve_worker_binary().ok_or_else(|| format!("`{WORKER_BINARY}` is not on PATH"))?;
-    spawn_worker_at(&program, model, payload, timeout).await
+    let workspace = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
+    let home = dirs::home_dir();
+    // #10102: the parent session's `CLAUDE_CONFIG_DIR`; unset refuses.
+    let config_dir = trusty_mpm::core::session_launch::user_tier_config_dir(None, None);
+    let sandbox = WorkerSandbox {
+        workspace: &workspace,
+        home: home.as_deref(),
+        config_dir: config_dir.as_deref(),
+    };
+    spawn_sandboxed_worker_at(&program, model, payload, timeout, &sandbox).await
+}
+
+/// Where a divert worker's sandbox is written (#10102).
+pub(crate) struct WorkerSandbox<'a> {
+    /// The worker's working directory: the parent session's workspace.
+    pub(crate) workspace: &'a Path,
+    /// The operator's home.
+    pub(crate) home: Option<&'a Path>,
+    /// The parent session's `CLAUDE_CONFIG_DIR`, the worker's user tier.
+    pub(crate) config_dir: Option<&'a Path>,
+}
+
+/// Write and verify the agent sandbox, then run the worker.
+///
+/// Why: #8928 step 6 — the divert worker is a `claude` launch too, so it
+/// starts only inside the agent role's verified sandbox.
+/// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
+/// [`trusty_mpm::core::session_launch::SandboxRole::Agent`]; on success
+/// [`spawn_worker_at`]. FAIL-CLOSED: no home, no config dir or a refused
+/// read-back returns `Err` before the worker starts, which the caller turns
+/// into a fall-through.
+/// Test: `a_sandboxed_worker_refuses_before_it_starts`,
+/// `a_sandboxed_worker_runs_after_the_sandbox_verifies`.
+pub(crate) async fn spawn_sandboxed_worker_at(
+    program: &Path,
+    model: &str,
+    payload: &str,
+    timeout: Duration,
+    sandbox: &WorkerSandbox<'_>,
+) -> Result<WorkerReply, String> {
+    use trusty_mpm::core::session_launch as sl;
+    let home = sandbox.home.ok_or_else(|| {
+        "no home directory resolved; the worker sandbox cannot be applied".to_owned()
+    })?;
+    let inputs = sl::launch_sandbox_inputs(sandbox.workspace, home);
+    sl::apply_launch_sandbox(sl::SandboxRole::Agent, &inputs, sandbox.config_dir)
+        .map_err(|e| e.to_string())?;
+    spawn_worker_at(program, model, payload, timeout).await
 }
 
 /// Run a specific worker binary and return its reply.

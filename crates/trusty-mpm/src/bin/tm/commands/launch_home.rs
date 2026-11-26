@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// `scripts/sandbox_daemon.sh` sets up) wrote `session-mcp/` and its owner
 /// settings under the client's own `$HOME`, outside the sandbox.
 /// What: reads the env and the process home, then defers to
-/// [`resolve_launch_home`].
+/// [`resolve_launch_home`], which lives in the library.
 /// Test: `sandboxed_launch_home_is_the_sandbox_home_not_the_process_home`.
 pub(crate) fn launch_home() -> anyhow::Result<Option<PathBuf>> {
     resolve_launch_home(
@@ -23,48 +23,12 @@ pub(crate) fn launch_home() -> anyhow::Result<Option<PathBuf>> {
         std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).as_deref(),
         dirs::home_dir(),
     )
+    .map_err(|err| anyhow::anyhow!(err))
 }
 
-/// Pure core of [`launch_home`], with the env passed in.
-///
-/// Why: tests must not mutate process-global env (common-pitfalls.md).
-/// What: `sandbox` exactly `1` gives `<parent of data_override>/home`, the
-/// layout `sandbox_daemon.sh` creates; an unset, relative or rootless override
-/// is an error, never a fall back to `home` (Fail-Open Check). Otherwise `home`.
-/// Test: `sandboxed_launch_home_is_the_sandbox_home_not_the_process_home`,
-/// `sandboxed_launch_home_refuses_without_a_data_override`,
-/// `unsandboxed_launch_home_is_the_process_home`.
-pub(crate) fn resolve_launch_home(
-    sandbox: Option<&std::ffi::OsStr>,
-    data_override: Option<&std::ffi::OsStr>,
-    home: Option<PathBuf>,
-) -> anyhow::Result<Option<PathBuf>> {
-    // #11077: the sandbox flag routes every launch-time write into the sandbox.
-    if sandbox != Some(std::ffi::OsStr::new("1")) {
-        return Ok(home);
-    }
-    let data = data_override
-        .filter(|raw| !raw.is_empty())
-        .map(Path::new)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "TRUSTY_SANDBOX=1 but TRUSTY_DATA_DIR_OVERRIDE is not an absolute path; \
-                 refusing to write launch files under the real home (#11077)"
-            )
-        })?;
-    let root = data
-        .parent()
-        .filter(|parent| parent.parent().is_some())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "TRUSTY_DATA_DIR_OVERRIDE={} has no sandbox dir above it; refusing to \
-             write launch files under the real home (#11077)",
-                data.display()
-            )
-        })?;
-    Ok(Some(root.join("home")))
-}
+// #10102: the pure core moved to the library, so the daemon's managed spawn
+// names the same sandbox-aware home.
+pub(crate) use trusty_mpm::core::launch_home::resolve_launch_home;
 
 /// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and
 /// trust-seeding it under `home`.
@@ -92,6 +56,31 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
         );
     }
     dir
+}
+
+/// Write and verify the launch's sandbox in `workspace` (#10102).
+///
+/// Why: #8928 step 6 — `tm launch`, `tm connect` and the Architect launch
+/// start `claude` only inside the sandbox their role asked for.
+/// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
+/// `profile`'s role, with `config_dir` (the relocated `CLAUDE_CONFIG_DIR`) as
+/// the user tier. FAIL-CLOSED: no home, no config dir, or a read-back that
+/// does not verify is an error, and every caller refuses its launch on it.
+/// Test: `apply_sandbox_refuses_without_a_config_dir_and_applies_with_one`,
+/// `apply_sandbox_refuses_a_workspace_that_does_not_verify`.
+pub(crate) fn apply_sandbox(
+    workspace: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+) -> anyhow::Result<()> {
+    use trusty_mpm::core::session_launch as sl;
+    let home = home.ok_or_else(|| {
+        anyhow::anyhow!("no home directory resolved; the sandbox cannot be applied")
+    })?;
+    let inputs = sl::launch_sandbox_inputs(workspace, home);
+    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, config_dir)
+        .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 /// Compose the session-scoped MCP config and the owner settings file under
@@ -153,6 +142,8 @@ pub(crate) fn strip_global_hooks(home: Option<&Path>) {
 
 #[cfg(test)]
 mod tests {
+    use super::apply_sandbox;
+
     /// #8988: a workspace with no owner gets its session-MCP file and no
     /// settings file, so `tm launch`/`tm connect` argv stays as before.
     #[test]
@@ -208,5 +199,43 @@ mod tests {
                 super::resolve_launch_home(flag, Some(OsStr::new("/tmp/sbx/data")), home.clone());
             assert_eq!(got.expect("no sandbox never refuses"), home);
         }
+    }
+
+    /// #10102: no config dir refuses; a tm-owned one applies and verifies.
+    #[test]
+    fn apply_sandbox_refuses_without_a_config_dir_and_applies_with_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        let home = root.join("home");
+        let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
+        let err = apply_sandbox(&ws, Some(&home), None, pm).expect_err("unset refuses");
+        assert!(err.to_string().contains("CLAUDE_CONFIG_DIR"), "{err}");
+        assert!(!home.join(".claude").exists(), "no `~/.claude` write");
+        let config =
+            trusty_mpm::core::paths::FrameworkPaths::under(&home).managed_claude_config_dir();
+        apply_sandbox(&ws, Some(&home), Some(&config), pm).expect("applies");
+        assert!(config.join("settings.json").exists());
+    }
+
+    /// #10102 Fail-Open Check: a workspace whose read-back fails is an error.
+    #[test]
+    fn apply_sandbox_refuses_a_workspace_that_does_not_verify() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join(".claude")).expect("mkdir");
+        std::fs::write(
+            ws.join(".claude/settings.local.json"),
+            r#"{"sandbox":{"enabled":false}}"#,
+        )
+        .expect("plant");
+        let home = root.join("home");
+        let config =
+            trusty_mpm::core::paths::FrameworkPaths::under(&home).managed_claude_config_dir();
+        let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
+        let err = apply_sandbox(&ws, Some(&home), Some(&config), pm).expect_err("refuses");
+        assert!(err.to_string().contains("settings.local.json"), "{err}");
     }
 }

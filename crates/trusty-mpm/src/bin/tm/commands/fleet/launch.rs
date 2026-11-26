@@ -292,6 +292,13 @@ impl Prepared {
         )?;
         // #8988: an Architect dir sits at depth 1, so it resolves no owner.
         // #8992: the profile is passed anyway; an Architect never gets skills/tools.
+        // #10102: the Architect's unsandboxed policy, verified, or no launch.
+        crate::commands::launch_home::apply_sandbox(
+            dir,
+            Some(home),
+            config_dir.as_deref(),
+            cli.profile,
+        )?;
         let files = crate::commands::launch_home::launch_files(
             dir,
             config_dir.as_deref(),

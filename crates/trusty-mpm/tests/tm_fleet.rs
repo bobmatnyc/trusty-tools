@@ -2132,3 +2132,40 @@ fn architect_restart_on_a_busy_box_exits_2_and_stops_nothing() {
     );
     assert_eq!(env.launches(2).len(), 1, "restart launched a claude");
 }
+
+/// #10102: the Architect launch writes its unsandboxed policy into its
+/// directory and verifies it before the session starts.
+#[test]
+fn fleet_init_applies_the_architect_sandbox_before_the_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join(".claude/settings.json")).expect("project settings"),
+    )
+    .expect("json");
+    assert_eq!(settings["sandbox"]["enabled"], false, "{settings}");
+    let record = std::fs::read_to_string(dir.join(".trusty-mpm/sandbox-roles.json"))
+        .expect("the role record");
+    assert!(record.contains("\"architect\""), "{record}");
+}
+
+/// #10102 Fail-Open Check: a sandbox the Architect cannot apply refuses the
+/// launch — here the directory already holds a sandboxed PM's policy — and
+/// no session starts.
+#[test]
+fn fleet_init_refuses_when_the_architect_sandbox_cannot_be_applied() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join(".trusty-mpm")).expect("mkdir");
+    std::fs::write(
+        dir.join(".trusty-mpm/sandbox-roles.json"),
+        r#"{"pm":{"sandbox":{"enabled":true}}}"#,
+    )
+    .expect("plant a PM record");
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("`pm` role"), "{}", text(&out));
+    assert!(!env.has_session("tm-architect"), "{}", text(&out));
+}

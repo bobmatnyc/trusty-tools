@@ -2216,3 +2216,183 @@ fn an_architect_inplace_relaunch_carries_the_lockdown() {
     let missing = tmp.path().join("gone.json");
     assert!(super::inplace_tail_args(SessionProfile::Architect, Some(&missing)).is_err());
 }
+
+/// #10102: a managed spawn writes the PM sandbox into the workspace and tm's
+/// user tier, and both verify, before the launch line is typed.
+#[test]
+#[serial_test::serial]
+fn spawn_writes_and_verifies_the_sandbox_before_the_line() {
+    // #9123: the spawn resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    drive_spawn(&fake, &home);
+    let read = |p: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(p).expect("read")).expect("json")
+    };
+    let project = read(&home.home().join(".claude/settings.json"));
+    assert_eq!(
+        project.pointer("/sandbox/enabled"),
+        Some(&serde_json::json!(true))
+    );
+    let fw = FrameworkPaths::from_root(home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME));
+    let config_dir = fw.managed_claude_config_dir();
+    let mut inputs = crate::core::session_launch::SandboxInputs::new(home.home(), home.home());
+    inputs.cargo_target_dir = None;
+    crate::core::session_launch::verify_sandbox_settings(
+        crate::core::session_launch::SandboxRole::Pm,
+        &inputs,
+        &config_dir,
+    )
+    .expect("the spawned workspace verifies");
+}
+
+/// #10102 Fail-Open Check: a sandbox that does not verify refuses the spawn
+/// and the resume, and nothing is typed into the pane.
+#[test]
+#[serial_test::serial]
+fn spawn_refuses_when_the_sandbox_does_not_verify() {
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let local = home.home().join(".claude/settings.local.json");
+    std::fs::create_dir_all(local.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&local, r#"{"sandbox":{"enabled":false}}"#).expect("plant override");
+    let adapter = ClaudeCodeAdapter::new(
+        fake.clone(),
+        &home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME),
+    );
+    let err = adapter
+        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect_err("an unverified sandbox must refuse the spawn");
+    assert!(err.to_string().contains("settings.local.json"), "{err}");
+    let err = adapter
+        .spawn_resume(
+            "tm-sess",
+            None,
+            home.home(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect_err("an unverified sandbox must refuse the resume");
+    assert!(err.to_string().contains("settings.local.json"), "{err}");
+    assert!(
+        fake.sends.lock().expect("send log").is_empty()
+            && fake.pane_sends.lock().expect("pane send log").is_empty(),
+        "a refused launch must type nothing into the pane"
+    );
+}
+
+/// #10102 fix round: the in-place relaunch writes the PM sandbox into a good
+/// workspace, and refuses — building no command — on one that does not verify.
+#[test]
+#[serial_test::serial]
+fn inplace_relaunch_applies_the_sandbox_and_refuses_an_unverified_one() {
+    // #9123: the relaunch resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let fw = FrameworkPaths::from_root(home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME));
+    let prompts = home.home().join("prompts");
+    std::fs::create_dir_all(&prompts).expect("mkdir prompts");
+
+    let good = home.home().join("good");
+    std::fs::create_dir_all(&good).expect("mkdir good");
+    build_inplace_resume_command_with(&fw, &prompts, &good, None).expect("a good workspace");
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(good.join(".claude/settings.json")).expect("settings"),
+    )
+    .expect("json");
+    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
+
+    let bad = home.home().join("bad");
+    std::fs::create_dir_all(bad.join(".claude")).expect("mkdir bad");
+    std::fs::write(
+        bad.join(".claude/settings.local.json"),
+        r#"{"sandbox":{"enabled":false}}"#,
+    )
+    .expect("plant override");
+    let err = build_inplace_resume_command_with(&fw, &prompts, &bad, None)
+        .map(|_| ())
+        .expect_err("an unverified sandbox refuses the relaunch");
+    assert!(err.to_string().contains("settings.local.json"), "{err}");
+}
+
+/// #10102 critic CRITICAL: with the config base off `$HOME` (#11821 P3), the
+/// spawn, resume and in-place relaunch name the real home's `.ssh` and `.aws`
+/// in `denyRead` and the `Read(...)` deny rules, never the config base's.
+#[test]
+#[serial_test::serial]
+fn a_split_config_base_sandbox_names_the_real_home() {
+    // #9123: every path resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let base_tmp = tempfile::tempdir().expect("config base");
+    let base = base_tmp.path();
+    let root = base.join(".trusty-mpm");
+    let ws = |name: &str| {
+        let dir = home.home().join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir ws");
+        dir
+    };
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &root);
+    let spawned = ws("spawned");
+    adapter
+        .spawn("tm-sess", &spawned, "task", TEST_SESSION_ID, &[])
+        .expect("spawn");
+    let resumed = ws("resumed");
+    adapter
+        .spawn_resume(
+            "tm-sess",
+            None,
+            &resumed,
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("resume");
+    let relaunched = ws("relaunched");
+    let prompts = ws("prompts");
+    let fw = FrameworkPaths::from_root(&root);
+    build_inplace_resume_command_with(&fw, &prompts, &relaunched, None).expect("relaunch");
+
+    for dir in [&spawned, &resumed, &relaunched] {
+        let raw = std::fs::read_to_string(dir.join(".claude/settings.json")).expect("settings");
+        let settings: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        let deny_read = &settings["sandbox"]["filesystem"]["denyRead"];
+        let deny = &settings["permissions"]["deny"];
+        for secret in [".ssh", ".aws"] {
+            let real = home.home().join(secret).display().to_string();
+            let named = |v: &serde_json::Value| {
+                v.as_array()
+                    .expect("array")
+                    .iter()
+                    .any(|e| e.as_str().is_some_and(|s| s.contains(&real)))
+            };
+            assert!(
+                named(deny_read),
+                "{dir:?} denyRead lacks {real}: {deny_read}"
+            );
+            assert!(named(deny), "{dir:?} deny lacks {real}: {deny}");
+            let wrong = base.join(secret).display().to_string();
+            assert!(
+                !raw.contains(&wrong),
+                "{dir:?} names the config base: {raw}"
+            );
+        }
+    }
+}

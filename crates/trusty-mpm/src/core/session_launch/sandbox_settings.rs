@@ -14,8 +14,8 @@
 //! merges them into the project file (through `merge_settings`, under the
 //! settings lock) and into the user file (under the same lock), then
 //! [`verify_sandbox_settings`] reads both back and refuses the launch when
-//! the merged result is not the sandbox it asked for. Nothing calls this yet:
-//! wiring every launch path is step 6.
+//! the merged result is not the sandbox it asked for. #10102 (step 6): every
+//! launch path calls it through `sandbox_launch::apply_launch_sandbox`.
 //! Test: `sandbox_settings_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -24,6 +24,13 @@ use serde_json::{Value, json};
 
 use super::PrepError;
 pub use super::sandbox_settings_verify::verify_sandbox_settings;
+pub use sandbox_launch::{apply_launch_sandbox, launch_sandbox_inputs, sandbox_role_for};
+
+// #10102: children here, not in `mod.rs`, which sits at the SLOC cap.
+#[path = "sandbox_launch.rs"]
+mod sandbox_launch;
+#[path = "sandbox_roles.rs"]
+mod sandbox_roles;
 
 /// Which policy a session gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +58,9 @@ pub struct SandboxInputs {
     pub mpm_socket: Option<PathBuf>,
     /// The shared `CARGO_TARGET_DIR`, which cargo must be able to write.
     pub cargo_target_dir: Option<PathBuf>,
+    /// The sccache server socket, when the operator runs one. Only the
+    /// unsandboxed Architect gets its client env (#10102).
+    pub sccache_socket: Option<PathBuf>,
 }
 
 impl SandboxInputs {
@@ -109,10 +119,22 @@ pub const DENIED_ENV_VARS: [&str; 11] = [
 /// Test: `the_pm_policy_names_every_socket_and_no_local_binding`,
 /// `the_agent_policy_has_no_tmux_socket`, `the_architect_policy_disables_the_sandbox`,
 /// `sandboxed_roles_never_reach_the_sccache_socket`,
-/// `the_project_policy_pins_the_permissive_booleans_off`.
+/// `the_project_policy_pins_the_permissive_booleans_off`,
+/// `only_the_architect_gets_the_sccache_client_env`.
 pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     if role == SandboxRole::Architect {
-        return json!({ "sandbox": { "enabled": false } });
+        // #10102: the unsandboxed role builds through the sccache server.
+        let env: serde_json::Map<String, Value> = inputs
+            .sccache_socket
+            .iter()
+            .flat_map(|socket| crate::core::sccache_socket::client_env(socket))
+            .map(|(k, v)| (k.to_owned(), Value::String(v)))
+            .collect();
+        let mut policy = json!({ "sandbox": { "enabled": false } });
+        if !env.is_empty() {
+            policy["env"] = Value::Object(env);
+        }
+        return policy;
     }
     let home = &inputs.home;
     let ws = &inputs.workspace;
@@ -220,6 +242,15 @@ pub enum SandboxSettingsError {
         /// The underlying error.
         source: std::io::Error,
     },
+    /// The workspace's role record could not be locked, read or written
+    /// (#10102).
+    #[error("the sandbox role record `{path}` failed: {source}")]
+    Record {
+        /// The record file.
+        path: PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
     /// A settings file could not be read back or is not a JSON object.
     #[error("sandbox settings `{path}` cannot be read back: {why}")]
     Unreadable {
@@ -236,24 +267,27 @@ pub enum SandboxSettingsError {
 
 /// Write `role`'s policy into the project and user tiers, then verify.
 ///
-/// What: merges [`project_policy`] into `<workspace>/.claude/settings.json`
-/// and [`user_policy`] into `<user_config_dir>/settings.json` with
-/// [`merge_policy`], each under the settings lock, then runs
-/// [`verify_sandbox_settings`].
+/// What: records `role`'s [`project_policy`] in the workspace's role record
+/// and merges the record's combined policy into
+/// `<workspace>/.claude/settings.json` (#10102, see
+/// [`sandbox_roles::write_project_tier`]); merges [`user_policy`]
+/// into `<user_config_dir>/settings.json` with [`merge_policy`] under the
+/// settings lock; then runs [`verify_sandbox_settings`].
 ///
 /// # Errors
 ///
 /// [`SandboxSettingsError`] on a write failure or a refused read-back.
 ///
 /// Test: `writing_preserves_unrelated_keys_and_verifies`,
-/// `a_local_override_refuses_the_launch`.
+/// `a_local_override_refuses_the_launch`,
+/// `two_sandboxed_roles_in_one_workspace_keep_each_others_entries`.
 pub fn write_sandbox_settings(
     role: SandboxRole,
     inputs: &SandboxInputs,
     user_config_dir: &Path,
 ) -> Result<(), SandboxSettingsError> {
-    let policy = project_policy(role, inputs);
-    super::settings::merge_settings(&inputs.workspace, |s| merge_policy(s, &policy))?;
+    // #10102: the role record keeps the other roles' entries.
+    sandbox_roles::write_project_tier(role, inputs)?;
     if let Some(policy) = user_policy(role) {
         let path = user_config_dir.join("settings.json");
         let user = |source| SandboxSettingsError::User {
