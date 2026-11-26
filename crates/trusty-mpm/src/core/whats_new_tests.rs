@@ -172,6 +172,35 @@ fn doctor_notice_shows_once_then_stays_quiet() {
     assert!(third.line.is_some(), "a new release is announced again");
 }
 
+/// #11003: a store holding a newer version (a downgrade, or the other binary
+/// sharing it) yields no line and is not written.
+#[test]
+fn doctor_notice_stays_quiet_for_an_older_build_and_never_writes_back() {
+    let dir = hermetic_temp_dir();
+    let store = SeenStore::in_root(dir.path());
+    store.mark_seen(&Version::new(1, 3, 0)).expect("seed");
+    let older = highlights("1.2.3", SAMPLE);
+    let out = doctor_notice(Ok(store.clone()), Some(&older));
+    assert!(out.line.is_none() && out.warning.is_none());
+    assert_eq!(store.last_seen().expect("read"), Some("1.3.0".to_owned()));
+}
+
+/// #11003: two builds taking turns announce once in total.
+#[test]
+fn doctor_notice_shows_once_across_alternating_builds() {
+    let dir = hermetic_temp_dir();
+    let (old, new) = (highlights("1.2.3", SAMPLE), highlights("1.3.0", SAMPLE));
+    let shown: Vec<bool> = [&new, &old, &new, &old]
+        .into_iter()
+        .map(|h| {
+            doctor_notice(Ok(SeenStore::in_root(dir.path())), Some(h))
+                .line
+                .is_some()
+        })
+        .collect();
+    assert_eq!(shown, [true, false, false, false]);
+}
+
 /// A failed write is reported and NOT recorded, so the notice shows again.
 #[test]
 fn doctor_notice_shows_again_when_the_write_fails() {
