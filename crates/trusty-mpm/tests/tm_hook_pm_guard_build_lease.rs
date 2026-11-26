@@ -776,3 +776,18 @@ fn a_remote_runner_build_is_not_refused_11886() {
     }
     assert_all_11886(&["entr cargo test -p x"], Verdict11886::Refused);
 }
+
+/// #11886 critic round 3: a runner word that is not the exact program word,
+/// and a lease inside a nested `$(…)`, no longer let a build run bare; a `-c`
+/// string the rule would refuse is leased whole.
+#[test]
+fn critic_round_3_shapes_are_leased_or_refused_11886() {
+    assert_all_11886(
+        &[
+            "GIT_SSH=/usr/bin/ssh entr cargo test",
+            "entr cargo test $(cargo check)",
+        ],
+        Verdict11886::Refused,
+    );
+    assert_all_11886(&["bash -c 'entr cargo test'"], Verdict11886::Leased);
+}
