@@ -293,7 +293,12 @@ fn a_dash_c_string_the_rule_refuses_is_leased_whole() {
 /// simple command around it.
 #[test]
 fn a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command() {
-    assert_refused(&["entr cargo test $(cargo check)"]);
+    assert_refused(&[
+        "entr cargo test $(cargo check)",
+        // #11886 r4: the segment split cuts an unquoted `$(…)` at `|` and `;`.
+        "entr cargo test $(cargo build 2>&1 | tail -1)",
+        "entr cargo test $(cargo check; true)",
+    ]);
     for (input, want) in [
         (
             "echo $( cargo build)",
@@ -302,6 +307,10 @@ fn a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command() {
         (
             "cargo test $(cargo check)",
             "tm build-lease -- cargo test $(tm build-lease -- cargo check)",
+        ),
+        (
+            "cargo test $(cargo check; true)",
+            "tm build-lease -- cargo test $(tm build-lease -- cargo check; true)",
         ),
     ] {
         assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
