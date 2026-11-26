@@ -53,11 +53,35 @@ fn broken_files_are_refused() {
         "config_dir = \"/x\"\nconfig_dir = \"/y\"",
         "config_dir = \"/x\" trailing",
         "config_dir \"/x\"",
-        "config_dir = \"\"\"/x\"\"\"",
+        "config_dir = \"\"\"/x",
         "config_dir = \"/x\\q\"",
+        "config_dir = \"/x\\e\"",
         "paths.config_dir = \"/x\"",
+        "config_dir = \"/x\" # bad\u{1}",
+        "config_dir = \"/x\"\r# lone CR",
+        "# c\n\u{feff}config_dir = \"/x\"",
     ] {
         assert!(parse(body).is_err(), "{body:?} must be refused");
+    }
+}
+
+/// #11821: the `toml` crate's multi-line rules; parity in trusty-crate-contracts.
+#[test]
+fn multi_line_strings_parse_as_toml_does() {
+    for (body, want) in [
+        ("config_dir = \"\"\"\n/ml\"\"\"", "/ml"),
+        ("config_dir = \"\"\"/a\r\nb\"\"\"", "/a\nb"),
+        ("config_dir = \"\"\"/j\\\n   \n  oin\"\"\"", "/join"),
+        ("config_dir = \"\"\"/q\"\"x\"\"\"\"\"", "/q\"\"x\"\""),
+        ("config_dir = '''/a\\b'''", "/a\\b"),
+        ("\u{feff}config_dir = '/bom'", "/bom"),
+    ] {
+        let file = parse(body).unwrap_or_else(|e| panic!("{body:?}: {e}"));
+        assert_eq!(
+            file.config_dir.as_deref(),
+            Some(Path::new(want)),
+            "{body:?}"
+        );
     }
 }
 

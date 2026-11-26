@@ -54,6 +54,8 @@ enum File {
     Absent,
     /// The body; `{key}` is replaced by the key under test.
     Body(&'static str),
+    /// The bytes, written verbatim (for input that is not UTF-8).
+    Raw(&'static [u8]),
     /// A directory where the file should be: a read error, not "absent".
     Unreadable,
 }
@@ -170,6 +172,121 @@ const FIXTURES: &[Fixture] = &[
     fx("broken file beats template", None, BROKEN, Some("/tpl")),
 ];
 
+/// An install-file body with env and template unset.
+const fn syn(name: &'static str, body: &'static str) -> Fixture {
+    fx(name, None, File::Body(body), None)
+}
+
+/// TOML syntax the `toml` crate accepts or refuses, which the hand-written
+/// reader must accept or refuse alike, with the same value (code-critic round
+/// on #11821 P4-f2).
+const SYNTAX_FIXTURES: &[Fixture] = &[
+    syn("dup key", "{key} = \"/a\"\n{key} = \"/b\"\n"),
+    syn(
+        "dup key, bare then quoted",
+        "{key} = \"/a\"\n\"{key}\" = \"/b\"\n",
+    ),
+    syn(
+        "dup key, other key twice",
+        "{key} = \"/a\"\ncodex_home = \"/c\"\ncodex_home = \"/d\"\n",
+    ),
+    syn("table header first", "[paths]\n{key} = \"/a\"\n"),
+    syn("table header after the key", "{key} = \"/a\"\n[extra]\n"),
+    syn("table header named as the key", "[{key}]\n"),
+    syn("array of tables", "{key} = \"/a\"\n[[extra]]\n"),
+    syn("dotted key", "{key}.sub = \"/a\"\n"),
+    syn("dotted key with spaces", "paths . {key} = \"/a\"\n"),
+    syn("inline table", "{key} = { a = \"/a\" }\n"),
+    syn("array value", "{key} = [\"/a\"]\n"),
+    syn("ml basic", "{key} = \"\"\"/ml/basic\"\"\"\n"),
+    syn(
+        "ml basic, leading newline trimmed",
+        "{key} = \"\"\"\n/ml/nl\"\"\"\n",
+    ),
+    syn(
+        "ml basic, leading CRLF trimmed",
+        "{key} = \"\"\"\r\n/ml/crlf\"\"\"\r\n",
+    ),
+    syn(
+        "ml basic, line-ending backslash",
+        "{key} = \"\"\"/ml/\\\n   \n  joined\"\"\"\n",
+    ),
+    syn(
+        "ml basic, backslash then spaces",
+        "{key} = \"\"\"/ml/\\   \n  sp\"\"\"\n",
+    ),
+    syn(
+        "ml basic, inner quotes",
+        "{key} = \"\"\"/q\"\"/x\"\"\"\"\"\n",
+    ),
+    syn("ml basic, inner newline", "{key} = \"\"\"/a\nb\"\"\"\n"),
+    syn("ml basic, inner CRLF", "{key} = \"\"\"/a\r\nb\"\"\"\n"),
+    syn(
+        "ml basic, escapes",
+        "{key} = \"\"\"/t\\tq\\\"u\\u00e9\"\"\"\n",
+    ),
+    syn("ml basic, unterminated", "{key} = \"\"\"/x\n"),
+    syn(
+        "ml basic, three inner quotes",
+        "{key} = \"\"\"/a\"\"\"\"\"\"\n",
+    ),
+    syn("ml basic, comment after", "{key} = \"\"\"/c\"\"\" # c\n"),
+    syn("ml literal", "{key} = '''/ml/lit'''\n"),
+    syn(
+        "ml literal, leading newline trimmed",
+        "{key} = '''\n/ml/lnl'''\n",
+    ),
+    syn("ml literal, backslash kept", "{key} = '''/a\\b\\\n'''\n"),
+    syn("ml literal, inner quotes", "{key} = '''/q''x'''''\n"),
+    syn("ml literal, unterminated", "{key} = '''/x\n"),
+    syn("ml string as key", "\"\"\"{key}\"\"\" = \"/x\"\n"),
+    syn("empty basic string as key", "\"\" = \"/x\"\n"),
+    syn("BOM", "\u{feff}{key} = \"/bom\"\n"),
+    syn("BOM after first line", "# c\n\u{feff}{key} = \"/bom\"\n"),
+    syn("control char in comment", "{key} = \"/a\" # bad\u{1}\n"),
+    syn("DEL in comment", "{key} = \"/a\" # bad\u{7f}\n"),
+    syn("tab in comment", "{key} = \"/a\" #\ttab\n"),
+    syn("lone CR", "{key} = \"/a\"\r# x\n"),
+    syn("lone CR in a comment", "# a\rb\n{key} = \"/a\"\n"),
+    syn("CRLF line ends", "# c\r\n{key} = \"/crlf\"\r\n"),
+    syn("no final newline", "{key} = \"/eof\""),
+    syn("tabs around =", "\t{key}\t=\t\"/tab\"\t\n"),
+    syn("no space around =", "{key}=\"/tight\"\n"),
+    syn(
+        "two pairs on one line",
+        "{key} = \"/a\" codex_home = \"/c\"\n",
+    ),
+    syn("key without value", "{key} =\n"),
+    syn("empty file", ""),
+    syn("only comments", "# one\n\n   # two\n"),
+    syn("escape \\e", "{key} = \"/e\\e\"\n"),
+    syn("escape \\x", "{key} = \"/x\\x41\"\n"),
+    syn("escape \\u surrogate", "{key} = \"/s\\ud800\"\n"),
+    syn("escape \\U", "{key} = \"/U\\U0001F600\"\n"),
+    syn("escape lower-case hex", "{key} = \"/h\\u00e9\"\n"),
+    syn("tab in basic string", "{key} = \"/a\tb\"\n"),
+    syn("DEL in basic string", "{key} = \"/a\u{7f}b\"\n"),
+    syn("control in literal string", "{key} = '/a\u{1}b'\n"),
+    syn("C1 control in basic string", "{key} = \"/a\u{85}b\"\n"),
+    syn("C1 control in comment", "{key} = \"/a\" # \u{85}\n"),
+    syn("lone CR in ml string", "{key} = \"\"\"/a\rb\"\"\"\n"),
+    syn("backslash space escape", "{key} = \"\"\"/a\\ b\"\"\"\n"),
+    syn("unicode bare key", "cönfig = \"/x\"\n"),
+    syn("quoted key with escape", "\"{key}\\u0020\" = \"/x\"\n"),
+    fx(
+        "invalid UTF-8",
+        None,
+        File::Raw(b"config_dir = \"/\xff\"\nprojects_root = \"/\xff\"\n"),
+        None,
+    ),
+    fx(
+        "invalid UTF-8 in a comment",
+        None,
+        File::Raw(b"# \xff\nconfig_dir = \"/a\"\nprojects_root = \"/a\"\n"),
+        None,
+    ),
+];
+
 /// One resolver's answer, in a form both crates can produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
@@ -203,6 +320,11 @@ fn scratch_home(fixture: &Fixture, key: Key) -> tempfile::TempDir {
             let tools = file.parent().expect("install file has a parent");
             fs::create_dir_all(tools).expect("tools dir");
             fs::write(&file, body.replace("{key}", key.name())).expect("install file");
+        }
+        File::Raw(bytes) => {
+            let tools = file.parent().expect("install file has a parent");
+            fs::create_dir_all(tools).expect("tools dir");
+            fs::write(&file, bytes).expect("install file");
         }
         File::Unreadable => fs::create_dir_all(&file).expect("directory as file"),
     }
@@ -289,7 +411,7 @@ fn common_outcome(fixture: &Fixture, key: Key, home: &Path) -> Outcome {
 fn mismatches(reader: &dyn Fn(&Fixture, Key, &Path) -> Outcome) -> (Vec<String>, BTreeSet<String>) {
     let mut bad = Vec::new();
     let mut classes = BTreeSet::new();
-    for fixture in FIXTURES {
+    for fixture in FIXTURES.iter().chain(SYNTAX_FIXTURES) {
         for key in [Key::ConfigDir, Key::ProjectsRoot] {
             let home = scratch_home(fixture, key);
             let (mine, theirs) = (
