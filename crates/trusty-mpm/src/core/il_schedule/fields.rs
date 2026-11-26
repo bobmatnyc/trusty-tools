@@ -9,6 +9,11 @@
 
 /// Top-level keys of `il-schedule.json`.
 pub const TOP_LEVEL: &[(&str, &str)] = &[
+    // #11002: ADR-0077 D3, the preset version; `tm il config update` migrates an older file.
+    (
+        "schema_version",
+        "The preset version the file follows; absent means 0. `tm il config diff` compares the file with the current preset, `tm il config update` migrates it.",
+    ),
     (
         "jobs",
         "Cadence jobs `il-cron.py` runs: `{name, due, every, command}`. Not edited by `tm il config`.",

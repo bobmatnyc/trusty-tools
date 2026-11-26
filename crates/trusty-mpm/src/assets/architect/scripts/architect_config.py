@@ -38,8 +38,9 @@ DEFAULT_PORT = 7890
 # #11369: the poller cadence; `tm architect poll` reads the same key and default.
 DEFAULT_POLL_INTERVAL_S = 60
 _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+# #11002: `schema_version` is the seeded file's ADR-0077 version; known, so it is never `unknown`.
 _KNOWN = ("owner_name", "memory_palace", "dashboard_port", "tailnet_url", "repos", "caps",
-          "projects_root", "claude_config_dir", "poll_interval_s")
+          "projects_root", "claude_config_dir", "poll_interval_s", "schema_version")
 DEFAULT_PROJECTS_ROOT = "~/trusty-mpm-projects"
 DEFAULT_CLAUDE_CONFIG_DIR = "~/.trusty-tools/trusty-mpm/claude-config"
 _REPO_FIELDS = ("slug", "gh_config_dir", "checkout")
