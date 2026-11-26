@@ -20,7 +20,7 @@ use super::super::build_lease_program::{
     LEADING_KEYWORDS, Word, heavy_program_offset, is_wrapper, subcommand, words,
 };
 use super::super::heredoc::HeredocBodies;
-use super::super::shell_lex::{DASH_C_SHELLS, QuoteScan};
+use super::super::shell_lex::DASH_C_SHELLS;
 use super::super::split_shell_segments_raw;
 use super::{LeaseRewrite, rewrite_for_lease};
 use crate::commands::hook_rewrite::is_env_assignment;
@@ -127,8 +127,19 @@ fn segment_refusal(seg: &str, piped: Option<&str>, heavy: &Heavy) -> Option<&'st
         }
     }
     let raw = &seg[word.start..word.end];
-    if is_expansion(raw) && names_heavy_program(expansion_text(seg, word), heavy) {
-        return Some("a program named by an expansion");
+    if is_expansion(raw) {
+        let text = expansion_text(seg, word);
+        // #11886 r1: the words after the whole expansion, not inside a backtick.
+        let end = word.start + text.len();
+        let after = seg_words
+            .iter()
+            .position(|w| w.start >= end)
+            .unwrap_or(seg_words.len());
+        if expanded_heavy_program(text, heavy).is_some_and(|program| {
+            runs_a_heavy_verb(program, subcommand(&seg_words[after..]), heavy)
+        }) {
+            return Some("a program named by an expansion");
+        }
     }
     let sub = subcommand(rest);
     let has_sub = heavy.iter().any(|(p, s)| p == base && s.is_some());
@@ -283,11 +294,58 @@ fn expansion_text<'a>(seg: &'a str, word: &Word) -> &'a str {
     &seg[word.start..word.end]
 }
 
-/// Whether any identifier in `text` is a heavy program's name (`$CARGO`,
-/// `${CARGO:-cargo}`, `$(which cargo)`).
-fn names_heavy_program(text: &str, heavy: &Heavy) -> bool {
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .any(|tok| heavy.iter().any(|(p, _)| p.eq_ignore_ascii_case(tok)))
+/// The heavy program an expanded program word names: an identifier equal to
+/// one, case aside (`$CARGO`, `${CARGO:-cargo}`, `$(which cargo)`).
+///
+/// #11886 r1: `_` stays inside an identifier, so `$CARGO_TARGET_DIR` names
+/// nothing; a path whose last component is literal (`$CARGO_TARGET_DIR/debug/tm`,
+/// `"$CARGO_HOME/bin/cargo"`) is the classifier's to read by that basename.
+fn expanded_heavy_program<'h>(text: &str, heavy: &'h Heavy) -> Option<&'h str> {
+    let bare = text.trim_matches('"');
+    if let Some((_, tail)) = bare.rsplit_once('/')
+        && !tail.contains(['$', '`', ')', '}'])
+    {
+        return None;
+    }
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .find_map(|tok| {
+            heavy
+                .iter()
+                .find(|(p, _)| p.eq_ignore_ascii_case(tok))
+                .map(|(p, _)| p.as_str())
+        })
+}
+
+/// Whether `program` with subcommand `sub` is a heavy build, or may be one
+/// because `sub` is itself an expansion (#11886 r1: `$CARGO fmt` is not).
+fn runs_a_heavy_verb(program: &str, sub: Option<String>, heavy: &Heavy) -> bool {
+    heavy
+        .iter()
+        .filter(|(p, _)| p == program)
+        .any(|(_, s)| match s {
+            None => true,
+            Some(verb) => sub
+                .as_deref()
+                .is_some_and(|sub| sub == verb || is_expansion(sub)),
+        })
+}
+
+/// Whether a `watch`, `parallel` or `flock` segment runs a heavy build as one
+/// quoted operand (#11886 r1): `watch -n 5 'cargo check'`, `flock F -c '…'`.
+/// The rewrite then leases the whole runner.
+/// Test: `a_runners_quoted_command_is_leased_whole`.
+pub(super) fn runner_operand_hides(seg: &str, heavy: &Heavy) -> bool {
+    let seg_words = words(seg);
+    let upto = program_index(&seg_words).map_or(seg_words.len(), |i| i + 1);
+    let Some(at) = seg_words[..upto]
+        .iter()
+        .position(|w| matches!(basename(&w.text), "watch" | "parallel" | "flock"))
+    else {
+        return false;
+    };
+    seg_words[at + 1..]
+        .iter()
+        .any(|w| w.text.contains(char::is_whitespace) && runs_heavy(&w.text, heavy))
 }
 
 /// Whether the text between two segments joins them with a pipe.
@@ -308,13 +366,41 @@ fn mentions_heavy(command: &str, heavy: &Heavy) -> bool {
     })
 }
 
-/// Whether `command`'s quotes balance once every here-document body is blanked.
+/// Whether `command`'s quotes close, here-document bodies and `#` comments
+/// skipped.
+///
+/// #11886 r1: `QuoteScan` reads a comment's apostrophe (`# the crate's
+/// tests`) as an open quote, so a commented build was refused.
 fn balanced_outside_bodies(command: &str, bodies: &HeredocBodies) -> bool {
-    let blanked: String = command
-        .char_indices()
-        .map(|(i, c)| if bodies.contains(i) { ' ' } else { c })
-        .collect();
-    QuoteScan::new(&blanked).balanced
+    let bytes = command.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut prev = b'\n';
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if bodies.contains(i) {
+            i += 1;
+            prev = b;
+            continue;
+        }
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(b'"') if b == b'\\' => i += 1,
+            Some(_) => {}
+            None if b == b'\\' => i += 1,
+            None if b == b'\'' || b == b'"' => quote = Some(b),
+            None if b == b'#' && (prev.is_ascii_whitespace() || b";|&(".contains(&prev)) => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            None => {}
+        }
+        prev = b;
+        i += 1;
+    }
+    quote.is_none()
 }
 
 /// The #11886 refusal reason for a heavy build run through `shape`.

@@ -32,7 +32,7 @@ use crate::commands::hook_rewrite::is_env_assignment;
 // at its line cap, so the module is mounted here).
 #[path = "build_lease_hidden.rs"]
 mod build_lease_hidden;
-use build_lease_hidden::{hidden_build_refusal, unparseable_build_refusal};
+use build_lease_hidden::{hidden_build_refusal, runner_operand_hides, unparseable_build_refusal};
 
 /// What the hook does with one Bash command.
 ///
@@ -159,7 +159,9 @@ fn segment_inserts(text: &str, base: usize, heavy: &[(String, Option<String>)]) 
                 _ => false,
             } || find_exec_commands(seg)
                 .iter()
-                .any(|inner| hides_a_heavy_build(inner, heavy));
+                .any(|inner| hides_a_heavy_build(inner, heavy))
+                // #11886 r1: `watch 'cargo check'`, `flock F -c '…'` lease whole.
+                || runner_operand_hides(seg, heavy);
             hidden
                 .then(|| command_start_offset(seg).map(|off| seg_start + off))
                 .flatten()
