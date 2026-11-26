@@ -14,6 +14,9 @@ broken file refuses) and each value it names must pass the same test. Exit 0
 admits, 1 refuses with one `refused:` line on stderr.
 `write --home H [--projects-root P] [--config-dir C]` creates each named directory
 and `H/.trusty-tools`, then writes install.toml through a temp file and a rename.
+It refuses (exit 1) when `H/.trusty-tools` or install.toml is a symlink, or
+`H/.trusty-tools` resolves outside H (#11821 P6b); the temp file is created
+exclusively, without following a symlink, mode 0600.
 Test: scripts/sandbox_install_paths_selftest.sh.
 """
 from __future__ import annotations
@@ -64,11 +67,21 @@ def check(a: argparse.Namespace) -> int:
 def write(a: argparse.Namespace) -> int:
     values = given(a)
     path = install_file_path(a.home)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tools = os.path.dirname(path)
+    # #11821 P6b: a symlinked `.trusty-tools` (or install.toml) would carry the write out of the sandbox home.
+    if os.path.islink(tools) or os.path.islink(path):
+        print(f"refused: {tools} or its install.toml is a symlink; the sandbox home must own it", file=sys.stderr)
+        return 1
+    os.makedirs(tools, exist_ok=True)
+    if os.path.realpath(tools) != os.path.join(os.path.realpath(a.home), os.path.basename(tools)):
+        print(f"refused: {tools} resolves outside the sandbox home", file=sys.stderr)
+        return 1
     for value in values.values():
         os.makedirs(value, exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    # #11821 P6b: a fresh temp file, never one a symlink planted, owner-only.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         # JSON string escaping is valid TOML basic-string escaping for these values.
         f.write("".join(f"{k} = {json.dumps(v)}\n" for k, v in values.items()))
     os.replace(tmp, path)
