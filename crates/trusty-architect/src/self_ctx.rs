@@ -30,10 +30,11 @@ pub const ENTRYPOINT_TAIL_START: u64 = 4_096;
 /// Only this many newest-by-mtime files are considered.
 pub const CANDIDATE_LIMIT: usize = 20;
 
-/// `<home>/.trusty-tools/trusty-mpm/claude-config/projects`, the prototype's
-/// `PROJECTS_DIR` with `~` given explicitly.
-pub fn projects_dir(home: &Path) -> PathBuf {
-    home.join(".trusty-tools/trusty-mpm/claude-config/projects")
+/// `<config_dir>/.trusty-tools/trusty-mpm/claude-config/projects`, the
+/// prototype's `PROJECTS_DIR`; `config_dir` is the install's config dir, home
+/// by default (#11821).
+pub fn projects_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join(".trusty-tools/trusty-mpm/claude-config/projects")
 }
 
 /// Claude Code's transcript directory for project `root`: its absolute path
@@ -43,9 +44,9 @@ pub fn transcript_dir_for(projects_dir: &Path, root: &str) -> PathBuf {
 }
 
 /// The prototype's `DEFAULT_DIR`: the transcript directory of `repo_root`
-/// under `home`'s projects directory.
-pub fn default_dir(home: &Path, repo_root: &str) -> PathBuf {
-    transcript_dir_for(&projects_dir(home), repo_root)
+/// under `config_dir`'s projects directory.
+pub fn default_dir(config_dir: &Path, repo_root: &str) -> PathBuf {
+    transcript_dir_for(&projects_dir(config_dir), repo_root)
 }
 
 /// Python truthiness of a JSON value.

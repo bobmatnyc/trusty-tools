@@ -55,7 +55,10 @@ fn f(v: &Value) -> f64 {
 }
 
 /// A `Config` whose every path is under `dir` and whose env is `vars`.
-fn config(dir: &Path, vars: &[(&str, String)]) -> Result<Config, trusty_architect::ConfigError> {
+fn config(
+    dir: &Path,
+    vars: &[(&str, String)],
+) -> Result<Config, trusty_architect::install_paths::InstallPathsError> {
     let base: Vec<(String, String)> = [
         ("SUPERVISOR_INBOX_DIR", "inbox"),
         ("SESSIONS_DIR", "sessions"),
