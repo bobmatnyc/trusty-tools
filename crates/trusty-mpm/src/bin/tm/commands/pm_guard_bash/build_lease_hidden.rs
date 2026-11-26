@@ -127,7 +127,7 @@ pub(super) fn unleased_build_refusal(
             // command; its words and its lease insertions are not this one's.
             let nested = |at: usize| {
                 spans.iter().any(|&(s, e)| {
-                    e.is_some_and(|e| s > seg_at && e <= seg_end && (s..e).contains(&at))
+                    e.is_some_and(|e| s > seg_at && s < seg_end && (s..e).contains(&at))
                 })
             };
             let skip = |at: usize| bodies.contains(at) || nested(at);
