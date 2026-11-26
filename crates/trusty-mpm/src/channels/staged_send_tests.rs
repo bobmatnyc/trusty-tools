@@ -47,7 +47,7 @@ fn staged() -> (OrgsConfig, StagedSends, u64, Instant) {
     let mut table = StagedSends::new(Duration::from_secs(60));
     let now = Instant::now();
     let id = table
-        .stage(&cfg, "bob-duetto", None, TEXT, now, &Audit::default())
+        .stage(&cfg, "bob-acme", None, TEXT, now, &Audit::default())
         .expect("staged");
     (cfg, table, id, now)
 }
@@ -71,7 +71,7 @@ fn approve_posts_exact_text_once() {
     );
     assert_eq!(
         *sender.sent.borrow(),
-        vec![("U0OWNER01".to_owned(), TEXT.to_owned())]
+        vec![("U0OWNER".to_owned(), TEXT.to_owned())]
     );
     for l in audit.0.borrow().iter() {
         assert!(!l.code.contains(TEXT), "audit carries no text: {l:?}");
@@ -140,7 +140,7 @@ fn cross_org_stage_is_refused_and_audited_without_text() {
         .stage(
             &cfg,
             "owner@example.com",
-            Some("duetto"),
+            Some("acme"),
             TEXT,
             Instant::now(),
             &audit,
@@ -201,11 +201,11 @@ fn slack_dm_posts_to_the_member_id() {
         poster: &poster,
         resolver: &resolver,
     };
-    let route = cfg.route("bob-duetto", None).expect("route");
+    let route = cfg.route("bob-acme", None).expect("route");
     assert_eq!(sender.send(&route, TEXT), Ok(()));
     assert_eq!(
         *poster.0.lock().expect("lock"),
-        vec!["U0OWNER01".to_owned()]
+        vec!["U0OWNER".to_owned()]
     );
     let gchat = cfg.route("owner@example.com", None).expect("route");
     assert!(matches!(

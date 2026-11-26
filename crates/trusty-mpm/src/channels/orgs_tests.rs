@@ -2,53 +2,53 @@
 
 use super::orgs::*;
 
-/// The S1 initial config: duetto on Slack, bta on Google Chat.
+/// The S1 initial config: acme on Slack, globex on Google Chat.
 pub(crate) const INITIAL: &str = r#"
 orgs:
-  duetto:
+  acme:
     kind: slack
-    workspace: T0TEST001
+    workspace: T0TEST
     credentials:
-      bot_token: secret://trusty/duettoresearch/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN
-  bta:
+      bot_token: secret://trusty/acme/SLACK.SLACK_MPM_BOT_OAUTH_TOKEN
+  globex:
     kind: gchat
     project: test-project-001
     service_account: ai-chat-bot
     space: AAAATEST001
     credentials:
-      sa_key: secret://trusty/bta/GCHAT.AI_CHAT_BOT_SA_KEY
+      sa_key: secret://trusty/globex/GCHAT.AI_CHAT_BOT_SA_KEY
 users:
-  bob-duetto:
-    org: duetto
-    address: U0OWNER01
+  bob-acme:
+    org: acme
+    address: U0OWNER
   owner@example.com:
-    org: bta
+    org: globex
     address: owner@example.com
 owner:
-  slack_org: duetto
-  slack_user: U0OWNER01
+  slack_org: acme
+  slack_user: U0OWNER
 "#;
 
 #[test]
 fn initial_config_parses() {
     let cfg = OrgsConfig::parse(INITIAL).expect("parses");
-    let duetto = cfg.org("duetto").expect("duetto");
-    assert_eq!(duetto.kind, ChannelKind::Slack);
-    assert_eq!(duetto.workspace.as_deref(), Some("T0TEST001"));
-    let bta = cfg.org("bta").expect("bta");
-    assert_eq!(bta.kind, ChannelKind::Gchat);
-    assert_eq!(bta.space.as_deref(), Some("AAAATEST001"));
+    let acme = cfg.org("acme").expect("acme");
+    assert_eq!(acme.kind, ChannelKind::Slack);
+    assert_eq!(acme.workspace.as_deref(), Some("T0TEST"));
+    let globex = cfg.org("globex").expect("globex");
+    assert_eq!(globex.kind, ChannelKind::Gchat);
+    assert_eq!(globex.space.as_deref(), Some("AAAATEST001"));
 }
 
 #[test]
 fn cross_org_send_is_refused() {
     let cfg = OrgsConfig::parse(INITIAL).expect("parses");
     let err = cfg
-        .route("owner@example.com", Some("duetto"))
+        .route("owner@example.com", Some("acme"))
         .expect_err("refused");
     assert_eq!(err.code(), "cross_org");
     let ok = cfg.route("owner@example.com", None).expect("own org");
-    assert_eq!((ok.org.as_str(), ok.kind), ("bta", ChannelKind::Gchat));
+    assert_eq!((ok.org.as_str(), ok.kind), ("globex", ChannelKind::Gchat));
 }
 
 #[test]
@@ -59,14 +59,14 @@ fn unknown_user_has_no_route() {
 
 #[test]
 fn either_org_binds_to_either_kind() {
-    // The initial binding swapped: duetto on gchat, bta on slack.
+    // The initial binding swapped: acme on gchat, globex on slack.
     let swapped = r#"
 orgs:
-  duetto: { kind: gchat, space: S1 }
-  bta: { kind: slack, workspace: T1 }
+  acme: { kind: gchat, space: S1 }
+  globex: { kind: slack, workspace: T1 }
 users:
-  other@example.com: { org: duetto, address: other@example.com }
-  b: { org: bta, address: U0B }
+  other@example.com: { org: acme, address: other@example.com }
+  b: { org: globex, address: U0B }
 "#;
     let cfg = OrgsConfig::parse(swapped).expect("parses");
     assert_eq!(
@@ -113,8 +113,8 @@ fn approvals_go_to_the_owner_dm_for_every_org() {
     assert_eq!(
         target,
         ApprovalTarget::OwnerSlackDm {
-            org: "duetto".into(),
-            user: "U0OWNER01".into()
+            org: "acme".into(),
+            user: "U0OWNER".into()
         }
     );
     let mut no_owner = cfg.clone();
