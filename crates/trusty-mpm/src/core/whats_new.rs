@@ -261,10 +261,13 @@ pub struct NoticeOutcome {
 /// Why: the notice must show once per release, a store failure must never
 /// fail doctor, and a failed write must not count as seen.
 /// What: no `current` → nothing. A store whose recorded version equals
-/// `current` → nothing. Otherwise the line is returned; a readable store is
-/// then written with `current`, and a read or write failure becomes the
-/// warning without a write (an unreadable file is never overwritten).
+/// `current` or a newer release → nothing (the store never moves backward).
+/// Otherwise the line is returned; a readable store is then written with
+/// `current`, and a read or write failure becomes the warning without a write
+/// (an unreadable file is never overwritten).
 /// Test: `doctor_notice_shows_once_then_stays_quiet`,
+/// `doctor_notice_stays_quiet_for_an_older_build_and_never_writes_back`,
+/// `doctor_notice_shows_once_across_alternating_builds`,
 /// `doctor_notice_shows_again_when_the_write_fails`,
 /// `doctor_notice_does_not_overwrite_an_unreadable_store`,
 /// `doctor_notice_reports_an_unresolved_store`.
@@ -280,7 +283,10 @@ pub fn doctor_notice(
     };
     let last = store.and_then(|s| s.last_seen().map(|last| (s, last)));
     let warning = match last {
-        Ok((_, Some(seen))) if seen == current.version.to_string() => {
+        // #11003: the store only moves forward, so two binaries sharing it (dev
+        // and installed) or a downgrade never re-announce. An unparsable
+        // recorded version falls through: it is shown and overwritten.
+        Ok((_, Some(seen))) if Version::parse(&seen).is_ok_and(|seen| current.version <= seen) => {
             return NoticeOutcome {
                 line: None,
                 warning: None,
