@@ -849,18 +849,35 @@ fn run_shim_args(shim_dir: &Path, args: &[&str]) -> std::process::Output {
 const GRAPHQL_REFUSAL: &str = "printf '{\"data\":null}\\n'; \
      echo 'GraphQL: API rate limit already exceeded for user ID 1.' >&2; exit 1";
 
+/// gh's own stderr line in [`GRAPHQL_REFUSAL`], which the shim keeps (#11233).
+#[cfg(unix)]
+const GH_LIMIT_LINE: &str = "GraphQL: API rate limit already exceeded for user ID 1.";
+
+/// The `--jq` filter the shim's one REST lookup sends (#11233): remaining,
+/// then reset, one per line.
+#[cfg(unix)]
+const RATE_LIMIT_JQ: &str = "--jq .resources.graphql.remaining,.resources.graphql.reset";
+
+/// A fake `gh api rate_limit` that checks the shim's filter and answers
+/// `remaining` and `reset` (#11233).
+#[cfg(unix)]
+fn rate_limit_answer(remaining: u64, reset: u64) -> String {
+    format!("[ \"$3 $4\" = '{RATE_LIMIT_JQ}' ] || exit 7; echo {remaining}; echo {reset}; exit 0")
+}
+
 /// 🔴 #10550: a primary GraphQL rate-limit refusal is one stderr line naming
 /// the limit and its reset (epoch and UTC), exit 1, and no partial stdout. The
-/// reset lookup asks `.resources.graphql.reset`, and nothing is retried.
+/// lookup reads `remaining` and `reset` in one call, and nothing is retried.
+/// #11233: with `remaining: 0` the line still names the primary limit, and it
+/// keeps gh's own limit line verbatim.
 #[cfg(unix)]
 #[test]
 fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
     let calls = tempfile::NamedTempFile::new().expect("call log");
     let log = calls.path().display();
-    let reset =
-        "[ \"$3 $4\" = '--jq .resources.graphql.reset' ] || exit 7; echo 1767225600; exit 0";
+    let reset = rate_limit_answer(0, 1_767_225_600);
     let call = format!("echo call >> '{log}'; {GRAPHQL_REFUSAL}");
-    let (_tmp, dir) = rate_limit_shim(reset, &call);
+    let (_tmp, dir) = rate_limit_shim(&reset, &call);
     let out = run_shim_args(&dir, &["pr", "list"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(out.stdout.is_empty(), "partial stdout leaked: {out:?}");
@@ -870,6 +887,7 @@ fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
         "primary GraphQL rate limit",
         "2026-01-01 00:00:00 UTC",
         "1767225600",
+        GH_LIMIT_LINE,
     ] {
         assert!(stderr.contains(part), "{part} missing: {stderr}");
     }
@@ -895,6 +913,34 @@ fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
     assert!(stderr.contains("primary GraphQL rate limit"), "{stderr}");
     assert!(stderr.contains("reset time is unknown"), "{stderr}");
+    // #11233: gh's own limit line is kept on the fallback path too.
+    assert!(stderr.contains(GH_LIMIT_LINE), "{stderr}");
+}
+
+/// 🔴 #11233: a refusal while the hourly quota has points left is not the
+/// primary limit. The line names a short-window or secondary limit, states the
+/// remaining count, carries no reset epoch and keeps gh's own line. One REST
+/// lookup, and the refused call ran once.
+#[cfg(unix)]
+#[test]
+fn a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary() {
+    let calls = tempfile::NamedTempFile::new().expect("call log");
+    let log = calls.path().display();
+    let lookup = format!("echo lookup >> '{log}'; {}", rate_limit_answer(4186, 1_767_225_600));
+    let call = format!("echo call >> '{log}'; {GRAPHQL_REFUSAL}");
+    let (_tmp, dir) = rate_limit_shim(&lookup, &call);
+    let out = run_shim_args(&dir, &["project", "item-list", "45"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "partial stdout leaked: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(!stderr.contains("primary"), "claimed the primary limit: {stderr}");
+    assert!(!stderr.contains(RATE_LIMIT_RESET_EPOCH_OPEN), "{stderr}");
+    for part in ["short-window or secondary GraphQL rate limit", "4186", GH_LIMIT_LINE] {
+        assert!(stderr.contains(part), "{part} missing: {stderr}");
+    }
+    let ran = std::fs::read_to_string(calls.path()).expect("call log");
+    assert_eq!(ran, "call\nlookup\n", "one call, one REST lookup");
 }
 
 /// 🔴 #10550: a call that is not a primary GraphQL refusal keeps its stdout,
