@@ -791,3 +791,11 @@ fn critic_round_3_shapes_are_leased_or_refused_11886() {
     );
     assert_all_11886(&["bash -c 'entr cargo test'"], Verdict11886::Leased);
 }
+
+/// #11886 option (a): the quoted evo-gate-log gate form is not refused.
+#[test]
+fn the_evo_gate_log_form_is_not_refused_11886() {
+    let command =
+        "\"$S/evo-gate-log\" --tag t \"$S/evo\" cargo +1.99.0 test -p trusty-mpm --no-fail-fast";
+    assert_ne!(verdict_11886(command), Verdict11886::Refused, "{command}");
+}

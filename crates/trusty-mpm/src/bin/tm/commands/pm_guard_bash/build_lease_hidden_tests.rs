@@ -307,3 +307,16 @@ fn a_lease_inside_a_nested_substitution_does_not_cover_its_outer_command() {
         assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
     }
 }
+
+/// #11886 option (a): the evo-gate-log spellings are exact remote-runner
+/// program words; another path to a file of that name is not.
+#[test]
+fn the_evo_gate_log_program_word_is_a_remote_runner() {
+    assert_not_refused(&[
+        "\"$S/evo-gate-log\" --tag t \"$S/evo\" cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
+        "$S/evo-gate-log --tag t $S/evo cargo clippy -p x",
+        "${S}/evo-gate-log --tag t ${S}/evo cargo check -p x",
+        "evo-gate-log --tag t evo cargo test -p x",
+    ]);
+    assert_refused(&["/tmp/evo-gate-log cargo test", "./evo-gate-log cargo test"]);
+}
