@@ -24,9 +24,18 @@ use super::build_lease_program::{
 };
 use super::heredoc::HeredocBodies;
 use super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
+use super::split_shell_segments_raw;
 use super::substitutions::paren_substitution_live_at;
-use super::{split_shell_segments, split_shell_segments_raw};
 use crate::commands::hook_rewrite::is_env_assignment;
+
+// #11886: builds the rewrite cannot reach are refused (pm_guard_bash/mod.rs is
+// at its line cap, so the module is mounted here).
+#[path = "build_lease_hidden.rs"]
+mod build_lease_hidden;
+use build_lease_hidden::{
+    blank_comments, hidden_build_refusal, runner_operand_hides, runs_heavy, unleased_build_refusal,
+    unparseable_build_refusal,
+};
 
 /// What the hook does with one Bash command.
 ///
@@ -47,7 +56,8 @@ pub(crate) enum LeaseRewrite {
 /// What: `heavy` is the `(program, optional subcommand)` table; `prefix` is
 /// the already shell-safe lease invocation to insert, e.g.
 /// `'/path/tm' build-lease --` (optionally with `--wait-secs N`). Nothing
-/// inside a here-document body is rewritten or refused. Every simple command whose program is heavy — at top
+/// inside a here-document body is rewritten; #11886: a build a shell runs
+/// from a body, a pipe, `eval` or an expansion refuses the command. Every simple command whose program is heavy — at top
 /// level or inside a substitution body — gets `<tm> build-lease -- ` inserted
 /// before its program word; a wrapper hiding one is leased whole.
 /// Test: `a_plain_heavy_build_is_wrapped`, `composed_commands_are_wrapped_in_place`,
@@ -83,12 +93,24 @@ pub(crate) fn rewrite_for_lease_with(
         return LeaseRewrite::None;
     }
     // #8261 critic round 1 (CRITICAL): a here-document body is DATA — a commit
-    // message, a file's content — even when it is handed to a shell. Nothing
-    // inside one is ever rewritten or refused.
+    // message, a file's content. Nothing inside one is ever rewritten; #11886:
+    // one a shell runs refuses the command when it builds (below).
+    // #11886 r2: read a copy with `#` comments blanked; insert into the original.
+    let original = command;
+    let blanked = blank_comments(original, &HeredocBodies::scan(original));
+    let command: &str = &blanked;
     let bodies = HeredocBodies::scan(command);
+    // #11886: a build run through text the shell reads later is refused.
+    // #11886 Fail-Open Check: an unreadable command naming a build is refused.
+    let hidden = hidden_build_refusal(command, heavy, &bodies)
+        .or_else(|| unparseable_build_refusal(command, heavy, &bodies));
+    if let Some(reason) = hidden {
+        return LeaseRewrite::Refuse(reason);
+    }
     let mut inserts = segment_inserts(command, 0, heavy);
     inserts.retain(|at| !bodies.contains(*at));
-    for (start, end) in substitution_spans(command) {
+    let spans = substitution_spans(command);
+    for &(start, end) in &spans {
         if bodies.contains(start) {
             continue;
         }
@@ -103,24 +125,28 @@ pub(crate) fn rewrite_for_lease_with(
         let inner = segment_inserts(&command[start..end], start, heavy);
         inserts.extend(inner.into_iter().filter(|at| !bodies.contains(*at)));
     }
+    // #11886: a heavy build no insertion leases is refused, never run bare.
+    if let Some(reason) = unleased_build_refusal(command, heavy, &bodies, &spans, &inserts) {
+        return LeaseRewrite::Refuse(reason);
+    }
     if inserts.is_empty() {
         return LeaseRewrite::None;
     }
     inserts.sort_unstable();
     inserts.dedup();
-    let mut out = String::with_capacity(command.len() + inserts.len() * 32);
+    let mut out = String::with_capacity(original.len() + inserts.len() * 32);
     let mut last = 0;
     for at in inserts {
         let prefix = match prefix_at(at) {
             Ok(prefix) => prefix,
             Err(reason) => return LeaseRewrite::Refuse(reason),
         };
-        out.push_str(&command[last..at]);
+        out.push_str(&original[last..at]);
         out.push_str(&prefix);
         out.push(' ');
         last = at;
     }
-    out.push_str(&command[last..]);
+    out.push_str(&original[last..]);
     LeaseRewrite::Rewrite(out)
 }
 
@@ -138,12 +164,16 @@ fn segment_inserts(text: &str, base: usize, heavy: &[(String, Option<String>)]) 
             if let Some(off) = heavy_program_offset(seg, heavy) {
                 return Some(seg_start + off);
             }
-            let hidden = match wrapped_command(seg.trim()) {
+            // #11886: a `{`, `do` or `then` before the wrapper hid its command.
+            let from = command_start_offset(seg).map_or(seg, |off| &seg[off..]);
+            let hidden = match wrapped_command(from.trim()) {
                 WrappedCommand::Inner(inner) => hides_a_heavy_build(&inner, heavy),
                 _ => false,
             } || find_exec_commands(seg)
                 .iter()
-                .any(|inner| hides_a_heavy_build(inner, heavy));
+                .any(|inner| hides_a_heavy_build(inner, heavy))
+                // #11886 r1: `watch 'cargo check'`, `flock F -c '…'` lease whole.
+                || runner_operand_hides(seg, heavy);
             hidden
                 .then(|| command_start_offset(seg).map(|off| seg_start + off))
                 .flatten()
@@ -170,10 +200,10 @@ pub(crate) fn is_heavy_build(argv: &[String], heavy: &[(String, Option<String>)]
 }
 
 /// Whether a wrapper's inner command runs a heavy build at any depth.
+///
+/// #11886 r3: one the rules would refuse counts, so the wrapper leases whole.
 fn hides_a_heavy_build(inner: &str, heavy: &[(String, Option<String>)]) -> bool {
-    split_shell_segments(inner)
-        .iter()
-        .any(|seg| heavy_program_offset(seg, heavy).is_some())
+    runs_heavy(inner, heavy)
 }
 
 fn refusal() -> String {
@@ -428,12 +458,15 @@ mod tests {
 
     #[test]
     fn an_unquoted_heredoc_body_is_never_rewritten() {
-        for input in [
-            "cat > notes.md <<EOF\nRun `cargo test -p x` first.\nEOF",
-            "bash <<EOF\ncargo test\nEOF",
-        ] {
-            assert_eq!(rw(input), LeaseRewrite::None, "{input}");
-        }
+        assert_eq!(
+            rw("cat > notes.md <<EOF\nRun `cargo test -p x` first.\nEOF"),
+            LeaseRewrite::None
+        );
+        // #11886: a body a shell runs is a build the rewrite cannot reach.
+        assert!(matches!(
+            rw("bash <<EOF\ncargo test\nEOF"),
+            LeaseRewrite::Refuse(_)
+        ));
         // The live command around a body is still leased.
         assert_eq!(
             rw("cargo test <<EOF\ncargo build\nEOF"),
