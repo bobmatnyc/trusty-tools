@@ -78,6 +78,10 @@ pub(crate) struct Facts {
     pub redirects: Vec<Redirect>,
     /// Commands marked unparsed, plus one when the grammar reported an error.
     pub unparsed: usize,
+    /// #10690: part of the input was never walked (no tree, a node past
+    /// [`MAX_DEPTH`], a `bash -c` past [`MAX_SHELL_NESTING`]), so commands
+    /// may be missing; rule 1 cannot judge such a call.
+    pub dropped: bool,
 }
 
 struct Ctx<'a> {
@@ -108,6 +112,7 @@ fn parse_nested(src: &str, cwd: &Path, home: &Path, nesting: usize) -> Facts {
     let Some(tree) = tree else {
         return Facts {
             unparsed: 1,
+            dropped: true,
             ..Facts::default()
         };
     };
@@ -143,6 +148,7 @@ fn named_children(node: Node) -> Vec<Node> {
 fn visit(node: Node, ctx: &mut Ctx, depth: usize) {
     if depth > MAX_DEPTH {
         ctx.has_error = true;
+        ctx.out.dropped = true;
         return;
     }
     match node.kind() {
@@ -188,6 +194,7 @@ fn visit_redirect(node: Node, ctx: &mut Ctx, depth: usize) {
 fn visit_words(node: Node, ctx: &mut Ctx, depth: usize) {
     if depth > MAX_DEPTH {
         ctx.has_error = true;
+        ctx.out.dropped = true;
         return;
     }
     if matches!(node.kind(), "command_substitution" | "process_substitution") {
@@ -254,14 +261,20 @@ fn follow_cd(argv: &[Word], ctx: &mut Ctx) {
 /// `bash -c '<literal>'` runs its argument as a script: parse it too.
 fn parse_shell_literal(argv: &[Word], ctx: &mut Ctx) {
     let shell = matches!(argv[0].lit(), Some("bash" | "sh" | "zsh" | "dash"));
-    if !shell || ctx.nesting >= MAX_SHELL_NESTING {
+    if !shell {
         return;
     }
     let Some(i) = argv.iter().position(|w| w.lit() == Some("-c")) else {
         return;
     };
     if let Some(script) = argv.get(i + 1).and_then(Word::lit) {
+        if ctx.nesting >= MAX_SHELL_NESTING {
+            // #10690: an unwalked script may write an anchor.
+            ctx.out.dropped = true;
+            return;
+        }
         let inner = parse_nested(script, &ctx.cwd, ctx.home, ctx.nesting + 1);
+        ctx.out.dropped |= inner.dropped;
         ctx.has_error |= inner.unparsed > inner.cmds.iter().filter(|c| c.unparsed).count();
         ctx.out.cmds.extend(inner.cmds);
         ctx.out.redirects.extend(inner.redirects);

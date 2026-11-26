@@ -43,7 +43,7 @@ pub(crate) async fn run(
     } else if pm_guard {
         // #10600: a guard that panics or errors denies instead of exiting non-zero.
         crate::commands::pm_guard_refusal::run(url, started).await
-    // #11431: log-only; never blocks, never relays to the daemon.
+    // #11431: never relays to the daemon; only rule 1 blocks (#10690).
     } else if pm_guard_shadow {
         crate::commands::pm_guard_min::pm_guard_shadow();
         Ok(())

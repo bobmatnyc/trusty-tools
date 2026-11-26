@@ -113,3 +113,17 @@ fn protected_covers_ancestors_and_globbed_contents() {
         &protected
     ));
 }
+
+/// #10690: a `bash -c` script past the shell-nesting bound is never walked,
+/// so the facts say part of the input was dropped; one inside it is walked.
+#[test]
+fn a_script_past_the_shell_bound_is_dropped() {
+    let src = "bash -c 'cp x ~/.cargo/bin/tm'";
+    let (cwd, home) = (Path::new("/work"), Path::new(HOME));
+    let inside = parse_nested(src, cwd, home, MAX_SHELL_NESTING - 1);
+    assert!(!inside.dropped);
+    assert!(names(&inside).contains(&"cp"));
+    let past = parse_nested(src, cwd, home, MAX_SHELL_NESTING);
+    assert!(past.dropped);
+    assert!(!parse("ls").dropped);
+}
