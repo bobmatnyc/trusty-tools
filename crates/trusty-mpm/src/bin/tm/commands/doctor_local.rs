@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 use trusty_mpm::core::paths::FrameworkPaths;
@@ -64,14 +65,16 @@ pub(crate) async fn doctor(
 ) -> anyhow::Result<()> {
     // #7757: resolve before printing anything, so a bad `--dir` fails closed.
     let project_dir = resolve_project_dir(flags.dir.as_deref())?;
-    let report = local_report(project_dir.as_deref()).await?;
 
+    // #11885: the header prints before the battery runs, so a slow run is
+    // visibly running rather than silent.
     println!("trusty-mpm doctor");
     // #10565: name the project every project-scoped row below was read from.
     println!(
         "{}",
         project_header(project_dir.as_deref(), flags.dir.is_some())
     );
+    let report = local_report(project_dir.as_deref()).await?;
     let mut overall = report.overall;
     for check in &report.checks {
         print_check(check);
@@ -108,11 +111,7 @@ pub(crate) async fn doctor(
     overall = overall.worst(gcloud.status);
     print_check(&gcloud);
     // #10263: bare-script hook commands, over the list `--fix` repairs.
-    let settings_files = super::doctor_repair::machine_wide_settings_files(
-        project_dir.as_deref(),
-        dirs::home_dir().as_deref(),
-    );
-    for check in trusty_mpm::core::hook_interpreter_doctor::hook_interpreter_rows(&settings_files) {
+    for check in hook_interpreter_rows_within(project_dir.clone(), SETTINGS_WALK_TIMEOUT).await {
         overall = overall.worst(check.status);
         print_check(&check);
     }
@@ -152,7 +151,72 @@ pub(crate) async fn doctor(
     // `doctor_repair`, so this file stays the report and the actions stay
     // together.
     // #10212: a `--rotate-deps` FAIL row makes the command exit non-zero.
-    super::doctor_repair::run_post_report_actions(flags)
+    let result = super::doctor_repair::run_post_report_actions(flags);
+    // #11885: a timed-out phase still holds a blocking-pool thread, and the
+    // runtime's drop waits for every one; exit now rather than wait on it.
+    exit_now(result)
+}
+
+/// How long the machine-wide settings walk behind `hook-interpreter` may run (#11885).
+const SETTINGS_WALK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The `hook-interpreter` and `notify-supervisor-asset` rows, bounded.
+///
+/// Why (#11885): the walk covers the whole home directory to depth 8 and took
+/// 78 s on a full home, with nothing printed meanwhile.
+/// What: runs [`super::doctor_repair::machine_wide_settings_files`] on the
+/// blocking pool for at most `limit`. In time, the two rows from
+/// `hook_interpreter_rows`; past `limit`, one `Unknown` timeout row; a
+/// panicked walk is one `Unknown` row naming the panic.
+/// Test: `a_settings_walk_past_its_limit_is_one_timeout_row`.
+async fn hook_interpreter_rows_within(
+    project_dir: Option<PathBuf>,
+    limit: Duration,
+) -> Vec<DoctorCheck> {
+    let walk = tokio::task::spawn_blocking(move || {
+        super::doctor_repair::machine_wide_settings_files(
+            project_dir.as_deref(),
+            dirs::home_dir().as_deref(),
+        )
+    });
+    rows_from_walk(walk, limit).await
+}
+
+/// Grade a settings walk against `limit`; split out so a test can hand in a
+/// walk that never finishes.
+async fn rows_from_walk(
+    walk: tokio::task::JoinHandle<Vec<PathBuf>>,
+    limit: Duration,
+) -> Vec<DoctorCheck> {
+    match trusty_mpm::core::doctor_bounded::within(HOOK_INTERPRETER, limit, walk).await {
+        Ok(Ok(files)) => trusty_mpm::core::hook_interpreter_doctor::hook_interpreter_rows(&files),
+        Ok(Err(e)) => vec![DoctorCheck::new(
+            HOOK_INTERPRETER,
+            CheckStatus::Unknown,
+            format!("the settings walk did not complete: {e}"),
+        )],
+        Err(row) => vec![row],
+    }
+}
+
+/// The row name `hook_interpreter_rows` reports first.
+const HOOK_INTERPRETER: &str = "hook-interpreter";
+
+/// Exit with `result`'s code without waiting on the blocking pool (#11885).
+///
+/// What: flushes stdout, then exits 0 on `Ok`; on `Err` prints the error as a
+/// returned `main` error would and exits 1.
+fn exit_now(result: anyhow::Result<()>) -> ! {
+    use std::io::Write as _;
+    let code = match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            1
+        }
+    };
+    let _ = std::io::stdout().flush();
+    std::process::exit(code)
 }
 
 /// Run the daemon's own check battery in this process.
@@ -331,5 +395,29 @@ mod tests {
             project_header(None, false),
             "project: none (cwd unreadable)"
         );
+    }
+
+    /// #11885: a walk that does not finish costs one `Unknown` timeout row,
+    /// and the call returns at its limit instead of waiting on the walk.
+    #[tokio::test]
+    async fn a_settings_walk_past_its_limit_is_one_timeout_row() {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let walk = tokio::task::spawn_blocking(move || {
+            // Held until the test releases it, so the walk cannot finish first.
+            let _ = held.recv();
+            Vec::new()
+        });
+        let rows = tokio::time::timeout(
+            Duration::from_secs(10),
+            rows_from_walk(walk, Duration::from_millis(50)),
+        )
+        .await
+        .expect("the settings walk is unbounded: the rows waited on it");
+        release.send(()).expect("release the held walk");
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, HOOK_INTERPRETER);
+        assert_eq!(rows[0].status, CheckStatus::Unknown);
+        assert!(rows[0].message.contains("timed out"), "{}", rows[0].message);
     }
 }

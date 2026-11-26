@@ -163,6 +163,8 @@ pub mod disk_usage_guard;
 /// Working-tree isolation policy for native Agent-tool dispatches (#4480).
 pub mod dispatch_isolation;
 pub mod doctor;
+/// #11885: a time bound for a doctor phase, with a timeout row.
+pub mod doctor_bounded;
 pub mod doctor_repair;
 pub mod il_schedule;
 // #8454 VC: the egress verdict contract between the daemon and the hook.
