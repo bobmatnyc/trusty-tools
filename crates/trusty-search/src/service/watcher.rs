@@ -229,7 +229,7 @@ impl FileWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::watch_test_support::await_watch_condition;
+    use crate::service::watch_test_support::{await_watch_condition, start_until_ready};
     use std::fs;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -270,7 +270,10 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let rx = Arc::new(Mutex::new(rx));
 
-        let _watcher = FileWatcher::start(dir.path().to_path_buf(), tx).expect("watcher starts");
+        // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+        let _watcher = start_until_ready("file watcher", || {
+            FileWatcher::start(dir.path().to_path_buf(), tx.clone())
+        });
 
         let file_path = dir.path().join("hello.txt");
         let saw = {
@@ -307,7 +310,10 @@ mod tests {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let rx = Arc::new(Mutex::new(rx));
-        let _watcher = FileWatcher::start(dir.path().to_path_buf(), tx).expect("watcher starts");
+        // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+        let _watcher = start_until_ready("file watcher", || {
+            FileWatcher::start(dir.path().to_path_buf(), tx.clone())
+        });
 
         let saw = {
             let rx = Arc::clone(&rx);

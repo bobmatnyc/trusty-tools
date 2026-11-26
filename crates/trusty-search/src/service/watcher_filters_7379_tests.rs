@@ -23,7 +23,9 @@ use crate::core::CodeIndexer;
 use crate::service::index_admission::apply_modified;
 use crate::service::network_fs::MountKind;
 use crate::service::watch_rescan::{reconcile_registered, RescanGate};
-use crate::service::watch_test_support::{await_watch_condition, await_watch_condition_within};
+use crate::service::watch_test_support::{
+    await_watch_condition, await_watch_condition_within, spawn_until,
+};
 use crate::service::watcher::WatchEvent;
 use crate::service::{IndexedFiles, SearchAppState};
 
@@ -109,14 +111,18 @@ async fn daemon_watcher_honours_include_paths_extensions_and_exclude_globs() {
     let handle = registry.register(filtered_handle(&id, &indexer, &root, &["md"]));
     let state = SearchAppState::new(registry);
 
-    state
-        .watcher_manager
-        .spawn_for_index_with_mount_kind(&handle, MountKind::Local)
-        .await;
-    assert!(
-        state.watcher_manager.is_watching(&id).await,
-        "the fixture must actually start a watcher"
-    );
+    // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+    let watching = spawn_until(
+        async || {
+            state
+                .watcher_manager
+                .spawn_for_index_with_mount_kind(&handle, MountKind::Local)
+                .await
+        },
+        async || state.watcher_manager.is_watching(&id).await,
+    )
+    .await;
+    assert!(watching, "the fixture must actually start a watcher");
 
     let admitted = {
         let indexer = Arc::clone(&indexer);
