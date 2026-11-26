@@ -315,12 +315,13 @@ pub(crate) async fn dispatch_session_argv(
     let full = std::iter::once("tm".to_string()).chain(argv);
     let cli = crate::cli::Cli::try_parse_from(full)?;
     match cli.command {
+        // #11821 P6b: box the handler future. The full clap parse above
+        // already needs about 2 MiB of stack in a debug build; holding the
+        // whole `session` state machine inline as well overflowed a 2 MiB
+        // thread once one more subcommand joined the CLI.
         Some(crate::cli::Command::Sessions { action }) => {
-            crate::commands::session::session(
-                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
-                action,
-            )
-            .await
+            let daemon = trusty_mpm::client::DaemonClient::with_client(client.clone(), url);
+            Box::pin(crate::commands::session::session(&daemon, action)).await
         }
         _ => anyhow::bail!("internal: the outside-git menu built a non-`sessions` command"),
     }

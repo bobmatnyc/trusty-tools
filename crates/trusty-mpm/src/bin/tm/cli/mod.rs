@@ -978,6 +978,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: IlAction,
     },
+    /// The install's host paths: `tm paths show|set` (install.toml).
+    ///
+    /// `set` is owner-only: refused inside a Claude Code session or agent.
+    // #11821 P6b. Test: `cli_parses_paths_show_and_set`.
+    Paths {
+        /// Paths action to perform.
+        #[command(subcommand)]
+        action: PathsAction,
+    },
     /// Edit a dotenv file without printing a value: `set` and `keys`.
     ///
     /// Only the bound Architect may run either verb.
