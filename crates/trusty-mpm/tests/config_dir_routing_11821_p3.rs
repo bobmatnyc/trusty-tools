@@ -451,7 +451,9 @@ fn default_savings_log_fails_closed_on_a_broken_install_file() {
 #[test]
 fn staged_savings_sweep_fails_closed_on_a_broken_install_file() {
     let (fx, _env) = broken_install_home();
-    let pending = fx.home.join(".trusty-mpm/usage/pending-savings");
+    // The lenient `$HOME` fallback root, named through the constant.
+    let fallback = fx.home.join(trusty_mpm::core::paths::FRAMEWORK_DIR_NAME);
+    let pending = fallback.join("usage/pending-savings");
     std::fs::create_dir_all(&pending).expect("mkdir pending");
     let staged = pending.join("00000000000000aa.json");
     std::fs::write(&staged, "{}").expect("stage");
@@ -464,7 +466,7 @@ fn staged_savings_sweep_fails_closed_on_a_broken_install_file() {
     assert!(!trusty_mpm::core::savings_sidecar::emit_staged_row_for_session("sess-11821"));
     assert!(staged.exists(), "the $HOME root must not be swept");
     assert!(
-        !fx.home.join(".trusty-mpm/usage/savings.jsonl").exists(),
+        !fallback.join("usage/savings.jsonl").exists(),
         "no row appended under $HOME"
     );
 }

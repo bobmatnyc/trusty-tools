@@ -41,7 +41,7 @@ impl BrokenHome {
 
     /// `$HOME/.trusty-mpm`, the fallback root no writer may use.
     fn fallback_root(&self) -> PathBuf {
-        self.home.join(".trusty-mpm")
+        self.home.join(trusty_mpm::core::paths::FRAMEWORK_DIR_NAME)
     }
 
     /// A `tm` confined to this home, reaching no daemon.
