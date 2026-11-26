@@ -203,10 +203,7 @@ fn slack_dm_posts_to_the_member_id() {
     };
     let route = cfg.route("bob-acme", None).expect("route");
     assert_eq!(sender.send(&route, TEXT), Ok(()));
-    assert_eq!(
-        *poster.0.lock().expect("lock"),
-        vec!["U0OWNER".to_owned()]
-    );
+    assert_eq!(*poster.0.lock().expect("lock"), vec!["U0OWNER".to_owned()]);
     let gchat = cfg.route("owner@example.com", None).expect("route");
     assert!(matches!(
         sender.send(&gchat, TEXT),
