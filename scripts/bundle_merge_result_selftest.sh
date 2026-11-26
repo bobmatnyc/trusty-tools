@@ -63,12 +63,20 @@ mkdir -p "${W}/scripts" "${W}/${FLEET}"
 cp "${META_SRC}" "${META}" || { echo "FAIL setup: cannot copy ${META_SRC}"; exit 1; }
 printf 'const SEEDS: &[Seed] = &[\n    embedded!("%s", "provenance.json", false),\n];\n' "${DEST}" > "${W}/${FLEET}/seed_table.rs"
 echo "// no script rows" > "${W}/${FLEET}/seed_table_scripts.rs"
+# #11773: history reads the content seeds and the skills table; give it a
+# minimal content tree (CLAUDE.md, no skills or agents) and a table with no
+# `previous` lists.
+CONTENT=content/instructions/architect
+SKILLS_TABLE=crates/trusty-mpm/src/core/project_skill_tier/architect_skills.rs
+mkdir -p "${W}/${CONTENT}/templates" "${W}/${CONTENT}/skills" "${W}/${CONTENT}/agents" "$(dirname "${W}/${SKILLS_TABLE}")"
+echo "# Architect" > "${W}/${CONTENT}/templates/CLAUDE.md"
+echo "// no skills" > "${W}/${SKILLS_TABLE}"
 # Earlier versions spread over the hash space, as on main, so A's and B's new
 # rows land in different gaps of the sorted file and merge cleanly.
 for d in 0 1 2 3 4 5 6 7 8 9 a b c d e f; do
   printf '%s\t%s\n' "${DEST}" "$(printf "%064d" 0 | tr 0 "${d}")"
 done > "${W}/${TSV}"
-g add scripts "${FLEET}"
+g add scripts "${FLEET}" "${CONTENT}" "${SKILLS_TABLE}"
 provenance base base
 regen
 commit base
