@@ -38,6 +38,9 @@ pub const SKILL_CAP_BYTES: usize = 8 * 1024;
 pub const TOTAL_CAP_BYTES: usize = 24 * 1024;
 /// Largest `.trusty-review.toml` read at the base commit.
 const CONFIG_CAP_BYTES: usize = 64 * 1024;
+/// Most `[[review.skills]]` entries processed per review; the rest are skipped
+/// with one summary entry (#11899).
+pub const MAX_SKILL_ENTRIES: usize = 32;
 
 /// One requested skill: one `[[review.skills]]` entry (#11899, DOC-93 §2).
 ///
@@ -140,7 +143,9 @@ impl<'a> SkillsCall<'a> {
                 None => Vec::new(), // no base commit: the entries are unknowable
             },
         };
-        if entries.is_empty() {
+        // #11899: a fork PR always records the withheld skills and says so,
+        // even when its base commit (and so its config) is not readable here.
+        if entries.is_empty() && !base.fork {
             return voice;
         }
         let origin = match (&base.store, base.fork) {

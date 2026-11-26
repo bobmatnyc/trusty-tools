@@ -822,13 +822,22 @@ Rules:
   pull request cannot add or edit the skill that reviews it; a new skill takes
   effect after it merges. The base commit must be present in the local
   checkout (`git fetch` it first). A `--base <ref>` review reads at that ref.
-- A pull request from a fork loads no skill, and the review says so.
+- A pull request from a fork loads no skill, and the review says so, even
+  when its base commit is not in the local checkout.
 - Each `SKILL.md` is capped at 8 KiB and all loaded skills together at 24 KiB.
-  A symlinked skill or skill directory is never followed.
+  At most 32 entries are processed; the rest are skipped as one summary
+  entry. A symlinked skill or skill directory is never followed, and each git
+  read is killed after 10 seconds and skipped.
+- A skill whose text holds a `<<<` or `>>>` run, or the reserved word
+  `REPO-SKILL` in any spelling (case, Unicode hyphens, zero-width or
+  fullwidth characters), is skipped as unreadable, so it cannot forge the
+  fence around its own text.
 - A skill problem never fails the review. A missing, invalid, over-cap,
   duplicate or non-matching skill, or a malformed entry (an unknown key, a
   wrong type), is skipped and named with its reason at the end of the review
-  body. A `.trusty-review.toml` that is not valid TOML is ignored, as before.
+  body, each name and reason inside a code span, so none of it renders as a
+  mention, link or image. The section is capped at 8,000 characters. A
+  `.trusty-review.toml` that is not valid TOML is ignored, as before.
 - Loaded skills are appended after the review template as one fenced block
   labelled as untrusted repository guidance, followed by a statement that the
   verdict rules and output schema take precedence. The output schema itself

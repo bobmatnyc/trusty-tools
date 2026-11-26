@@ -148,3 +148,32 @@ async fn runner_without_skills_leaves_prompt_and_record_unchanged() {
     let json = serde_json::to_string(result).expect("json");
     assert!(!json.contains("repo_skills"), "{json}");
 }
+
+/// Acceptance (c) when the fork's base commit is not in the local checkout:
+/// the config cannot be read, yet the record still says `fork` with the base
+/// SHA and the review body says repository skills were not loaded (#11899).
+#[tokio::test]
+async fn runner_fork_pr_with_unreadable_base_still_says_so() {
+    let (dir, _) = checkout();
+    let absent = "ab".repeat(20); // a well-formed SHA that is not in the checkout
+    let mut source = FakePrSource::new(BODY, &billing_diff());
+    source.head.fork = true;
+    source.head.base_sha = absent.clone();
+    let input = RepoSkillsInput::from_repo_config(Some(dir.path().to_path_buf()));
+    let options = ReviewOptions::default().with_repo_skills(input);
+    let seen = observe(source, legacy_caller(), options).await;
+    let requests = seen.reviewer.requests();
+    let system = &requests.first().expect("a reviewer call").0;
+    assert!(!system.contains("Repository review skills"), "{system}");
+    let result = &seen.outcome.result;
+    let record = result.repo_skills.as_ref().expect("a fork always records");
+    assert!(record.fork && record.loaded.is_empty(), "{record:?}");
+    assert_eq!(record.base_sha, absent);
+    assert!(
+        result
+            .review_body
+            .contains("repository skills were not loaded"),
+        "{}",
+        result.review_body
+    );
+}

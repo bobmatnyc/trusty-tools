@@ -62,8 +62,8 @@ pub struct SkippedSkill {
 ///
 /// Why: a consumer (and the tests) can branch on the class without parsing
 /// the prose reason.
-/// What: the DOC-93 RS-25 reasons, plus `malformed_entry`, `fork` and
-/// `no_base`, which DOC-93 states in prose but does not name.
+/// What: the DOC-93 RS-25 reasons, plus `malformed_entry`, `fork`, `no_base`
+/// and `over_entry_cap`, which DOC-93 states in prose or leaves open.
 /// Test: `every_skip_reason_is_recorded_and_named_in_the_body`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +93,8 @@ pub enum SkipKind {
     Fork,
     /// No base commit is known or readable, so nothing can be read.
     NoBase,
+    /// Entries past the per-review entry cap; recorded as one summary entry.
+    OverEntryCap,
 }
 
 impl SkipKind {
@@ -111,6 +113,7 @@ impl SkipKind {
             Self::MalformedEntry => "malformed entry",
             Self::Fork => "fork pull request",
             Self::NoBase => "no base commit",
+            Self::OverEntryCap => "over entry cap",
         }
     }
 }

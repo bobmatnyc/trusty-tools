@@ -12,8 +12,10 @@
 //! Test: `base_sha_is_read_not_head_or_worktree`, `symlinked_skill_is_not_regular`,
 //! `option_like_base_ref_is_refused`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// What one blob lookup at the base commit found (#11899).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,18 +160,77 @@ pub(crate) fn has_commit(repo_root: &Path, sha: &str) -> bool {
     is_hex_sha(sha) && run_git(repo_root, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_ok()
 }
 
-/// Run `git -C <repo_root> <args>`; stdout on success, stderr's first line on failure.
+/// Longest one git call may run; a slower call is killed and its read skipped.
+pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `git -C <repo_root> <args>` within [`GIT_TIMEOUT`].
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("git")
+    run_git_within(repo_root, args, GIT_TIMEOUT)
+}
+
+/// Run `git -C <repo_root> <args>`, killed after `timeout`.
+///
+/// Why: a hung git (a huge object, a lock, a slow filesystem) must not hold
+/// the review; a timeout is a skipped read, never a failed review (#11899).
+/// What: stdout and stderr are drained on threads so a full pipe cannot
+/// stall the child; the child is polled until it exits or `timeout` passes,
+/// then killed and reaped. Returns stdout on success, else stderr's first
+/// line, or a timeout message.
+/// Test: `git_call_past_its_timeout_is_an_error`.
+pub(crate) fn run_git_within(
+    repo_root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("could not run git: {e}"))?;
-    if out.status.success() {
-        Ok(out.stdout)
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("git timed out after {} ms", timeout.as_millis()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => return Err(format!("could not wait for git: {e}")),
+        }
+    };
+    let out = stdout.join().unwrap_or_default();
+    if status.success() {
+        Ok(out)
     } else {
-        let err = String::from_utf8_lossy(&out.stderr);
+        let err = stderr.join().unwrap_or_default();
+        let err = String::from_utf8_lossy(&err);
         Err(err.lines().next().unwrap_or("git failed").to_string())
     }
 }

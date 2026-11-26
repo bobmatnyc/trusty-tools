@@ -10,7 +10,9 @@ use globset::{GlobBuilder, GlobSetBuilder};
 use trusty_common::integrity::Sha256Digest;
 
 use super::git_store::{BaseTree, BlobRead};
-use super::{SKILL_CAP_BYTES, SkillRequest, TOTAL_CAP_BYTES, render, skill_format};
+use super::{
+    MAX_SKILL_ENTRIES, SKILL_CAP_BYTES, SkillRequest, TOTAL_CAP_BYTES, render, skill_format,
+};
 use crate::config::review_skills::SkillEntry;
 use crate::identifier::is_valid_identifier;
 use crate::models::{LoadedSkill, RepoSkillsRecord, SkipKind, SkippedSkill};
@@ -51,7 +53,8 @@ pub(crate) fn load_skills(
     let mut bodies: Vec<(String, String, String)> = Vec::new();
     let mut total = 0usize;
     let mut seen: Vec<String> = Vec::new();
-    for entry in entries {
+    // #11899: at most MAX_SKILL_ENTRIES entries are processed.
+    for entry in entries.iter().take(MAX_SKILL_ENTRIES) {
         let req = match entry {
             Ok(req) => req,
             Err(skipped) => {
@@ -74,6 +77,14 @@ pub(crate) fn load_skills(
                 reason,
             }),
         }
+    }
+    // #11899: one summary entry names the entries past the cap.
+    if entries.len() > MAX_SKILL_ENTRIES {
+        record.skipped.push(SkippedSkill {
+            name: format!("entries {}-{}", MAX_SKILL_ENTRIES + 1, entries.len()),
+            kind: SkipKind::OverEntryCap,
+            reason: format!("only the first {MAX_SKILL_ENTRIES} entries are processed"),
+        });
     }
     match origin {
         SkillOrigin::Base { base_sha, .. } => record.base_sha = base_sha.clone(),
@@ -155,12 +166,9 @@ fn load_one(
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Err((SkipKind::Unreadable, "SKILL.md is not UTF-8".into()));
     };
-    if text.contains(render::DELIMITER_WORD) {
-        let why = format!(
-            "SKILL.md contains the reserved word {}",
-            render::DELIMITER_WORD
-        );
-        return Err((SkipKind::Unreadable, why));
+    // #11899: refuse any text that could read as a fence marker, lookalikes included.
+    if let Some(why) = render::fence_lookalike(text) {
+        return Err((SkipKind::Unreadable, format!("SKILL.md {why}")));
     }
     let doc =
         skill_format::parse_skill(name, text).map_err(|e| (SkipKind::InvalidFrontmatter, e))?;
