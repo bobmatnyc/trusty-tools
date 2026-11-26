@@ -116,7 +116,8 @@ check "writer wrote nothing through the symlink" '[ ! -e "$WORK/outside/tools/in
 H="$WORK/plain-home"
 mkdir -p "$H"
 OUT="$(python3 -I "$SIP_PY" write --home "$H" --config-dir "$H/c" 2>&1)" && RC=0 || RC=$?
-MODE="$(stat -f %Lp "$H/.trusty-tools/install.toml" 2>/dev/null || stat -c %a "$H/.trusty-tools/install.toml" 2>/dev/null || true)"
+# #11821 P6b: read the mode through python, not `stat -f`; GNU stat treats `-f` as file-system mode and prints a report.
+MODE="$(python3 -I -c 'import os, sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$H/.trusty-tools/install.toml" 2>/dev/null || true)"
 check "writer writes a plain home's install.toml owner-only" '[ "$RC" -eq 0 ] && [ "$MODE" = 600 ]'
 
 if [ "$FAILS" -ne 0 ]; then
