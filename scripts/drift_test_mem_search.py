@@ -50,6 +50,8 @@ def drift_dir():
     """`<config_dir>/.trusty-tools/drift/mem-search`; raises InstallPathsError on a broken install.toml (#11821)."""
     return os.path.join(tools_dir(), "drift", "mem-search")
 REMEMBER_TYPES = {"Ruling", "Decision", "Status", "Turn", "Reference"}
+# #11902: the daemon's secret-gate refusal text (memory_remember); `force` does not bypass it.
+SECRET_GATE = "likely secret/credential token"
 
 
 def load_golden(paths):
@@ -112,7 +114,11 @@ def seed_test_palace(m, guard, source, existing):
     Returns (palace, source drawers, live id -> test id map, info). The source
     is only listed (memory_list), never recalled. #11815: a drawer that fails
     to seed raises RunAborted naming every such drawer, so a partial seed is
-    never scored. Test: `test_partial_seed_aborts_and_names_drawers`."""
+    never scored. #11902: the seed is a verbatim copy of drawers the live
+    palace already holds, so a drawer the secret gate refuses is re-sent once
+    with `allow_secret_like` and listed in info["seed_secret_like"]; every
+    other drawer keeps the gate. Test: `test_partial_seed_aborts_and_names_drawers`,
+    `test_secret_like_drawer_seeds_verbatim_and_is_listed`."""
     pal, t0 = guard.new_name(), time.perf_counter()
     guard.claim(pal, existing)
     _, _, err = m.call("palace_create", {"name": pal, "force": True,
@@ -120,7 +126,7 @@ def seed_test_palace(m, guard, source, existing):
     if err:
         raise RuntimeError(f"palace_create: {err}")
     src = list_all(m, source)
-    idmap, failed = {}, []
+    idmap, failed, secret_like = {}, [], []
     for d in src.values():
         a = {"palace": pal, "text": d["content"], "force": True}
         if d["_room"]:
@@ -128,6 +134,10 @@ def seed_test_palace(m, guard, source, existing):
         if d.get("drawer_type") in REMEMBER_TYPES:
             a["type"] = d["drawer_type"]
         resp, _, err = m.call("memory_remember", a)
+        if err and SECRET_GATE in str(err):
+            resp, _, err = m.call("memory_remember", dict(a, allow_secret_like=True))
+            if not err:
+                secret_like.append(d["drawer_id"])
         if err or not resp or not resp.get("drawer_id"):
             failed.append(f"{d['drawer_id']} ({err or 'no drawer_id'})")
             continue
@@ -136,7 +146,7 @@ def seed_test_palace(m, guard, source, existing):
         raise RunAborted(f"{len(failed)} of {len(src)} drawers of {source} did not seed into {pal}: "
                          + "; ".join(failed))
     return pal, src, idmap, {"test_palace": pal, "source_palace": source, "seeded": len(idmap),
-                             "seed_s": round(time.perf_counter() - t0, 1)}
+                             "seed_secret_like": secret_like, "seed_s": round(time.perf_counter() - t0, 1)}
 
 
 def delete_test_palace(m, guard, pal):
