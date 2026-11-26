@@ -336,6 +336,30 @@ pub(crate) fn rederive_from_compiled_prompt(
     compiled_prompt: &Path,
     claude_session_id: &str,
 ) -> bool {
+    // #11731: delegates with the ambient roster resolver; production is unchanged.
+    rederive_from_compiled_prompt_with(
+        framework_root,
+        compiled_prompt,
+        claude_session_id,
+        ambient_roster_source_bytes,
+    )
+}
+
+/// [`rederive_from_compiled_prompt`] with an explicit roster-byte resolver.
+///
+/// Why (#11731): the ambient resolver reads `$CLAUDE_CONFIG_DIR`/`$HOME`, which
+/// concurrent tests rewrite, so a test that sized its fixture with one read and
+/// re-derived with a second could land on the other branch — the #7746 race on
+/// the re-derivation path.
+/// What: the re-derivation, with `roster_source` standing in for
+/// [`ambient_roster_source_bytes`].
+/// Test: `rederiving_a_prompt_that_folds_nothing_appends_nothing`.
+pub(crate) fn rederive_from_compiled_prompt_with(
+    framework_root: &Path,
+    compiled_prompt: &Path,
+    claude_session_id: &str,
+    roster_source: impl FnOnce(&Path) -> usize,
+) -> bool {
     let Ok(prompt) = std::fs::read_to_string(compiled_prompt) else {
         return false;
     };
@@ -358,7 +382,7 @@ pub(crate) fn rederive_from_compiled_prompt(
         compiled_prompt,
         &prompt,
         Some(claude_session_id.to_string()),
-        ambient_roster_source_bytes,
+        roster_source,
         resolve_pm_price,
     );
     crate::core::savings::has_row(
