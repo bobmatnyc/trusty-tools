@@ -520,16 +520,26 @@ fn rederiving_a_prompt_that_folds_nothing_appends_nothing() {
     let project = tempfile::tempdir().expect("temp project");
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "local");
-    // #7616: the re-derivation resolves this machine's roster onto the source
-    // side, so a fixture sized against the bundled sections alone would now
-    // FOLD and take the other branch.
-    let bulky = "x".repeat(ambient_source_bytes(project.path(), sections()) + 1);
+    // #11731: both the fixture size and the re-derivation read the injected
+    // `no_roster`, never the ambient `$CLAUDE_CONFIG_DIR`/`$HOME` roster a
+    // concurrent test may rewrite between two reads (the #7746 race).
+    let bulky = "x".repeat(source_bytes_with(project.path(), sections(), no_roster) + 1);
     std::fs::write(&dest, &bulky).expect("compiled prompt");
     let ledger = crate::core::savings::savings_log_in(framework_root.path());
+    let roster_reads = std::cell::Cell::new(0_usize);
 
     assert!(
-        !rederive_from_compiled_prompt(framework_root.path(), &dest, "c1"),
+        !rederive_from_compiled_prompt_with(framework_root.path(), &dest, "c1", |dir| {
+            roster_reads.set(roster_reads.get() + 1);
+            no_roster(dir)
+        }),
         "a prompt that folded nothing must report no row"
+    );
+    // #11731: the re-derivation measured the injected roster, not the host's.
+    assert_eq!(
+        roster_reads.get(),
+        1,
+        "the re-derivation must read the supplied roster source"
     );
     assert!(crate::core::savings::fold_session(&ledger, "c1").is_zero());
 }
