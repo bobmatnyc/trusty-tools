@@ -175,7 +175,7 @@ impl UsearchStore {
     /// [`compact_threshold`], and no back-off from a failed attempt is
     /// pending.
     /// Test: `super::compact_9450_tests::an_abandoned_load_heal_runs_once_writes_stop`.
-    async fn compaction_due(&self) -> bool {
+    pub(super) async fn compaction_due(&self) -> bool {
         let live = self.index.read().await.size();
         let churn = self.compact.churn();
         // #9450: an unhealed graph stays due until a heal swaps.

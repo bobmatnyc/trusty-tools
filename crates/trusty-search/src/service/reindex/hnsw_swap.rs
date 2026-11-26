@@ -64,7 +64,7 @@
 //! Test: `tests` submodule below.
 
 use crate::core::registry::{IndexHandle, IndexId};
-use crate::core::store::StagedSwapOutcome;
+use crate::core::store::{tombstones_path, StagedSwapOutcome};
 use std::path::{Path, PathBuf};
 
 /// The (live, staging) HNSW snapshot path pair for one index.
@@ -319,6 +319,7 @@ pub(super) async fn commit_staged_hnsw_swap(
                 paths.live.display(),
                 index_id_for_task
             );
+            carry_staged_tombstones(paths, index_id).await;
             // #6299: the staging file the live store recorded (and may be
             // mmap-viewing) now only exists under the live name. Only on a
             // SUCCESSFUL rename — a failed one leaves staging in place, and
@@ -403,10 +404,13 @@ pub(super) async fn abort_staged_hnsw_swap(
 
     let staging = paths.staging.clone();
     let staging_sidecar = paths.staging.with_extension("keys.json");
+    // #10303: the staged pair's tombstones go with it.
+    let staging_tombstones = tombstones_path(&paths.staging);
     let index_id_for_task = index_id.0.clone();
     let removed = tokio::task::spawn_blocking(move || {
         remove_if_exists(&staging)?;
         remove_if_exists(&staging_sidecar)?;
+        remove_if_exists(&staging_tombstones)?;
         Ok::<(), std::io::Error>(())
     })
     .await;
@@ -467,6 +471,35 @@ async fn resolve_store_snapshot_path(
              (issue #6299)",
             index_id.0,
             outcome,
+        );
+    }
+}
+
+/// Give the live pair the tombstones of the staged pair it now is (#10303).
+///
+/// Why: the live tombstone file describes the pair the swap just replaced.
+/// A store that served a staging view during the reindex may have written
+/// tombstones against the staged pair; those now describe the live one.
+/// What: after both pair renames succeed, renames the staging tombstone file
+/// onto the live name, or deletes the live one when staging has none. A
+/// failure is logged: each file carries the digest of the sidecar it was
+/// written for, so a left-over file is ignored at load, never misapplied.
+/// Test: `tests::commit_staged_hnsw_swap_clears_the_live_tombstone_file`,
+/// `tests::commit_staged_hnsw_swap_carries_staged_tombstones`.
+async fn carry_staged_tombstones(paths: &HnswSwapPaths, index_id: &IndexId) {
+    let staging = tombstones_path(&paths.staging);
+    let live = tombstones_path(&paths.live);
+    let carried = tokio::task::spawn_blocking(move || match std::fs::rename(&staging, &live) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => remove_if_exists(&live),
+        Err(e) => Err(e),
+    })
+    .await;
+    if !matches!(carried, Ok(Ok(()))) {
+        tracing::warn!(
+            "staged hnsw swap: could not carry the tombstone file for '{}' ({carried:?}); \
+             its sidecar digest keeps a stale file from applying (#10303)",
+            index_id.0
         );
     }
 }

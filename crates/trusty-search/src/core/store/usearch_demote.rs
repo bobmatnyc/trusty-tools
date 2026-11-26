@@ -261,12 +261,14 @@ impl UsearchStore {
         if cooldown.is_zero() {
             return Ok(None);
         }
-        // Already a view: nothing on the heap to reclaim.
-        if self.is_view.load(Ordering::Acquire) {
+        // Already a view: nothing on the heap to reclaim — unless its #10303
+        // tombstones are due the #9450 compaction, which folds them.
+        let is_view = self.is_view.load(Ordering::Acquire);
+        if is_view && !(compact && self.tombstones_due_compaction().await) {
             return Ok(None);
         }
         // Clean already: #2164's demote owns that case and needs no save.
-        if !self.dirty.load(Ordering::Acquire) {
+        if !is_view && !self.dirty.load(Ordering::Acquire) {
             return Ok(None);
         }
         match self.write_clock.since_last_write() {

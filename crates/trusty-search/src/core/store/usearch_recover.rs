@@ -123,6 +123,8 @@ impl UsearchStore {
         let new_next_key = probe.next_key.load(Ordering::Relaxed);
         // #9450: the adopted graph brings its own churn count and heal marker.
         let (churn, heal_epoch) = (probe.compact.churn(), probe.compact.heal_epoch());
+        // #10303: the adopted maps already omit tombstoned ids; keep the keys.
+        let tombstones = std::mem::take(&mut *probe.tombstones.lock().await);
         let restored = new_id_to_key.len();
         // Release the probe (and its mmap) before re-opening the same file.
         drop(probe);
@@ -150,6 +152,7 @@ impl UsearchStore {
         }
         self.next_key.store(new_next_key.max(1), Ordering::Relaxed);
         self.compact.restore(churn, heal_epoch);
+        *self.tombstones.lock().await = tombstones;
         self.is_view.store(true, Ordering::Release);
         // The in-memory graph is now byte-for-byte the on-disk snapshot.
         self.dirty.store(false, Ordering::Release);

@@ -63,9 +63,14 @@ mod usearch_relink;
 // `usearch_store.rs` stays under the 500-SLOC production cap.
 mod usearch_requant;
 mod usearch_store;
+// #10303: tombstones for copy-free removal from a view-mode index.
+#[cfg(test)]
+mod tombstones_10303_tests;
+mod usearch_tombstones;
 
 pub use self::types::{
     relative_key, CompactMode, CompactReport, DemoteStats, ReindexProbe, RequantizeReport,
     StagedSwapOutcome, VectorHit, VectorStore,
 };
 pub use self::usearch_store::UsearchStore;
+pub use self::usearch_tombstones::{tombstones_path, TombstoneError};
