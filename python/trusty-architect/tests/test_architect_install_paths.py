@@ -103,7 +103,7 @@ def test_mpm_root_follows_the_config_dir_and_fails_closed(tmp_path):
 
 # #11821 P6b r1: install.toml syntax parity with trusty-common's reader (the `toml` crate).
 # Rows named as a SYNTAX_FIXTURES row mirror it from `architect_reader_matches_trusty_common_resolver`
-# (crates/trusty-crate-contracts/tests/architect_install_paths_parity_11821.rs, #11916); those
+# (trusty-crate-contracts test target architect_install_paths_parity_11821, #11916); those
 # fixtures are Rust consts, so they are mirrored here, not read. "two BOMs" follows toml_parser's
 # lexer, which skips exactly one leading BOM; the "BOM, CRLF ..." row combines three mirrored rows.
 # want "" means Rust refuses with a parse error; None means Rust accepts and the key stays at its default.
