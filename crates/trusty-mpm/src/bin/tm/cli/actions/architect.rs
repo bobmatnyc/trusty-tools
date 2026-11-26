@@ -5,7 +5,8 @@
 //! replaces, so a caller swaps one for the other.
 //! What: [`ArchitectAction`] — `poll`, `serve` (#9779), `classify`, `input-state`, `quiet`,
 //! `self-ctx`. The work is `trusty_architect::verbs`. #10063 adds
-//! `dashboard`, the dashboard store's verbs ([`DashboardArgs`]).
+//! `dashboard`, the dashboard store's verbs ([`DashboardArgs`]). #11773 adds
+//! `drift`, the read-only managed-file report, and `up --strict`.
 //! Test: `cli_parses_architect_verbs`, `cli_parses_architect_dashboard_verbs`.
 
 use std::path::PathBuf;
@@ -116,6 +117,27 @@ pub(crate) enum ArchitectAction {
     Up(UpArgs),
     /// Attach to the Architect's tmux session (switch-client inside tmux).
     Attach,
+    /// Report how each managed file differs from this binary's bundle (#11773).
+    ///
+    /// Read-only: writes, locks and fetches nothing. Per managed path it
+    /// compares the bytes on disk, the sha the installed
+    /// `docs/architect/bundle-provenance.json` records, and the bytes this
+    /// binary's seed ships, and prints one state: `current` (equal to the
+    /// seed), `stale` (an earlier shipped copy; the next `tm fleet init`
+    /// refreshes it), `edited` (no shipped copy matches), `absent`, `extra`
+    /// (an unseeded file under `scripts/` or `.claude/skills/`, or an
+    /// orphaned `*.shipped`), `owner` (`AGENTS.md`) or `instance` (a changed
+    /// `local/` file). Bytes from a content release newer than this binary's
+    /// shipped history read `edited`. Exit codes: 0 nothing edited, 1 a file
+    /// is edited, 2 the directory or the seed cannot be read.
+    Drift {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// The Architect directory (default: the one `tm fleet init` recorded).
+        #[arg(long)]
+        dir: Option<String>,
+    },
     /// Restart the Architect behind the checkpoint gate (#11365).
     ///
     /// Waits for an idle box (3 reads 5 s apart, exit 2), asks the Architect
@@ -154,4 +176,8 @@ pub(crate) struct UpArgs {
     /// The Architect directory (default: the one `tm fleet init` recorded).
     #[arg(long)]
     pub(crate) dir: Option<String>,
+    /// Refuse (exit 1, nothing written) when a managed `scripts/*` file is
+    /// edited; see `tm architect drift` (#11773).
+    #[arg(long)]
+    pub(crate) strict: bool,
 }
