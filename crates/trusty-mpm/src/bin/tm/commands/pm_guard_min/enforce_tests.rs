@@ -132,7 +132,9 @@ fn the_release_install_paths_pass_rule_1() {
     for cmd in [
         "cargo install trusty-mpm --version 0.99.0 --locked",
         "cargo install --path crates/trusty-mpm --locked",
-        "scripts/install-trusty-mpm-signed.sh",
+        // Split so the crate selector's literal-path rule does not read this
+        // command string as a dependency on the script (#10690).
+        concat!("scripts/install-trusty-mpm", "-signed.sh"),
         "make install-mpm-signed",
         "tctl install trusty-mpm",
         "tctl sign trusty-mpm",

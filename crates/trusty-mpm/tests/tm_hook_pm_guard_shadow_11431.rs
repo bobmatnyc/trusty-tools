@@ -57,8 +57,14 @@ fn bash(cmd: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// The hook's guard directory under `home`, named through install_paths.
+fn guard_dir(home: &Path) -> std::path::PathBuf {
+    home.join(trusty_common::install_paths::MPM_DIR_NAME)
+        .join("guard")
+}
+
 fn log_lines(home: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(home.join(".trusty-mpm/guard/shadow.jsonl"))
+    std::fs::read_to_string(guard_dir(home).join("shadow.jsonl"))
         .unwrap_or_default()
         .lines()
         .map(|l| serde_json::from_str(l).expect("log line is JSON"))
@@ -99,7 +105,7 @@ fn an_r1_write_is_refused_and_a_malformed_call_too() {
     refused(home.path(), &bash(&huge));
     assert_eq!(log_lines(home.path()).len(), 4, "each refusal is recorded");
     // `.trusty-mpm/guard` is a file, so the log directory cannot be created.
-    let base = home.path().join(".trusty-mpm");
+    let base = home.path().join(trusty_common::install_paths::MPM_DIR_NAME);
     std::fs::remove_dir_all(&base).expect("clear");
     std::fs::create_dir_all(&base).expect("base");
     std::fs::write(base.join("guard"), "not a dir").expect("blocker");
@@ -113,7 +119,7 @@ fn an_r1_write_is_refused_and_a_malformed_call_too() {
 #[test]
 fn a_fifo_log_path_still_gets_the_deny() {
     let home = tempfile::tempdir().expect("home");
-    let log = home.path().join(".trusty-mpm/guard/shadow.jsonl");
+    let log = guard_dir(home.path()).join("shadow.jsonl");
     std::fs::create_dir_all(log.parent().expect("dir")).expect("dir");
     let made = std::process::Command::new("mkfifo")
         .arg(&log)
