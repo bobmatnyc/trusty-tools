@@ -192,3 +192,27 @@ fn a_runners_quoted_command_is_leased_whole() {
     }
     assert_eq!(rw("watch -n 5 'git status'"), LeaseRewrite::None);
 }
+
+/// #11886 critic round 2: a `#` comment's apostrophe no longer moves the
+/// segment split, and an `_`-joined name still names its heavy program.
+#[test]
+fn comments_and_underscored_names_stay_fail_closed() {
+    for (input, want) in [
+        (
+            "# it's\nbash -c 'cargo fmt; cargo test'",
+            "# it's\ntm build-lease -- bash -c 'cargo fmt; cargo test'",
+        ),
+        (
+            "# don't cache\ncargo test -p x\n# it's done",
+            "# don't cache\ntm build-lease -- cargo test -p x\n# it's done",
+        ),
+    ] {
+        assert_eq!(rw(input), LeaseRewrite::Rewrite(want.into()), "{input}");
+    }
+}
+
+/// #11886 critic round 2: `$CARGO_BIN` and `${CARGO_CMD}` name cargo.
+#[test]
+fn underscored_expansions_naming_cargo_are_refused() {
+    assert_refused(&["$CARGO_BIN test", "${CARGO_CMD} build"]);
+}

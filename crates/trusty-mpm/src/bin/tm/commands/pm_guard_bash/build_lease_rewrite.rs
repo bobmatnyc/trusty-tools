@@ -32,7 +32,9 @@ use crate::commands::hook_rewrite::is_env_assignment;
 // at its line cap, so the module is mounted here).
 #[path = "build_lease_hidden.rs"]
 mod build_lease_hidden;
-use build_lease_hidden::{hidden_build_refusal, runner_operand_hides, unparseable_build_refusal};
+use build_lease_hidden::{
+    blank_comments, hidden_build_refusal, runner_operand_hides, unparseable_build_refusal,
+};
 
 /// What the hook does with one Bash command.
 ///
@@ -92,6 +94,10 @@ pub(crate) fn rewrite_for_lease_with(
     // #8261 critic round 1 (CRITICAL): a here-document body is DATA — a commit
     // message, a file's content. Nothing inside one is ever rewritten; #11886:
     // one a shell runs refuses the command when it builds (below).
+    // #11886 r2: read a copy with `#` comments blanked; insert into the original.
+    let original = command;
+    let blanked = blank_comments(original, &HeredocBodies::scan(original));
+    let command: &str = &blanked;
     let bodies = HeredocBodies::scan(command);
     // #11886: a build run through text the shell reads later is refused.
     // #11886 Fail-Open Check: an unreadable command naming a build is refused.
@@ -122,19 +128,19 @@ pub(crate) fn rewrite_for_lease_with(
     }
     inserts.sort_unstable();
     inserts.dedup();
-    let mut out = String::with_capacity(command.len() + inserts.len() * 32);
+    let mut out = String::with_capacity(original.len() + inserts.len() * 32);
     let mut last = 0;
     for at in inserts {
         let prefix = match prefix_at(at) {
             Ok(prefix) => prefix,
             Err(reason) => return LeaseRewrite::Refuse(reason),
         };
-        out.push_str(&command[last..at]);
+        out.push_str(&original[last..at]);
         out.push_str(&prefix);
         out.push(' ');
         last = at;
     }
-    out.push_str(&command[last..]);
+    out.push_str(&original[last..]);
     LeaseRewrite::Rewrite(out)
 }
 

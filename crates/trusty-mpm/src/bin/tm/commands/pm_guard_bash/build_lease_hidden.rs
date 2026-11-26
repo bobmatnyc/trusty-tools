@@ -24,6 +24,7 @@ use super::super::shell_lex::DASH_C_SHELLS;
 use super::super::split_shell_segments_raw;
 use super::{LeaseRewrite, rewrite_for_lease};
 use crate::commands::hook_rewrite::is_env_assignment;
+use std::borrow::Cow;
 
 /// The `(program, optional subcommand)` heavy-build table.
 type Heavy = [(String, Option<String>)];
@@ -297,8 +298,7 @@ fn expansion_text<'a>(seg: &'a str, word: &Word) -> &'a str {
 /// The heavy program an expanded program word names: an identifier equal to
 /// one, case aside (`$CARGO`, `${CARGO:-cargo}`, `$(which cargo)`).
 ///
-/// #11886 r1: `_` stays inside an identifier, so `$CARGO_TARGET_DIR` names
-/// nothing; a path whose last component is literal (`$CARGO_TARGET_DIR/debug/tm`,
+/// #11886 r1: a path whose last component is literal (`$CARGO_TARGET_DIR/debug/tm`,
 /// `"$CARGO_HOME/bin/cargo"`) is the classifier's to read by that basename.
 fn expanded_heavy_program<'h>(text: &str, heavy: &'h Heavy) -> Option<&'h str> {
     let bare = text.trim_matches('"');
@@ -307,7 +307,9 @@ fn expanded_heavy_program<'h>(text: &str, heavy: &'h Heavy) -> Option<&'h str> {
     {
         return None;
     }
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+    // #11886 r2: `_` splits, so `$CARGO_BIN` names cargo; the path rule
+    // above still passes `$CARGO_TARGET_DIR/debug/tm`.
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
         .find_map(|tok| {
             heavy
                 .iter()
@@ -367,12 +369,35 @@ fn mentions_heavy(command: &str, heavy: &Heavy) -> bool {
 }
 
 /// Whether `command`'s quotes close, here-document bodies and `#` comments
-/// skipped.
-///
-/// #11886 r1: `QuoteScan` reads a comment's apostrophe (`# the crate's
-/// tests`) as an open quote, so a commented build was refused.
+/// skipped (#11886 r1: a comment's apostrophe is no open quote).
 fn balanced_outside_bodies(command: &str, bodies: &HeredocBodies) -> bool {
+    comment_walk(command, bodies).1
+}
+
+/// `command` with every `#` comment outside quotes and here-document bodies
+/// blanked to spaces, so every byte offset survives.
+///
+/// Why (#11886 r2): `QuoteScan`, and the segment splitter on it, read a
+/// comment's apostrophe as an open quote and cut a later quoted string apart,
+/// so `# it's` + `bash -c 'cargo fmt; cargo test'` leased nothing.
+/// Test: `comments_and_underscored_names_stay_fail_closed`.
+pub(super) fn blank_comments<'a>(command: &'a str, bodies: &HeredocBodies) -> Cow<'a, str> {
+    let (comments, _) = comment_walk(command, bodies);
+    if comments.is_empty() {
+        return Cow::Borrowed(command);
+    }
+    let mut bytes = command.as_bytes().to_vec();
+    for (start, end) in comments {
+        bytes[start..end].fill(b' ');
+    }
+    Cow::Owned(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The `#` comment spans of `command`, and whether its quotes close, both
+/// read outside here-document bodies.
+fn comment_walk(command: &str, bodies: &HeredocBodies) -> (Vec<(usize, usize)>, bool) {
     let bytes = command.as_bytes();
+    let mut comments = Vec::new();
     let mut quote: Option<u8> = None;
     let mut prev = b'\n';
     let mut i = 0;
@@ -390,9 +415,11 @@ fn balanced_outside_bodies(command: &str, bodies: &HeredocBodies) -> bool {
             None if b == b'\\' => i += 1,
             None if b == b'\'' || b == b'"' => quote = Some(b),
             None if b == b'#' && (prev.is_ascii_whitespace() || b";|&(".contains(&prev)) => {
+                let start = i;
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
                 }
+                comments.push((start, i));
                 continue;
             }
             None => {}
@@ -400,7 +427,7 @@ fn balanced_outside_bodies(command: &str, bodies: &HeredocBodies) -> bool {
         prev = b;
         i += 1;
     }
-    quote.is_none()
+    (comments, quote.is_none())
 }
 
 /// The #11886 refusal reason for a heavy build run through `shape`.
