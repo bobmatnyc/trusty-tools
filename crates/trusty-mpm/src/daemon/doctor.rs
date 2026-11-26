@@ -891,15 +891,49 @@ pub async fn run_doctor_for_manager(
     // classification `prune-worktrees` and `reconcile-worktrees` share.
     // #7357: the entry point resolves the adopted anchors; every scan beneath
     // it takes them as a parameter.
-    let worktree_counts =
-        gather_worktree_counts(mgr, &repos_root, &crate::project::default_adopted_anchors()).await;
+    let adopted = crate::project::default_adopted_anchors();
+    let inventory = gather_worktree_counts(mgr, &repos_root, &adopted);
+    // #11885: the inventory runs git per worktree and took 70 s+ on a busy host
+    // before `tm doctor` printed a line; past the bound it is a timeout row.
+    let (worktree_counts, inventory_timeout) = match crate::core::doctor_bounded::within(
+        "worktrees",
+        WORKTREE_INVENTORY_TIMEOUT,
+        inventory,
+    )
+    .await
+    {
+        Ok(counts) => (counts, None),
+        Err(row) => (None, Some(row)),
+    };
     let report =
         run_doctor_with_claims(project_dir, Some(&repos_root), &active, worktree_counts).await;
     // #9238: needs the manager's records and tmux driver, so it is added here.
     let mut checks = report.checks;
+    if let Some(row) = inventory_timeout {
+        replace_row(&mut checks, row);
+    }
     checks.push(doctor_session_names::check_session_names(mgr).await);
     checks.push(doctor_channel_taint::check_channel_taint(mgr).await);
     DoctorReport::from_checks(checks)
+}
+
+/// How long the doctor waits for the reconciled worktree inventory (#11885).
+pub(crate) const WORKTREE_INVENTORY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(20);
+
+/// Put `row` in place of the check of the same name, or append it.
+///
+/// Why (#11885): a timed-out inventory still lets `check_worktrees` run, and it
+/// reads the missing count as "unavailable"; the timeout row says why.
+/// Test: `replace_row_swaps_the_named_check_and_appends_a_missing_one`.
+fn replace_row(
+    checks: &mut Vec<crate::core::doctor::DoctorCheck>,
+    row: crate::core::doctor::DoctorCheck,
+) {
+    match checks.iter_mut().find(|c| c.name == row.name) {
+        Some(slot) => *slot = row,
+        None => checks.push(row),
+    }
 }
 
 /// The claimed workspace paths whose session is still live (#7259).

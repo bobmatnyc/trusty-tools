@@ -1241,3 +1241,32 @@ fn a_root_with_no_file_name_yields_no_ids_and_no_panic() {
         ""
     );
 }
+
+/// #11885: a timeout row replaces the `worktrees` row that read the missing
+/// count as "unavailable", and a row with no namesake is appended.
+#[test]
+fn replace_row_swaps_the_named_check_and_appends_a_missing_one() {
+    use crate::core::doctor_bounded::timeout_row;
+    let mut checks = vec![
+        DoctorCheck::new("agents", CheckStatus::Ok, "fine"),
+        DoctorCheck::new("worktrees", CheckStatus::Unknown, "inventory unavailable"),
+    ];
+    replace_row(
+        &mut checks,
+        timeout_row("worktrees", WORKTREE_INVENTORY_TIMEOUT),
+    );
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[1].status, CheckStatus::Unknown);
+    assert!(
+        checks[1].message.contains("timed out"),
+        "{}",
+        checks[1].message
+    );
+
+    replace_row(
+        &mut checks,
+        timeout_row("hook-interpreter", WORKTREE_INVENTORY_TIMEOUT),
+    );
+    assert_eq!(checks.len(), 3);
+    assert_eq!(checks[2].name, "hook-interpreter");
+}
