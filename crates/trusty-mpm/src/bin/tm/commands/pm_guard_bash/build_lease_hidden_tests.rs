@@ -249,3 +249,16 @@ fn leased_builds_and_builds_named_by_no_word_are_not_refused() {
         assert_eq!(rw(input), LeaseRewrite::None, "{input}");
     }
 }
+
+/// #11886 option (a): a build after a remote runner word runs on another
+/// host, so the fail-closed rule skips it; a local wrapped build is refused.
+#[test]
+fn a_build_after_a_remote_runner_is_not_refused() {
+    assert_not_refused(&[
+        "$EVO cargo +1.99.0 test -p trusty-mpm --no-fail-fast",
+        "\"${EVO}\" cargo check -p x",
+        "evo cargo clippy -p x",
+        "ssh host cargo test",
+    ]);
+    assert_refused(&["entr cargo test -p x"]);
+}
