@@ -44,6 +44,8 @@ async fn sidecar_ahead_of_graph(hnsw: &std::path::Path, ids: &[String], extra: &
 /// Red before #10301: the load kept every sidecar entry, so the missing ids
 /// read as embedded and the catch-up pass embedded nothing.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_sidecar_ahead_of_the_graph_owes_and_reembeds_the_missing_ids() {
     let dir = tempfile::tempdir().expect("tempdir");
     let redb = dir.path().join("index.redb");
@@ -115,6 +117,7 @@ async fn a_sidecar_ahead_of_the_graph_owes_and_reembeds_the_missing_ids() {
 /// cannot cover the graph after the reconcile, so the load discards the
 /// snapshot rather than serve a graph with keys no id names (#3970 direction).
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_sidecar_that_also_dropped_graph_keys_discards_the_snapshot() {
     let dir = tempfile::tempdir().expect("tempdir");
     let hnsw = dir.path().join("hnsw.usearch");

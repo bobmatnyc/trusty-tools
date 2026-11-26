@@ -154,6 +154,8 @@ const C: (&str, &str, &str) = ("c", "src/c.rs", "fn kept() {}");
 /// The main #8761 failure: a file removed, and one edited, while the pass
 /// embedded. Before the fix the removed file's vector was re-inserted.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_file_removed_or_edited_during_the_embed_phase_gets_no_vector() {
     let idx = make_indexer();
     stage(&idx, &[A, ("b", "src/b.rs", "fn edited() {}"), C]).await;
@@ -198,6 +200,7 @@ async fn a_file_removed_or_edited_during_the_embed_phase_gets_no_vector() {
 /// A removal that lands after the pre-commit check and before the upsert:
 /// `remove_file` finds no vector yet, so the commit must evict its own.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_file_removed_during_the_upsert_has_its_vector_evicted() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
@@ -227,6 +230,7 @@ async fn a_file_removed_during_the_upsert_has_its_vector_evicted() {
 /// `remove_file` paused between its two drops. Dropping the vector first left
 /// the map entry for the commit to see, and it upserted an orphan.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
@@ -256,6 +260,7 @@ async fn a_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
 /// The file watcher's id removal (`remove_chunk_ids_committed`, which
 /// replaced `remove_chunk` in #9212) has the same gap as `remove_file`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
@@ -285,6 +290,7 @@ async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
 
 /// A vector the post-upsert check cannot evict is an error, not a warning.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_eviction_after_the_upsert_is_an_error() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, C]).await;
@@ -308,6 +314,7 @@ async fn a_failed_eviction_after_the_upsert_is_an_error() {
 
 /// The first failed eviction must not leave the other orphans in place.
 #[tokio::test]
+#[serial_test::parallel]
 async fn one_failed_eviction_does_not_stop_the_others() {
     let (idx, gated) = gated_indexer(None);
     stage(&idx, &[A, ("b", "src/b.rs", "fn also_removed() {}"), C]).await;
@@ -457,6 +464,7 @@ async fn embedded_pass(dir: &std::path::Path) -> (CodeIndexer, DeferredEmbedPlan
 /// The embed phase counts as activity, so the idle ticker does not evict the
 /// chunk map the commit is about to read.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_embed_pass_keeps_the_chunk_map_from_idle_eviction() {
     let dir = tempfile::tempdir().unwrap();
     let (idx, _gated) = gated_indexer(Some(&dir.path().join("index.redb")));

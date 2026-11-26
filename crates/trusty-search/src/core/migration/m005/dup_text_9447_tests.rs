@@ -63,6 +63,8 @@ async fn seed_duplicates(f: &Fixture) -> Vec<String> {
 /// in the store once the corpus no longer holds it.
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn m005_keeps_a_vector_for_every_duplicate_text_chunk() {
     let f = fixture_named("m005-dup-text-9447").await;
     let seeded = seed_duplicates(&f).await;
@@ -95,6 +97,7 @@ async fn m005_keeps_a_vector_for_every_duplicate_text_chunk() {
 /// The gap M005 reports equals the number of migrated chunks with no vector.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn m005_reports_the_real_vector_gap() {
     let f = fixture_named("m005-dup-gap-9447").await;
     seed_duplicates(&f).await;
@@ -118,6 +121,7 @@ async fn m005_reports_the_real_vector_gap() {
 /// orphan sweep spares an old id that a vector was just re-pointed onto.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn claim_vectors_gives_each_duplicate_its_own_vector() {
     let (h1, h2, h3, h4) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]);
     let s = |v: &str| v.to_string();

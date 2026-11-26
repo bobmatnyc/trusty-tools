@@ -124,6 +124,8 @@ async fn search_over_an_unreadable_corpus_is_an_error_not_an_empty_result_set() 
 /// What: exercises the record/clear/error contract directly.
 /// Test: this function IS the test.
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn a_recorded_corpus_fault_clears_on_the_next_successful_read() {
     let fault = CorpusReadFault::default();
     assert!(fault.error("idx").is_none(), "a fresh record is clean");

@@ -523,6 +523,8 @@ mod tests {
 
     /// A mint carries 128 bits of hex and starts at generation 1; two differ.
     #[test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     fn a_mint_is_well_formed_and_unique() {
         let a = IndexIdentity::mint();
         let b = IndexIdentity::mint();

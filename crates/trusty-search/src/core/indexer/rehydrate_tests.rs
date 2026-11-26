@@ -211,6 +211,8 @@ async fn rehydrate_dedupes_concurrent_callers_onto_one_scan() {
 /// set both times, and that set must be the sorted-by-id prefix, not
 /// whatever redb's B-tree iteration order happens to produce.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn rehydrate_is_deterministic_across_repeated_cycles_over_cap() {
     // #6369: the cap arrives from the child's spawn environment. Setting it
     // in-process pinned a BM25 corpus cap of 5 across the whole test binary,

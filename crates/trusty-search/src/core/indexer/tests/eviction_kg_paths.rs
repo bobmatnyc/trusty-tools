@@ -124,6 +124,8 @@ async fn idle_eviction_drops_and_lazily_rehydrates_chunks() {
 /// Idle-eviction safety: a BM25-only indexer (no durable corpus) is NEVER
 /// evicted — its in-memory map is the only copy of the data.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn idle_eviction_skips_indexers_without_corpus() {
     let idx = make_indexer(); // embedder + store, but corpus: None
     idx.add_chunk(raw("a", "src/a.rs", "fn a() {}"))
@@ -152,6 +154,7 @@ async fn idle_eviction_skips_indexers_without_corpus() {
 /// `search_kg` without `refine_query`, verify both neighbours surface.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_kg_refine_query_none_preserves_all_neighbours() {
     let idx = make_indexer();
     // Seed chunk
@@ -258,6 +261,7 @@ async fn test_kg_refine_query_none_preserves_all_neighbours() {
 ///
 /// Test: this test.  Also verified by `test_kg_refine_threshold_boundary`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_kg_refine_query_filters_irrelevant_neighbours() {
     use crate::core::classifier::QueryIntent;
 
@@ -437,6 +441,7 @@ async fn test_kg_refine_query_filters_irrelevant_neighbours() {
 /// whose cosine with a planted chunk embedding equals the threshold.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_kg_refine_threshold_boundary() {
     use crate::core::mmr::cosine_similarity;
     use KG_REFINE_THRESHOLD;
@@ -472,6 +477,7 @@ async fn test_kg_refine_threshold_boundary() {
 /// What: `"src/lib.rs"` + `"/tmp/test"` → `"/tmp/test/src/lib.rs"`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn resolve_chunk_file_relative_becomes_absolute() {
     let root = std::path::Path::new("/tmp/test");
     let result = resolve_chunk_file("src/lib.rs", root);
@@ -484,6 +490,7 @@ fn resolve_chunk_file_relative_becomes_absolute() {
 /// What: `"/Users/alice/proj/src/lib.rs"` → same string unchanged.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn resolve_chunk_file_absolute_passthrough() {
     let root = std::path::Path::new("/tmp/test");
     let abs_path = "/Users/alice/proj/src/lib.rs";
@@ -501,6 +508,7 @@ fn resolve_chunk_file_absolute_passthrough() {
 ///   (b) `CodeChunk.file` in search results is the resolved absolute path.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn relative_storage_resolved_to_absolute_in_search_results() {
     let idx = make_indexer(); // root_path = "/tmp/test"
     idx.index_file("src/lib.rs", "pub fn hello() {}\n")
@@ -558,6 +566,7 @@ async fn relative_storage_resolved_to_absolute_in_search_results() {
 /// roots; assert each resolves its `file` to its own root prefix.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn relative_chunk_resolves_correctly_for_different_roots() {
     let dim = 32;
     let embedder_a: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
@@ -611,6 +620,7 @@ async fn relative_chunk_resolves_correctly_for_different_roots() {
 /// What: index a file, enumerate chunks, assert the `file` field is absolute.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn enumerate_chunks_returns_resolved_absolute_paths() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -639,6 +649,7 @@ async fn enumerate_chunks_returns_resolved_absolute_paths() {
 /// What: a `RawChunk` with a relative `file` → `CodeChunk.path == Some("src/lib.rs")`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn raw_to_code_chunk_populates_path_for_relative_file() {
     use crate::core::indexer::raw_to_code_chunk;
 
@@ -670,6 +681,7 @@ fn raw_to_code_chunk_populates_path_for_relative_file() {
 /// What: a `RawChunk` with an absolute `file` → `CodeChunk.path == None`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn raw_to_code_chunk_path_is_none_for_absolute_file() {
     use crate::core::indexer::raw_to_code_chunk;
 
@@ -695,6 +707,7 @@ fn raw_to_code_chunk_path_is_none_for_absolute_file() {
 /// What: index a file, search for it, assert `CodeChunk.path == Some("src/auth.rs")`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_result_path_field_is_populated_after_index_file() {
     let idx = make_indexer(); // root_path = "/tmp/test"
     idx.index_file("src/auth.rs", "pub fn authenticate() { /* ok */ }\n")
