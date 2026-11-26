@@ -271,6 +271,7 @@ mod tests {
             )),
             embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
             file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+            size_caps: Default::default(),
         }
     }
 
@@ -472,6 +473,7 @@ mod tests {
             )),
             embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
             file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+            size_caps: Default::default(),
         };
 
         // Load hashes into a fresh map — this is what `spawn_reindex` does.

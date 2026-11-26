@@ -297,6 +297,24 @@ pub(crate) async fn list_indexes_report(
 /// Test: `create_over_the_socket_matches_the_http_body`,
 /// `a_root_the_allowlist_has_not_approved_is_refused_and_registers_nothing` in
 /// `crate::service::rpc::writes`.
+/// #11655: `400 invalid_size_cap` for a size cap of 0 or over the ceiling.
+///
+/// Test: `create_refuses_an_out_of_range_size_cap`.
+fn reject_invalid_size_caps(
+    req: &CreateIndexRequest,
+) -> Result<(), (axum::http::StatusCode, serde_json::Value)> {
+    crate::service::size_caps::validate_size_caps(
+        req.source_file_max_bytes,
+        req.office_file_max_bytes,
+    )
+    .map_err(|message| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "invalid_size_cap", "message": message }),
+        )
+    })
+}
+
 pub(crate) async fn create_index_report(
     state: &Arc<SearchAppState>,
     mut req: CreateIndexRequest,
@@ -304,6 +322,8 @@ pub(crate) async fn create_index_report(
     let id = IndexId::new(req.id.clone());
     // #8922: refused before anything is registered.
     super::index_config::reject_invalid_globs(req.exclude_globs.as_deref())?;
+    // #11655: an out-of-range size cap is refused before anything registers.
+    reject_invalid_size_caps(&req)?;
     // Issue #63: validate root_path is absolute and points at an existing
     // directory before registering. Previously the handler accepted any
     // `PathBuf` the client supplied, so a relative path (e.g. `claude-mpm`)
@@ -714,6 +734,8 @@ pub(crate) async fn create_index_report(
             follow_links,
             extra_skip_dirs: extra_skip_dirs.clone(),
             data_file_max_bytes: data_file_max_bytes_opt,
+            source_file_max_bytes: req.source_file_max_bytes,
+            office_file_max_bytes: req.office_file_max_bytes,
             lexical_only,
             skip_kg,
             skip_vector,
@@ -863,6 +885,10 @@ pub(crate) async fn create_index_report(
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: crate::service::size_caps::FileSizeCaps::resolve(
+            req.source_file_max_bytes,
+            req.office_file_max_bytes,
+        ),
     };
     // Issue #3995 round 5 (CRITICAL): snapshot whatever cold-store entry is
     // parked under `id` right now, BEFORE registering the fresh handle below.

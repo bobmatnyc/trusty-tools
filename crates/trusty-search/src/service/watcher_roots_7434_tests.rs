@@ -148,6 +148,7 @@ async fn modified_file_under_additional_root_updates_its_root_relative_chunks() 
             watched,
             &handle.indexer,
             &files,
+            handle.size_caps,
         )
         .await;
     }

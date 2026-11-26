@@ -69,6 +69,12 @@ pub struct RegisterFilters {
     /// a background job. Set `false` for synchronous full-index behaviour.
     /// Why/What/Test: see `register_index_with_daemon_filtered`.
     pub defer_embed: bool,
+    /// #11655: the config's source and office/PDF size caps, sent as
+    /// `source_file_max_bytes` / `office_file_max_bytes` only when set.
+    /// Test: `create_params_carries_configured_size_caps`.
+    pub source_file_max_bytes: Option<u64>,
+    /// #11655: see `source_file_max_bytes`.
+    pub office_file_max_bytes: Option<u64>,
 }
 
 impl Default for RegisterFilters {
@@ -84,6 +90,8 @@ impl Default for RegisterFilters {
             lexical_only: false,
             skip_kg: false,
             defer_embed: true,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         }
     }
 }
@@ -277,6 +285,13 @@ fn create_params(
     // Issue #923: omit `defer_embed` when true (server default); only send when opting out.
     if !filters.defer_embed {
         create_body["defer_embed"] = serde_json::json!(false);
+    }
+    // #11655: omitted when unset, so the daemon default (1 MiB / 10 MiB) holds.
+    if let Some(v) = filters.source_file_max_bytes {
+        create_body["source_file_max_bytes"] = serde_json::json!(v);
+    }
+    if let Some(v) = filters.office_file_max_bytes {
+        create_body["office_file_max_bytes"] = serde_json::json!(v);
     }
     create_body
 }

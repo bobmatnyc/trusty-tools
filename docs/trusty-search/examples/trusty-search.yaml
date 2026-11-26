@@ -24,6 +24,16 @@
 #                                     "rate strategy" finds the declaring
 #                                     chunk instead of falling back to a
 #                                     generic vector search.
+#     source_file_max_bytes (int, optional) — size cap for source and text
+#                                     files. Default 1048576 (1 MiB).
+#     office_file_max_bytes (int, optional) — size cap for pdf, docx, pptx,
+#                                     xls, xlsx, xlsm. Default 10485760
+#                                     (10 MiB). Each cap accepts 1 to
+#                                     268435456 (256 MiB); 0 or more fails
+#                                     loading. A larger file is skipped and
+#                                     listed in the index status
+#                                     `skipped_files`. Caps apply when the
+#                                     index is registered (#11655).
 
 version: 1
 

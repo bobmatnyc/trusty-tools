@@ -88,6 +88,25 @@ pub struct ProjectConfig {
     /// Test: `data_file_hygiene_defaults_and_round_trips` in this module.
     #[serde(default = "default_data_file_max_bytes")]
     pub data_file_max_bytes: Option<u64>,
+
+    /// #11655: source-file size cap (bytes). Absent ⇒ 1 MiB
+    /// (`walker::MAX_FILE_BYTES`).
+    ///
+    /// Why: a project with large source or text files can index them without
+    /// raising the cap for every index (owner option A on #11655).
+    /// What: `1..=size_caps::MAX_CONFIGURABLE_FILE_BYTES` (256 MiB); 0 or a
+    /// larger value fails config loading. Sent to the daemon when the index
+    /// is registered; an already-registered index keeps the caps it was
+    /// created with.
+    /// Test: `size_caps_load_and_reject_out_of_range` in `super::repo_config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file_max_bytes: Option<u64>,
+
+    /// #11655: office/PDF size cap (bytes) for pdf/docx/pptx/xls/xlsx/xlsm.
+    /// Absent ⇒ 10 MiB (`extract::MAX_OFFICE_FILE_BYTES`). Same range and
+    /// rules as `source_file_max_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office_file_max_bytes: Option<u64>,
 }
 
 /// Shared serde default for `ProjectConfig::data_file_max_bytes` (issue #1372):
@@ -109,6 +128,8 @@ impl Default for ProjectConfig {
             exclude: None,
             extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
             data_file_max_bytes: default_data_file_max_bytes(),
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         }
     }
 }
@@ -135,6 +156,12 @@ impl ProjectConfig {
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
         let cfg: Self = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
+        // #11655: an out-of-range size cap fails loading loudly.
+        crate::service::size_caps::validate_size_caps(
+            cfg.source_file_max_bytes,
+            cfg.office_file_max_bytes,
+        )
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
         Ok(Some(cfg))
     }
 }

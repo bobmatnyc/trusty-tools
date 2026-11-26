@@ -366,6 +366,16 @@ pub struct IndexHandle {
     /// persistence round-trip tests.
     pub data_file_max_bytes: u64,
 
+    /// #11655: the per-index source and office/PDF size caps.
+    ///
+    /// Why: a project with large documents must be able to index them
+    /// without lifting the cap for every index (#11651, option A).
+    /// What: resolved from `PersistedIndex::{source,office}_file_max_bytes`
+    /// (`None` = 1 MiB / 10 MiB) and read by every size gate through
+    /// `WalkOptions::size_caps` and `core::extract::read_content_with_cap`.
+    /// Test: `raised_source_cap_indexes_a_file_over_the_old_default`.
+    pub size_caps: crate::service::size_caps::FileSizeCaps,
+
     /// Glob patterns matched against the *immediate subdirectory name* under
     /// `root_path`. When non-empty, the reindex walker keeps only files
     /// whose first path component (relative to `root_path`) matches one of
@@ -701,6 +711,7 @@ impl IndexHandle {
             follow_links: true,
             extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
             data_file_max_bytes: crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES,
+            size_caps: crate::service::size_caps::FileSizeCaps::default(),
             path_filter: Vec::new(),
             context_embedding: Arc::new(RwLock::new(None)),
             context_summary: Arc::new(RwLock::new(None)),

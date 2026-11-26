@@ -343,6 +343,7 @@ pub(crate) async fn reindex_report(
                     // #6524: a rebuild must not drop an operator's pause or the event feed.
                     embedding_pause: Arc::clone(&handle.embedding_pause),
                     file_events: Arc::clone(&handle.file_events),
+                    size_caps: handle.size_caps,
                 };
                 // Issue #3995 round 5 (CRITICAL): snapshot the cold-store
                 // entry (if any) parked under `index_id` BEFORE registering

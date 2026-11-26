@@ -370,6 +370,34 @@ trusty-search index /path/to/project --name myproject
 `skip_kg` and `lexical_only` are orthogonal (D1) — setting both suppresses
 both the embedder (Stage 2) and the KG rebuild (Stage 3), leaving only BM25.
 
+## File size caps (#11655)
+
+The indexer skips a file larger than its size cap and lists it in the index
+status `skipped_files` with reason `exceeds_size_limit`. Two caps can be set
+per index:
+
+| Field | Applies to | Default |
+|---|---|---|
+| `source_file_max_bytes` | source and text files | 1 MiB (1048576) |
+| `office_file_max_bytes` | pdf, docx, pptx, xls, xlsx, xlsm | 10 MiB (10485760) |
+
+Each accepts 1 byte to 256 MiB (268435456). Office extraction and chunking
+read the whole file into memory, so the ceiling bounds memory per file. A
+value of 0 or above the ceiling fails config loading. `data_file_max_bytes`
+(64 KiB) still applies on top for json, xml, txt and log files.
+
+Set them in `.trusty-search.yaml` (single index) or per index in
+`trusty-search.yaml`:
+
+```yaml
+source_file_max_bytes: 2097152    # 2 MiB
+office_file_max_bytes: 52428800   # 50 MiB
+```
+
+The caps are sent when the index is registered (`search.index.create`, which
+takes the same two fields). An index registered before the caps were set keeps
+its old caps; delete it and run `trusty-search index` again to apply them.
+
 ## Memory tiers (auto-tuned at startup)
 
 `MEMORY_LIMIT_MB` is computed dynamically as **25% of detected system RAM, clamped to 1–64 GB**. It is not a fixed tier value. The env var `TRUSTY_MEMORY_LIMIT_MB` overrides it. All other limits below are tier-based.

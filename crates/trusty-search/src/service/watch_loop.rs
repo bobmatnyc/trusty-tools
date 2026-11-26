@@ -26,7 +26,9 @@ use tokio::task::JoinHandle;
 
 use crate::core::file_events::FileEventKind;
 use crate::service::indexed_files::IndexedFiles;
-use crate::service::walker::{path_in_skipped_dir, rel_path_is_credential, should_skip_path};
+use crate::service::walker::{
+    path_in_skipped_dir, rel_path_is_credential, should_skip_path_with_caps,
+};
 use crate::service::watch_rescan::RescanFollowUp;
 // #7434: which root a watch covers, and its slot in the index's root table.
 use crate::service::watch_roots::WatchedRoot;
@@ -312,12 +314,15 @@ pub(crate) fn spawn_watch_loop_for_root(
                         )
                         .await;
                     } else {
+                        // #11655: no registry means no handle, so no
+                        // per-index caps; the defaults apply.
                         handle_modified_in_root(
                             &path,
                             &index_id,
                             &watched,
                             &indexer,
                             &indexed_files,
+                            crate::service::size_caps::FileSizeCaps::default(),
                         )
                         .await;
                     }
@@ -452,7 +457,15 @@ pub async fn handle_modified(
 ) {
     // #7434: a bare root pair is the PRIMARY root, which is what this meant.
     let watched = WatchedRoot::from_pair(canonical_root, raw_root);
-    handle_modified_in_root(path, index_id, &watched, indexer, indexed_files).await;
+    handle_modified_in_root(
+        path,
+        index_id,
+        &watched,
+        indexer,
+        indexed_files,
+        crate::service::size_caps::FileSizeCaps::default(),
+    )
+    .await;
 }
 
 /// [`handle_modified`] for one root of a multi-root index (#7434).
@@ -470,6 +483,8 @@ pub async fn handle_modified_in_root(
     watched: &WatchedRoot,
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
+    // #11655: the index's own size caps, so a raised cap is honoured here.
+    caps: crate::service::size_caps::FileSizeCaps,
 ) {
     // Skip directories — the watcher fires on parent mtime updates too.
     if path.is_dir() {
@@ -487,7 +502,7 @@ pub async fn handle_modified_in_root(
     // don't go stale. The per-mode `is_allowed_for_mode` filter still
     // gates the docs out of `mode=code` results, so this only widens
     // text-mode coverage.
-    if path_in_skipped_dir(path) || should_skip_path(path) {
+    if path_in_skipped_dir(path) || should_skip_path_with_caps(path, caps) {
         tracing::debug!(?path, "skip excluded file");
         return;
     }
@@ -522,7 +537,7 @@ pub async fn handle_modified_in_root(
     // extractor instead of being treated as UTF-8 text — mirrors
     // `service::reindex::batch`'s dispatch so the watcher and the
     // reindex/ingest path behave identically for these formats.
-    let content = match crate::core::extract::read_content(path).await {
+    let content = match crate::core::extract::read_content_with_cap(path, caps.office).await {
         Ok(s) => s,
         Err(err) => {
             tracing::debug!(%err, ?path, "skip unreadable file");

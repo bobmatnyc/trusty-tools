@@ -768,3 +768,31 @@ async fn a_single_file_is_sent_as_file_put() {
         .to_string();
     assert!(err.contains("unknown index"), "{err}");
 }
+
+/// #11655: configured size caps reach `search.index.create`; unset ones are
+/// omitted so the daemon defaults hold.
+#[tokio::test]
+#[serial_test::parallel]
+async fn create_params_carries_configured_size_caps() {
+    let daemon = mock_daemon(|_, params| {
+        assert_eq!(params["source_file_max_bytes"], 2_097_152, "{params}");
+        assert!(params.get("office_file_max_bytes").is_none(), "{params}");
+        Ok(json!({ "id": "caps", "created": true }))
+    })
+    .await;
+    let filters = RegisterFilters {
+        source_file_max_bytes: Some(2_097_152),
+        ..RegisterFilters::default()
+    };
+    let got = register_on(
+        &daemon.client,
+        "caps",
+        std::path::Path::new("/repos/caps"),
+        &filters,
+    )
+    .await;
+    assert_eq!(
+        got.expect("success must not fail"),
+        RegisterOutcome::Registered { created: true }
+    );
+}

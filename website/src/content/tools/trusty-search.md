@@ -73,6 +73,11 @@ directories such as `.ssh`, `.aws`, `.gnupg` and `.kube`, paths carrying secret
 markers, and the top level of your home directory. Those are refused with the
 matched pattern named in the error, not silently skipped.
 
+Files over a size cap are skipped and listed in the index status. The caps
+default to 1 MiB for source files and 10 MiB for PDF and Office documents.
+Set `source_file_max_bytes` or `office_file_max_bytes` in `.trusty-search.yaml`
+to raise either one, up to 256 MiB.
+
 ## 24 tools over MCP
 
 The MCP server speaks stdio and HTTP/SSE and exposes each retrieval lane

@@ -100,6 +100,8 @@ async fn relocate_index_updates_root_path() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;

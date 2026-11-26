@@ -321,6 +321,9 @@ mod multi_root_tests;
 // #11651: the walk records files the size cap refused.
 #[cfg(test)]
 mod size_skip_11651_tests;
+// #11655: per-index source and office/PDF size caps.
+#[cfg(test)]
+mod size_caps_11655_tests;
 // #8438: the swap and staging paths honour the registry's layout.
 #[cfg(test)]
 mod registry_layout_8438_tests;
