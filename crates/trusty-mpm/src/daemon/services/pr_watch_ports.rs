@@ -25,11 +25,12 @@ use trusty_architect::ledger::store::StorePaths;
 use trusty_common::control_bus::HarnessEvent;
 
 use super::pr_watch_loop::{self, Emitter, LedgerPort, Ports, PrWatchLoop, Transition, Waker};
-use crate::core::pr_watch::gh::GhPrReader;
+use crate::core::pr_watch::gh::{GhPrReader, IdentityResolver};
 use crate::core::pr_watch::table::{Table, WatchRow};
 use crate::core::pr_watch::verdict::Kind;
 use crate::daemon::DaemonState;
 use crate::daemon::action_events::{ActionPublisher, spool};
+use crate::session_manager::worktree_reclaim_gh::resolve_strict_gh_env_in;
 
 /// Per-call `gh` budget for the loop's reads.
 const GH_CALL_BUDGET: Duration = Duration::from_secs(30);
@@ -172,10 +173,27 @@ impl Waker for PaneWaker {
     }
 }
 
+/// The daemon's PR reader: each call's identity resolved as worktree reclaim
+/// resolves it, against `registry_dir` (#11673).
+///
+/// Why: launchd hands the daemon neither `GH_TOKEN` nor `GH_CONFIG_DIR`; the
+/// overlay `resolve_gh_env(None)` gave was empty, so every read exited 4.
+/// What: [`resolve_strict_gh_env_in`] per call — the registry pin, then the
+/// static `github:` binding for the repo — with no ambient fallback on a
+/// refusal.
+/// Test: `a_pinned_repo_reads_through_its_bound_identity`,
+/// `a_registry_refusal_spawns_no_gh`.
+pub(crate) fn daemon_reader(registry_dir: PathBuf, budget: Duration) -> GhPrReader {
+    let identity: IdentityResolver = Arc::new(move |repo: &str| {
+        resolve_strict_gh_env_in(repo, &registry_dir).map_err(|f| f.to_string())
+    });
+    GhPrReader::new(identity, budget)
+}
+
 /// Start the loop unless [`pr_watch_loop::ENV_ENABLED`] turns it off.
 ///
-/// What: the table under the data dir, `gh` with the ambient identity overlay
-/// (as the merged-PR sweep), the daemon's publisher and spool.
+/// What: the table under the data dir, [`daemon_reader`] over the project
+/// registry, the daemon's publisher and spool.
 pub(crate) fn spawn_if_enabled(
     state: Arc<DaemonState>,
     cancel: tokio_util::sync::CancellationToken,
@@ -192,15 +210,12 @@ pub(crate) fn spawn_if_enabled(
             return;
         }
     };
-    let (env, unset) = match crate::core::gh_identity::resolve_gh_env(None) {
-        Ok(e) => (e.vars().to_vec(), e.unset_vars().to_vec()),
-        Err(e) => {
-            warn!("pr watch: no GitHub identity overlay ({e}); using ambient auth");
-            (Vec::new(), Vec::new())
-        }
-    };
     let ports = Ports {
-        reader: Arc::new(GhPrReader::new(env, unset, GH_CALL_BUDGET)),
+        // #11673: per-repo identity, resolved per call; was `resolve_gh_env(None)`.
+        reader: Arc::new(daemon_reader(
+            crate::project::registry_data_dir(),
+            GH_CALL_BUDGET,
+        )),
         emitter: Arc::new(BusEmitter {
             publisher: state.action_events().publisher().cloned(),
             spool_dir: Some(spool::spool_dir(&data_dir)),
@@ -216,3 +231,7 @@ pub(crate) fn spawn_if_enabled(
     let driver = PrWatchLoop::new(Table::at(data_dir), ports, interval);
     tokio::spawn(driver.run_until(cancel));
 }
+
+#[cfg(test)]
+#[path = "pr_watch_identity_tests.rs"]
+mod identity_tests;
