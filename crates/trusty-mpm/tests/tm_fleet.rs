@@ -2169,3 +2169,116 @@ fn fleet_init_refuses_when_the_architect_sandbox_cannot_be_applied() {
     assert!(text(&out).contains("`pm` role"), "{}", text(&out));
     assert!(!env.has_session("tm-architect"), "{}", text(&out));
 }
+
+/// A tmux server of the test's own on an explicit socket, standing in for
+/// the server a caller's `$TMUX` names (#10701); killed on drop.
+struct DecoyServer {
+    _dir: tempfile::TempDir,
+    socket: PathBuf,
+}
+
+impl DecoyServer {
+    fn new() -> Self {
+        // Short path: tmux refuses a socket path over `sun_path` (104 bytes).
+        let dir = tempfile::Builder::new()
+            .prefix("tmd")
+            .tempdir_in("/tmp")
+            .expect("decoy dir");
+        let socket = dir.path().join("s");
+        let decoy = Self { _dir: dir, socket };
+        let out = decoy
+            .tmux(&["-f", "/dev/null", "new-session", "-d", "-s", "decoy"])
+            .output()
+            .expect("spawn tmux");
+        assert!(out.status.success(), "{}", text(&out));
+        decoy
+    }
+
+    /// `tmux -S <socket> <args>`: this server only, never the default one.
+    fn tmux(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new("tmux");
+        cmd.arg("-S")
+            .arg(&self.socket)
+            .args(args)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        cmd
+    }
+
+    /// The `$TMUX` value a pane of this server carries.
+    fn tmux_env(&self) -> String {
+        format!("{},1,0", self.socket.display())
+    }
+
+    /// One line per window on this server: `<session> <window index>`.
+    fn windows(&self) -> Vec<String> {
+        let out = self
+            .tmux(&[
+                "list-windows",
+                "-a",
+                "-F",
+                "#{session_name} #{window_index}",
+            ])
+            .output()
+            .expect("spawn tmux");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl Drop for DecoyServer {
+    fn drop(&mut self) {
+        let _ = self.tmux(&["kill-server"]).output();
+    }
+}
+
+/// #10701: `tm fleet init` run from a pane of another tmux server, with the
+/// host-state gate lifted, creates nothing on that server. Every tmux call
+/// that inherits the caller's `TMUX` or `TMUX_PANE` names the fleet's server
+/// with `-L default` ahead of its command.
+#[test]
+fn fleet_init_never_reaches_the_server_an_inherited_tmux_names_10701() {
+    let env = FleetEnv::new();
+    let decoy = DecoyServer::new();
+    // A `tmux` first on `PATH` that logs each call's TMUX, TMUX_PANE and argv.
+    let log = env.bin.path().join("tmux-calls.log");
+    let real = trusty_common::bin_resolve::resolve_binary("tmux").expect("tmux on PATH");
+    trusty_common::exec_stub::write_executable(
+        &env.bin.path().join("tmux"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"${{TMUX:-}}\" \"${{TMUX_PANE:-}}\" \"$*\" \
+             >> {log:?}\nexec {real:?} \"$@\"\n",
+            log = log.display().to_string(),
+            real = real.display().to_string(),
+        ),
+    )
+    .expect("tmux logger");
+    let dir = env.dir();
+    let tmux_env = decoy.tmux_env();
+    let out = env.tm_in_session(
+        &["fleet", "init", "--dir", dir_arg(&dir)],
+        None,
+        &[
+            ("TMUX", OsStr::new(&tmux_env)),
+            ("TMUX_PANE", OsStr::new("%0")),
+        ],
+    );
+    assert_eq!(decoy.windows(), ["decoy 0"], "{}", text(&out));
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(env.has_session("tm-architect"), "{}", text(&out));
+    let calls = std::fs::read_to_string(&log).expect("the tmux call log");
+    let inherited: Vec<&str> = calls
+        .lines()
+        .filter(|line| line.starts_with(&format!("{tmux_env}\t")))
+        .collect();
+    assert!(!inherited.is_empty(), "no call inherited TMUX:\n{calls}");
+    for line in &inherited {
+        let argv = line.splitn(3, '\t').nth(2).unwrap_or_default();
+        assert!(
+            argv.starts_with("-L default "),
+            "a call inherited TMUX without naming the fleet server: {line}"
+        );
+    }
+}

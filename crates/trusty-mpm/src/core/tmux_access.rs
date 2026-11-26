@@ -193,6 +193,55 @@ pub fn tmux_access_for_root(data_root: &Path) -> TmuxAccess {
     })
 }
 
+/// The `-L` name of the server `tm fleet` runs the Architect on (#10701).
+pub const FLEET_SERVER: &str = "default";
+
+/// The `-L` name every `tm fleet init|relaunch` tmux call carries, or why
+/// there is none (#10701).
+///
+/// Why: a tmux client with no `-L`/`-S` takes its server from an inherited
+/// `$TMUX`, so a fleet run from a pane of another server, with the host-state
+/// gate lifted, created the Architect there.
+/// What: `Err` with the refusal when `access` refuses tmux; `Err` when the
+/// socket directory base (the sandbox's own directory, else `tmux_tmpdir`,
+/// else tmux's default base) does not resolve to a directory. Otherwise
+/// [`FLEET_SERVER`], the server tmux reaches with `$TMUX` unset. A caller that
+/// gets `Err` spawns no tmux; it never falls back to an unnamed server.
+/// Test: `the_fleet_server_is_named_when_tmux_is_allowed`,
+/// `the_fleet_server_is_refused_when_tmux_is_refused`,
+/// `the_fleet_server_is_refused_when_its_socket_dir_does_not_resolve`.
+pub fn fleet_server_for(
+    access: &TmuxAccess,
+    tmux_tmpdir: Option<&Path>,
+) -> Result<&'static str, String> {
+    if let Some(reason) = access.skip_reason() {
+        return Err(reason);
+    }
+    let base = match access {
+        TmuxAccess::SandboxServer { tmux_tmpdir } => Some(tmux_tmpdir.as_path()),
+        _ => tmux_tmpdir.filter(|p| !p.as_os_str().is_empty()),
+    };
+    // The parent of `tmux-<uid>` is the base tmux must find.
+    let dir = crate::core::tmux_server::socket_dir(base, nix::unistd::getuid().as_raw());
+    match dir.parent().map(Path::is_dir) {
+        Some(true) => Ok(FLEET_SERVER),
+        _ => Err(format!(
+            "the fleet's tmux socket directory {} does not resolve ({TMUX_TMPDIR_ENV}); no tmux \
+             command was run",
+            dir.display()
+        )),
+    }
+}
+
+/// [`fleet_server_for`] for THIS process (#10701).
+///
+/// Test: covered through [`fleet_server_for`]; end to end by
+/// `fleet_init_never_reaches_the_server_an_inherited_tmux_names_10701`.
+pub fn fleet_server() -> Result<&'static str, String> {
+    let tmpdir = std::env::var_os(TMUX_TMPDIR_ENV).map(PathBuf::from);
+    fleet_server_for(&tmux_access(), tmpdir.as_deref())
+}
+
 /// Read the four inputs from this process's environment and run `f`.
 fn with_process_env<T>(f: impl FnOnce(&TmuxEnv<'_>) -> T) -> T {
     let sandbox = std::env::var_os(trusty_common::credentials::SANDBOX_ENV_VAR);
