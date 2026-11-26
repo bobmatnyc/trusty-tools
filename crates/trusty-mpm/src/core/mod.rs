@@ -154,6 +154,7 @@ pub mod architect_dashboard;
 // #10944: the Architect directory and the dashboard store root the daemon resolves.
 pub mod architect_store;
 pub mod delegation_authority;
+// #11001: the IL schedule preset and its one writer, `tm il config`.
 pub mod deploy_validate;
 pub mod deterministic_overseer;
 pub mod discovery;
@@ -163,6 +164,7 @@ pub mod disk_usage_guard;
 pub mod dispatch_isolation;
 pub mod doctor;
 pub mod doctor_repair;
+pub mod il_schedule;
 // #8454 VC: the egress verdict contract between the daemon and the hook.
 pub mod egress_verdict;
 #[cfg(test)]

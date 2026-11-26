@@ -129,9 +129,11 @@ pub(crate) mod env_file_fs;
 pub(crate) mod env_file_grant;
 // #8436: `tm fleet init|status` — the Architect's setup.
 pub(crate) mod fleet;
+// #11001: `tm il config` — the IL schedule's verbs.
 pub(crate) mod generate;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
+pub(crate) mod il;
 // #9034: the autostart decision, with launchctl and the process table injected.
 pub(crate) mod guided_autostart_plan;
 pub(crate) mod guided_inplace;

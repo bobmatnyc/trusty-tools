@@ -38,6 +38,8 @@ mod env;
 mod fleet;
 mod generate;
 mod hooks;
+// #11001: `tm il config` — the IL schedule's only writer.
+mod il;
 mod issue;
 mod mcp;
 mod memory;
@@ -82,6 +84,7 @@ pub(crate) use env::EnvAction;
 pub(crate) use fleet::{FleetAction, FleetProjectAction};
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
+pub(crate) use il::{IlAction, IlConfigAction};
 pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;

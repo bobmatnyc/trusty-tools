@@ -232,7 +232,9 @@ fn deploy_file(
             file.dest
         ))]),
         Ok(bytes) if shipped_before(&file.dest, &bytes) => {
-            write_seed(&path, file)?;
+            if let Some(steps) = publish(&path, file, shipped_before)? {
+                return Ok(steps);
+            }
             Ok(vec![Step::Changed(format!(
                 "updated {} (an unedited earlier shipped copy)",
                 file.dest
@@ -251,7 +253,9 @@ fn deploy_file(
             Ok(steps)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            write_seed(&path, file)?;
+            if let Some(steps) = publish(&path, file, shipped_before)? {
+                return Ok(steps);
+            }
             Ok(vec![Step::Changed(format!("wrote {}", file.dest))])
         }
         Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => {
@@ -283,6 +287,43 @@ fn write_shipped_sibling(dir: &Path, file: &Seeded<'_>) -> anyhow::Result<String
     Ok(rel)
 }
 
+/// Write `file`, deciding again under the schedule lock for the IL schedule.
+///
+/// Why: #11001 — `tm il config` writes `local/il-schedule.json` under
+/// `core::il_schedule`'s sidecar lock. An unlocked write after its publish
+/// would drop an enrollment and report nothing.
+/// What: any other destination: [`write_seed`], `None`. The schedule: under
+/// `with_exclusive_lock` it is read again; absent or `shipped_before` writes
+/// and returns `None`; the shipped bytes are `Unchanged`; any other bytes are
+/// kept and `Skipped`. A lock failure is an error and writes nothing.
+/// Test: `an_il_schedule_enrolled_mid_init_is_kept_11001`.
+fn publish(
+    path: &Path,
+    file: &Seeded<'_>,
+    shipped_before: ShippedBefore<'_>,
+) -> anyhow::Result<Option<Vec<Step>>> {
+    if file.dest != trusty_mpm::core::il_schedule::REL_PATH {
+        write_seed(path, file)?;
+        return Ok(None);
+    }
+    #[cfg(test)]
+    hook::run();
+    trusty_common::file_lock::with_exclusive_lock(path, || match std::fs::read(path) {
+        Ok(bytes) if bytes == file.contents.as_bytes() => {
+            Ok(Some(vec![Step::Unchanged(file.dest.clone())]))
+        }
+        Ok(bytes) if !shipped_before(&file.dest, &bytes) => Ok(Some(vec![Step::Skipped(format!(
+            "{}: changed by `tm il config` during init, kept as is",
+            file.dest
+        ))])),
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            Err(err).with_context(|| format!("cannot read {}", path.display()))
+        }
+        _ => write_seed(path, file).map(|()| None),
+    })
+    .with_context(|| format!("cannot lock {}", path.display()))?
+}
+
 /// Write `file`'s shipped bytes to `path` atomically; mode `0755` for a script.
 fn write_seed(path: &Path, file: &Seeded<'_>) -> anyhow::Result<()> {
     trusty_common::atomic_file::write_atomic(path, file.contents.as_bytes())
@@ -305,4 +346,26 @@ fn make_executable(path: &Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> anyhow::Result<()> {
     Ok(())
+}
+
+/// Test seam between the unlocked read and the locked write of [`publish`].
+#[cfg(test)]
+pub(crate) mod hook {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BEFORE_LOCK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Run `f` once, at the next schedule publish on this thread.
+    pub(crate) fn set(f: impl FnOnce() + 'static) {
+        BEFORE_LOCK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    /// Run and clear the pending hook, if any.
+    pub(super) fn run() {
+        if let Some(f) = BEFORE_LOCK.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
 }

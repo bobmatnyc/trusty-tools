@@ -297,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
         Some(Command::Content { action }) => return commands::content::run(action).await,
         Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await), // #9758
+        Some(Command::Il { action }) => return commands::il::run(action), // #11001
         // #8994: `tm worktrees` reads and appends the worktree ledger only.
         Some(Command::Worktrees(args)) => return commands::worktrees::run(args).await,
         _ => {}
@@ -779,12 +780,11 @@ async fn main() -> anyhow::Result<()> {
         // `cli.command` returned early — before this match ever runs (see the
         // #2405 early short-circuit above, right after `Cli::try_parse`).
         // The arm still must exist for match exhaustiveness over `Command`.
-        Some(Command::Config(_)) => unreachable!("config dispatched before daemon-URL resolution"),
+        // #11001: `tm il` is daemon-less too, dispatched in the early match.
+        Some(Command::Config(_) | Command::Il { .. }) => unreachable!("dispatched early"),
         // Unreachable for the same reason as `Config`: the #2997 disclaim-exec
         // shim returned early right after `Config` above, before this match.
-        Some(Command::InternalSpawnDisclaimed { .. }) => {
-            unreachable!("internal-spawn-disclaimed dispatched before daemon-URL resolution")
-        }
+        Some(Command::InternalSpawnDisclaimed { .. }) => unreachable!("dispatched early"),
     };
 
     // #6288: `tm session prune-idle`'s exit-75 translation moved with it to

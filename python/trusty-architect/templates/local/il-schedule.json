@@ -14,5 +14,12 @@
     "fixed_base": 83000
   },
   "do_not_clear": [],
-  "paused_sessions": []
+  "paused_sessions": [],
+  "session_example": {
+    "name": "tm-my-project",
+    "project": "/srv/projects/my-project",
+    "code": "mp",
+    "signals": ["S1", "S2", "S5"],
+    "thresholds": {"floor_ctx": 180000}
+  }
 }
