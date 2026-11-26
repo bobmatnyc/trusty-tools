@@ -279,6 +279,27 @@ pub trait VectorStore: Send + Sync {
         Ok(())
     }
 
+    /// Remove every id in `ids`; every id is tried (#10303).
+    ///
+    /// Why: `UsearchStore` writes one tombstone file per call in view mode
+    /// instead of one per id. What: the default loops over `remove` and
+    /// returns the first failure with the count that failed.
+    /// Test: `store::tombstones_10303_tests::remove_many_writes_one_tombstone_file_for_the_batch`.
+    async fn remove_many(&self, ids: &[String]) -> Result<()> {
+        let mut failed = 0usize;
+        let mut first: Option<anyhow::Error> = None;
+        for id in ids {
+            if let Err(e) = self.remove(id).await {
+                failed += 1;
+                first.get_or_insert(e);
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some(e) => Err(e.context(format!("{failed} of {} vector deletes failed", ids.len()))),
+        }
+    }
+
     /// Persist this store to disk. Default = no-op (in-memory backends).
     ///
     /// Why: lets `CodeIndexer::save_to_disk` call through a `dyn VectorStore`

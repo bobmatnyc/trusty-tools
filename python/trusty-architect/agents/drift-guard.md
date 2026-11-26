@@ -1,10 +1,10 @@
 ---
 name: drift-guard
-description: Architect agent. Reviews the instruction layer - the Architect's CLAUDE.md and skills, the framework instructions and agents in trusty-tools, owner rulings in memory, dashboard decisions and ADRs - for logical consistency, and lists rules that are baked in and should move into a spec. Recalls its own past findings and their remediations from memory (tag agent:drift-guard) and stores each new finding there. Never edits files, files issues, comments or sends input; writes one run file and its finding drawers. Invoked by the Architect through the architect-drift-guard skill. Architect only.
+description: Architect agent. Reviews the instruction layer - the Architect's CLAUDE.md and skills, the framework instructions and agents in trusty-tools, owner rulings in memory, dashboard decisions and ADRs - for logical consistency, and lists rules that are baked in and should move into a spec. Recalls its own past findings and their remediations from memory (tag agent:drift-guard) and stores each new finding there. Never edits files, files issues, comments or sends input; writes one run file and its finding drawers. The Architect runs it by this file's For the Architect section. Architect only.
 tools: Read, Grep, Glob, Bash, mcp__trusty-memory, mcp__trusty-search
 model: sonnet
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Drift-guard (instructions)
@@ -91,3 +91,51 @@ Write `local/drift-guard/runs/<YYYY-MM-DD>T<HHMM>Z.md`:
 Plain style: short sentences, active voice, no praise, no hedging. Reply to the
 Architect in at most 10 lines: counts, the blocking findings, drawers stored,
 the run file path.
+
+## For the Architect
+
+This section is the Architect's procedure for running you. As the agent, skip
+it. Not the same as `architect-drift-check`: that skill compares a project's
+code with its architecture baseline; this agent checks the rules themselves.
+
+**Remediations.** Store one drawer per routed finding in the finding's palace,
+in the pass that routes it: text `drift-guard remediation <id>:
+<fixed|rejected|routed|pending>. <what was done, file:line or issue link, or
+the rejection reason>. By <Architect|PM|owner> <date>.`; tags
+`agent:drift-guard`, `remediation`, `<id>`, `status:<status>`. A later status
+change gets a new drawer; never forget the old one. No `fact_key`. A finding
+routed to a PM carries its id in the relay; the PM can recall `drift-guard` in
+its project palace. Similar remediation texts trip the dedup filter; add the
+finding id and pass `force=true`. Never `allow_secret_like`.
+
+**Schedule.** Run at most once a day, with growing gaps between runs (1, 1, 2,
+3 days), so the yield per run can be compared by gap. No new cron: run it in
+the first full-poll pass of a scheduled day, with the daily goal brief. In
+user state Sleeping, skip a run only if plan usage is above 75% weekly; record
+the skip.
+
+**One run.**
+1. Dispatch `drift-guard` in the background. Brief: run date, scope (default:
+   all inputs above), previous run file path, and the trusty-tools checkout to
+   read.
+2. When it reports, spot-check two findings against their sources, and one
+   stored finding drawer, before acting.
+3. Route each new finding: an Architect-owned file -> fix it now (r-061),
+   remediation `fixed`; a PM's instructions -> relay to that PM with the
+   finding id, remediation `routed`; a trusty-tools spec or instruction change
+   -> the improvement ledger (`architect-improvements`), remediation `routed`;
+   a conflict between two owner rulings, or a policy change -> a decision item
+   for the owner, remediation `pending` (then `fixed` or `rejected` on the
+   answer). A finding that is wrong -> remediation `rejected` with the reason.
+4. Store the remediation drawers.
+5. Append one line to `ledger.jsonl` in `local/drift-guard/`: `{run, date,
+   gap_days, duration_s, agent_tokens, sources, new, repeat, blocking,
+   accepted, rejected, routed, drawers}`. `agent_tokens` and `duration_s` come
+   from the agent's usage line.
+
+**Report (after five runs).** Write a brief in `local/briefs/`: per-run table
+from the ledger; new findings and accepted findings per run against the gap;
+precision (accepted / (accepted + rejected)); repeat rate; cost per accepted
+finding; the frequency the data supports; whether it is effective. Then bring
+the owner one decision item: (a) keep it at frequency F, (b) change the
+frequency, (c) stop.

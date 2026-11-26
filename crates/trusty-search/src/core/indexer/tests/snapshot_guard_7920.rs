@@ -67,6 +67,8 @@ fn snapshot_ids(path: &std::path::Path) -> HashSet<String> {
 
 /// #7920 verbatim: an empty corpus flushed over a populated snapshot.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn shutdown_flush_refuses_empty_corpus_over_populated_chunks_json() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");
@@ -96,6 +98,7 @@ async fn shutdown_flush_refuses_empty_corpus_over_populated_chunks_json() {
 
 /// A non-empty corpus that never came from this file is just as destructive.
 #[tokio::test]
+#[serial_test::parallel]
 async fn shutdown_flush_refuses_foreign_partial_corpus() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");
@@ -118,6 +121,7 @@ async fn shutdown_flush_refuses_foreign_partial_corpus() {
 
 /// The guard must not turn into never-flush: chunks added after a load land.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_added_after_load_are_persisted() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");
@@ -146,6 +150,7 @@ async fn chunks_added_after_load_are_persisted() {
 /// on the owning path — `check_overwrite` returns before it ever reads the
 /// file when the indexer owns the path and holds a chunk.
 #[tokio::test]
+#[serial_test::parallel]
 async fn corrupt_snapshot_does_not_block_the_owning_writer() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");
@@ -201,6 +206,7 @@ fn preserved_sidecars(path: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// preserved under a sidecar rather than destroyed.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn unreadable_snapshot_no_longer_wedges_a_store_less_writer() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");
@@ -251,6 +257,7 @@ async fn unreadable_snapshot_no_longer_wedges_a_store_less_writer() {
 /// with no sidecar, and the guard itself refuses the stand-in shape directly.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_quarantined_writer_never_reaches_the_unreadable_self_heal() {
     use crate::core::corpus::CorpusOpenFailure;
     use crate::core::indexer::snapshot_guard::{SnapshotGuard, WriterShape};
@@ -299,6 +306,7 @@ async fn a_quarantined_writer_never_reaches_the_unreadable_self_heal() {
 
 /// LOW #7980: a second rotten snapshot must never clobber the first sidecar.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_second_unreadable_snapshot_never_clobbers_the_first_sidecar() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");
@@ -338,6 +346,7 @@ async fn a_second_unreadable_snapshot_never_clobbers_the_first_sidecar() {
 /// renames and asserts both payloads survive.
 /// Test: this IS the test.
 #[test]
+#[serial_test::parallel]
 fn two_slot_claims_without_an_intervening_rename_never_collide() {
     use crate::core::indexer::snapshot_guard::{claim_sidecar_slot, CORRUPT_SUFFIX};
 
@@ -372,6 +381,7 @@ fn two_slot_claims_without_an_intervening_rename_never_collide() {
 /// refusal, the counter, and that the file is byte-identical.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_preservation_refuses_the_write_and_keeps_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().join("locked");
@@ -423,6 +433,7 @@ async fn a_failed_preservation_refuses_the_write_and_keeps_the_file() {
 /// asserts that quarantining republishes it to every later reader.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_quarantine_mid_persist_loop_is_seen_by_the_detached_writer() {
     use crate::core::corpus::CorpusOpenFailure;
     use crate::core::indexer::snapshot_guard::WriterShape;
@@ -447,6 +458,7 @@ async fn a_quarantine_mid_persist_loop_is_seen_by_the_detached_writer() {
 
 /// Error arm: a failed write surfaces as `Err` and leaves the source intact.
 #[tokio::test]
+#[serial_test::parallel]
 async fn snapshot_write_failure_surfaces_error_and_keeps_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunks.json");

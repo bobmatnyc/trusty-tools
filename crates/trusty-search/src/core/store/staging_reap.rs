@@ -75,7 +75,8 @@ pub(super) fn is_reapable_staging(name: &str, live: &str) -> bool {
 /// staging file left by a SIGKILLed process. Called from `load_from`, which is
 /// the one moment the process is provably not mid-save on this path.
 /// What: scans `hnsw_path`'s parent for staging names derived from either live
-/// artifact (the snapshot itself and its `keys.json` sidecar) and unlinks the
+/// artifact (the snapshot, its `keys.json` sidecar and, since #10303, its
+/// `tombstones.json` file) and unlinks the
 /// reapable ones. Every step is best-effort: an unreadable directory, an
 /// unreadable entry, or a failed unlink is logged at `debug` and skipped, never
 /// propagated — a snapshot that loads fine must not be refused because a
@@ -91,6 +92,12 @@ pub(super) fn reap_orphan_staging_files(hnsw_path: &Path) -> usize {
     // The two artifacts `save` stages: `<stem>.usearch` and `<stem>.keys.json`.
     let sidecar = hnsw_path.with_extension("keys.json");
     let sidecar_name = sidecar.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // #10303: a view-mode removal stages `<stem>.tombstones.json` the same way.
+    let tombstones = super::usearch_tombstones::tombstones_path(hnsw_path);
+    let tombstones_name = tombstones
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
 
     let entries = match std::fs::read_dir(parent) {
         Ok(e) => e,
@@ -110,7 +117,10 @@ pub(super) fn reap_orphan_staging_files(hnsw_path: &Path) -> usize {
         let Some(name) = file_name.to_str() else {
             continue;
         };
-        if !is_reapable_staging(name, snapshot_name) && !is_reapable_staging(name, sidecar_name) {
+        if !is_reapable_staging(name, snapshot_name)
+            && !is_reapable_staging(name, sidecar_name)
+            && !is_reapable_staging(name, tombstones_name)
+        {
             continue;
         }
         let path = entry.path();

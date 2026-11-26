@@ -173,6 +173,8 @@ fn query(text: &str, top_k: usize) -> SearchQuery {
 }
 
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn l1_literal_phrase_ranks_the_verbatim_occurrence_first() {
     // Why: spike lookup L1 — the default `search` returned ten irrelevant rows
     // for a string that occurs verbatim in exactly one chunk. #7675. This
@@ -196,6 +198,7 @@ async fn l1_literal_phrase_ranks_the_verbatim_occurrence_first() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn l3_compound_identifier_ranks_its_declaration_first() {
     // Why: spike lookup L3 — BM25 split `render_savings_segment` into common
     // words and the top hit was an adjacent-but-wrong impl block. #7675.
@@ -212,6 +215,7 @@ async fn l3_compound_identifier_ranks_its_declaration_first() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn every_literal_carrying_chunk_outranks_every_chunk_without_it() {
     // Why: the fix is a FLOOR, not a boost — no chunk lacking the literal may
     // sit above one carrying it, however high its semantic score. #7675.
@@ -237,6 +241,7 @@ async fn every_literal_carrying_chunk_outranks_every_chunk_without_it() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn exact_hit_outside_top_k_is_promoted_into_the_results() {
     // Why: the floor can only rank what survives `take(top_k)`; in L1 the
     // literal-carrying chunk was outside that window entirely. #7675.
@@ -256,6 +261,7 @@ async fn exact_hit_outside_top_k_is_promoted_into_the_results() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn conceptual_ranking_is_unchanged_by_the_floor() {
     // Why: requirement 2 of #7675 — a query with no verbatim occurrence in the
     // corpus must rank exactly as it did before. The floor's whole gate is
@@ -306,6 +312,7 @@ async fn conceptual_ranking_is_unchanged_by_the_floor() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unquoted_phrase_earns_no_literal_even_when_it_occurs_verbatim() {
     // Why: round-2 HIGH. An unquoted multi-word phrase used to earn the floor
     // under a hit cap alone, so a distinctive prose sentence occurring once in
@@ -340,6 +347,7 @@ async fn an_unquoted_phrase_earns_no_literal_even_when_it_occurs_verbatim() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn hybrid_top_one_agrees_with_lexical_for_every_planted_identifier() {
     // Why: the property #7675 asks for — for every identifier planted in the
     // corpus, the default hybrid `search` must land on the same file:line that
@@ -380,6 +388,7 @@ async fn hybrid_top_one_agrees_with_lexical_for_every_planted_identifier() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn extract_exact_literal_reads_the_query_shapes() {
     // Why: the extractor is the whole gate between the floor and conceptual
     // ranking. #7675.
@@ -456,6 +465,7 @@ fn extract_exact_literal_reads_the_query_shapes() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_filename_query_floors_the_chunks_of_that_file() {
     // Why: ripgrep finds `session_mcp_scope.rs` trivially; the identifier gate
     // rejected it outright because of the dot. Round-2 MEDIUM. #7675.
@@ -502,6 +512,7 @@ async fn a_filename_query_floors_the_chunks_of_that_file() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_common_basename_is_capped_and_does_not_bury_the_relevant_file() {
     // Why: round-3 HIGH — `Filename` had no analogue of the deleted
     // `PHRASE_HIT_CAP`, so `occurrences_of` floored every chunk of every file
@@ -574,6 +585,7 @@ async fn a_common_basename_is_capped_and_does_not_bury_the_relevant_file() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_path_shaped_query_returns_its_file_first() {
     // Why: round-3 "must be true" — a multi-segment path query disambiguates
     // a common basename on purpose, and the cap must keep its exact match
@@ -636,6 +648,7 @@ async fn a_path_shaped_query_returns_its_file_first() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_issue_reference_floors_its_verbatim_occurrence() {
     // Why: `#7675` fails every identifier rule on its leading hash, yet it is
     // exactly the kind of literal a caller reaches for ripgrep with. #7675.
@@ -676,6 +689,7 @@ async fn an_issue_reference_floors_its_verbatim_occurrence() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_archived_duplicate_ranks_below_the_live_definition() {
     // Why: round-2 HIGH. `apply_archive_downrank` multiplies a stale chunk's
     // score, and `apply_floor` then overwrote that score — so a deprecated
@@ -714,6 +728,7 @@ async fn an_archived_duplicate_ranks_below_the_live_definition() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_postings_candidate_path_and_the_full_scan_agree() {
     // Why: the postings prefilter replaces an O(corpus) content scan, so it is
     // only sound if it finds exactly what the scan would. #7675.
@@ -757,6 +772,7 @@ async fn the_postings_candidate_path_and_the_full_scan_agree() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn literal_regex_anchors_an_identifier_at_word_boundaries() {
     // Why: `is_trusted` must not match inside `is_trusted_root`. #7675.
     // What: the identifier matcher is `\b`-anchored; the phrase matcher folds
@@ -773,6 +789,7 @@ fn literal_regex_anchors_an_identifier_at_word_boundaries() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn tied_filename_hits_are_ordered_by_lane_score_not_chunk_id() {
     // Why: #7775 HIGH. A `Filename` hit's only ordering signals are the
     // path-suffix tier and an occurrence count that is always 1, so every file
@@ -866,6 +883,7 @@ async fn tied_filename_hits_are_ordered_by_lane_score_not_chunk_id() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn every_file_carrying_an_identifier_survives_overlapping_chunks_of_one_file() {
     // Why: #7675 / #10203 parity probe — overlapping chunks of ONE file (a
     // parent impl chunk and its child fn chunks, 89-811 and 89-188) all carry
@@ -1001,6 +1019,7 @@ async fn filename_lane_ids(idx: &CodeIndexer, want: usize) -> Vec<(String, bool)
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_filename_querys_named_file_stays_first_when_content_hits_exist() {
     // Why: owner ruling 2026-10-26 (#7675) — content matches join a filename
     // query, and the file it names must keep rank 1.
@@ -1023,6 +1042,7 @@ async fn a_filename_querys_named_file_stays_first_when_content_hits_exist() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_filename_querys_content_hits_rank_after_every_path_hit() {
     // Why: owner ruling 2026-10-26 (#7675) — ripgrep lists every file that
     // mentions `session_mcp_scope.rs`; the floor dropped them all (7 of 7 in
@@ -1071,6 +1091,7 @@ async fn a_filename_querys_content_hits_rank_after_every_path_hit() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_filename_querys_content_hits_are_capped_apart_from_its_path_hits() {
     // Why: owner ruling 2026-10-26 (#7675) — content hits take their own cap,
     // `FILENAME_CONTENT_HIT_CAP`, and must never cost a path hit its slot.
@@ -1102,6 +1123,7 @@ async fn a_filename_querys_content_hits_are_capped_apart_from_its_path_hits() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_filename_query_with_no_content_hits_returns_only_its_path_hits() {
     // Why: owner ruling 2026-10-26 (#7675) — with nothing mentioning the file,
     // a filename query must behave exactly as before the ruling.

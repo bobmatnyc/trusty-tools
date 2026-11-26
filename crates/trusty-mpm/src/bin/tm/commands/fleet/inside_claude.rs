@@ -97,6 +97,24 @@ pub(crate) fn present_markers(
 pub(crate) fn refuse_inside_claude_code(
     env: impl Fn(&str) -> Option<OsString>,
 ) -> anyhow::Result<()> {
+    refuse_command_inside_claude_code("tm fleet relaunch", "Nothing was stopped", "#10033", env)
+}
+
+/// [`refuse_inside_claude_code`] for any owner-only `command` (#11821 P6b).
+///
+/// Why: `tm paths set` writes `install.toml`, a trust anchor, and must refuse
+/// a hooked session the same way `tm fleet relaunch` does.
+/// What: `Err` naming every present marker, then `untouched` (what was left
+/// alone), then the operator terminal; `issue` is cited last. No value is
+/// printed.
+/// Test: `session_markers_refuse_and_name_no_value`,
+/// `paths_set_refuses_inside_a_claude_code_session`.
+pub(crate) fn refuse_command_inside_claude_code(
+    command: &str,
+    untouched: &str,
+    issue: &str,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> anyhow::Result<()> {
     let present = present_markers(env);
     if present.is_empty() {
         return Ok(());
@@ -105,10 +123,10 @@ pub(crate) fn refuse_inside_claude_code(
         .iter()
         .map(|(name, reason)| format!("`{name}` {}", reason.describe()))
         .collect();
+    // #11821 P6b: the command, what it left alone and the issue are the caller's.
     anyhow::bail!(
-        "tm fleet relaunch refused: it runs inside a Claude Code session ({}). Nothing was \
-         stopped. Run `tm fleet relaunch` from an operator terminal outside any Claude Code \
-         session (#10033)",
+        "{command} refused: it runs inside a Claude Code session ({}). {untouched}. Run \
+         `{command}` from an operator terminal outside any Claude Code session ({issue})",
         reasons.join("; ")
     )
 }

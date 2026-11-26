@@ -116,6 +116,8 @@ impl Embedder for SlowRefineEmbedder {
 /// its 200 ms landed in `fusion_ms`.
 /// Test: this test.
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn a_refine_query_embed_is_charged_to_embed_ms() {
     let dim = 32;
     let embedder: Arc<dyn Embedder> = Arc::new(SlowRefineEmbedder(

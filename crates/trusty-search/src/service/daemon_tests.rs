@@ -15,6 +15,8 @@ use super::*;
 use serial_test::serial;
 
 #[test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 fn pid_alive_current_process_is_alive() {
     // Why: smoke-test the PID-aliveness predicate so the launchd
     // crash-loop fix has explicit coverage. Our own PID must register
@@ -29,6 +31,7 @@ fn pid_alive_current_process_is_alive() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn read_lockfile_pid_parses_pid() {
     // Why: `running_daemon_pid` depends on this parser. A malformed
     // file must return None rather than panic.
@@ -43,6 +46,7 @@ fn read_lockfile_pid_parses_pid() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn lockfile_contention_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("daemon.lock");
@@ -390,6 +394,7 @@ async fn run_daemon_refuses_to_start_while_another_holder_has_the_lock() {
 /// operator the setting and reported nothing. The parser must hand malformed
 /// lines back with their line numbers so the caller can warn.
 #[test]
+#[serial_test::parallel]
 fn parse_daemon_env_reports_malformed_lines() {
     let (pairs, malformed) = super::parse_daemon_env(
         "# comment\n\
@@ -420,6 +425,7 @@ fn parse_daemon_env_reports_malformed_lines() {
 /// to log the line verbatim — leaking the key in cleartext to anyone who can
 /// read the daemon log.
 #[test]
+#[serial_test::parallel]
 fn malformed_line_summary_redacts_a_typod_credential() {
     let secret = "sk-or-v1-0123456789abcdef0123456789abcdef";
     let summary = super::malformed_line_summary(&format!("OPENROUTER_API_KEY {secret}"));
@@ -441,6 +447,7 @@ fn malformed_line_summary_redacts_a_typod_credential() {
 /// A bare token on its own line has no key name to report, so nothing but the
 /// length may be logged — the leading token IS the secret in that case.
 #[test]
+#[serial_test::parallel]
 fn malformed_line_summary_redacts_a_bare_secret() {
     let secret = "sk-or-v1-0123456789abcdef";
     let summary = super::malformed_line_summary(secret);
@@ -455,6 +462,7 @@ fn malformed_line_summary_redacts_a_bare_secret() {
 /// The common case — a fumbled separator on an ordinary setting — must still
 /// name the setting, or the warning tells the operator nothing actionable.
 #[test]
+#[serial_test::parallel]
 fn malformed_line_summary_names_a_conventional_key() {
     let summary = super::malformed_line_summary("TRUSTY_MAX_CHUNKS 100000");
     assert!(summary.contains("TRUSTY_MAX_CHUNKS"), "got: {summary}");
@@ -469,6 +477,7 @@ fn malformed_line_summary_names_a_conventional_key() {
 /// `daemon.env` itself lives, so applying it early would let the production
 /// data dir's file redirect a `--data-dir /tmp/isolated` run at production data.
 #[test]
+#[serial_test::parallel]
 fn early_load_skips_flag_derived_keys() {
     for key in [
         "TRUSTY_DATA_DIR",
@@ -488,6 +497,7 @@ fn early_load_skips_flag_derived_keys() {
 
 /// #4827: the daemon path is the only one that may source `daemon.env`.
 #[test]
+#[serial_test::parallel]
 fn argv_selects_daemon_start_for_the_daemon_path() {
     let argv = |args: &[&str]| -> Vec<String> {
         std::iter::once("trusty-search")
@@ -808,6 +818,7 @@ fn deregister_shared_discovery_warns_when_the_entry_cannot_be_removed() {
 /// With either arm free to win, 50 straight `Ok`s has odds of 2^-50.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_socket_only_stop_returns_ok_when_the_serve_loop_also_ended() {
     for attempt in 0..50 {
         let drain = tokio_util::sync::CancellationToken::new();
@@ -1119,6 +1130,7 @@ fn a_live_unrelated_pid_in_an_unheld_lock_does_not_block_startup_11060() {
 /// the probe is an `Err`, and that `holder_verdict` keeps the pid.
 /// Test: this function.
 #[test]
+#[serial_test::parallel]
 fn a_lock_that_cannot_be_probed_is_not_treated_as_free_11060() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let probe = lock_is_held(tmp.path());

@@ -91,6 +91,8 @@ impl VectorStore for UsearchStore {
             return Ok(Vec::new());
         }
 
+        // #10303: read before the graph lock (lock order).
+        let tombstoned = self.has_tombstones().await;
         let matches = {
             let index = self.index.read().await;
             // #8232: checked under the read lock the close's reset waits on.
@@ -98,9 +100,16 @@ impl VectorStore for UsearchStore {
             // #9414: ask for at least the size-scaled beam (usearch searches
             // with max(expansion_search, count)); hits are truncated below.
             let count = super::hnsw_tuning::search_count(top_k, index.size());
-            index
-                .search(query, count)
-                .map_err(|e| anyhow!("usearch search failed: {e}"))?
+            if tombstoned {
+                // #10303: a tombstoned key is unmapped; keep it from taking a slot.
+                let key_to_id = self.key_to_id.read().await;
+                index.filtered_search(query, count, |key: usearch::Key| {
+                    key_to_id.contains_key(&key)
+                })
+            } else {
+                index.search(query, count)
+            }
+            .map_err(|e| anyhow!("usearch search failed: {e}"))?
         };
 
         let key_to_id = self.key_to_id.read().await;
@@ -198,48 +207,41 @@ impl VectorStore for UsearchStore {
     async fn remove(&self, id: &str) -> Result<()> {
         let _mutation_guard = self.save_lock.lock().await;
         self.refuse_if_closed("remove")?;
-        // Promote view → mutable on first write. No-op when already mutable.
-        self.ensure_mutable().await?;
-        let key = {
-            let mut id_to_key = self.id_to_key.write().await;
-            match id_to_key.remove(id) {
-                Some(k) => k,
-                None => return Ok(()), // idempotent: removing an unknown id is a no-op
-            }
-        };
-        self.key_to_id.write().await.remove(&key);
-
-        let index = self.index.write().await;
-        if index.contains(key) {
-            index
-                .remove(key)
-                .map_err(|e| anyhow!("usearch remove failed: {e}"))?;
-            // Graph changed — see the `dirty` note in `upsert` (issue #2164).
-            self.mark_dirty();
-            // Issue #1717: credit this removal against the shrink guard in
-            // `save()` ONLY when the HNSW graph actually lost a vector — not
-            // merely when `id_to_key` lost an entry. `upsert()` inserts into
-            // `id_to_key`/`key_to_id` before calling `index.add()` and does
-            // NOT roll those maps back if `add()` fails (dim mismatch,
-            // capacity error) — so a dangling `id_to_key` entry with no
-            // matching HNSW vector is possible, and `index.contains(key)` is
-            // the authoritative check for whether the graph actually shrank.
-            // Crediting on the wrong condition (a bare `id_to_key.remove`
-            // success) would inflate `removed_since_save` for ids that were
-            // never really in the graph, silently weakening the shrink
-            // guard's refusal threshold in exactly the borderline cases it
-            // exists to catch.
-            self.removed_since_save.fetch_add(1, Ordering::Relaxed);
-            // #9450: counted toward the next graph compaction.
-            self.compact.record(1);
+        // #10303: a view-mode removal writes a tombstone instead of a heap copy.
+        if self.is_view.load(Ordering::Acquire) {
+            return self.tombstone_remove_locked(&[id.to_string()]).await;
         }
-        Ok(())
+        self.remove_mutable_locked(id).await
+    }
+
+    // #10303: one tombstone write for the whole batch in view mode.
+    async fn remove_many(&self, ids: &[String]) -> Result<()> {
+        let _mutation_guard = self.save_lock.lock().await;
+        self.refuse_if_closed("remove")?;
+        if self.is_view.load(Ordering::Acquire) {
+            return self.tombstone_remove_locked(ids).await;
+        }
+        let mut failed = 0usize;
+        let mut first: Option<anyhow::Error> = None;
+        for id in ids {
+            if let Err(e) = self.remove_mutable_locked(id).await {
+                failed += 1;
+                first.get_or_insert(e);
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some(e) => Err(e.context(format!("{failed} of {} vector deletes failed", ids.len()))),
+        }
     }
 
     async fn len(&self) -> Result<usize> {
         let index = self.index.read().await;
         self.refuse_if_closed("len")?;
-        Ok(index.size())
+        // #10303: tombstoned vectors are still mapped but no longer counted.
+        Ok(index
+            .size()
+            .saturating_sub(self.tombstones_in_graph(&index).await))
     }
 
     /// Issue #2984 Phase 1 HIGH finding 3: single-id membership check backed

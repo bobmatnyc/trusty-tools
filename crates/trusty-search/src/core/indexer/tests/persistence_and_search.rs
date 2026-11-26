@@ -12,6 +12,8 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 #[tokio::test]
+// #11445: reaches the index-identity file; see IDENTITY_REACHING.
+#[serial_test::parallel]
 async fn test_save_chunks_roundtrip() {
     // Issue #85: a freshly-loaded indexer must have its chunks restored
     // and its BM25 posting list rebuilt from disk — no re-parsing of
@@ -52,6 +54,7 @@ async fn test_save_chunks_roundtrip() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_load_chunks_missing_file_returns_zero() {
     let idx = make_indexer();
     let dir = tempfile::tempdir().unwrap();
@@ -334,6 +337,7 @@ async fn test_incremental_persist_redirects_to_staging_while_reindexing() {
 /// and not hanging forever.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn wait_for_incremental_persist_drain_waits_for_in_flight_task() {
     let idx = make_indexer();
     idx.simulate_persist_in_flight_for_tests(true);
@@ -366,6 +370,7 @@ async fn wait_for_incremental_persist_drain_waits_for_in_flight_task() {
 /// asserts it returns `true` in well under that budget.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn wait_for_incremental_persist_drain_returns_immediately_when_idle() {
     let idx = make_indexer();
     assert!(
@@ -390,6 +395,7 @@ async fn wait_for_incremental_persist_drain_returns_immediately_when_idle() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_search_integration_returns_relevant_chunk_first() {
     let idx = make_indexer();
 
@@ -443,6 +449,7 @@ async fn test_search_integration_returns_relevant_chunk_first() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_query_cache_skips_embedder_on_repeat() {
     // We don't have a hit-counter on the trait, so drive correctness
     // indirectly: the cache hit path must populate `query_cache` and
@@ -464,6 +471,7 @@ async fn test_query_cache_skips_embedder_on_repeat() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_search_with_no_embedder_falls_back_to_bm25() {
     // Indexer without `with_components` → embedder/store None → BM25-only.
     let idx = CodeIndexer::new("bm25-only", "/tmp/test");
@@ -488,6 +496,7 @@ async fn test_search_with_no_embedder_falls_back_to_bm25() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_remove_chunk_ids_removes_from_results() {
     let idx = make_indexer();
     idx.add_chunk(raw("a:1:1", "a.rs", "fn authenticate() {}"))
@@ -514,6 +523,7 @@ async fn test_remove_chunk_ids_removes_from_results() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_kg_expansion_marks_neighbours_with_hybrid_kg() {
     // Build a corpus where "login_handler" calls "authenticate".
     // Query for "authenticate" with Usage intent so KG expansion fires;
@@ -603,6 +613,7 @@ async fn test_kg_expansion_marks_neighbours_with_hybrid_kg() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_kg_expansion_disabled_by_expand_graph_false() {
     let idx = make_indexer();
     idx.add_chunk(RawChunk {
@@ -674,6 +685,7 @@ async fn test_kg_expansion_disabled_by_expand_graph_false() {
 /// Test: covers the search dispatcher's `skip_kg` branch for the
 /// Semantic variant added in #138.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_semantic_stage_skips_kg_expansion() {
     let idx = make_indexer();
     idx.add_chunk(RawChunk {
@@ -746,6 +758,7 @@ async fn search_semantic_stage_skips_kg_expansion() {
 /// Test: covers the search dispatcher's `force_kg` branch for the
 /// Graph variant added in #138.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_graph_stage_forces_kg_expansion_on_definition_query() {
     // BM25-only mode so the vector lane can't pull `caller` into the
     // result set as a near-neighbour and mask the KG expansion signal we
@@ -816,6 +829,7 @@ async fn search_graph_stage_forces_kg_expansion_on_definition_query() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_symbol_graph_rebuilds_after_indexing() {
     let idx = make_indexer();
     assert_eq!(idx.symbol_graph().await.node_count(), 0);
@@ -832,6 +846,7 @@ async fn test_symbol_graph_rebuilds_after_indexing() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_entity_exact_match_finds_chunk() {
     // Issue #20: an exact-name entity hit should resolve to a chunk in the
     // entity's file whose line range contains the entity. We use a struct
@@ -854,6 +869,7 @@ async fn test_entity_exact_match_finds_chunk() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_entity_exact_match_struct_ranks_first() {
     // Issue #20: indexing a Rust snippet with `struct FooBar` and querying
     // "FooBar" must surface that chunk at rank 1 via the synthetic BM25
@@ -896,6 +912,7 @@ async fn test_entity_exact_match_struct_ranks_first() {
 /// exact-match injection must still lift the matching type to rank 1 over a
 /// chunk that only repeats the word.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_entity_exact_match_bare_word_ranks_first_under_keyword() {
     use crate::core::classifier::{QueryClassifier, QueryIntent};
     let idx = CodeIndexer::new("ent-rank-9027", "/tmp/test");
@@ -935,6 +952,7 @@ async fn test_entity_exact_match_bare_word_ranks_first_under_keyword() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_entity_exact_match_skips_non_symbol_entities() {
     // Issue #20: only NamedType and ModulePath entities should anchor
     // exact-name boosts. A LiteralString like "this is a long literal"
@@ -952,6 +970,7 @@ async fn test_entity_exact_match_skips_non_symbol_entities() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_entity_exact_match_skips_multiword_query() {
     let idx = make_indexer();
     idx.index_file("e.rs", "use std::sync::Arc;\nfn f() {}\n")
@@ -961,6 +980,7 @@ async fn test_entity_exact_match_skips_multiword_query() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_virtual_terms_populated_from_entities() {
     // Issue #19: chunks should pick up entity text as virtual_terms so
     // BM25 matches symbolic queries that don't appear literally in the body.
@@ -984,6 +1004,7 @@ async fn test_virtual_terms_populated_from_entities() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_get_embedding_returns_some_after_indexing() {
     let idx = make_indexer();
     idx.add_chunk(raw("a:1:1", "a.rs", "fn alpha() {}"))
@@ -1003,6 +1024,7 @@ async fn test_get_embedding_returns_some_after_indexing() {
 /// What: asserts that known IDs return content and unknown IDs return `None`.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_chunk_content_by_id_returns_none_for_unknown() {
     let idx = make_indexer();
     idx.add_chunk(raw("a:1:1", "a.rs", "fn alpha() {}"))
@@ -1024,6 +1046,7 @@ async fn test_chunk_content_by_id_returns_none_for_unknown() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_similar_by_embedding_excludes_seed() {
     let idx = make_indexer();
     idx.add_chunk(raw("a:1:1", "a.rs", "fn alpha() {}"))
@@ -1042,6 +1065,7 @@ async fn test_similar_by_embedding_excludes_seed() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_index_files_batch_indexes_all_chunks_once() {
     // Bulk-indexing two files should leave the corpus with the same chunks
     // as if we'd called index_file twice, but issue exactly one symbol-graph
@@ -1076,6 +1100,7 @@ async fn test_index_files_batch_indexes_all_chunks_once() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_index_files_batch_empty_input_is_noop() {
     let idx = make_indexer();
     let added = idx.index_files_batch(&[]).await.unwrap();
@@ -1084,6 +1109,7 @@ async fn test_index_files_batch_empty_input_is_noop() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_index_files_batch_bm25_only_mode() {
     // No embedder/store wired — the batch path must still populate the
     // corpus and BM25 must still find chunks.
@@ -1124,6 +1150,7 @@ async fn test_index_files_batch_bm25_only_mode() {
 /// weights; we verify by asserting the symbol chunk is the top hit.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_uses_domain_terms_when_provided() {
     use crate::core::classifier::{QueryClassifier, QueryIntent};
 

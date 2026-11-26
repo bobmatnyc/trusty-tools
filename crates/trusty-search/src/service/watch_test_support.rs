@@ -103,6 +103,8 @@ mod tests {
     /// permanently against such a consumer; re-applying the stimulus recovers.
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     async fn resaving_recovers_when_early_stimuli_are_dropped() {
         // Drops the first two stimuli, then starts delivering.
         let delivered = Arc::new(AtomicU32::new(0));
@@ -138,6 +140,7 @@ mod tests {
     /// `false` rather than hanging — a test asserting absence depends on it.
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::parallel]
     async fn budget_is_honoured_when_condition_never_holds() {
         let started = Instant::now();
         let held =

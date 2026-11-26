@@ -703,6 +703,103 @@ async fn write_after_abort_swap_rebuilds_when_no_live_snapshot_exists() {
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 }
 
+/// Why (#10303): the live tombstone file describes the pair a commit replaces;
+/// the swap must clear it. Fails on the pre-#10303 code, which leaves it.
+/// What: plant a live tombstone file, commit, check it is gone.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn commit_staged_hnsw_swap_clears_the_live_tombstone_file() {
+    let data_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+    let root_dir = tempfile::tempdir().unwrap();
+
+    let store = store_with_vectors(10).await;
+    let (id, handle) = build_test_handle("hnsw-swap-10303-clear", root_dir.path(), Some(store));
+    let paths = begin_staged_hnsw_swap(&handle, &id)
+        .await
+        .expect("resolves");
+    let live_tombstones = tombstones_path(&paths.live);
+    std::fs::create_dir_all(live_tombstones.parent().unwrap()).unwrap();
+    std::fs::write(&live_tombstones, b"old pair").unwrap();
+
+    commit_staged_hnsw_swap(&handle, &id, &paths).await;
+
+    assert!(paths.live.exists());
+    assert!(
+        !live_tombstones.exists(),
+        "commit clears the old pair's tombstones"
+    );
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
+/// Why (#10303): a store serving a staging view can tombstone a key during
+/// the reindex; the commit makes that pair live, so its tombstones go too.
+/// Fails on the pre-#10303 code, which has no tombstone file to carry.
+/// What: demote onto staging, remove one id, commit, reload the live pair.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn commit_staged_hnsw_swap_carries_staged_tombstones() {
+    let data_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+    let root_dir = tempfile::tempdir().unwrap();
+
+    let (store, id, handle, paths) =
+        store_demoted_onto_staging("hnsw-swap-10303-carry", root_dir.path(), true).await;
+    store.remove("chunk:0").await.expect("view-mode remove");
+    assert!(
+        store.in_view_mode(),
+        "the removal wrote a tombstone, not a copy"
+    );
+    assert!(tombstones_path(&paths.staging).exists());
+
+    commit_staged_hnsw_swap(&handle, &id, &paths).await;
+
+    assert!(!tombstones_path(&paths.staging).exists());
+    assert!(
+        tombstones_path(&paths.live).exists(),
+        "carried onto the live pair"
+    );
+    drop(handle);
+    drop(store);
+    let reloaded = UsearchStore::load_from(&paths.live)
+        .await
+        .expect("load ok")
+        .expect("some");
+    assert!(!reloaded.contains("chunk:0").await);
+    assert_eq!(reloaded.len().await.unwrap(), 19);
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
+/// Why (#10303): an abort deletes the staged pair; its tombstones go with it.
+/// Fails on the pre-#10303 code, which deletes only the pair.
+/// What: plant a staging tombstone file, abort, check it is gone.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn abort_staged_hnsw_swap_deletes_staged_tombstones() {
+    let data_dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+    let root_dir = tempfile::tempdir().unwrap();
+
+    let (id, handle) = build_test_handle("hnsw-swap-10303-abort", root_dir.path(), None);
+    let paths = begin_staged_hnsw_swap(&handle, &id)
+        .await
+        .expect("resolves");
+    partial_checkpoint_to(&paths.staging).await;
+    std::fs::write(tombstones_path(&paths.staging), b"staged").unwrap();
+
+    abort_staged_hnsw_swap(&handle, &id, &paths).await;
+
+    assert!(!paths.staging.exists());
+    assert!(!tombstones_path(&paths.staging).exists());
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
 /// Save `store_with_vectors(5)` directly to `path` — a bare helper for
 /// tests that need a plausible pre-existing staging checkpoint without
 /// caring about its exact content.

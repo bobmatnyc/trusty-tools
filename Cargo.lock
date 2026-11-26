@@ -11692,6 +11692,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "trusty-analyze",
+ "trusty-architect",
  "trusty-common",
  "trusty-console",
  "trusty-installer",

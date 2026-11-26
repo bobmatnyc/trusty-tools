@@ -114,9 +114,7 @@ pub const SKILL_FLOOR_EXACT: &[&str] = &[
     "architect-review",
     // #10161 D3b: the dashboard skill.
     "architect-dashboard",
-    // #10161 D3c: the skills that run the drift-guard and improver agents.
-    "architect-drift-guard",
-    "architect-improver",
+    // #11896: no drift-guard or improver skill; both ship as agents (D2f).
     "cargo-publish",
     "git-workflow",
     "code-review-standards",

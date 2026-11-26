@@ -1,0 +1,2 @@
+Fixed
+- The poller reads the claude-config dir under the install's config dir (`TRUSTY_MPM_CONFIG_DIR`, then `install.toml` `config_dir`, then `$HOME`), as tm does, through a new local reader `trusty_architect::install_paths`. A broken, unreadable or relative `install.toml` now fails `Config::from_env` and `tm architect poll` closed instead of falling back to `$HOME`; `Config::from_env` returns `install_paths::InstallPathsError` in place of `ConfigError` (Refs [#11821](https://github.com/bobmatnyc/trusty-tools/issues/11821))

@@ -28,6 +28,7 @@ use super::steps::usage::UsagePaths;
 use super::watchdog::{FROZEN_MIN_DEFAULT, SILENT_MINUTES_DEFAULT};
 use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
+use crate::install_paths::{self, InstallPathsError};
 use crate::self_ctx::{default_dir, projects_dir};
 
 /// Load alert line: the 15-minute load average over this many times the cores.
@@ -158,15 +159,18 @@ pub struct Config {
 impl Config {
     /// Reads the configuration through `get` (e.g. `|k| std::env::var(k).ok()`).
     /// `root` is the Architect project directory; `home` is the user's home.
+    /// The claude-config dir sits under the install's config dir
+    /// ([`install_paths::config_dir`]), as tm's does (#11821 P4-f2).
     ///
     /// # Errors
-    /// None today: every bad value lands in [`Config::problems`]. The
-    /// `Result` stays for a value that cannot fall back.
+    /// [`InstallPathsError`] when the config dir does not resolve: a broken or
+    /// unreadable `install.toml`, or an empty or relative value, with no
+    /// `$HOME` fallback. Every other bad value lands in [`Config::problems`].
     pub fn from_env(
         root: &Path,
         home: &Path,
         get: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, InstallPathsError> {
         let path = |name: &str, default: PathBuf| {
             get(name)
                 .filter(|v| !v.is_empty())
@@ -196,7 +200,9 @@ impl Config {
                 None
             }),
         };
-        let config = home.join(".trusty-tools/trusty-mpm/claude-config");
+        // #11821: tm's claude-config dir, under the install's config dir.
+        let base = install_paths::config_dir(home, get)?.path;
+        let config = base.join(".trusty-tools/trusty-mpm/claude-config");
         let band_default = BandConfig::default();
         let lenient =
             |name: &str, default: f64| get(name).and_then(|v| py_float(&v)).unwrap_or(default);
@@ -228,8 +234,9 @@ impl Config {
         Ok(Self {
             inbox: inbox.clone(),
             sessions_dir: path("SESSIONS_DIR", config.join("sessions")),
-            transcript_base: path("TRANSCRIPT_BASE", projects_dir(home)),
-            self_ctx_dir: path("SELF_CTX_DIR", default_dir(home, &root_text)),
+            // #11821: the transcripts live under the same config dir.
+            transcript_base: path("TRANSCRIPT_BASE", projects_dir(&base)),
+            self_ctx_dir: path("SELF_CTX_DIR", default_dir(&base, &root_text)),
             tmux_socket: get("TMUX_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
@@ -371,7 +378,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_reads_env_once_like_the_prototype() -> Result<(), ConfigError> {
+    fn config_reads_env_once_like_the_prototype() -> Result<(), InstallPathsError> {
         let none = |_: &str| None;
         let c = Config::from_env(Path::new("/arch"), Path::new("/home/u"), &none)?;
         assert_eq!(c.inbox, Path::new("/arch/inbox"));
@@ -426,7 +433,8 @@ mod tests {
     }
 
     #[test]
-    fn bad_ctx_variables_switch_off_their_sensor_and_are_reported() -> Result<(), ConfigError> {
+    fn bad_ctx_variables_switch_off_their_sensor_and_are_reported() -> Result<(), InstallPathsError>
+    {
         let bad = |k: &str| match k {
             "PANE_CTX_WINDOW" => Some(String::new()),
             "SELF_CTX_WINDOW" => Some("lots".to_owned()),

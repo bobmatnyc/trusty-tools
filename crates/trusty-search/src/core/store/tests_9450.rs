@@ -448,6 +448,9 @@ async fn a_failed_compaction_keeps_the_churn_count_and_marker() {
         0,
         "a legacy sidecar has no marker"
     );
+    // #10303: a view-mode removal is a tombstone and a view save writes no
+    // sidecar; this test is about a heap graph, so promote it first.
+    store.promote_view_to_mutable().await.expect("promote");
     for i in 0..50 {
         store.remove(&format!("c{i}")).await.expect("remove");
     }

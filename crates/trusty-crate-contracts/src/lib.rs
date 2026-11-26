@@ -23,6 +23,9 @@
 //!   a live trusty-memory daemon as `Serving`.
 //! - `tests/palace_name_contract_11823.rs` — the #11823 arm: the palace name
 //!   `tctl ensure` sends is the one trusty-memory's create accepts.
+//! - `tests/architect_install_paths_parity_11821.rs` — the #11821 P4-f2 arm:
+//!   trusty-architect's local install.toml reader resolves as trusty-common's
+//!   resolver does, or refuses as it does.
 //!
 //! A new test belongs here when, and only when, it needs the real entry points
 //! of two crates that do not already depend on one another. A test that needs

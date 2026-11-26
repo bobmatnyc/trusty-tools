@@ -279,6 +279,8 @@ mod tests {
     /// store written by a previous run.
     /// Test: this test.
     #[tokio::test]
+    // #11445: reaches the index-identity file; see IDENTITY_REACHING.
+    #[serial_test::parallel]
     async fn load_into_cache_populates_map() {
         let dir = tempfile::tempdir().unwrap();
         let handle = make_handle_with_corpus(&dir);
@@ -319,6 +321,7 @@ mod tests {
     /// `load_file_hashes` can retrieve them on the next run.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn persist_batch_writes_to_store() {
         let dir = tempfile::tempdir().unwrap();
         let handle = make_handle_with_corpus(&dir);
@@ -342,6 +345,7 @@ mod tests {
     /// daemon doesn't reload stale hashes after a force reindex.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn clear_persisted_hashes_empties_store() {
         let dir = tempfile::tempdir().unwrap();
         let handle = make_handle_with_corpus(&dir);
@@ -365,6 +369,7 @@ mod tests {
     /// don't write unbounded data to redb.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn persist_batch_skips_when_over_cap() {
         let dir = tempfile::tempdir().unwrap();
         let handle = make_handle_with_corpus(&dir);
@@ -384,6 +389,7 @@ mod tests {
     /// not a panic.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn load_into_cache_no_corpus_is_noop() {
         let indexer = CodeIndexer::new("no-corpus", "/tmp/no-corpus");
         let handle = IndexHandle::bare(
@@ -421,6 +427,7 @@ mod tests {
     ///
     /// Test: this IS the test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn warm_boot_hash_load_after_simulated_restart() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("index.redb");

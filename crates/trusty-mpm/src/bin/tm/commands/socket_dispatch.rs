@@ -76,6 +76,7 @@ pub(crate) fn ignores_url(command: &Option<Command>) -> bool {
                 | Command::Secrets { .. }
                 | Command::Content { .. }
                 | Command::Il { .. }
+                | Command::Paths { .. }
                 | Command::Worktrees(_)
                 | Command::Services { .. }
                 | Command::Auth { .. }
