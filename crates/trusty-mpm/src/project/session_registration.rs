@@ -188,7 +188,6 @@ enum Checkout {
 /// does not report as its own `--show-toplevel`, or whose git-dir probe fails,
 /// is `UnverifiedRoot`. Otherwise says whether `root` is a linked worktree.
 fn verified_root(root: &Path, home: Option<&Path>) -> Result<Checkout, SessionRegistrationError> {
-    use crate::core::project_aliases::git_dir_differs_from_common;
     // #10368: D50 — never the home directory, an ancestor of it, or `/`.
     let home = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
     if root.parent().is_none() || home.is_some_and(|h| h.starts_with(root)) {
@@ -199,7 +198,7 @@ fn verified_root(root: &Path, home: Option<&Path>) -> Result<Checkout, SessionRe
     if git_toplevel(root).as_deref() != Some(root) {
         return Err(SessionRegistrationError::UnverifiedRoot(root.to_path_buf()));
     }
-    match git_dir_differs_from_common(root) {
+    match is_linked_worktree(root) {
         Some(false) => Ok(Checkout::Main),
         Some(true) => Ok(Checkout::LinkedWorktree),
         None => Err(SessionRegistrationError::UnverifiedRoot(root.to_path_buf())),
@@ -219,14 +218,11 @@ fn verified_root(root: &Path, home: Option<&Path>) -> Result<Checkout, SessionRe
 /// `a_bare_repo_worktree_writes_nothing_11217`,
 /// `a_worktree_whose_main_checkout_cannot_be_resolved_writes_nothing_11217`.
 fn main_checkout_of(root: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let common = String::from_utf8(out.stdout).ok()?;
+    // #11217: scrubbed env, so `GIT_COMMON_DIR` cannot name repo X.
+    let common = git_stdout(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
     let common = PathBuf::from(common.trim()).canonicalize().ok()?;
     let main = common.parent()?.to_path_buf();
     // #11217: fail closed — the parent must hold this very common dir.
@@ -296,17 +292,48 @@ fn canonical_clone_url(root: &Path, repos_root: &Path) -> Option<String> {
         .then(|| format!("https://github.com/{}/{}", origin.owner, origin.repo))
 }
 
-/// `git -C root rev-parse --show-toplevel`, canonicalized; `None` on any failure.
-fn git_toplevel(root: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--show-toplevel"])
+/// `git -C root <args>`'s stdout, or `None` on a spawn failure, a non-zero
+/// exit or non-UTF-8 output.
+///
+/// Why: #11217 — an inherited `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_WORK_TREE`
+/// points git at another repository, so a worktree of repo A would resolve to
+/// repo X and register X; the trusty-secrets server scrubs the same way (#9065).
+/// What: runs through [`git_command`](crate::session_manager::worktree_safety::git_command),
+/// which removes every repository-redirecting variable from the child env.
+/// Test: `inherited_git_common_dir_never_registers_another_repo_11217` (env_serial).
+fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
+    let out = crate::session_manager::worktree_safety::git_command(root, args)
         .output()
         .ok()
         .filter(|o| o.status.success())?;
-    let top = String::from_utf8(out.stdout).ok()?;
+    String::from_utf8(out.stdout).ok()
+}
+
+/// `git -C root rev-parse --show-toplevel`, canonicalized; `None` on any failure.
+fn git_toplevel(root: &Path) -> Option<PathBuf> {
+    // #11217: scrubbed env, so `GIT_WORK_TREE` cannot name another top level.
+    let top = git_stdout(root, &["rev-parse", "--show-toplevel"])?;
     PathBuf::from(top.trim()).canonicalize().ok()
+}
+
+/// Whether `root` is a linked worktree: its git dir and common dir differ.
+///
+/// What: one scrubbed `rev-parse --path-format=absolute --git-dir
+/// --git-common-dir`; anything but two lines, or any git failure, is `None`.
+fn is_linked_worktree(root: &Path) -> Option<bool> {
+    // #11217: replaces the unscrubbed `git_dir_differs_from_common` here.
+    let out = git_stdout(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+    )?;
+    let mut lines = out.lines();
+    let (git_dir, common) = (lines.next()?, lines.next()?);
+    lines.next().is_none().then(|| git_dir != common)
 }
 
 /// The row a session start writes: identity fields only, every option unset.
