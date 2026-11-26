@@ -3,14 +3,18 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_paths_11821::`.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
-/// Run `tm <args>` with only `HOME`, `PATH`, a private `TMUX_TMPDIR` and
-/// `extra` set.
+use crate::common;
+
+/// Run `tm <args>` with a cleared environment: the #7568 isolation from
+/// `common::isolate_spawned_tm`, `PATH`, a private `TMUX_TMPDIR` and `extra`.
 fn tm(home: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tm"));
-    cmd.env_clear()
-        .env("HOME", home)
+    let mut cmd = common::tm_command_in(home);
+    // Clear the inherited environment, then re-apply the helper's isolation
+    // so the child still gets the temp `HOME` and the offline switches.
+    cmd.env_clear();
+    common::isolate_spawned_tm(&mut cmd, home)
         .env("PATH", "/usr/bin:/bin")
         .env("TMUX_TMPDIR", home)
         .args(args);
