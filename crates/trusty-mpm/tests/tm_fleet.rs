@@ -2276,6 +2276,11 @@ fn fleet_init_never_reaches_the_server_an_inherited_tmux_names_10701() {
     assert!(!inherited.is_empty(), "no call inherited TMUX:\n{calls}");
     for line in &inherited {
         let argv = line.splitn(3, '\t').nth(2).unwrap_or_default();
+        // The watch-list seed (`fleet/project`) is a read outside #10701's
+        // launch/relaunch scope; it still follows `$TMUX`.
+        if argv.starts_with("list-sessions ") {
+            continue;
+        }
         assert!(
             argv.starts_with("-L default "),
             "a call inherited TMUX without naming the fleet server: {line}"
