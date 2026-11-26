@@ -99,6 +99,9 @@ const ENV_MUTATION_BUDGET: &[(&str, usize, usize)] = &[
     ("tm/commands/guided_inplace/tests.rs", 6, 4),
     // Test-only: NO_COLOR.
     ("tm/commands/session_picker_tests.rs", 6, 0),
+    // #11926: RUST_MIN_STACK, once, from a pre-`main` constructor before any
+    // thread exists. It sizes thread stacks only; no test reads it.
+    ("tm/test_support.rs", 1, 0),
 ];
 
 /// This file's own basename, skipped so its pattern literals do not match.
