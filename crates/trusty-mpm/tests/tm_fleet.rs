@@ -2276,14 +2276,59 @@ fn fleet_init_never_reaches_the_server_an_inherited_tmux_names_10701() {
     assert!(!inherited.is_empty(), "no call inherited TMUX:\n{calls}");
     for line in &inherited {
         let argv = line.splitn(3, '\t').nth(2).unwrap_or_default();
-        // The watch-list seed (`fleet/project`) is a read outside #10701's
-        // launch/relaunch scope; it still follows `$TMUX`.
-        if argv.starts_with("list-sessions ") {
-            continue;
-        }
         assert!(
             argv.starts_with("-L default "),
             "a call inherited TMUX without naming the fleet server: {line}"
         );
     }
+}
+
+/// #10701: the watch-list seed reads the fleet's server, not the server an
+/// inherited `$TMUX` names: a `tm-beta` session there seeds nothing.
+#[test]
+fn fleet_init_seeds_the_watch_list_from_the_fleet_server_10701() {
+    let env = FleetEnv::new();
+    let decoy = DecoyServer::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    let started = Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            "tm-alpha",
+            "-c",
+            "/tmp",
+            "sleep 600",
+        ])
+        .env("TMUX_TMPDIR", env.tmux_dir.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_SOCKET")
+        .status()
+        .expect("run tmux");
+    assert!(started.success(), "tmux new-session tm-alpha");
+    let out = decoy
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "tm-beta",
+            "-c",
+            "/tmp",
+            "sleep 600",
+        ])
+        .output()
+        .expect("spawn tmux");
+    assert!(out.status.success(), "{}", text(&out));
+    let tmux_env = decoy.tmux_env();
+    let mut cmd = env.operator_command();
+    cmd.env("TRUSTY_MPM_ROOT", &root)
+        .env("TMUX", &tmux_env)
+        .env("TMUX_PANE", "%0");
+    let out = env.confine(
+        cmd,
+        &["fleet", "init", "--no-launch", "--dir", dir_arg(&dir)],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(watched(&dir), ["alpha"], "{}", text(&out));
 }
