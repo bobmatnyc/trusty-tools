@@ -53,7 +53,7 @@ Rules:
 - RS-9. Entries load in file order. The first entry with a given `name` wins. Each later entry with the same `name` is skipped with kind `duplicate`.
 - RS-10. A pull request author can edit `.trusty-review.toml` on the head branch. The configuration is therefore read at the same revision as the skill files (§5).
 - RS-41. An entry with a key other than `name` and `apply_to`, or with an `apply_to` that is not a list of strings, is skipped with kind `malformed_entry`. A `review.skills` value that is not a list of entries is one `malformed_entry` skip. A skipped entry is named by its `name`, or by `entry <n>` (1-based) when it has none.
-- RS-42. A `.trusty-review.toml` at the base commit that is not valid TOML is ignored with a warning. No skill loads and the review writes no `repo_skills` record, as for any malformed `.trusty-review.toml` today.
+- RS-42. A `.trusty-review.toml` at the base commit that is not valid TOML loads no skill. The review records one skip of kind `config_unreadable` (RS-45) and completes.
 
 ## 3. Skill file {#SPEC-REVSKILL-03~draft}
 
@@ -104,10 +104,10 @@ Other frontmatter keys are ignored. Files beside `SKILL.md` in the skill directo
 **ID:** SPEC-REVSKILL-05~draft
 
 - RS-20. trusty-review reads `.trusty-review.toml` skill entries and every `SKILL.md` at the base commit of the pull request, the tip of the target branch the pull request merges into. It never reads them from the head commit or the working tree. A pull request cannot change the skill that reviews it.
-- RS-21. A pull request from a fork loads no repository skill. The fork test is `head_is_fork`: the head label owner and the base label owner differ, or a label has no `owner:` prefix. A fork pull request always records `repo_skills` with `fork: true` and the base sha, whether or not the base commit is readable. When the base commit is readable, the configuration is read at the base and every entry is listed as skipped with kind `fork`. The review body says: "none loaded. This PR comes from a fork, so repository skills were not loaded and no repository skill text was used."
+- RS-21. A pull request from a fork loads no repository skill. The fork test is `head_is_fork`: the head label owner and the base label owner differ, or a label has no `owner:` prefix. A fork pull request with no configured skill is silent: no `repo_skills` record and no notice (RS-36). A fork pull request records `repo_skills` with `fork: true` and the base sha only when the base configuration lists skills or cannot be read. When the base commit is readable and lists skills, every entry is listed as skipped with kind `fork`. When the base configuration is unreadable (RS-45), the record carries `fork: true` and the entry is skipped with kind `config_unreadable`. The review body then says: "none loaded. This PR comes from a fork, so repository skills were not loaded and no repository skill text was used."
 - RS-22. A same-repository pull request loads skills at the base commit.
 - RS-44. A review of a range, `--base <ref>`, reads the configuration and skills at the commit `<ref>` resolves to in the repository root. A range review has no fork signal, so it never sets `fork`. An empty `<ref>`, or one starting with `-`, is refused and no skill loads.
-- RS-45. Reading the base commit needs a local checkout that holds it. A GitHub pull request review with no checkout, or whose base commit is not fetched, reads nothing. So does a review of a diff file or standard input. The configuration cannot be read, so no skill loads and no record is written. A fork pull request is the exception: RS-21 still records it. A review given an explicit request list records every request as skipped with kind `no_base`.
+- RS-45. Reading the base commit needs a local checkout that holds it. A GitHub pull request review with no checkout, or whose base commit is not fetched, reads nothing. So does a review of a diff file or standard input. The configuration cannot be read, so no skill loads and no record is written. A fork pull request is the exception: it records `fork: true` and the base sha, and the fork notice appears (RS-21). A configuration file that is present at the base commit but cannot be read (a git error or timeout, over its size cap, not a regular file, not UTF-8, or not valid TOML) is one skip of kind `config_unreadable`, named `.trusty-review.toml`, with the cause as its reason. An absent file, or one with no or an empty `[[review.skills]]` list, is silent. A review given an explicit request list records every request as skipped with kind `no_base`.
 
 Reading the base commit rather than the head means the skills are the ones the target branch already accepted. A skill added by the pull request itself takes effect for later pull requests, after it merges.
 
@@ -132,6 +132,7 @@ Reading the base commit rather than the head means the skills are the ones the t
 | `over total cap` | `over_total_cap` | Adding the skill exceeds 24 KiB. |
 | `malformed entry` | `malformed_entry` | RS-41. |
 | `fork pull request` | `fork` | RS-21. |
+| `configuration unreadable` | `config_unreadable` | The base `.trusty-review.toml` exists but cannot be read or parsed (RS-45). |
 | `no base commit` | `no_base` | RS-45. |
 | `over entry cap` | `over_entry_cap` | RS-51. |
 
@@ -165,7 +166,7 @@ The system prompt is layered today: the stock rubric, then principles, then voic
 - RS-33. The review record carries a `repo_skills` object: `{base_sha, fork, loaded[{name, sha256, bytes}], skipped[{name, kind, reason}]}`. `base_sha` is the commit the configuration was read at, and is empty when none was read. `fork` is true for a fork pull request. `loaded` lists each loaded skill's `name`, content hash and size in bytes.
 - RS-34. The content hash is the SHA-256 of the exact `SKILL.md` bytes read, in lowercase hex.
 - RS-35. `skipped` lists each skipped skill with its `kind` and `reason` (§6).
-- RS-36. The record fields are additive and optional. A consumer that ignores them keeps working. The `repo_skills` key is present only when skills are configured, and is absent otherwise (RS-42, RS-45).
+- RS-36. The record fields are additive and optional. A consumer that ignores them keeps working. The `repo_skills` key is present only when skills are configured or the base configuration cannot be read, and is absent otherwise (RS-21, RS-45).
 
 The hash lets a reader compare two reviews of different repositories, or of one repository over time, and tell whether the same skill text applied.
 
