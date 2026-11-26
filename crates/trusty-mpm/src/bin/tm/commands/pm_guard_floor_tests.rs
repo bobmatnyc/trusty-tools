@@ -173,6 +173,48 @@ fn fleet_relaunch_binds_every_caller_on_every_path() {
     }
 }
 
+/// #11821 P6b: `tm paths set` writes install.toml, a trust anchor; it is
+/// denied for the Architect, a PM, a spoofed Architect and a subagent, guarded
+/// and bypassed, in every spelling; `tm paths show` is not.
+#[test]
+fn paths_set_binds_every_caller_on_every_path() {
+    let fx = fixture();
+    let verdict = |command: &str, env: HookEnv, bypassed: bool, agent: bool| {
+        let mut call = bash(&fx, command);
+        if agent {
+            call["agent_id"] = json!("agent-11821");
+        }
+        let gate = ArchitectGate::new(&call, env, || allowlist(&fx));
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed)
+    };
+    let denied = [
+        "tm paths set --projects-root /tmp/p",
+        "trusty-mpm paths set --config-dir /tmp/c",
+        "tm paths se --config-dir /tmp/c",
+        "sh -c 'tm paths set --projects-root /tmp/p'",
+        "echo $(tm paths set --projects-root /tmp/p)",
+        "tm paths $VERB --projects-root /tmp/p",
+        "cargo run -p trusty-mpm --bin tm -- paths set --config-dir /tmp/c",
+    ];
+    for bypassed in [false, true] {
+        for (env, agent) in [
+            (architect_env(&fx), false),
+            (architect_env(&fx), true),
+            (pm_env(&fx), false),
+            (spoof_env(&fx), false),
+        ] {
+            for command in denied {
+                let deny = verdict(command, env.clone(), bypassed, agent)
+                    .unwrap_or_else(|| panic!("{command} must be denied"));
+                assert_eq!(deny.rule, TRUST_ANCHOR_RULE, "{command}");
+                assert!(deny.reason.contains("install.toml"), "{}", deny.reason);
+            }
+            let show = verdict("tm paths show", env, bypassed, agent);
+            assert!(show.is_none(), "tm paths show must pass: {show:?}");
+        }
+    }
+}
+
 /// #8878 PR2a spoof: a PM or an agent calling `tm presence local` or `tm
 /// fleet bind` is denied on both paths; the Architect's main thread runs
 /// them, bound or not (an unbound one must reach `tm fleet bind`).
