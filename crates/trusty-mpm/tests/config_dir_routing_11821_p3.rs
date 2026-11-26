@@ -297,3 +297,30 @@ fn archive_root_fails_closed_on_a_broken_install_file() {
         .expect_err("the archive root refuses");
     assert_refused_closed(&fx, err.to_string());
 }
+
+/// #11821 P3-f1 review: a `github.token_env` launch refuses before it proves
+/// or stores the token; before the fix the state root fell back to
+/// `$HOME/.trusty-mpm`. An invalid `host` keeps the pre-fix run off the
+/// network: there the refusal named the host, not install.toml.
+/// #9123: a credential test, so `#[serial]` inside `CredentialSandbox`; the
+/// fixture's `EnvGuard` drops first and hands `$HOME` back to the sandbox.
+#[test]
+#[serial_test::serial]
+fn token_env_shim_fails_closed_on_a_broken_install_file() {
+    const SOURCE: &str = "TM_TEST_11821_P3F1_TOKEN_ENV";
+    let mut sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let (fx, _env) = broken_install_home();
+    let cfg = trusty_mpm::core::trusty_tools_config::GithubConfig {
+        token_env: Some(SOURCE.to_string()),
+        host: Some("not a host!".to_string()),
+        ..Default::default()
+    };
+    sandbox.set(SOURCE, "tok-11821");
+    let env = trusty_mpm::core::gh_identity::resolve_gh_env(Some(&cfg));
+    sandbox.remove(SOURCE);
+    let env = env.expect("a token_env binding resolves");
+    let err = trusty_mpm::core::gh_token_env_shim::shim_token_env(&env)
+        .expect_err("the token_env shim refuses");
+    assert!(!err.contains("tok-11821"), "the token must not leak: {err}");
+    assert_refused_closed(&fx, err);
+}
