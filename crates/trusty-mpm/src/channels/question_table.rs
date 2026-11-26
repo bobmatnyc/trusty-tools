@@ -52,8 +52,9 @@ pub const FORMAT_VERSION: u32 = 1;
 /// `~/.trusty-tools/trusty-mpm/channels/questions.jsonl`.
 // #9815: `tm hook --pm-guard` seals this file, its `.lock` and `.torn`.
 pub fn questions_path(home: &Path) -> PathBuf {
+    // #11821 P3: under the configured config dir of `home`.
     trusty_common::crate_config::crate_config_dir_at(
-        home,
+        &crate::core::config_base::config_base_under(home),
         crate::core::trusty_tools_config::CRATE_NAME,
     )
     .join("channels")

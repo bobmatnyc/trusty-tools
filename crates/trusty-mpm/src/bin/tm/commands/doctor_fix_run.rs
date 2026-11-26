@@ -384,8 +384,9 @@ fn rust_build_env_run(c: &FixContext) -> RepairRun {
             );
         }
     }
+    // #11821 P3: under the configured config dir of `home`.
     let config_path = trusty_common::crate_config::crate_config_path_at(
-        home,
+        &trusty_mpm::core::config_base::config_base_under(home),
         trusty_mpm::core::trusty_tools_config::CRATE_NAME,
     );
     let config = trusty_common::crate_config::load_at::<

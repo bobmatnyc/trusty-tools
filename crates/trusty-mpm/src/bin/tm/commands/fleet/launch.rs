@@ -311,7 +311,8 @@ impl Prepared {
         )?;
         // #8981: the conversation id comes from tm's own record, which outlives
         // the daemon's session record.
-        let root = home.join(".trusty-mpm");
+        // #11821 P3: the configured config dir.
+        let root = trusty_mpm::core::config_base::framework_root_under(home);
         let conversation =
             architect_conversation::resolve_conversation(&root, dir, config_dir.as_deref());
         claude_spec
@@ -589,7 +590,9 @@ fn record_process(dir: &Path, home: &Path, session: &str) -> Result<ArmingRecord
 /// Record the `claude` at `pid` found in `session` and read its name back.
 // #8878: through the one record writer every Architect launch path calls.
 fn record_found(dir: &Path, home: &Path, session: &str, pid: u32) -> Result<ArmingRecord, String> {
-    architect_session::bind_architect(&home.join(".trusty-mpm"), pid, dir, session)
+    // #11821 P3: the configured config dir.
+    let root = trusty_mpm::core::config_base::framework_root_under(home);
+    architect_session::bind_architect(&root, pid, dir, session)
 }
 
 /// Record the stamp on the session, then start `claude` in it from its spec.

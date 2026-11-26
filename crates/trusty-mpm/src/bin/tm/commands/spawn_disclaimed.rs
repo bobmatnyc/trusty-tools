@@ -116,7 +116,8 @@ pub(crate) fn run(argv: Vec<String>) -> anyhow::Result<()> {
 /// `run_launch_spec_marks_started_before_it_spawns`.
 pub(crate) fn run_launch_spec(path: &std::path::Path) -> anyhow::Result<()> {
     // #9092: the root of the daemon's session store.
-    let root = dirs::home_dir().map(|home| home.join(".trusty-mpm"));
+    // #11821 P3: the configured config dir; `None` on a broken install.toml.
+    let root = trusty_mpm::core::config_base::framework_root_dir();
     let started = std::time::Instant::now();
     // #11270: the stamp the pane would hand a spec that sets none.
     let inherited = std::env::var_os(trusty_mpm::core::session_profile::SESSION_PROFILE_ENV);

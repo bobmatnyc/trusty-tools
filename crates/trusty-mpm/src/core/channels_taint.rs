@@ -184,8 +184,9 @@ fn scopes_overlap(a: &Path, b: &Path) -> bool {
 
 /// The taint directory under `home`.
 pub fn taint_dir(home: &Path) -> PathBuf {
+    // #11821 P3: under the configured config dir of `home`.
     trusty_common::crate_config::crate_config_dir_at(
-        home,
+        &crate::core::config_base::config_base_under(home),
         crate::core::trusty_tools_config::CRATE_NAME,
     )
     .join("channels")

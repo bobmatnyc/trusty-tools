@@ -58,10 +58,25 @@ impl StoreError {
     }
 }
 
-/// `<home>/.trusty-mpm/build-slots`.
+/// `<config dir of home>/.trusty-mpm/build-slots`; readers only, a broken
+/// `install.toml` answers `home`'s (#11821).
 #[must_use]
 pub fn canonical_path(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm").join(SLOT_DIR_NAME)
+    // #11821 P3: under the configured config dir.
+    crate::core::config_base::framework_root_under(home).join(SLOT_DIR_NAME)
+}
+
+/// [`canonical_path`] for the store opener: fails closed when the config dir
+/// of `home` does not resolve (#11821 P3).
+///
+/// Test: `a_broken_install_file_never_opens_the_home_store`.
+pub fn try_canonical_path(
+    home: &Path,
+) -> Result<PathBuf, trusty_common::install_paths::InstallPathsError> {
+    let base = crate::core::config_base::try_config_base_under(home)?;
+    Ok(base
+        .join(crate::core::paths::FRAMEWORK_DIR_NAME)
+        .join(SLOT_DIR_NAME))
 }
 
 /// The fallback [`SlotDir::resolve`] uses: [`fixed_fallback_path`], or in a
@@ -109,15 +124,22 @@ impl SlotDir {
     ///
     /// Test: as [`Self::resolve`].
     pub fn resolve_in(home: Option<&Path>, fallback: &Path) -> Result<Self, StoreError> {
-        let canonical = home.map_or_else(
-            || PathBuf::from("~/.trusty-mpm").join(SLOT_DIR_NAME),
-            canonical_path,
-        );
-        let canonical_error = match home {
-            None => "no home directory".to_string(),
-            Some(_) => match open_private_dir(&canonical, true) {
-                Ok(dir) => return Ok(dir),
-                Err(err) => err,
+        let (canonical, canonical_error) = match home {
+            None => (
+                PathBuf::from("~/.trusty-mpm").join(SLOT_DIR_NAME),
+                "no home directory".to_string(),
+            ),
+            // #11821: a broken install.toml makes the canonical store unusable;
+            // never `$HOME`'s store in its place.
+            Some(home) => match try_canonical_path(home) {
+                Err(err) => (
+                    trusty_common::install_paths::install_file_path(home),
+                    format!("the config dir is unresolved: {err}"),
+                ),
+                Ok(canonical) => match open_private_dir(&canonical, true) {
+                    Ok(dir) => return Ok(dir),
+                    Err(err) => (canonical, err),
+                },
             },
         };
         match open_private_dir(fallback, false) {
@@ -188,6 +210,25 @@ mod tests {
         let slots = SlotDir::resolve_in(Some(good.path()), &fallback).expect("canonical");
         assert_eq!(slots.path(), canonical_path(good.path()));
         assert!(slots.fallback_reason().is_none());
+    }
+
+    /// #11821 P3: a broken install.toml never lands the store under `home`.
+    #[test]
+    fn a_broken_install_file_never_opens_the_home_store() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join(".trusty-tools")).expect("mkdir");
+        std::fs::write(tmp.path().join(".trusty-tools/install.toml"), "bogus = 1\n")
+            .expect("broken install.toml");
+        assert!(try_canonical_path(tmp.path()).is_err());
+        let fallback = tmp.path().join("fixed");
+        let slots = SlotDir::resolve_in(Some(tmp.path()), &fallback).expect("fallback");
+        assert_eq!(slots.path(), fallback);
+        let why = slots.fallback_reason().expect("marked as the fallback");
+        assert!(why.contains("install.toml"), "{why}");
+        assert!(
+            !tmp.path().join(".trusty-mpm").exists(),
+            "no store may be created under the home"
+        );
     }
 
     #[test]

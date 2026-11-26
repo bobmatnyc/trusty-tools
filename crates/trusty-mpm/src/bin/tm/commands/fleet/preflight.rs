@@ -26,7 +26,8 @@ use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKS
 use super::user_config_path;
 
 /// The built-in projects root under the home directory (`~/trusty-mpm-projects`).
-const PROJECTS_ROOT_DIR: &str = "trusty-mpm-projects";
+// #11821 P3: the one constant, not a private copy.
+const PROJECTS_ROOT_DIR: &str = trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 /// The one child repository fleet init accepts, `<dir>/local` (#8878 R1).
 pub(crate) const PRIVATE_REPO_DIR: &str = "local";
@@ -266,7 +267,22 @@ fn projects_roots(target: &Path, home: &Path) -> Result<Vec<PathBuf>, DirRefusal
             .map(|raw| expand_tilde(raw, home))
     };
     let mut roots = vec![home.join(PROJECTS_ROOT_DIR)];
-    let config = crate_config_path_at(home, CRATE_NAME);
+    // #11821 P3: install.toml's projects_root is a root fleet init must not
+    // own; a broken install.toml leaves the set unknown, so refuse.
+    match trusty_common::install_paths::read_install_file(home) {
+        Ok(file) => roots.extend(file.and_then(|f| f.projects_root)),
+        Err(e) => {
+            return Err(DirRefusal::Unresolvable {
+                path: target.to_path_buf(),
+                reason: format!("install.toml did not load: {e}"),
+            });
+        }
+    }
+    // #11821 P3: config.yaml under the configured config dir of `home`.
+    let config = crate_config_path_at(
+        &trusty_mpm::core::config_base::config_base_under(home),
+        CRATE_NAME,
+    );
     match load_at::<TrustyToolsConfig>(&config) {
         Ok(None) => {}
         Ok(Some(cfg)) => roots.extend(expand(cfg.workspace_root_template.as_deref())),

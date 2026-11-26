@@ -79,18 +79,23 @@ impl EgressAnchors {
     /// not resolve, which the parent turns into a deny of every write.
     ///
     /// Test: `egress_anchor_config_yaml_writes_are_denied`,
-    /// `egress_anchor_unresolvable_location_denies_every_write`.
+    /// `egress_anchor_unresolvable_location_denies_every_write`,
+    /// `the_install_file_is_an_anchor`.
     pub(super) fn locate(home: &Path) -> Result<Self, PathBuf> {
-        let managed = managed_claude_config_dir_at(home);
+        // #11821 P3: under the configured config dir of `home`.
+        let base = trusty_mpm::core::config_base::config_base_under(home);
+        let managed = managed_claude_config_dir_at(&base);
         let lexical = [
-            trusty_common::crate_config::crate_config_path_at(home, CRATE_NAME),
+            trusty_common::crate_config::crate_config_path_at(&base, CRATE_NAME),
             managed.join(SETTINGS_NAMES[0]),
             managed.join(SETTINGS_NAMES[1]),
             // #11463: a same-user agent must not add its own ssh key or edit
             // the remote-host allowlist to pose as EVO to
             // `trusty-secrets remote-gate`.
             home.join(AUTHORIZED_KEYS),
-            trusty_common::crate_config::crate_config_path_at(home, TRUSTY_COMMON),
+            trusty_common::crate_config::crate_config_path_at(&base, TRUSTY_COMMON),
+            // #11821: install.toml decides where every other anchor lives.
+            trusty_common::install_paths::install_file_path(home),
         ];
         let mut out = Self {
             guarded: Vec::new(),

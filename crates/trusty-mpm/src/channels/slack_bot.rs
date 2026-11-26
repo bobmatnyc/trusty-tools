@@ -203,7 +203,11 @@ pub fn bot_ref(home: Option<&Path>) -> Result<String, String> {
 /// `daemon_holds_app_token_via_app_ref_only`.
 pub fn host_slack(home: Option<&Path>) -> Result<HostChannel, String> {
     let home = home.ok_or("no home directory, so no host ceiling")?;
-    let path = trusty_common::crate_config::crate_config_path_at(home, "trusty-mpm");
+    // #11821 P3: under the configured config dir of `home`.
+    let path = trusty_common::crate_config::crate_config_path_at(
+        &crate::core::config_base::config_base_under(home),
+        "trusty-mpm",
+    );
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("host ceiling {} unreadable: {}", path.display(), e.kind()))?;
     let ceiling = parse_host(&text, Some(home)).map_err(|e| e.to_string())?;

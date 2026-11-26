@@ -374,7 +374,8 @@ pub(crate) fn save_state_to(path: &Path, state: &CompactionState) {
 pub(crate) fn state_file_path(session_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     Some(
-        home.join(".trusty-mpm")
+        // #11821 P3: under the configured config dir.
+        trusty_mpm::core::config_base::framework_root_under(&home)
             .join("statusline")
             .join(format!("{session_id}.json")),
     )

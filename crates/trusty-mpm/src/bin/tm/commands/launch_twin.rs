@@ -76,9 +76,21 @@ pub(crate) fn confirm_placement(checked: &Path, placed: &Path) -> anyhow::Result
 /// on the managed checkout before provisioning anything (#8878 review).
 /// Test: the grant rule is `an_architect_without_the_twin_grant_is_not_twin`.
 pub(crate) fn precheck(project_dir: &Path) -> anyhow::Result<PathBuf> {
-    let root = dirs::home_dir()
-        .map(|home| home.join(".trusty-mpm"))
+    let home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("`--twin` refused: the home directory is unknown"))?;
+    precheck_under(&home, project_dir)
+}
+
+/// [`precheck`] for an explicit home (hermetic).
+///
+/// What: reads `config.toml` under the configured config dir of `home`
+/// (#11821 P3); a config dir that does not resolve refuses.
+/// Test: `twin_precheck_follows_the_config_dir_and_refuses_a_broken_install_file`.
+pub(crate) fn precheck_under(home: &Path, project_dir: &Path) -> anyhow::Result<PathBuf> {
+    // #11821 P3: the configured config dir; a broken install.toml refuses too.
+    let root = trusty_mpm::core::config_base::try_config_base_under(home)
+        .map(|base| base.join(trusty_mpm::core::paths::FRAMEWORK_DIR_NAME))
+        .map_err(|e| anyhow::anyhow!("`--twin` refused: the config dir is unresolved: {e}"))?;
     let config = twin_arming::load_user_config_strict(&root)
         .map_err(|e| anyhow::anyhow!("`--twin` refused: the user config could not be read: {e}"))?;
     twin_identity::check_grant(project_dir, &config).map_err(|refusal| {
@@ -135,5 +147,41 @@ pub(crate) fn arm(root: &Path, claude_pid: Option<u32>, project_dir: &Path) {
             twin_arming::record_path(root, pid).display()
         ),
         Err(e) => eprintln!("warning: twin mode NOT armed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::precheck_under;
+
+    /// #11821 P3: `--twin` reads the grant under the configured config dir, and a
+    /// broken install.toml refuses rather than reading `$HOME`'s config.
+    #[test]
+    fn twin_precheck_follows_the_config_dir_and_refuses_a_broken_install_file() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let (home, cfg) = (root.path().join("home"), root.path().join("cfg"));
+        std::fs::create_dir_all(cfg.join(".trusty-mpm")).expect("mkdir");
+        // Only the configured dir's config is malformed: reading it proves the route.
+        std::fs::write(cfg.join(".trusty-mpm/config.toml"), "not = [toml").expect("write");
+        let install = trusty_common::install_paths::install_file_path(&home);
+        std::fs::create_dir_all(install.parent().expect("tools dir")).expect("mkdir");
+        std::fs::write(
+            &install,
+            format!("config_dir = {:?}\n", cfg.display().to_string()),
+        )
+        .expect("write install.toml");
+        let err = precheck_under(&home, root.path()).expect_err("malformed cfg config refuses");
+        let text = err.to_string();
+        assert!(
+            text.contains("could not be read") && text.contains("cfg"),
+            "{text}"
+        );
+
+        std::fs::write(&install, "bogus = 1\n").expect("break install.toml");
+        let err = precheck_under(&home, root.path()).expect_err("broken install.toml refuses");
+        assert!(
+            err.to_string().contains("config dir is unresolved"),
+            "{err}"
+        );
     }
 }

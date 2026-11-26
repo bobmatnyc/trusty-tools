@@ -263,9 +263,10 @@ pub(crate) fn init_daemon_tracing() -> anyhow::Result<(
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let log_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?
-        .join(".trusty-mpm")
+    // #11821 P3: under the configured config dir; a broken install.toml keeps
+    // $HOME so the daemon still logs (the launch refuses separately).
+    let log_dir = trusty_mpm::core::paths::FrameworkPaths::default()
+        .root
         .join("logs");
     std::fs::create_dir_all(&log_dir)?;
     let file_appender = tracing_appender::rolling::daily(&log_dir, "trusty-mpm.log");

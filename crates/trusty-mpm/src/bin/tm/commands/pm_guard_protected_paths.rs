@@ -91,6 +91,11 @@ impl ProtectedEnv {
         if let Some(home) = &self.home {
             dirs.push(home.join(".claude"));
             dirs.push(managed_claude_config_dir_at(home));
+            // #11821 P3: the configured config dir's managed tier as well.
+            let base = trusty_mpm::core::config_base::config_base_under(home);
+            if base != *home {
+                dirs.push(managed_claude_config_dir_at(&base));
+            }
         }
         dirs
     }

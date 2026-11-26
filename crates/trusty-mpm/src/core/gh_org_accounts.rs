@@ -188,7 +188,8 @@ impl OrgAccounts {
     pub fn load_default() -> Result<Self, OrgAccountsError> {
         dirs::home_dir().map_or_else(
             || Ok(Self::default()),
-            |home| Self::load(&home.join(".trusty-mpm")),
+            // #11821 P3: under the configured config dir.
+            |home| Self::load(&crate::core::config_base::framework_root_under(&home)),
         )
     }
 

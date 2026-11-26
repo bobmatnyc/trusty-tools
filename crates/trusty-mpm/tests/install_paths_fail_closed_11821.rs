@@ -317,10 +317,19 @@ async fn decommission_refuses_on_a_broken_install_file() {
 
     let result = mgr.decommission(&record.id, None).await;
 
-    assert!(
-        result.is_err(),
-        "a broken install.toml must refuse decommission"
-    );
+    // #11821 P3 (P2 critic LOW): the refusal is the install.toml error itself,
+    // not any error.
+    match &result {
+        Err(ManagedError::Io(io)) => {
+            let shown = io.to_string();
+            assert_eq!(io.kind(), std::io::ErrorKind::InvalidData, "got {shown}");
+            assert!(
+                shown.contains("install.toml") && shown.contains("bogus"),
+                "the refusal must name install.toml and the bad key, got {shown}"
+            );
+        }
+        other => panic!("a broken install.toml must refuse decommission, got {other:?}"),
+    }
     let after = mgr.get(&record.id).await.expect("record kept");
     assert_eq!(format!("{:?}", after.state), before, "no state advanced");
     assert!(workspace.exists(), "the workspace must not be removed");
