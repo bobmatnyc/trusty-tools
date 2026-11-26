@@ -29,7 +29,7 @@
     "scripts/architect-idle.py": "d2be4e9700162bba7c3f2b437dfa38236db3dfff657e4e7261cdf44fbf954503",
     "scripts/architect-start.sh": "f85d8153b212f20192f5b7798d55b35a9d2c806f54dd8abfff05f1a21fa6cc2c",
     "scripts/architect-watchdog.py": "796842db94a8b3f729c1b7dc55f49027be84f612383d2b85b0168d0bd4bb348d",
-    "scripts/architect_config.py": "8e46a9f8e8210a91f0ace24367dd0e16f6ebb499916b81a43b5995a5462048cf",
+    "scripts/architect_config.py": "d2e97c6dc0f09347f22b5aff740342e7b1954c8703af017881390209d91af177",
     "scripts/auto_sleep.py": "3a58ff8f291363eefcab9b3abcebf4e3287a8dd0935672ea53ee91aed89defe7",
     "scripts/brief-id.py": "b0015fd6b89334aabcf4e9658be636907c8200c7180493a8fc80eaac0e6c1e88",
     "scripts/brief_ids.py": "ee0d2972d21318a93143559685be58073fe3cf1bc3b7cde34f22864b994c0c52",

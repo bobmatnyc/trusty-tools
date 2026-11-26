@@ -129,7 +129,8 @@ def read_install_file(home: str) -> Optional[dict]:
     except OSError as err:
         raise ConfigError(f"{path}: cannot read: {type(err).__name__}") from None
     try:
-        data = _parse_toml(raw.decode("utf-8"))
+        # #11821 P6b r1: "utf-8-sig" drops exactly one leading BOM, as the Rust reader's toml lexer does.
+        data = _parse_toml(raw.decode("utf-8-sig"))
     except ValueError as err:  # UnicodeDecodeError and TOMLDecodeError are ValueErrors
         raise ConfigError(f"{path}: not valid install TOML ({err})") from None
     for key, value in data.items():

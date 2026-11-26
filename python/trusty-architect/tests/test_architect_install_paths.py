@@ -99,3 +99,43 @@ def test_mpm_root_follows_the_config_dir_and_fails_closed(tmp_path):
     _install(tmp_path, BROKEN)
     with pytest.raises(dp.RegistryError):
         dp.mpm_root({"HOME": str(tmp_path)})
+
+
+# #11821 P6b r1: install.toml syntax parity with trusty-common's reader (the `toml` crate).
+# Rows named as a SYNTAX_FIXTURES row mirror it from `architect_reader_matches_trusty_common_resolver`
+# (crates/trusty-crate-contracts/tests/architect_install_paths_parity_11821.rs, #11916); those
+# fixtures are Rust consts, so they are mirrored here, not read. "two BOMs" follows toml_parser's
+# lexer, which skips exactly one leading BOM; the "BOM, CRLF ..." row combines three mirrored rows.
+# want "" means Rust refuses with a parse error; None means Rust accepts and the key stays at its default.
+_SYNTAX_PARITY = [
+    ("BOM", "﻿config_dir = \"/bom\"\n", "/bom"),
+    ("BOM, CRLF line ends and comments", "﻿# c\r\nconfig_dir = \"/bom\" # here\r\n", "/bom"),
+    ("BOM after first line", "# c\n﻿config_dir = \"/bom\"\n", ""),
+    ("two BOMs", "﻿﻿config_dir = \"/bom\"\n", ""),
+    ("CRLF line ends", "# c\r\nconfig_dir = \"/crlf\"\r\n", "/crlf"),
+    ("only comments", "# one\n\n   # two\n", None),
+    ("comments and a trailing comment", "# moved\n\nconfig_dir = '/lit/path' # here\n", "/lit/path"),
+]
+
+
+@pytest.fixture(params=["tomllib", "fallback"])
+def toml_reader(request, monkeypatch):
+    """Run each parity row through tomllib and through the <3.11 flat-line fallback."""
+    if request.param == "fallback":
+        monkeypatch.setitem(sys.modules, "tomllib", None)  # `import tomllib` raises ImportError
+    elif sys.version_info < (3, 11):
+        pytest.skip("tomllib needs Python 3.11")
+    return request.param
+
+
+@pytest.mark.parametrize("name,body,want", _SYNTAX_PARITY, ids=[r[0] for r in _SYNTAX_PARITY])
+def test_install_file_syntax_matches_the_rust_reader(tmp_path, toml_reader, name, body, want):
+    tools = tmp_path / ".trusty-tools"  # path-literal: allow (a tmp_path fixture home)
+    tools.mkdir()
+    (tools / "install.toml").write_bytes(body.encode("utf-8"))
+    env = {"HOME": str(tmp_path)}
+    if want == "":
+        with pytest.raises(ac.ConfigError):
+            ac.install_config_dir(env)
+    else:
+        assert ac.install_config_dir(env) == (want or str(tmp_path)), name
