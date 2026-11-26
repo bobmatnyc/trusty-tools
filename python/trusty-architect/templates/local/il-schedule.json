@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "jobs": [
     {"name": "prune", "due": "2026-01-01", "every": "1h", "command": "builtin:prune"},
     {"name": "rotate", "due": "2026-01-01", "every": "1h", "command": "builtin:rotate"},

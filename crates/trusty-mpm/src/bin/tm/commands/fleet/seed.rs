@@ -228,8 +228,14 @@ fn deploy_file(
         }
         // #10608: an upgrade leaves instance-owned files byte-identical.
         Ok(_) if refresh::instance_owned(&file.dest) => Ok(vec![Step::Skipped(format!(
-            "{}: instance-owned, kept as is on upgrade",
-            file.dest
+            "{}: instance-owned, kept as is on upgrade{}",
+            file.dest,
+            // #11002: the schedule has a preset diff and a versioned update.
+            if file.dest == trusty_mpm::core::il_schedule::REL_PATH {
+                "; `tm il config diff` shows preset changes, `tm il config update` applies them"
+            } else {
+                ""
+            }
         ))]),
         Ok(bytes) if shipped_before(&file.dest, &bytes) => {
             if let Some(steps) = publish(&path, file, shipped_before)? {
