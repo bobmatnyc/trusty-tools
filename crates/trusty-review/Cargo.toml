@@ -203,6 +203,9 @@ semver       = { workspace = true }
 # Scans PR title + body for `[A-Z][A-Z0-9]+-\d+` ticket keys so the JIRA source
 # can do an exact issueKey lookup (parity with code-intelligence's primary path).
 regex        = { workspace = true }
+# #11899: `apply_to` globs and SKILL.md frontmatter for repo-named review skills.
+globset      = { workspace = true }
+serde_yaml   = { workspace = true }
 
 # ── Error handling ─────────────────────────────────────────────────────────
 # thiserror for library error enums; anyhow used in main.rs binary only.

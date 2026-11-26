@@ -52,6 +52,7 @@ impl FakePrSource {
             head: PrHead {
                 sha: HEAD_SHA.to_string(),
                 fork: false,
+                base_sha: String::new(),
             },
             meta_calls: AtomicUsize::new(0),
             diff_calls: AtomicUsize::new(0),

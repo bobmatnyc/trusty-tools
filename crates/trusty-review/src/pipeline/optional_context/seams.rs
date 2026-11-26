@@ -33,6 +33,8 @@ pub(crate) struct PrHead {
     pub(crate) sha: String,
     /// The head is in a different repository than the base.
     pub(crate) fork: bool,
+    /// #11899: the base commit SHA; repo skills are read here, never at the head.
+    pub(crate) base_sha: String,
 }
 
 /// Where the runner reads a GitHub PR's metadata and diff (#9192).

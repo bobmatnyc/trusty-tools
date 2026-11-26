@@ -102,6 +102,13 @@ because that file is attacker-controlled: any PR author can add one.
 A template only appends. It never replaces the grade scale, the verdict table,
 or the severity anchors, so a project cannot quietly redefine what BLOCK means.
 
+The same file can name review skills that live in the repository, at
+`.claude/skills/<name>/SKILL.md`, each with optional `apply_to` path globs.
+trusty-review reads the list and each skill at the pull request's base commit,
+so a pull request cannot edit the skill that reviews it, and a fork pull
+request loads none. A missing, invalid or oversized skill is skipped and named
+in the review; it never fails the review.
+
 ## Due-diligence reports
 
 `trusty-review report --manifest <file>` generates a structured technical

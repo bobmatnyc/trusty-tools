@@ -30,6 +30,8 @@ pub mod voice;
 // Why: per-project `.trusty-review.toml` discovery (issue #2995) — separated
 // so the pure/impure git-root-walk split mirrors `index_resolver`.
 pub mod repo_config;
+// #11899: `[[review.skills]]` entries of `.trusty-review.toml` (DOC-93).
+pub(crate) mod review_skills;
 // Why: `[review]` config-file section + named review-template precedence
 // resolution (issue #2995) — mirrors the `voice` submodule's pattern.
 pub mod review_template;

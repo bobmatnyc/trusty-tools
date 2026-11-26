@@ -17,11 +17,13 @@ use serde::{Deserialize, Serialize};
 pub mod anchor; // #10762
 // #9192: the optional-context ledger `run_review_with` returns.
 pub mod context_source;
+pub mod repo_skills; // #11899
 pub mod severity; // #9310
 pub mod status;
 pub mod verdict_status; // #9310
 pub use anchor::{AnchorSide, SubjectType, UnanchoredFinding, UnanchoredReason};
 pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
+pub use repo_skills::{LoadedSkill, RepoSkillsRecord, SkipKind, SkippedSkill};
 pub use severity::Severity;
 pub use status::ReviewStatus;
 pub use verdict_status::VerdictStatus;
@@ -862,6 +864,12 @@ pub struct ReviewResult {
     /// `run_review_flags_shallow_clean_review_on_large_diff` (runner_tests.rs).
     #[serde(default, skip_serializing_if = "is_false")]
     pub shallow_clean_review: bool,
+    /// #11899: the repo-named review skills this review asked for — the
+    /// loaded names with their sha256, and each skipped name with its reason.
+    /// `None` (absent from the JSON) when the review asked for no skill.
+    /// Test: `loads_skill_and_records_name_and_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_skills: Option<RepoSkillsRecord>,
 
     // ── Telemetry ─────────────────────────────────────────────────────────
     /// Model id used for the main reviewer call.
@@ -983,6 +991,7 @@ impl ReviewResult {
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
             shallow_clean_review: false,
+            repo_skills: None, // #11899
             model: String::new(),
             input_tokens: 0,
             output_tokens: 0,

@@ -74,6 +74,8 @@ pub mod pr_index;
 pub mod prompt;
 // #10782: a finding that quotes no code is withheld before the gate.
 pub mod quote_admission;
+// #11899: repo-named review skills, read at the PR base commit (DOC-93).
+pub mod repo_skills;
 // #9310: the bounded reply shape a parse failure records.
 pub(crate) mod reply_shape;
 pub mod runner;
@@ -138,6 +140,7 @@ pub use prompt::{
     reviewer_system_prompt_with_coverage,
 };
 pub use prompt_templates::{PromptContentError, ReviewerPrompts};
+pub use repo_skills::{RepoSkillsInput, SkillRequest, SkillsSource}; // #11899
 pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review, run_review_with};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};
 pub use verify::{maybe_verify, run_verification_round, select_candidates};

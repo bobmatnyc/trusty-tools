@@ -24,7 +24,7 @@ use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
     claim_slot, content_or_abort, finalize_run, ground_parsed_findings, mark_no_head_sha_abort,
-    resolve_diff_token, subject_of,
+    pr_url_of, resolve_diff_token, subject_of,
 };
 #[cfg(test)]
 use crate::store::{ClaimOutcome, DedupError};
@@ -247,11 +247,7 @@ async fn run_pipeline(
     // A non-GitHub source gets owner `LOCAL_OWNER`, the never-post sentinel.
     let (owner, repo, pr_number, is_local) = subject_of(&input.diff_source);
 
-    let pr_url = if !is_local {
-        format!("https://github.com/{owner}/{repo}/pull/{pr_number}")
-    } else {
-        String::new()
-    };
+    let pr_url = pr_url_of(&owner, &repo, pr_number, is_local); // #11899: moved for SLOC headroom
     // #9015: no reviewer prompts (or configured voice), no review — before any
     // claim, fetch or model call.
     let subject = (owner.as_str(), repo.as_str(), pr_number, pr_url.as_str());
@@ -570,6 +566,9 @@ async fn run_pipeline(
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
+    // #11899: repo-named review skills, read at the base commit, after the template.
+    let skills = super::repo_skills::SkillsCall::new(options, &diff_source, &head, &raw_diff);
+    let voice_config = skills.attach(voice_config, &mut result);
 
     // ── Step 5c: MAP-REDUCE branch (#1643 / #680) ─────────────────────────
     // When the selector chose the per-file path, delegate to the map-reduce
