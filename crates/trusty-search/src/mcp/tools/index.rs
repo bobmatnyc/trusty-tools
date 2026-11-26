@@ -150,6 +150,9 @@ fn required_index_id(server: &McpServer, args: &Value) -> Result<String, Dispatc
         .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))
 }
 
+/// The two per-index size caps `create_index` forwards (#11655, #11903).
+const SIZE_CAP_KEYS: [&str; 2] = ["source_file_max_bytes", "office_file_max_bytes"];
+
 /// Read `key` as a non-empty array whose every entry is a string.
 ///
 /// Why: `create_index` forwards `exclude_globs` verbatim into the request body,
@@ -347,6 +350,15 @@ pub(super) async fn dispatch_index_tool(
             // `SKIP_DIRS` + `.gitignore` filters were enough.
             if let Some(globs) = string_array(args, "exclude_globs") {
                 body["exclude_globs"] = Value::Array(globs);
+            }
+            // #11903: forward the #11655 size caps verbatim. The daemon's
+            // `search.index.create` validates them (`invalid_size_cap`) and
+            // reports `size_caps_applied: false` on a re-registration, so this
+            // arm neither checks nor defaults them.
+            for key in SIZE_CAP_KEYS {
+                if let Some(cap) = args.get(key).filter(|v| !v.is_null()) {
+                    body[key] = cap.clone();
+                }
             }
             Some(server.call(METHOD_INDEX_CREATE, body).await)
         }
