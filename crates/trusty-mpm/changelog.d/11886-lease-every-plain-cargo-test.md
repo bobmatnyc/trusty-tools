@@ -1,0 +1,3 @@
+Fixed
+- The pm-guard hook now leases a heavy build behind a `{`, `do` or `then` before a shell wrapper (`for p in a b; do bash -c "cargo test -p $p"; done`, and the compression rewrite's `{ …; }` group), behind a wrapper operand (`flock FILE`, `taskset MASK`), and under `watch`, `parallel`, BSD `script FILE` and `coproc`. Each ran unleased before, so it could run another worktree's test binary in the shared target directory (#11886).
+- The hook now refuses, with the leased form, a heavy build it cannot wrap: a here-document, `<<<` string or pipe fed to a shell, `eval`, `script -c`, a program or subcommand named by an expansion (`$CARGO test`, `cargo $verb`), and a command whose quoting it cannot parse. It used to let these run unleased (#11886).

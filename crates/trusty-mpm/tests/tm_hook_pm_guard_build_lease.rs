@@ -573,3 +573,133 @@ fn a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969() {
         "the build must run in the `cd`'s directory, not where the shell stood: {lost_cd}"
     );
 }
+
+/// What the pm-guard hook did with a dispatched agent's Bash `command`.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict11886 {
+    /// Rewritten to run under `tm build-lease`.
+    Leased,
+    /// Refused by the build-lease rule for #11886.
+    Refused,
+    /// Anything else, including a pass-through with no output.
+    Other(String),
+}
+
+fn verdict_11886(command: &str) -> Verdict11886 {
+    let home = scratch_home();
+    let stdout = run_hook(
+        home.path(),
+        &["--pm-guard"],
+        &bash_payload(home.path(), command, true),
+    );
+    if stdout.contains("\"deny\"") && stdout.contains("#11886") {
+        return Verdict11886::Refused;
+    }
+    let (rewritten, _) = match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(_) => updated_command(&stdout),
+        Err(_) => return Verdict11886::Other(stdout),
+    };
+    if rewritten.contains(" build-lease ") {
+        Verdict11886::Leased
+    } else {
+        Verdict11886::Other(stdout)
+    }
+}
+
+fn assert_all_11886(commands: &[&str], want: Verdict11886) {
+    let wrong: Vec<String> = commands
+        .iter()
+        .map(|c| (c, verdict_11886(c)))
+        .filter(|(_, got)| *got != want)
+        .map(|(c, got)| format!("{c:?} => {got:?}"))
+        .collect();
+    assert!(wrong.is_empty(), "want {want:?}:\n{}", wrong.join("\n"));
+}
+
+/// #11886: a shell wrapper behind a `{`, `do` or `then` — the shape the
+/// compression rewrite and every loop produce — ran its build unleased.
+#[test]
+fn a_shell_wrapper_behind_a_keyword_or_group_is_leased_11886() {
+    assert_all_11886(
+        &[
+            "bash --login -c 'cargo test'",
+            "for p in a b; do bash -c \"cargo test -p $p\"; done",
+            "if true; then sh -c 'cargo test'; fi",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886: a wrapper operand (`flock FILE`, `taskset MASK`) or a runner
+/// (`watch`, `parallel`, BSD `script FILE`, `coproc`) hid the build.
+#[test]
+fn a_build_behind_a_wrapper_operand_or_runner_is_leased_11886() {
+    assert_all_11886(
+        &[
+            "flock /tmp/l cargo test",
+            "taskset 0x3 cargo test",
+            "watch -n 5 cargo test",
+            "parallel cargo test -p ::: a b",
+            "script -q /dev/null cargo test",
+            "coproc cargo test",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886: a shell reading its commands from a here-document, a `<<<`
+/// string or a pipe runs a build the rewrite cannot reach, so it is refused.
+#[test]
+fn a_shell_reading_a_build_from_stdin_is_refused_11886() {
+    assert_all_11886(
+        &[
+            "bash <<'EOF'\ncargo test\nEOF",
+            "bash <<EOF\ncd x && cargo test -p x\nEOF",
+            "bash <<< 'cargo test'",
+            "echo 'cargo test' | bash",
+            "printf 'cargo test\\n' | sh -s",
+        ],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886: `eval` and Linux `script -c` run a string the lease cannot wrap.
+#[test]
+fn an_eval_or_script_string_build_is_refused_11886() {
+    assert_all_11886(
+        &[
+            "eval cargo test",
+            "eval 'cd x && cargo test'",
+            "script -q -c 'cargo test' /dev/null",
+        ],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886: a program or subcommand named by an expansion is a build the
+/// hook cannot classify; it is refused with the literal, leased form.
+#[test]
+fn a_build_named_by_an_expansion_is_refused_11886() {
+    assert_all_11886(
+        &[
+            "$CARGO test",
+            "${CARGO:-cargo} test",
+            "\"$(which cargo)\" test",
+            "`which cargo` test",
+            "x=test; cargo $x",
+            "cargo $(echo test)",
+            "for v in check test; do cargo $v; done",
+        ],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886 Fail-Open Check: a command whose quoting the hook cannot parse
+/// is refused when its words name a heavy build, never passed through.
+#[test]
+fn an_unparseable_build_is_refused_not_passed_through_11886() {
+    assert_all_11886(
+        &["bash -c 'cargo test -p x", "eval \"cargo test"],
+        Verdict11886::Refused,
+    );
+}
