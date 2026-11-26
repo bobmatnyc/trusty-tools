@@ -751,3 +751,15 @@ fn an_underscored_expansion_naming_cargo_is_refused_11886() {
         Verdict11886::Refused,
     );
 }
+
+/// #11886 fail-closed rule: a heavy build the hook could not lease is
+/// refused; a leased build still leases; a `make`-driven build passes.
+#[test]
+fn an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886() {
+    assert_all_11886(
+        &["entr -c cargo test -p x", "cargo check && entr cargo test"],
+        Verdict11886::Refused,
+    );
+    assert_all_11886(&["cargo test -p x"], Verdict11886::Leased);
+    assert_ne!(verdict_11886("make test"), Verdict11886::Refused);
+}
