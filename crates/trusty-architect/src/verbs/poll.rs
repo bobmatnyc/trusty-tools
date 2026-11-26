@@ -49,7 +49,8 @@ pub struct PollArgs {
 ///
 /// # Errors
 /// [`VerbError::Usage`] when `ARCHITECT_SESSION` or `ARCHITECT_POLL_SESSION`
-/// is not a tmux session name (it holds `:`, `.` or whitespace).
+/// is not a tmux session name (it holds `:`, `.` or whitespace);
+/// [`VerbError::Failed`] when the config dir does not resolve (#11821).
 pub fn poll_config(
     root: &Path,
     home: &Path,
@@ -74,8 +75,9 @@ pub fn poll_config(
         "SUPERVISOR_INBOX_DIR" => set("ARCHITECT_INBOX_DIR").or_else(|| set(name)),
         _ => get(name),
     };
+    // #11821: a broken install.toml is a failure to report, not a usage error.
     let mut config =
-        Config::from_env(root, home, &lookup).map_err(|e| VerbError::Usage(e.to_string()))?;
+        Config::from_env(root, home, &lookup).map_err(|e| VerbError::Failed(e.to_string()))?;
     if let Some(file) = set("ARCHITECT_QUIET_SESSIONS_FILE") {
         config.quiet_sessions = PathBuf::from(file);
     }

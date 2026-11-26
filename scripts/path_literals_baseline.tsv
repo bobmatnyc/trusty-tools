@@ -1,8 +1,6 @@
 # Hard-coded project-home / config-dir literals per file (#11821 P6a).
 # Written by scripts/check_path_literals.py. A count may only fall: run `--shrink` after a migration.
 crates/trusty-analyze/src/commands/daemon.rs	1
-crates/trusty-architect/src/poller/config.rs	1
-crates/trusty-architect/src/self_ctx.rs	1
 crates/trusty-channels/src/policy/fs.rs	2
 crates/trusty-channels/src/policy/tests/load.rs	1
 crates/trusty-channels/src/policy/tests/reload.rs	1
