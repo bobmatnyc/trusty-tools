@@ -136,30 +136,40 @@ fn project_unadopt_refuses_on_a_broken_install_file() {
     );
 }
 
-/// The PM guard's file-change budget is never reached: the trust-anchor floor
-/// denies every write first (`a_broken_install_file_denies_every_write`), so
-/// no counter lands under `$HOME/.trusty-mpm/state`. This pins why the budget
-/// writer needs no fail-closed arm of its own; it passed before PR 2 too.
+/// The PM guard's file-change budget denies `patch` and `git apply`; before the
+/// fix both were allowed and counted under `$HOME/.trusty-mpm/state`. The
+/// trust-anchor floor finds no write target in either command, so the budget
+/// is the only guard that sees them (code-critic HIGH on 48ddb726b5).
 #[test]
-fn pm_guard_budget_is_never_reached_on_a_broken_install_file() {
-    let fx = BrokenHome::new();
-    let outside = tempfile::tempdir().expect("non-checkout cwd");
-    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"issue-11821","tool_name":"Bash","tool_input":{"command":"python3 <<'PY' > src/lib.rs\nprint(1)\nPY"}}"#;
-    let mut cmd = fx.tm();
-    cmd.current_dir(outside.path()).args(["hook", "--pm-guard"]);
-    let out = run_with_stdin(cmd, payload);
-    let all = text(&out);
-    assert!(out.status.success(), "the guard exits 0: {all}");
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("\"deny\""),
-        "the floor must deny the edit: {all}"
-    );
-    assert!(
-        !fx.fallback_root()
+fn pm_guard_budget_denies_patch_and_git_apply_on_a_broken_install_file() {
+    let mut failures = Vec::new();
+    for command in ["patch -p1 < fix.diff", "git apply fix.diff"] {
+        let fx = BrokenHome::new();
+        let outside = tempfile::tempdir().expect("non-checkout cwd");
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+        })
+        .to_string();
+        let mut cmd = fx.tm();
+        cmd.current_dir(outside.path()).args(["hook", "--pm-guard"]);
+        let out = run_with_stdin(cmd, &payload);
+        let all = text(&out);
+        let denied = String::from_utf8_lossy(&out.stdout).contains("\"deny\"");
+        let counted = fx
+            .fallback_root()
             .join("state/pm_guard_turn_budget")
-            .exists(),
-        "no budget counter under $HOME: {all}"
-    );
+            .exists();
+        // Both commands are checked before any assert, so one run shows both.
+        if !out.status.success() || !denied || counted {
+            failures.push(format!(
+                "`{command}`: denied={denied} counter_under_home={counted}: {all}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// An undelivered `SubagentStop` fails the hook; before the fix it was
