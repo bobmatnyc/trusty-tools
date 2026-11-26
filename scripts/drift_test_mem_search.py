@@ -211,7 +211,7 @@ def run_memory(golden, rows, info, private_path, dream_source=None):
             pal, src, idmap, pinfo = seed_test_palace(m, guard, source, existing)
             info["memory_palaces"][source] = pinfo
             own = set(list_all(m, pal))
-            check_scope_covers(m, pal, own)
+            check_scope_covers(m, pal, own | set(idmap.values()))
             resp, ms, _ = recall(m, pal, "warm-up", 1)
             check_own(resp, own, pal)
             info["warmup_ms"][f"memory:{source}"] = round(ms)
@@ -379,7 +379,14 @@ def main(argv=None):
     mt = lane_metrics(metrics(rows), lanes)
     prev = None
     if os.path.exists(a.results):
-        lines = [json.loads(l) for l in open(a.results) if l.strip() and '"lane": "dream"' not in l]
+        lines = []
+        for n, l in enumerate(open(a.results), 1):
+            if not l.strip() or '"lane": "dream"' in l:
+                continue
+            try:
+                lines.append(json.loads(l))
+            except ValueError as e:  # #11815: one torn line must not crash a run whose lanes already ran
+                print(f"drift_test_mem_search: skipping unparseable {a.results}:{n}: {e}", file=sys.stderr)
         # #11815: the previous run is the last one that covered every selected lane.
         lines = [r for r in lines if set(lanes) <= set(r.get("lanes", LANES))]
         prev = lines[-1] if lines else None

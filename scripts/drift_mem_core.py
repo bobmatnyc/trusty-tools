@@ -341,7 +341,11 @@ def check_own(resp, own, pal):
 
 
 def check_scope_covers(m, pal, own):
-    """Refuse to recall when the wing scope would hide seeded drawers (#11815)."""
+    """Refuse to recall when the wing scope would hide seeded drawers, or when
+    there are none, so the check never passes vacuously (#11815).
+    Test: `test_wing_hiding_a_seeded_drawer_aborts_before_recall`."""
+    if not own:
+        raise RunAborted(f"test palace {pal} has no seeded drawers; nothing to recall")
     resp, _, err = m.call("memory_list", {"palace": pal, "wing": RECALL_WING, "limit": 100000, "full": True})
     if err or resp is None or resp.get("truncated"):
         raise RunAborted(f"memory_list {pal} wing {RECALL_WING}: {err or 'truncated'}")
