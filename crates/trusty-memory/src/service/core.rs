@@ -29,6 +29,7 @@ use super::helpers::{
     collect_palace_stats, drawer_content_preview, drawer_snippet, is_reserved_system_palace,
     list_palaces_blocking, palace_info_blocking, palace_info_from,
 };
+use super::palace_create::{PalaceCreateError, PalaceCreateRequest, PalaceCreateResult};
 use super::types::{
     CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult,
     StatusPayload,
@@ -268,89 +269,50 @@ impl MemoryService {
     ///
     /// Why: trims duplicated work between the HTTP handler and any future
     /// non-HTTP creation flow.
-    /// What: validates the name, builds the `Palace` row, calls
-    /// `PalaceRegistry::create_palace`, and emits `PalaceCreated`. Returns
-    /// the new palace id. A name that is a live alias is `Conflict` (#9544).
-    /// Test: covered indirectly by `palace_list_includes_richer_counts` (which
-    /// posts a palace through the HTTP layer then reads it back);
-    /// `create_palace_for_a_live_alias_is_a_conflict`.
+    /// What: [`Self::create_palace_outcome`], answering only the palace id.
+    /// Test: `create_palace_for_a_live_alias_answers_exists`;
+    /// `palace_list_includes_richer_counts` posts a palace through it.
     pub async fn create_palace(
         &self,
         body: CreatePalaceBody,
         source: ActivitySource,
     ) -> ServiceResult<String> {
+        Ok(self.create_palace_outcome(body, source).await?.palace_id)
+    }
+
+    /// Create a palace, or report the one already under the name (#11823).
+    ///
+    /// Why: the shared create flow with the HTTP error mapping; a caller that
+    /// ensures a palace needs to know whether it was created, existed or was
+    /// aliased.
+    /// What: trims the name (empty is `BadRequest`), then
+    /// [`super::palace_create::create_palace`]. `cwd` is required unless
+    /// `force` or `personal` — no daemon-cwd fallback. A refused request is
+    /// `BadRequest`, an unauthorized `force` is `Forbidden`, a lookup or store
+    /// failure is `Internal`. Success serializes as
+    /// `{"palace_id", "status": "created"|"exists"|"aliased", "alias_of"?}`.
+    /// Test: `service_create_without_cwd_is_a_bad_request`,
+    /// `create_palace_for_a_live_alias_answers_exists`.
+    pub async fn create_palace_outcome(
+        &self,
+        body: CreatePalaceBody,
+        source: ActivitySource,
+    ) -> ServiceResult<PalaceCreateResult> {
         let name = body.name.trim().to_string();
         if name.is_empty() {
             return Err(ServiceError::bad_request("name is required"));
         }
-        // Issue #88 / Change 2: enforce palace = project mapping for
-        // HTTP-originated palace creation. The validation cwd is, in order of
-        // preference:
-        //   a. `body.cwd` — the caller explicitly supplied their project path
-        //      (correct for any client that is not the daemon itself).
-        //   b. `std::env::current_dir()` — daemon's own cwd, the pre-Change-2
-        //      fallback (rarely meaningful when the daemon is launched from ~).
-        // This keeps older clients that omit `cwd` working without a breaking
-        // change, while letting pin-file-aware clients get accurate validation.
-        // spec-001: `force=true` lets an application bypass the project-slug
-        // gate so it can create palaces under arbitrary slugs (e.g. one per
-        // app/tenant for chat-session storage). The env-var bypass remains for
-        // test contexts; both short-circuit the same validation call.
-        //
-        // Issue #1714: `force=true` bypasses slug validation entirely, so it
-        // is gated behind the minimal authz seam in `crate::authz` before any
-        // other check runs. In the default single-tenant mode this is a
-        // no-op (unchanged behaviour); in multi-tenant mode it fails closed
-        // until a real capability check lands. See `crate::authz` module
-        // docs for the full design rationale.
-        let skip_enforcement =
-            std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
-        if body.force {
-            crate::authz::authorize_force_palace_create(&self.state)
-                .map_err(|e| ServiceError::forbidden(e.to_string()))?;
-        }
-        if !skip_enforcement && !body.force {
-            let cwd = body
-                .cwd
-                .as_deref()
-                .map(std::path::Path::new)
-                .map(|p| p.to_path_buf())
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| self.state.data_root.clone());
-            crate::project_root::validate_palace_name(&name, &cwd)
-                .map_err(|e| ServiceError::bad_request(e.to_string()))?;
-        }
-        let id = PalaceId::new(&name);
-        let palace = Palace {
-            id: id.clone(),
-            name: name.clone(),
-            description: body.description.filter(|s| !s.is_empty()),
-            created_at: chrono::Utc::now(),
-            data_dir: self.state.data_root.join(&name),
+        let req = PalaceCreateRequest {
+            name: &name,
+            description: body.description,
+            cwd: body.cwd.as_deref(),
+            force: body.force,
         };
-        self.state
-            .registry
-            .create_palace(&self.state.data_root, palace)
-            .map_err(|e| {
-                // #9544: a live alias name is a state clash, not a daemon fault.
-                let live_alias = e
-                    .downcast_ref::<trusty_common::palace_alias::LiveAliasError>()
-                    .is_some();
-                if live_alias {
-                    ServiceError::conflict(format!("create palace: {e:#}"))
-                } else {
-                    ServiceError::internal(format!("create palace: {e:#}"))
-                }
-            })?;
-        // Issue #228: keep the in-memory palace-name cache in sync so writes
-        // to this palace can resolve `Palace.name` without a disk walk.
-        self.state.palace_names.insert(name.clone(), name.clone());
-        self.state.emit(DaemonEvent::PalaceCreated {
-            id: name.clone(),
-            name: name.clone(),
-            source,
-        });
-        Ok(name)
+        super::palace_create::create_palace(&self.state, req, source).map_err(|e| match e {
+            PalaceCreateError::Invalid(msg) => ServiceError::bad_request(msg),
+            PalaceCreateError::Forbidden(e) => ServiceError::forbidden(e.to_string()),
+            PalaceCreateError::Store(e) => ServiceError::internal(format!("create palace: {e:#}")),
+        })
     }
 
     /// Delete a palace from disk, optionally rejecting non-empty palaces.

@@ -10,16 +10,19 @@
 //!
 //! Sub-modules:
 //!   - `detection`: `find_project_root`, `PROJECT_MARKERS`, `TRUSTY_TOOLS_DIR`,
-//!     `PERSONAL_PALACE`, `is_unsafe_pin_location`.
+//!     `PERSONAL_PALACE`.
 //!   - `pin_file`: `ProjectPin`, `PIN_SCHEMA_VERSION`, `PIN_FILE_REL`,
 //!     `read_project_pin`, `write_project_pin`, `project_slug_at`,
 //!     `project_slug_at_readonly`, `project_slug`, `project_slug_from_basename`.
+//!   - re-exported from `trusty_common::palace_resolve`:
+//!     `resolve_palace_for_project`, `plan_palace_create_for_project` — the
+//!     shared resolver's project name without the process env (#11823).
 //!   - `validation`: `validate_palace_name`.
 //!
 //! Test: `project_slug_finds_git_root`, `project_slug_returns_none_without_markers`,
 //! `project_slug_uses_first_ancestor_marker`,
 //! `project_slug_personal_always_allowed`,
-//! `pin_file_read_when_present`, `absent_pin_writes_computed_slug`,
+//! `pin_file_read_when_present`, `project_slug_at_writes_no_pin_file`,
 //! `renamed_dir_with_pin_resolves_to_original_slug`,
 //! `trusty_tools_dir_is_project_marker`,
 //! `lazy_write_non_fatal_on_readonly_dir`.
@@ -32,6 +35,11 @@ pub use detection::{PERSONAL_PALACE, PROJECT_MARKERS, TRUSTY_TOOLS_DIR, find_pro
 pub use pin_file::{
     PIN_FILE_REL, PIN_SCHEMA_VERSION, ProjectPin, pinned_slug_at, project_slug, project_slug_at,
     project_slug_at_readonly, project_slug_from_basename, read_project_pin, write_project_pin,
+};
+// #11823: the daemon names a client's palace with trusty-common's env-free
+// resolver and plan, never a copy of them.
+pub use trusty_common::palace_resolve::{
+    plan_palace_create_for_project, resolve_palace_for_project,
 };
 pub use validation::validate_palace_name;
 
@@ -171,33 +179,40 @@ mod tests {
         );
     }
 
-    /// Why: when the name exactly matches the derived slug the creation must
-    /// succeed.
-    /// What: create a project root named `cool-app`; assert that
-    /// `validate_palace_name("cool-app", subdir)` returns `Ok(())`.
+    /// Why: when the name exactly matches the resolved name the creation must
+    /// succeed. #11823: the resolved name is the shared resolver's
+    /// `parent/dir` slug for an unpinned repo with no remote — never the bare
+    /// folder name the old rule accepted, which readers never look for.
+    /// What: create a project root `work/cool-app`; assert that
+    /// `validate_palace_name("work-cool-app", subdir)` returns `Ok(())` and
+    /// the folder name `cool-app` is rejected.
     /// Test: itself.
     #[test]
     fn validate_palace_name_accepts_matching_slug() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("cool-app");
+        let root = tmp.path().join("work").join("cool-app");
         fs::create_dir_all(root.join(".git")).unwrap();
         let sub = root.join("src");
         fs::create_dir_all(&sub).unwrap();
 
-        let result = validate_palace_name("cool-app", &sub);
+        let result = validate_palace_name("work-cool-app", &sub);
         assert!(result.is_ok(), "matching slug must be accepted: {result:?}");
+        assert!(
+            validate_palace_name("cool-app", &sub).is_err(),
+            "the folder-name rule is gone (#11823)"
+        );
     }
 
     /// Why: a mismatched name must be rejected with an actionable error that
-    /// tells the user which slug is expected.
-    /// What: create a project root named `cool-app`; assert that
+    /// tells the user which name is expected.
+    /// What: create a project root `work/cool-app`; assert that
     /// `validate_palace_name("wrong-name", subdir)` returns `Err` and the
-    /// error message mentions `cool-app`.
+    /// error message mentions `work-cool-app`.
     /// Test: itself.
     #[test]
     fn validate_palace_name_rejects_mismatch() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("cool-app");
+        let root = tmp.path().join("work").join("cool-app");
         fs::create_dir_all(root.join(".git")).unwrap();
         let sub = root.join("src");
         fs::create_dir_all(&sub).unwrap();
@@ -206,9 +221,34 @@ mod tests {
         assert!(result.is_err(), "mismatched name must be rejected");
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("cool-app"),
+            msg.contains("work-cool-app"),
             "error must mention the expected slug; got: {msg}"
         );
+    }
+
+    /// Why (#11823): a malformed pin blocks the create and is reported; it
+    /// never falls back to a derived name.
+    /// What: a project with a wrong-shaped pin; the derived name is refused
+    /// and the error names the pin file.
+    /// Test: itself.
+    #[test]
+    fn validate_palace_name_rejects_a_malformed_pin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("work").join("pinned-app");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(TRUSTY_TOOLS_DIR)).unwrap();
+        fs::write(
+            root.join(PIN_FILE_REL),
+            "schema_version: 1\npalace:\n  not: a-string\n",
+        )
+        .unwrap();
+
+        for name in ["work-pinned-app", "pinned-app"] {
+            let msg = validate_palace_name(name, &root)
+                .expect_err("a malformed pin must refuse every name")
+                .to_string();
+            assert!(msg.contains(PIN_FILE_REL), "{msg}");
+        }
     }
 
     /// Why: outside a project directory, only `personal` is allowed; any
@@ -310,33 +350,25 @@ mod tests {
         );
     }
 
-    /// Why: when no pin file exists, `project_slug_at` must lazily create one
-    /// so subsequent calls (or after a rename) use the file instead of the
-    /// basename.
+    /// Why (#11823, Q4): `project_slug_at` used to write the folder name into
+    /// a pin, a second naming rule beside the shared resolver. It now only
+    /// reads.
     /// What: create a project root with a `.git` marker but no pin file; call
-    /// `project_slug_at`; assert the pin file was created with the expected slug.
+    /// `project_slug_at`; assert the basename slug comes back and no pin file
+    /// exists afterwards.
     /// Test: itself.
     #[test]
-    fn absent_pin_writes_computed_slug() {
+    fn project_slug_at_writes_no_pin_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("my-cool-project");
         fs::create_dir_all(root.join(".git")).unwrap();
 
-        // No pin file yet.
-        assert!(
-            read_project_pin(&root).expect("no err").is_none(),
-            "no pin before first call"
-        );
-
         let slug = project_slug_at(&root).expect("slug");
         assert_eq!(slug, "my-cool-project");
-
-        // Pin file must now exist.
-        let pin = read_project_pin(&root)
-            .expect("no err")
-            .expect("pin written");
-        assert_eq!(pin.palace, "my-cool-project");
-        assert_eq!(pin.schema_version, PIN_SCHEMA_VERSION);
+        assert!(
+            !root.join(PIN_FILE_REL).exists(),
+            "project_slug_at must not write a pin file"
+        );
     }
 
     /// Why: the central use-case for Phase 1 — a project with a pin file
@@ -592,6 +624,9 @@ mod tests {
         );
     }
 
+    /// Why: a read-only project root still answers its slug; since #11823
+    /// nothing is written there either way.
+    /// Test: itself.
     #[cfg(unix)]
     #[test]
     fn lazy_write_non_fatal_on_readonly_dir() {

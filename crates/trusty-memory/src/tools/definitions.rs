@@ -182,13 +182,13 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "palace_create",
-                "description": "Create a new memory palace.",
+                "description": "Create a new memory palace, or report the existing one. Returns `{palace_id, status, alias_of?}`: status `created`, `exists` (a palace or alias already holds the name; nothing is changed) or `aliased` (the name was linked to the project's existing folder-named palace).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "name":        {"type": "string"},
                         "description": {"type": "string"},
-                        "cwd":         {"type": "string", "description": "Optional caller working directory used for palace-name enforcement. Pass the project root (or any path inside it) so the pin file at `.trusty-tools/trusty-memory.yaml` is honoured. When omitted, the daemon's own cwd is used (rarely meaningful for remote calls)."},
+                        "cwd":         {"type": "string", "description": "The caller's project directory (root or any path inside it). Required unless `force` is true or `name` is `personal`. The palace name must be the one this project resolves to: the `.trusty-tools/trusty-memory.yaml` pin, else the git owner-repo, else the parent-dir slug. The daemon never uses its own cwd or environment."},
                         "force":       {"type": "boolean", "description": "Bypass project-slug validation so an application can create a palace under an arbitrary slug (spec-001: chat-session manager, one palace per app/tenant). Defaults to false.", "default": false}
                     },
                     "required": ["name"]

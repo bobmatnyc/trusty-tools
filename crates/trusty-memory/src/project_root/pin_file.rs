@@ -8,16 +8,14 @@
 //! What: re-exports `ProjectPin`, `PIN_SCHEMA_VERSION`, `PIN_FILE_REL` and
 //! `read_project_pin`; defines `write_project_pin`, `project_slug_from_basename`,
 //! `project_slug_at`, `project_slug_at_readonly`, `pinned_slug_at`, `project_slug`.
-//! Test: `pin_file_read_when_present`, `absent_pin_writes_computed_slug`,
+//! Test: `pin_file_read_when_present`, `project_slug_at_writes_no_pin_file`,
 //! `renamed_dir_with_pin_resolves_to_original_slug`,
 //! `malformed_pin_does_not_fall_back_to_basename`.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-use crate::messaging::slugify_string;
-
-use super::detection::{TRUSTY_TOOLS_DIR, find_project_root, is_unsafe_pin_location};
+use super::detection::{TRUSTY_TOOLS_DIR, find_project_root};
 
 // #5811: schema and read path are shared. A second definition here would let
 // the writer and the readers drift on the same file.
@@ -37,9 +35,8 @@ pub fn read_project_pin(root: &Path) -> Result<Option<ProjectPin>> {
 
 /// Write a palace pin to `.trusty-tools/trusty-memory.yaml` at `root`.
 ///
-/// Why: the lazy-write path in [`project_slug_at`] and the explicit
-/// `trusty-memory link` backfill command both need to emit the same YAML
-/// schema. A single writer keeps the format consistent.
+/// Why: the explicit `trusty-memory link` command is the one pin writer
+/// (#11823 removed the lazy write); a single writer keeps the format consistent.
 /// What: re-reads the pin already at `root` first (#9274, ADR-0067 D2). It
 /// refuses to write when that pin is newer than [`PIN_SCHEMA_VERSION`] or
 /// cannot be read or parsed, and otherwise keeps the on-disk pin's unknown
@@ -86,15 +83,14 @@ pub fn write_project_pin(root: &Path, pin: &ProjectPin) -> Result<PathBuf> {
 ///
 /// Why: the resolution order needs the basename derivation without the
 /// pin-file side effects, and both paths must be testable in isolation.
-/// What: slugifies the last path component of `root` and clamps it to
-/// `PALACE_ID_MAX_LEN` (#2443 — this is the name `validate_palace_name` tells a
-/// caller to use, so an over-long one named a palace the format gate then
-/// refused). `None` when the basename is empty or slugifies to empty.
+/// What: delegates to `trusty_common::palace_resolve::folder_palace_slug`
+/// (#11823), the rule the create plan's folder alias uses: the slugified
+/// basename clamped to `PALACE_ID_MAX_LEN` (#2443). `None` when the basename
+/// is empty or slugifies to empty.
 /// Test: `project_slug_at_returns_root_basename_slug`.
 pub fn project_slug_from_basename(root: &Path) -> Option<String> {
-    let basename = root.file_name()?.to_str()?;
-    let slug = trusty_common::palace_id::clamp_palace_id(&slugify_string(basename));
-    if slug.is_empty() { None } else { Some(slug) }
+    // #11823: the one folder-slug rule, shared with the create plan's alias step.
+    trusty_common::palace_resolve::folder_palace_slug(root)
 }
 
 /// Read the pin at the project root above `start`, failing closed.
@@ -121,59 +117,18 @@ fn pin_outcome_at(start: &Path) -> Result<Option<String>> {
 
 /// Derive a palace slug from the project root found at or above `start`.
 ///
-/// Why: the interactive-command path (issue #88, Phase 1). Palace names must
-/// match the canonical slug of the project they belong to, and that slug must
-/// survive directory renames — the pin file is the stable anchor.
-/// What: returns the pinned slug when one exists; otherwise computes the
-/// basename slug and lazily writes the pin (best-effort, non-fatal) so future
-/// calls take the pinned path. Returns `None` when no project root is found OR
-/// when a pin exists but cannot be trusted (#5811 — deriving past a broken pin
-/// is what sent writes to the wrong palace).
-/// Test: `pin_file_read_when_present`, `absent_pin_writes_computed_slug`,
+/// Why: the interactive-command path (issue #88, Phase 1). #11823 (Q4): it no
+/// longer writes a pin. The lazy write pinned the folder name, a second naming
+/// rule beside the shared resolver; a pin is now written only by an explicit
+/// `trusty-memory link`.
+/// What: the same answer as [`project_slug_at_readonly`] — the pinned slug,
+/// else the basename slug; `None` without a project root or past an
+/// untrustworthy pin (#5811). Never writes.
+/// Test: `pin_file_read_when_present`, `project_slug_at_writes_no_pin_file`,
 /// `renamed_dir_with_pin_resolves_to_original_slug`,
 /// `malformed_pin_does_not_fall_back_to_basename`.
 pub fn project_slug_at(start: &Path) -> Option<String> {
-    let root = find_project_root(start)?;
-
-    match pin_outcome_at(start) {
-        Ok(Some(slug)) => return Some(slug),
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!(
-                path = %root.join(PIN_FILE_REL).display(),
-                "palace pin exists but cannot be trusted ({e:#}); refusing to derive past it"
-            );
-            return None;
-        }
-    }
-
-    // Compute from basename and lazily write the pin. `is_unsafe_pin_location`
-    // (PR #492) keeps the write out of a temp/home/root directory, where it
-    // would poison every subdirectory; the slug is still returned so memory
-    // operations work.
-    let slug = project_slug_from_basename(&root)?;
-    if is_unsafe_pin_location(&root) {
-        tracing::debug!(
-            slug = %slug,
-            root = %root.display(),
-            "skipping lazy pin write: root is a system/home/temp dir"
-        );
-        return Some(slug);
-    }
-    let pin = ProjectPin::new(slug.clone());
-    match write_project_pin(&root, &pin) {
-        Ok(path) => tracing::debug!(
-            slug = %slug,
-            path = %path.display(),
-            "wrote palace pin file (lazy init)"
-        ),
-        Err(e) => tracing::warn!(
-            slug = %slug,
-            root = %root.display(),
-            "could not write palace pin file ({e:#}); slug will remain basename-derived"
-        ),
-    }
-    Some(slug)
+    project_slug_at_readonly(start)
 }
 
 /// Return the *pinned* palace slug for the project at or above `start`, and

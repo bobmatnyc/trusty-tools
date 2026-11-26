@@ -1321,15 +1321,17 @@ async fn list_palaces_with_counts_opens_palaces_off_the_executor() {
     );
 }
 
-/// Why (#9544): the registry refuses to create a palace under a live alias
-/// name, but the service mapped every create failure to `Internal`, so HTTP
-/// answered 500 and UDS `-32603` for a state clash the caller can resolve.
+/// Why (#9544, #11823): the registry refuses to create a palace under a live
+/// alias name, which the service once answered as a conflict. Since #11823 an
+/// existing alias is an existing palace: the create answers `exists` with the
+/// alias target and still writes nothing.
 /// What: creates a palace, registers an alias to it, then creates a palace
-/// named after the alias. Asserts `Conflict` and that no `palace.json` was
-/// written for the alias.
+/// named after the alias. Asserts `Exists` with `alias_of` and that no
+/// `palace.json` was written for the alias.
 /// Test: itself.
 #[tokio::test]
-async fn create_palace_for_a_live_alias_is_a_conflict() {
+async fn create_palace_for_a_live_alias_answers_exists() {
+    use crate::service::palace_create::PalaceCreateStatus;
     let (svc, state) = service();
     let canonical = svc
         .create_palace(palace_body("alias-target"), ActivitySource::Http)
@@ -1342,14 +1344,12 @@ async fn create_palace_for_a_live_alias_is_a_conflict() {
     )
     .expect("register_alias");
 
-    let err = svc
-        .create_palace(palace_body("alias-name"), ActivitySource::Http)
+    let out = svc
+        .create_palace_outcome(palace_body("alias-name"), ActivitySource::Http)
         .await
-        .expect_err("a live alias name must be refused");
-    match err {
-        ServiceError::Conflict(msg) => assert!(msg.contains("alias"), "{msg}"),
-        other => panic!("expected Conflict, got {other:?}"),
-    }
+        .expect("a live alias name answers exists");
+    assert_eq!(out.status, PalaceCreateStatus::Exists);
+    assert_eq!(out.alias_of.as_deref(), Some("alias-target"));
     assert!(
         !state
             .data_root

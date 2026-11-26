@@ -141,8 +141,8 @@ pub async fn register_index(
 ///
 /// Why: the project should have a memory palace so memory tools resolve to the
 /// right store; `ensure` provisions it. Creating a palace whose name already
-/// exists resolves to the same on-disk dir (the registry `create_dir_all` is a
-/// no-op), so re-running is safe.
+/// exists is answered `status: exists` and writes nothing (#11823), so
+/// re-running is safe.
 ///
 /// **This stage silently did nothing between #6286 pass A and this fix.**
 /// `resolve_base_url(MEMORY_APP)` reads an `http_addr` file ADR-0032 stopped
@@ -150,29 +150,32 @@ pub async fn register_index(
 /// "daemon not running; skipped" whether or not one was — a green outcome for a
 /// project that was never provisioned.
 ///
-/// What: probes trusty-memory's socket; if nothing is serving it, returns an
-/// idempotent no-op. Otherwise derives the palace name (pin-file value or
-/// slugified basename — matching the daemon's `validate_palace_name`), asks
-/// `memory.palace_get`, and on not-found calls `palace_create` with
-/// `{name, cwd}` so the daemon's name-enforcement uses the project path.
+/// What: names the palace through the shared resolver first (#11823); a pin
+/// that cannot be trusted fails the stage naming the pin path and reason, with
+/// no fallback name and no `force` retry, whether or not the daemon is up. Then
+/// probes trusty-memory's socket; if nothing is serving it, returns an
+/// idempotent no-op. Otherwise asks `memory.palace_get`, and on not-found calls
+/// `palace_create` with `{name, cwd}` so the daemon's name-enforcement uses the
+/// project path.
 /// Test: `tests::create_palace_created`, `create_palace_daemon_down`,
-/// `create_palace_already_exists`, `create_palace_rpc_error`.
+/// `create_palace_already_exists`, `create_palace_rpc_error`,
+/// `create_palace_fails_on_a_malformed_pin_without_calling_the_daemon`.
 pub async fn create_palace(
     socket: &std::path::Path,
     project_root: &std::path::Path,
 ) -> Result<StageOutcome> {
+    // #11823: the shared resolver is the only naming rule; its error (which
+    // names the pin path) fails this stage, per the step convention in `report`.
+    let name = match identity::palace_name_for(project_root) {
+        Ok(name) => name,
+        Err(e) => return Ok(fail(STAGE_PALACE, format!("cannot name palace: {e}"))),
+    };
     if !memory_serving(socket).await {
         return Ok(noop(
             STAGE_PALACE,
             "trusty-memory daemon not running; skipped (run `tctl start` then re-run)",
         ));
     }
-    let Some(name) = identity::palace_name_for(project_root) else {
-        return Ok(fail(
-            STAGE_PALACE,
-            format!("cannot derive palace name from {}", project_root.display()),
-        ));
-    };
 
     // Idempotency fast-path (optimization only — correctness does NOT depend on
     // it): an existing palace answers `memory.palace_get` and we no-op without a
@@ -180,8 +183,7 @@ pub async fn create_palace(
     // `palace_id` equals the name (per the trusty-memory palace contract).
     // Should that ever drift, the worst case is a missed fast-path: we fall
     // through to the create below, which is itself idempotent — trusty-memory
-    // resolves a duplicate name to the same palace dir (its registry
-    // `create_dir_all` is a no-op).
+    // answers a duplicate name `status: exists` and writes nothing (#11823).
     //
     // Only a NOT-FOUND refusal falls through. Any other error is the daemon
     // saying something went wrong, and creating on top of that would turn a
@@ -282,6 +284,7 @@ pub async fn run_stages(project_root: &std::path::Path) -> Vec<StageOutcome> {
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
+    use crate::commands::ensure::identity::tests::{git_project, write_pin};
     use crate::commands::ensure::ENV_TEST_LOCK as ENV_LOCK;
     use crate::commands::test_support::{
         clear_data_dir_override, clear_env, search_stub, set_env, stub_data_dir,
@@ -291,6 +294,15 @@ mod tests {
     use std::sync::atomic::Ordering;
     use trusty_common::search_rpc::{CODE_CONFLICT, TRUSTY_SEARCH_SOCKET_ENV};
     use trusty_common::uds::server::RpcError;
+
+    /// A `widget` repo with remote `acme/widget`, the env override cleared.
+    ///
+    /// Why (#11823): the palace name now comes from the shared resolver, which
+    /// reads git and `TRUSTY_MEMORY_PALACE`; the caller holds `ENV_LOCK`.
+    fn widget_project() -> (tempfile::TempDir, std::path::PathBuf) {
+        clear_env(&[trusty_common::PALACE_OVERRIDE_ENV]);
+        git_project("widget", Some("https://github.com/acme/widget.git"))
+    }
 
     /// Why (#9214): the index stage must dial trusty-search's socket, never the
     /// TCP address a stale `http_addr` names — that listener is going away.
@@ -429,13 +441,12 @@ mod tests {
     /// Test: This is the test.
     #[tokio::test]
     async fn create_palace_daemon_down() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_proj, root) = widget_project();
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let out = create_palace(
-            &tmp.path().join("absent.sock"),
-            std::path::Path::new("/tmp/widget"),
-        )
-        .await
-        .unwrap();
+        let out = create_palace(&tmp.path().join("absent.sock"), &root)
+            .await
+            .unwrap();
         assert_eq!(out.stage, STAGE_PALACE);
         assert!(out.ok);
         assert!(!out.changed);
@@ -451,6 +462,8 @@ mod tests {
     /// Test: This is the test.
     #[tokio::test]
     async fn create_palace_created() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_proj, root) = widget_project();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
         let recorder = std::sync::Arc::clone(&seen);
         let daemon = stub_memory_socket(move |method: &str, params: Value| {
@@ -472,9 +485,7 @@ mod tests {
         })
         .await;
 
-        let out = create_palace(daemon.socket(), std::path::Path::new("/tmp/widget"))
-            .await
-            .unwrap();
+        let out = create_palace(daemon.socket(), &root).await.unwrap();
         assert_eq!(out.stage, STAGE_PALACE);
         assert!(out.ok, "detail: {}", out.detail);
         assert!(out.changed);
@@ -485,9 +496,16 @@ mod tests {
             vec!["memory.palace_get", "palace_create"],
             "the fast-path get must precede the create"
         );
-        assert_eq!(calls[1].1["name"], "widget");
+        // #11823: the resolver's `owner-repo` name, not the folder slug.
+        assert_eq!(calls[0].1["palace_id"], "acme-widget");
+        assert_eq!(calls[1].1["name"], "acme-widget");
+        assert!(
+            calls[1].1.get("force").is_none(),
+            "the create must never force"
+        );
         assert_eq!(
-            calls[1].1["cwd"], "/tmp/widget",
+            calls[1].1["cwd"],
+            root.to_str().expect("utf-8 path"),
             "the daemon's name-enforcement reads cwd; omitting it would fail a \
              real project whose slug is pinned"
         );
@@ -502,6 +520,8 @@ mod tests {
     /// Test: This is the test.
     #[tokio::test]
     async fn create_palace_already_exists() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_proj, root) = widget_project();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let recorder = std::sync::Arc::clone(&seen);
         let daemon = stub_memory_socket(move |method: &str, _params: Value| {
@@ -513,9 +533,7 @@ mod tests {
         })
         .await;
 
-        let out = create_palace(daemon.socket(), std::path::Path::new("/tmp/widget"))
-            .await
-            .unwrap();
+        let out = create_palace(daemon.socket(), &root).await.unwrap();
         assert!(out.ok);
         assert!(!out.changed);
         assert!(out.detail.contains("already exists"));
@@ -534,6 +552,8 @@ mod tests {
     /// Test: This is the test.
     #[tokio::test]
     async fn create_palace_rpc_error() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_proj, root) = widget_project();
         let daemon = stub_memory_socket(|method: &str, _params: Value| {
             let method = method.to_string();
             Box::pin(async move {
@@ -549,9 +569,7 @@ mod tests {
         })
         .await;
 
-        let out = create_palace(daemon.socket(), std::path::Path::new("/tmp/widget"))
-            .await
-            .unwrap();
+        let out = create_palace(daemon.socket(), &root).await.unwrap();
         assert!(!out.ok);
         assert!(
             out.detail.contains("palace name rejected"),
@@ -569,6 +587,8 @@ mod tests {
     /// Test: This is the test.
     #[tokio::test]
     async fn create_palace_does_not_create_over_a_non_not_found_failure() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_proj, root) = widget_project();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let recorder = std::sync::Arc::clone(&seen);
         let daemon = stub_memory_socket(move |method: &str, _params: Value| {
@@ -580,15 +600,53 @@ mod tests {
         })
         .await;
 
-        let out = create_palace(daemon.socket(), std::path::Path::new("/tmp/widget"))
-            .await
-            .unwrap();
+        let out = create_palace(daemon.socket(), &root).await.unwrap();
         assert!(!out.ok, "{}", out.detail);
         assert!(out.detail.contains("memory.palace_get"), "{}", out.detail);
         assert_eq!(
             *seen.lock().unwrap_or_else(|e| e.into_inner()),
             vec!["memory.palace_get".to_string()],
             "a failing probe must not be followed by a create"
+        );
+    }
+
+    /// Why (#11823): a malformed pin used to fall back to the folder slug and
+    /// create a palace nobody chose. It must fail the stage, naming the pin
+    /// file, before any daemon call — so no fallback create and no `force`.
+    /// What: a `widget` repo with an unparsable pin and a recording stub;
+    /// assert `!ok`, the detail names the pin path, and nothing was called.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn create_palace_fails_on_a_malformed_pin_without_calling_the_daemon() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_proj, root) = widget_project();
+        let pin = write_pin(&root, "palace: [unclosed\n");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+        let daemon = stub_memory_socket(move |method: &str, _params: Value| {
+            recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(method.to_string());
+            Box::pin(async move { Ok(json!({ "id": "widget" })) })
+        })
+        .await;
+
+        let out = create_palace(daemon.socket(), &root).await.unwrap();
+        assert_eq!(out.stage, STAGE_PALACE);
+        assert!(
+            !out.ok,
+            "a malformed pin must fail the stage: {}",
+            out.detail
+        );
+        assert!(
+            out.detail.contains(&pin.display().to_string()),
+            "the failure must name the pin file: {}",
+            out.detail
+        );
+        assert!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "no palace call may follow an untrustworthy pin"
         );
     }
 }

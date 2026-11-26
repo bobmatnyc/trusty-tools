@@ -107,7 +107,8 @@ async fn force_false_still_enforces_validation() {
     .expect_err("force=false must reject a non-project slug");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("no project root") || msg.contains("does not match"),
+        // #11823: the resolver names a start outside any project directory.
+        msg.contains("not inside a project directory") || msg.contains("does not match"),
         "expected a validation error, got: {msg}"
     );
 }

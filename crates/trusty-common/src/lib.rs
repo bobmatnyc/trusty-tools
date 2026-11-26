@@ -1134,15 +1134,19 @@ pub use palace_id::{
 /// What: Gated behind the `palace-resolve` feature. Exposes
 /// [`palace_resolve::resolve_palace`], [`palace_resolve::resolve_palace_with_remote`],
 /// [`palace_resolve::PalaceResolution`], [`palace_resolve::PalaceSource`],
-/// [`palace_resolve::PalaceResolveError`], the pin-file schema, and the shared
-/// `git` probes.
+/// [`palace_resolve::PalaceResolveError`], the pin-file schema, the shared
+/// `git` probes, and the create decision [`palace_resolve::plan_palace_create`]
+/// with its env-free daemon form [`palace_resolve::plan_palace_create_for_project`]
+/// (#11823).
 /// Test: `cargo test -p trusty-common --features palace-resolve -- palace_resolve`.
 #[cfg(feature = "palace-resolve")]
 pub mod palace_resolve;
 #[cfg(feature = "palace-resolve")]
 pub use palace_resolve::{
-    PIN_FILE_REL, PIN_SCHEMA_VERSION, PalaceResolution, PalaceResolveError, PalaceSource,
-    ProjectPin, resolve_palace, resolve_palace_with_remote,
+    PIN_FILE_REL, PIN_SCHEMA_VERSION, PalaceCreatePlan, PalaceCreatePlanError, PalaceResolution,
+    PalaceResolveError, PalaceSource, ProjectPin, folder_palace_slug, plan_palace_create,
+    plan_palace_create_for_project, resolve_palace, resolve_palace_for_project,
+    resolve_palace_with_remote,
 };
 
 /// Palace-level alias map: redirect one palace name to another (issue #1939).

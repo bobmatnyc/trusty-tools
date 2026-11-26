@@ -1,28 +1,27 @@
 //! Handler for `trusty-memory link` — explicit pre-populate of the
 //! `.trusty-tools/trusty-memory.yaml` pin file.
 //!
-//! Why: the lazy write in `project_slug_at` happens automatically on the
-//! first memory operation inside a project, but users who want to lock in
-//! the slug *before* a drive reorg (when the directory still has its
-//! original name) need a way to do so explicitly. `trusty-memory link`
-//! writes (or refreshes) the pin file immediately and prints what it did.
+//! Why: users who want to lock in the palace name *before* a drive reorg
+//! (when the directory still has its original name) need a way to do so
+//! explicitly. `trusty-memory link` is the only pin writer (#11823 removed the
+//! lazy write) and prints what it did.
 //!
-//! What: resolves the project root for the given path (default: CWD),
-//! computes the slug from the current directory basename, and calls
-//! `write_project_pin` — even if a pin file already exists (refresh
-//! semantics). The existing `palace` value is preserved when `--force` is
-//! not passed and the file already exists, so a re-run without `--force`
-//! is a no-op for the slug field.
+//! What: resolves the project root for the given path (default: CWD), takes
+//! the palace name from `--slug`, else the shared resolver's project name
+//! (git `owner/repo`, else `parent/dir`; #11823), and calls
+//! `write_project_pin`. The existing `palace` value is preserved when
+//! `--force` is not passed and the file already exists, so a re-run without
+//! `--force` is a no-op for the slug field.
 //!
 //! Test: `link_creates_pin_file`, `link_is_idempotent`,
-//!       `link_updates_slug_with_force`.
+//!       `link_updates_slug_with_force`, `link_pins_the_git_owner_repo_name`.
 
 use anyhow::{Context, Result};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 
 use crate::project_root::{
-    PIN_FILE_REL, ProjectPin, find_project_root, project_slug_from_basename, read_project_pin,
+    PIN_FILE_REL, ProjectPin, find_project_root, read_project_pin, resolve_palace_for_project,
     write_project_pin,
 };
 
@@ -31,12 +30,13 @@ use crate::project_root::{
 ///
 /// Why: allows users to pin the palace slug before renaming their project
 /// directory, making the linkage explicit and committed to version control.
-/// What: resolves the project root (walking up from `path`), reads any
-/// existing pin, decides whether to write a new one (first time, or when
-/// `force` is true, or when `slug` differs from the existing one), and
-/// prints a summary of what happened.
+/// What: resolves the project root (walking up from `path`), takes the name
+/// from `--slug` or else the shared resolver (#11823; an untrustworthy pin is
+/// an error), reads any existing pin, decides whether to write a new one
+/// (first time, or when `force` is true, or when `slug` differs from the
+/// existing one), and prints a summary of what happened.
 /// Test: `link_creates_pin_file`, `link_is_idempotent`,
-///       `link_updates_slug_with_force`.
+///       `link_updates_slug_with_force`, `link_pins_the_git_owner_repo_name`.
 pub fn handle_link(
     path: Option<PathBuf>,
     slug_override: Option<String>,
@@ -58,16 +58,19 @@ pub fn handle_link(
         )
     })?;
 
-    // Determine the slug to write.
+    // Determine the slug to write. #11823: an explicit `--slug` wins (Q3);
+    // otherwise the shared resolver's project name, never the folder name.
     let slug = match slug_override {
         Some(ref s) => s.clone(),
-        None => project_slug_from_basename(&root).ok_or_else(|| {
-            anyhow::anyhow!(
-                "could not derive a palace slug from '{}'. \
-                 Pass --slug <slug> to set one explicitly.",
-                root.display()
-            )
-        })?,
+        None => resolve_palace_for_project(&start)
+            .map(|project| project.id)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "could not resolve a palace name from '{}': {e}. \
+                     Pass --slug <slug> to set one explicitly.",
+                    start.display()
+                )
+            })?,
     };
 
     // Check for an existing pin file.
@@ -141,14 +144,15 @@ mod tests {
     use std::fs;
 
     /// Why: the primary use-case — a fresh project directory has no pin file;
-    /// `handle_link` must create one with the correct slug.
-    /// What: create a project root with `.git`, call `handle_link` from it,
-    /// read back the pin file, and assert the slug matches.
+    /// `handle_link` must create one with the resolver's name (#11823: the
+    /// `parent/dir` slug for a repo with no remote, not the folder name).
+    /// What: create a project root `work/my-new-project` with `.git`, call
+    /// `handle_link` from it, read back the pin file, and assert the slug.
     /// Test: itself.
     #[test]
     fn link_creates_pin_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("my-new-project");
+        let root = tmp.path().join("work").join("my-new-project");
         fs::create_dir_all(root.join(".git")).unwrap();
 
         handle_link(Some(root.clone()), None, None, false).expect("handle_link ok");
@@ -156,7 +160,7 @@ mod tests {
         let pin = read_project_pin(&root)
             .expect("read ok")
             .expect("Some(pin)");
-        assert_eq!(pin.palace, "my-new-project");
+        assert_eq!(pin.palace, "work-my-new-project");
         assert_eq!(pin.schema_version, PIN_SCHEMA_VERSION);
     }
 
@@ -168,7 +172,7 @@ mod tests {
     #[test]
     fn link_is_idempotent() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("stable-project");
+        let root = tmp.path().join("work").join("stable-project");
         fs::create_dir_all(root.join(".git")).unwrap();
 
         handle_link(Some(root.clone()), None, None, false).expect("first call ok");
@@ -177,7 +181,7 @@ mod tests {
         let pin = read_project_pin(&root)
             .expect("read ok")
             .expect("Some(pin)");
-        assert_eq!(pin.palace, "stable-project");
+        assert_eq!(pin.palace, "work-stable-project");
     }
 
     /// Why: `--force` with an explicit slug must overwrite an existing pin.
@@ -233,5 +237,42 @@ mod tests {
             .expect("read ok")
             .expect("Some(pin)");
         assert_eq!(pin.palace, "guarded-slug", "slug must not change");
+    }
+
+    /// Why (#11823): `link` wrote the folder name while readers resolve git
+    /// `owner/repo`, so a linked project pinned a palace no reader used.
+    /// What: a git repo `My_Repo` with origin `Acme/My_Repo`; `handle_link`
+    /// with no `--slug` pins `acme-my-repo`, not `my-repo`.
+    /// Test: itself.
+    #[test]
+    fn link_pins_the_git_owner_repo_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("My_Repo");
+        fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "git@example.com:Acme/My_Repo.git",
+            ],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&root)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+
+        handle_link(Some(root.clone()), None, None, false).expect("handle_link ok");
+
+        let pin = read_project_pin(&root)
+            .expect("read ok")
+            .expect("Some(pin)");
+        assert_eq!(pin.palace, "acme-my-repo");
     }
 }

@@ -1972,3 +1972,51 @@ fn a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors() {
         "a failed re-open registers nothing"
     );
 }
+
+/// Why (#11823): the create call wrote `palace.json` with no existence check,
+/// so a second create replaced an existing palace's metadata — name,
+/// description and creation time.
+/// What: creates `kept`, then creates `kept` again from a fresh registry with
+/// different metadata, under both the checked and the plain entry point.
+/// Asserts the second answer is `Exists` and `palace.json` is byte-identical.
+/// Test: this test itself.
+#[test]
+fn create_on_an_existing_palace_leaves_palace_json_byte_identical() {
+    use crate::engine::palace::Palace;
+    use crate::engine::registry::PalaceCreateOutcome;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace = |description: &str| Palace {
+        id: PalaceId::new("kept"),
+        name: description.to_string(),
+        description: Some(description.to_string()),
+        created_at: Utc::now(),
+        data_dir: data_root.join("kept"),
+    };
+    let first = PalaceRegistry::new()
+        .create_palace_or_existing(data_root, palace("original"))
+        .expect("first create");
+    assert!(
+        matches!(first, PalaceCreateOutcome::Created(_)),
+        "{first:?}"
+    );
+    drop(first);
+    let path = data_root.join("kept").join("palace.json");
+    let before = std::fs::read(&path).expect("read palace.json");
+
+    let reg = PalaceRegistry::new();
+    let again = reg
+        .create_palace_or_existing(data_root, palace("replacement"))
+        .expect("second create");
+    assert!(matches!(again, PalaceCreateOutcome::Exists(_)), "{again:?}");
+    drop(again);
+    reg.create_palace(data_root, palace("replacement"))
+        .expect("plain create on an existing palace");
+    assert_eq!(
+        std::fs::read(&path).expect("read palace.json"),
+        before,
+        "an existing palace.json must not be rewritten"
+    );
+}

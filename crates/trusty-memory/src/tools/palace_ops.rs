@@ -9,8 +9,7 @@
 //! Test: `dispatch_palace_create_persists`, `dispatch_palace_delete_*`,
 //! `dispatch_palace_update_*` in `tools::tests`.
 
-use crate::engine::palace::{Palace, PalaceId};
-use crate::{ActivitySource, AppState, DaemonEvent};
+use crate::{ActivitySource, AppState};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -54,114 +53,72 @@ fn validate_slug_format(slug: &str) -> Result<()> {
     ))
 }
 
+/// MCP `palace_create`.
+///
+/// Why (#11823): creates must name the palace every reader resolves for the
+/// client's project and must never overwrite an existing palace.
+/// What: checks the slug format (skipped only under the test bypass), then
+/// runs the shared flow in [`crate::service::palace_create::create_palace`] —
+/// `cwd` required for a project palace, alias to an existing folder-named
+/// palace, "exists" for an existing palace or live alias. Answers
+/// `{"palace_id", "status": "created"|"exists"|"aliased", "alias_of"?,
+/// "bootstrap"}`; `bootstrap` is non-null only for `created`.
+/// Test: `dispatch_palace_create_persists`, `create_without_cwd_is_rejected`,
+/// `create_on_an_existing_palace_answers_exists_and_leaves_it_untouched`,
+/// `create_aliases_the_folder_named_palace`.
 pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
+    use crate::service::palace_create::{
+        PalaceCreateError, PalaceCreateRequest, PalaceCreateStatus, create_palace,
+    };
+
     let palace_name = args
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("palace_create: missing 'name'"))?;
-
-    // Issue #88 / Change 2: enforce palace = project mapping. New palaces must
-    // be named after the current project slug (derived by walking up from CWD)
-    // or the special `personal` sentinel. Existing palaces are unaffected —
-    // this gate only applies to NEW creation requests.
-    //
-    // The validation cwd is, in order of preference:
-    //   a. `args["cwd"]` — the MCP caller's project path. When present and the
-    //      project has a `.trusty-tools/trusty-memory.yaml` pin file, the
-    //      pinned slug is used for validation (correct even after a drive reorg).
-    //   b. `std::env::current_dir()` — daemon's own cwd, pre-Change-2 fallback.
-    //
-    // Skip enforcement when invoked from a test context (tests use arbitrary
-    // names against tempdir roots that are not real projects). The bypass is
-    // keyed on an env var (`TRUSTY_SKIP_PALACE_ENFORCEMENT=1`) that tests set
-    // locally; production deployments never set it.
-    // spec-001 / Phase 1: `force=true` bypasses slug validation so an
-    // application can create a palace under an arbitrary slug (e.g. one palace
-    // per app/tenant for chat-session storage). The env-var bypass remains for
-    // test contexts; either short-circuits the same validation call.
     let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
-    // Issue #1714: `force=true` is a privileged bypass; gate it behind the
-    // minimal authz seam (no-op in the default single-tenant mode, fails
-    // closed in multi-tenant mode). See `crate::authz` for the full design.
-    if force {
-        crate::authz::authorize_force_palace_create(state)?;
-    }
-    // Even when `force=true`, validate that the slug is a safe filesystem name:
-    // lowercase letters, digits, and hyphens only; must start with a letter or
-    // digit; max 63 chars. This prevents path traversal and redb table-name
-    // collisions regardless of the project-slug enforcement bypass.
     // The test-context bypass (TRUSTY_SKIP_PALACE_ENFORCEMENT=1) also skips
-    // the format gate so unit tests that use historical slug names keep passing.
+    // the format gate so unit tests that use historical slug names keep
+    // passing; `force=true` never skips it (path traversal, redb names).
+    let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
     if !skip_enforcement {
         validate_slug_format(palace_name)?;
     }
-    if !skip_enforcement && !force {
-        let cwd = args
-            .get("cwd")
+    let req = PalaceCreateRequest {
+        name: palace_name,
+        description: args
+            .get("description")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(std::path::Path::new)
-            .map(|p| p.to_path_buf())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| state.data_root.clone());
-        crate::project_root::validate_palace_name(palace_name, &cwd)?;
-    }
-
-    let description = args
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let palace = Palace {
-        id: PalaceId::new(palace_name),
-        name: palace_name.to_string(),
-        description,
-        created_at: chrono::Utc::now(),
-        data_dir: state.data_root.join(palace_name),
+            .map(str::to_string),
+        cwd: args.get("cwd").and_then(|v| v.as_str()),
+        force,
     };
-    let _handle = state
-        .registry
-        .create_palace(&state.data_root, palace)
-        .context("create_palace")?;
-    // Issue #228: keep the in-memory palace-name cache in sync so
-    // subsequent writes can resolve the friendly name without a disk
-    // walk. The id == name pairing matches what the registry persisted.
-    state
-        .palace_names
-        .insert(palace_name.to_string(), palace_name.to_string());
-    // Issue #96: emit so MCP-driven palace creation lands in the
-    // dashboard activity feed alongside HTTP-origin creates.
-    state.emit(DaemonEvent::PalaceCreated {
-        id: palace_name.to_string(),
-        name: palace_name.to_string(),
-        source: ActivitySource::Mcp,
-    });
-    // Issue #60: auto-seed the KG with temporal metadata so every
-    // new palace has at least `created_at` + `bootstrapped_at`
-    // triples anchored to the palace name. We deliberately do NOT
-    // pass a project_path here — that requires an explicit user
-    // decision (which directory belongs to this palace?). Failures
-    // are non-fatal: the palace was already created, and the user
+    let result = create_palace(state, req, ActivitySource::Mcp).map_err(|e| match e {
+        PalaceCreateError::Invalid(msg) => anyhow!(msg),
+        PalaceCreateError::Forbidden(e) | PalaceCreateError::Store(e) => e,
+    })?;
+    // Issue #60: auto-seed the KG with temporal metadata so every new palace
+    // has at least `created_at` + `bootstrapped_at` triples anchored to the
+    // palace name. No project_path: that needs an explicit user decision.
+    // Failures are non-fatal: the palace was already created, and the user
     // can re-run `kg_bootstrap` manually if needed.
-    let bootstrap_summary = match crate::bootstrap::bootstrap_palace(state, palace_name, None).await
-    {
-        Ok(r) => Some(serde_json::json!({
-            "triples_asserted": r.triples_asserted,
-            "project_subject": r.project_subject,
-        })),
-        Err(e) => {
-            tracing::warn!(
+    let mut bootstrap_summary = None;
+    if result.status == PalaceCreateStatus::Created {
+        match crate::bootstrap::bootstrap_palace(state, palace_name, None).await {
+            Ok(r) => {
+                bootstrap_summary = Some(json!({
+                    "triples_asserted": r.triples_asserted,
+                    "project_subject": r.project_subject,
+                }));
+            }
+            Err(e) => tracing::warn!(
                 palace = %palace_name,
                 "auto-bootstrap on palace_create failed: {e:#}",
-            );
-            None
+            ),
         }
-    };
-    Ok(json!({
-        "palace_id": palace_name,
-        "status": "created",
-        "bootstrap": bootstrap_summary,
-    }))
+    }
+    let mut out = serde_json::to_value(&result).context("serialize palace_create result")?;
+    out["bootstrap"] = json!(bootstrap_summary);
+    Ok(out)
 }
 
 pub(crate) async fn handle_palace_list(state: &AppState, _args: Value) -> Result<Value> {

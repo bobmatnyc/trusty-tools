@@ -220,7 +220,6 @@ crates/trusty-memory/src/lib.rs	get_prompt_context_returns_cached_or_hint
 crates/trusty-memory/src/lib.rs	health_endpoint_reports_bound_addr
 crates/trusty-memory/src/lib.rs	sse_stream_receives_palace_created
 crates/trusty-memory/src/messaging/operations.rs	cwd_palace_slug_falls_back_to_basename
-crates/trusty-memory/src/project_root/detection.rs	lazy_write_skipped_for_temp_dir_root
 crates/trusty-memory/src/project_root/mod.rs	project_slug_personal_always_allowed
 crates/trusty-memory/src/prompt_facts.rs	gather_hot_triples_skips_non_hot
 crates/trusty-memory/src/prompt_facts.rs	get_prompt_context_filters_by_query
@@ -230,9 +229,6 @@ crates/trusty-memory/src/prompt_log/config.rs	config_from_env_disabled
 crates/trusty-memory/src/prompt_log/config.rs	config_from_env_overrides_dir
 crates/trusty-memory/src/service/core.rs	palace_list_includes_richer_counts
 crates/trusty-memory/src/service/helpers.rs	palace_list_includes_richer_counts
-crates/trusty-memory/src/service/types.rs	create_palace_accepts_pinned_slug_via_cwd
-crates/trusty-memory/src/service/types.rs	create_palace_force_bypasses_validation
-crates/trusty-memory/src/service/types.rs	create_palace_rejects_mismatch_when_cwd_given
 crates/trusty-memory/src/service/types.rs	palace_list_includes_richer_counts
 crates/trusty-memory/src/tools/chat_ops.rs	chat_session_get_missing_errors
 crates/trusty-memory/src/tools/helpers.rs	dispatch_remember_rejects_short_content

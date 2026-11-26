@@ -1,21 +1,21 @@
 //! Dispatcher-level test for creating a palace under a live alias name (#9544).
 //!
-//! Why: the refusal lives in the registry and its wire code in `rpc`; this
-//! pins that the `palace_create` MCP tool keeps the typed `LiveAliasError` in
-//! the error it returns, which is what both transports downcast.
+//! Why: the registry refuses to shadow a live alias; this pins that the
+//! `palace_create` MCP tool turns that into an `exists` answer (#11823).
 //! What: drives `dispatch_tool` against a tempdir-rooted `AppState`.
 //! Test: this IS the test module.
 
 use super::*;
 
-/// Why (#9544): creating a palace under a live alias name shadows the alias
-/// for good, splitting the name off the palace it pointed at.
+/// Why (#9544, #11823): creating a palace under a live alias name would
+/// shadow the alias for good; since #11823 the create answers `exists` with
+/// the alias target instead of an error, and still writes nothing.
 /// What: creates a palace, aliases a second name to it, then calls
-/// `palace_create` for the alias name. Asserts the error downcasts to
-/// `LiveAliasError` and that no `palace.json` exists for the alias.
+/// `palace_create` for the alias name. Asserts `status: exists`,
+/// `alias_of` names the target, and no `palace.json` exists for the alias.
 /// Test: this function.
 #[tokio::test]
-async fn palace_create_tool_refuses_a_live_alias_name() {
+async fn palace_create_tool_answers_exists_for_a_live_alias_name() {
     let (state, _tmp) = test_state();
     dispatch_tool(&state, "palace_create", json!({"name": "canon-target"}))
         .await
@@ -27,13 +27,11 @@ async fn palace_create_tool_refuses_a_live_alias_name() {
     )
     .expect("register_alias");
 
-    let err = dispatch_tool(&state, "palace_create", json!({"name": "canon-alias"}))
+    let out = dispatch_tool(&state, "palace_create", json!({"name": "canon-alias"}))
         .await
-        .expect_err("a live alias name must be refused");
-    let live = err
-        .downcast_ref::<trusty_common::palace_alias::LiveAliasError>()
-        .unwrap_or_else(|| panic!("expected LiveAliasError, got {err:#}"));
-    assert_eq!(live.target, "canon-target");
+        .expect("a live alias name answers exists");
+    assert_eq!(out["status"], "exists", "{out}");
+    assert_eq!(out["alias_of"], "canon-target", "{out}");
     assert!(
         !state
             .data_root

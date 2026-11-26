@@ -285,7 +285,7 @@ this table is generated from it, not maintained by hand.
 | `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
 | `palace_backup` | `dest?`, `palace?` | #9282: write a consistent backup of one palace while the daemon serves it; writers are not paused. |
 | `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |
-| `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace. |
+| `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace, or report the existing one. |
 | `palace_delete` | `palace_id`, `force?` | Delete an entire memory palace, including its drawers, vectors, and knowledge graph. |
 | `palace_dream` | `palace`, `compact?`, `dry_run?`, `max_age_days?`, `room?` | On-demand LLM-driven consolidation for a palace (issue #1721). |
 | `palace_embed_sweep` | — | #5000 / #4786: vector coverage for EVERY palace on disk, uncapped. |

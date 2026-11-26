@@ -497,6 +497,26 @@ pub fn resolve_palace_with_remote(
     start: &Path,
     explicit_remote: Option<&str>,
 ) -> Result<PalaceResolution, PalaceResolveError> {
+    resolve_with(start, explicit_remote, ResolveEnv::Honor)
+}
+
+/// Whether resolution reads this process's `TRUSTY_MEMORY_PALACE` (#11823).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolveEnv {
+    /// Level 1 applies: the caller is the project's own process.
+    Honor,
+    /// Level 1 is skipped: the caller (the memory daemon) serves a project
+    /// that sent its directory, and the variable is the daemon's, not the
+    /// project's.
+    Ignore,
+}
+
+/// [`resolve_palace_with_remote`] with level 1 switched by `env`.
+fn resolve_with(
+    start: &Path,
+    explicit_remote: Option<&str>,
+    env: ResolveEnv,
+) -> Result<PalaceResolution, PalaceResolveError> {
     let project_root = find_project_root(start);
 
     // Level 2 is read and validated FIRST even though level 1 outranks it: an
@@ -513,8 +533,13 @@ pub fn resolve_palace_with_remote(
         None => None,
     };
 
-    // Level 1: the operator escape hatch.
-    if let Some(raw) = palace_override_from_env() {
+    // Level 1: the operator escape hatch. #11823: never for a daemon resolving
+    // a client's project.
+    let env_override = match env {
+        ResolveEnv::Honor => palace_override_from_env(),
+        ResolveEnv::Ignore => None,
+    };
+    if let Some(raw) = env_override {
         // #2443: this level slugifies but never went through the pure core, so
         // it was the one derived id that kept no length bound.
         let slug = clamp_palace_id(&slugify_string(&raw));
@@ -581,6 +606,202 @@ pub fn resolve_palace_with_remote(
             start: start.to_path_buf(),
         }),
     }
+}
+
+/// What a caller must do so the project's resolved palace is servable (#11823).
+///
+/// Why: readers name a palace with [`resolve_palace`], but older creators named
+/// it after the project folder. A create for the resolved name must therefore
+/// first look for a palace stored under the folder name and link it, never hide
+/// it behind a new empty palace and never rename or delete it.
+/// What: one variant per action; [`plan_palace_create`] is the only producer.
+/// Test: `plan_exists_when_the_resolved_palace_exists`,
+/// `plan_aliases_when_folder_differs_from_repo_name`,
+/// `plan_creates_when_neither_palace_exists`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PalaceCreatePlan {
+    /// The resolved palace already exists; nothing to do.
+    Exists {
+        /// The resolved palace id.
+        id: String,
+    },
+    /// The resolved palace is missing and a palace stored under the project's
+    /// folder name exists: register the alias `resolved` → `folder`.
+    AliasToFolder {
+        /// The resolved palace id — the alias name.
+        resolved: String,
+        /// The existing folder-named palace — the alias target.
+        folder: String,
+    },
+    /// Neither palace exists: create the resolved palace.
+    Create {
+        /// The resolved palace id to create.
+        id: String,
+    },
+}
+
+/// Why [`plan_palace_create`] could not produce a plan.
+///
+/// Why: a malformed pin must block the create with no fallback name, a create
+/// with no project directory has no project to name, and a lookup that could
+/// not answer must never read as "absent" (#11823).
+/// What: the resolver's own error, passed through; a start outside any
+/// project directory; or the caller's palace lookup failing.
+/// Test: `plan_propagates_a_malformed_pin`, `plan_rejects_a_start_with_no_project_dir`,
+/// `plan_refuses_when_a_lookup_fails`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PalaceCreatePlanError {
+    /// The resolver refused, for example on an untrustworthy pin.
+    #[error(transparent)]
+    Resolve(#[from] PalaceResolveError),
+    /// `start` is not inside a git checkout or a marked project directory.
+    #[error("cannot plan a palace create from {}: it is not inside a project directory", start.display())]
+    NoProjectDir {
+        /// The directory planning started from.
+        start: PathBuf,
+    },
+    /// The caller's existence lookup failed for `id`; nothing is planned.
+    #[error("look up palace `{id}` before create: {source}")]
+    Lookup {
+        /// The palace id being looked up.
+        id: String,
+        /// The lookup's own error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+/// Decide whether the project at `start` needs its palace created, aliased to
+/// a folder-named palace, or left alone (#11823).
+///
+/// Why: the store's create call overwrites an existing palace's metadata, and a
+/// palace created under the folder name by an older creator holds the
+/// project's memory. The decision has to be pure so every create path (daemon,
+/// `tctl ensure`, `tm` launch) answers it the same way and tests can pin it.
+/// What: resolves with [`resolve_palace`] (errors propagate, never a fallback),
+/// requires a project directory — the main worktree root, else the detected
+/// project root — and asks `palace_exists` (the caller's daemon lookup) about
+/// at most two ids:
+///
+/// 1. the resolved id exists → [`PalaceCreatePlan::Exists`];
+/// 2. the source is [`PalaceSource::GitOwnerRepo`] or [`PalaceSource::ParentDir`],
+///    the folder slug of the project directory differs from the resolved id,
+///    and that folder palace exists → [`PalaceCreatePlan::AliasToFolder`];
+/// 3. otherwise → [`PalaceCreatePlan::Create`].
+///
+/// A lookup error is [`PalaceCreatePlanError::Lookup`]: it never yields
+/// `Create` and never skips the alias check. An
+/// [`PalaceSource::EnvOverride`] or [`PalaceSource::PinFile`] id is an
+/// explicit user choice, so no folder alias is planned for it. The folder slug
+/// keys on the main worktree root, so a worktree and its main checkout plan
+/// the same action. Performs git probes and a pin read; no daemon I/O.
+///
+/// Test: `plan_aliases_for_a_repo_with_no_remote`,
+/// `plan_never_aliases_an_env_or_pin_choice`,
+/// `plan_is_the_same_from_a_worktree_and_its_main_checkout`,
+/// `plan_never_aliases_a_palace_to_itself`, `plan_refuses_when_a_lookup_fails`.
+pub fn plan_palace_create<E>(
+    start: &Path,
+    palace_exists: impl Fn(&str) -> Result<bool, E>,
+) -> Result<PalaceCreatePlan, PalaceCreatePlanError>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    plan_with(start, ResolveEnv::Honor, palace_exists)
+}
+
+/// [`plan_palace_create`] for a daemon serving a client's project (#11823).
+///
+/// Why: inside the memory daemon `TRUSTY_MEMORY_PALACE` is the daemon's own
+/// variable; a client's create must be named from the client's project only.
+/// What: the same plan with resolution level 1 skipped (see
+/// [`resolve_palace_for_project`]).
+/// Test: `project_plan_ignores_the_process_palace_env`.
+pub fn plan_palace_create_for_project<E>(
+    start: &Path,
+    palace_exists: impl Fn(&str) -> Result<bool, E>,
+) -> Result<PalaceCreatePlan, PalaceCreatePlanError>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    plan_with(start, ResolveEnv::Ignore, palace_exists)
+}
+
+/// The palace a client's project directory names, ignoring this process's
+/// `TRUSTY_MEMORY_PALACE` and requiring a project directory (#11823).
+///
+/// Why: the daemon validates a client's create against exactly the name the
+/// project's own readers resolve (pin, git `owner/repo`, `parent/dir`).
+/// What: levels 2–4 of [`resolve_palace_with_remote`]; a start outside any
+/// project directory is [`PalaceCreatePlanError::NoProjectDir`].
+/// Test: `project_plan_ignores_the_process_palace_env`,
+/// `plan_rejects_a_start_with_no_project_dir`.
+pub fn resolve_palace_for_project(start: &Path) -> Result<PalaceResolution, PalaceCreatePlanError> {
+    let resolution = resolve_with(start, None, ResolveEnv::Ignore)?;
+    project_dir_of(start, &resolution)?;
+    Ok(resolution)
+}
+
+/// #11823 (Q5): the main worktree root, else the detected project root.
+fn project_dir_of(
+    start: &Path,
+    resolution: &PalaceResolution,
+) -> Result<PathBuf, PalaceCreatePlanError> {
+    main_worktree_root(start)
+        .or_else(|| resolution.project_root.clone())
+        .ok_or_else(|| PalaceCreatePlanError::NoProjectDir {
+            start: start.to_path_buf(),
+        })
+}
+
+fn plan_with<E>(
+    start: &Path,
+    env: ResolveEnv,
+    palace_exists: impl Fn(&str) -> Result<bool, E>,
+) -> Result<PalaceCreatePlan, PalaceCreatePlanError>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let resolution = resolve_with(start, None, env)?;
+    // #11823 (Q5): a create with no project directory is rejected.
+    let project_dir = project_dir_of(start, &resolution)?;
+    // #11823: a lookup error refuses the plan; it is never read as "absent".
+    let exists = |id: &str| {
+        palace_exists(id).map_err(|e| PalaceCreatePlanError::Lookup {
+            id: id.to_string(),
+            source: e.into(),
+        })
+    };
+    let id = resolution.id;
+    if exists(&id)? {
+        return Ok(PalaceCreatePlan::Exists { id });
+    }
+    let folder = match resolution.source {
+        PalaceSource::GitOwnerRepo | PalaceSource::ParentDir => folder_palace_slug(&project_dir),
+        PalaceSource::EnvOverride | PalaceSource::PinFile => None,
+    };
+    match folder {
+        Some(folder) if folder != id && exists(&folder)? => Ok(PalaceCreatePlan::AliasToFolder {
+            resolved: id,
+            folder,
+        }),
+        _ => Ok(PalaceCreatePlan::Create { id }),
+    }
+}
+
+/// The folder-name rule older creators used: the slugified, clamped basename
+/// of `root` (#11823).
+///
+/// Why: the plan's alias step and trusty-memory's `project_slug_from_basename`
+/// must name the same folder palace; one definition keeps them from drifting.
+/// What: `None` when the basename is missing, not UTF-8, or slugifies to empty.
+/// Test: `folder_palace_slug_clamps_and_slugifies`.
+pub fn folder_palace_slug(root: &Path) -> Option<String> {
+    let basename = root.file_name()?.to_str()?;
+    let slug = clamp_palace_id(&slugify_string(basename));
+    (!slug.is_empty()).then_some(slug)
 }
 
 /// Resolve the MAIN worktree's root directory for the repo containing `start`.

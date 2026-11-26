@@ -77,7 +77,7 @@ pub use error::EngineError;
 pub(crate) use maintenance_lease::{LeaseStatus, MaintenanceLease};
 // #9278 (ruling 2026-10-14): no root re-export of the palace types or the
 // handle, so each has one path before 1.0.
-pub use registry::PalaceRegistry;
+pub use registry::{PalaceCreateOutcome, PalaceRegistry};
 pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_to_uuid};
 // #9278 (A5): the crate-only consolidation items lose their root re-export;
 // `MockInference` is test-support (ruling D3).

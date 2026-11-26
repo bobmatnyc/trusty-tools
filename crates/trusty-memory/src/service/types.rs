@@ -120,24 +120,21 @@ impl From<PersistedDreamStats> for DreamStatusPayload {
 
 /// `POST /api/v1/palaces` body — service-facing version.
 ///
-/// Why: Change 2 — the optional `cwd` field lets HTTP callers pass the
-/// filesystem path of the project they are operating from. When present,
-/// `validate_palace_name` uses it as the `start` for pin-file-based
-/// validation instead of the daemon's own cwd (which is `~` or `/` and
-/// rarely meaningful). When absent the existing daemon-cwd fallback applies
-/// so older clients continue to work.
-/// What: `name` is required; `description`, `cwd`, and `force` are optional.
-/// Test: `create_palace_accepts_pinned_slug_via_cwd`,
-///       `create_palace_rejects_mismatch_when_cwd_given`,
-///       `create_palace_force_bypasses_validation`.
+/// Why: the `cwd` field names the project the palace belongs to; the daemon
+/// resolves the palace name from it, never from its own cwd or environment.
+/// #11823: a project create without `cwd` is refused.
+/// What: `name` is required; `cwd` is required unless `force` is set or the
+/// name is `personal`; `description` is optional.
+/// Test: `service_create_without_cwd_is_a_bad_request`,
+///       `create_palace_for_a_live_alias_answers_exists`.
 #[derive(Deserialize, Clone, Debug)]
 pub struct CreatePalaceBody {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    /// Optional caller working directory used for palace-name enforcement.
-    /// When present, `validate_palace_name` uses this path instead of the
-    /// daemon's process cwd. Useful when the daemon is launched from `~/`
+    /// The caller's project directory, used for palace-name enforcement.
+    /// Required for a project palace (#11823); the daemon's own cwd is never
+    /// used. Useful when the daemon is launched from `~/`
     /// but the caller is inside a project tree.
     #[serde(default)]
     pub cwd: Option<String>,
