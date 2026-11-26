@@ -14,6 +14,7 @@
 //! size cap).
 
 use super::super::ooxml::forge_uncompressed_size;
+use super::super::MAX_OFFICE_FILE_BYTES;
 use super::*;
 use calamine::{Data, Sheets};
 use std::io::Write;
@@ -141,7 +142,7 @@ fn test_extracts_single_sheet() {
     let path = tmp.path().join("book.xlsx");
     std::fs::write(&path, xlsx).unwrap();
 
-    let extracted = extract(&path).expect("extraction must succeed");
+    let extracted = extract(&path, MAX_OFFICE_FILE_BYTES).expect("extraction must succeed");
     assert!(extracted.text.contains("== Sheet1 =="));
     assert!(extracted.text.contains("Name\tAmount"));
     assert!(extracted.text.contains("Widget\t42"));
@@ -158,7 +159,7 @@ fn test_extracts_multiple_sheets_as_sections() {
     let path = tmp.path().join("book.xlsx");
     std::fs::write(&path, xlsx).unwrap();
 
-    let extracted = extract(&path).expect("extraction must succeed");
+    let extracted = extract(&path, MAX_OFFICE_FILE_BYTES).expect("extraction must succeed");
     assert!(extracted.text.contains("== Revenue =="));
     assert!(extracted.text.contains("== Costs =="));
     // Revenue section appears before the Costs section.
@@ -211,7 +212,7 @@ fn test_pathological_cell_attribute_count_does_not_hang() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = extract(&path);
+        let result = extract(&path, MAX_OFFICE_FILE_BYTES);
         let _ = tx.send(result.is_ok());
     });
     let completed = rx.recv_timeout(std::time::Duration::from_secs(10));
@@ -241,7 +242,7 @@ fn test_cell_whitespace_trimmed_and_eol_normalized() {
     let path = tmp.path().join("book.xlsx");
     std::fs::write(&path, xlsx).unwrap();
 
-    let extracted = extract(&path).expect("extraction must succeed");
+    let extracted = extract(&path, MAX_OFFICE_FILE_BYTES).expect("extraction must succeed");
     // Leading/trailing whitespace is trimmed from the cell text.
     assert!(
         extracted.text.contains("padded\tline1\nline2"),
@@ -420,7 +421,7 @@ fn zip_bomb_extraction_child_worker() {
         return;
     };
     if !fixture.is_empty() {
-        let result = extract(Path::new(&fixture));
+        let result = extract(Path::new(&fixture), MAX_OFFICE_FILE_BYTES);
         println!("CHILD_RESULT_IS_ERR={}", result.is_err());
     }
     println!("CHILD_PEAK_RSS_BYTES={}", peak_rss_bytes());
@@ -684,7 +685,8 @@ fn test_oversized_package_reports_too_large() {
     let path = tmp.path().join("huge.xlsx");
     std::fs::write(&path, vec![0u8; (MAX_OFFICE_FILE_BYTES + 1) as usize]).unwrap();
 
-    let err = extract(&path).expect_err("an over-cap document must be refused");
+    let err =
+        extract(&path, MAX_OFFICE_FILE_BYTES).expect_err("an over-cap document must be refused");
     assert!(
         matches!(err, ExtractError::TooLarge { cap, .. } if cap == MAX_OFFICE_FILE_BYTES),
         "expected TooLarge naming the office-document cap, got: {err}"
@@ -704,7 +706,8 @@ fn test_document_exactly_at_size_cap_is_accepted() {
     let path = tmp.path().join("exact.xlsx");
     std::fs::write(&path, vec![0u8; MAX_OFFICE_FILE_BYTES as usize]).unwrap();
 
-    let bytes = read_package_bytes(&path).expect("a document exactly at the cap is within it");
+    let bytes = read_package_bytes(&path, MAX_OFFICE_FILE_BYTES)
+        .expect("a document exactly at the cap is within it");
     assert_eq!(bytes.len() as u64, MAX_OFFICE_FILE_BYTES);
 }
 
@@ -739,7 +742,8 @@ fn test_stream_longer_than_its_stat_is_still_refused() {
         )
     });
 
-    let err = read_package_bytes(&path).expect_err("a stream past the cap must be refused");
+    let err = read_package_bytes(&path, MAX_OFFICE_FILE_BYTES)
+        .expect_err("a stream past the cap must be refused");
     assert!(
         matches!(err, ExtractError::TooLarge { cap, .. } if cap == MAX_OFFICE_FILE_BYTES),
         "expected TooLarge from the post-read check, got: {err}"
@@ -840,7 +844,8 @@ fn test_large_legitimate_workbook_still_extracts() {
     let path = tmp.path().join("big.xlsx");
     std::fs::write(&path, xlsx).unwrap();
 
-    let extracted = extract(&path).expect("a large but well-formed workbook must extract");
+    let extracted = extract(&path, MAX_OFFICE_FILE_BYTES)
+        .expect("a large but well-formed workbook must extract");
     assert!(extracted.text.contains("cell-0-0-value"));
     assert!(extracted.text.contains("cell-1999-199-value"));
 }
@@ -863,7 +868,7 @@ fn test_not_a_workbook_errors() {
     let path = tmp.path().join("not-a-workbook.xlsx");
     std::fs::write(&path, b"this is not a spreadsheet").unwrap();
 
-    let err = extract(&path).expect_err("non-workbook input must error");
+    let err = extract(&path, MAX_OFFICE_FILE_BYTES).expect_err("non-workbook input must error");
     assert_eq!(
         err.to_string(),
         "spreadsheet extraction failed: Cannot detect file format"

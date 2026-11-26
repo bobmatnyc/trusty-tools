@@ -69,6 +69,12 @@ pub struct RegisterFilters {
     /// a background job. Set `false` for synchronous full-index behaviour.
     /// Why/What/Test: see `register_index_with_daemon_filtered`.
     pub defer_embed: bool,
+    /// #11655: the config's source and office/PDF size caps, sent as
+    /// `source_file_max_bytes` / `office_file_max_bytes` only when set.
+    /// Test: `create_params_carries_configured_size_caps`.
+    pub source_file_max_bytes: Option<u64>,
+    /// #11655: see `source_file_max_bytes`.
+    pub office_file_max_bytes: Option<u64>,
 }
 
 impl Default for RegisterFilters {
@@ -84,6 +90,8 @@ impl Default for RegisterFilters {
             lexical_only: false,
             skip_kg: false,
             defer_embed: true,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         }
     }
 }
@@ -198,6 +206,10 @@ pub(crate) async fn register_on(
                 .get("created")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // #11655: caps apply at registration only; say when they did not.
+            if let Some(line) = size_caps_warning(index_name, &body) {
+                eprintln!("{line}");
+            }
             Ok(RegisterOutcome::Registered { created })
         }
         // #9214 H2: unreachable only; it used to be `Err(_) => Unreachable`.
@@ -278,7 +290,40 @@ fn create_params(
     if !filters.defer_embed {
         create_body["defer_embed"] = serde_json::json!(false);
     }
+    // #11655: omitted when unset, so the daemon default (1 MiB / 10 MiB) holds.
+    if let Some(v) = filters.source_file_max_bytes {
+        create_body["source_file_max_bytes"] = serde_json::json!(v);
+    }
+    if let Some(v) = filters.office_file_max_bytes {
+        create_body["office_file_max_bytes"] = serde_json::json!(v);
+    }
     create_body
+}
+
+/// The warning line for a create answer whose size caps were not applied.
+///
+/// Why (#11655): caps are set when an index is registered, so caps added to
+/// the yaml for an existing index do nothing; the user must be told.
+/// What: `Some(line)` when the daemon answered `size_caps_applied: false`,
+/// naming the index, both cap sets and the remedy; `None` otherwise.
+/// Test: `a_create_answer_with_unapplied_caps_yields_one_warning_line`.
+pub(crate) fn size_caps_warning(index_name: &str, body: &serde_json::Value) -> Option<String> {
+    if body.get("size_caps_applied").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    let caps = |key: &str| {
+        let side = &body[key];
+        format!(
+            "source={} office={}",
+            side["source_file_max_bytes"], side["office_file_max_bytes"]
+        )
+    };
+    Some(format!(
+        "warning: index '{index_name}' is already registered with size caps {} (requested {}); \
+         delete the index and re-index to change the size caps",
+        caps("registered_size_caps"),
+        caps("requested_size_caps"),
+    ))
 }
 
 /// Fetch an index's chunk count from its status. `None` when the status

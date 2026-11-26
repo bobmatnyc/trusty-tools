@@ -156,6 +156,8 @@ pub(crate) fn walk_options(handle: &IndexHandle) -> WalkOptions {
         follow_links: handle.follow_links,
         extra_skip_dirs: handle.extra_skip_dirs.clone(),
         data_file_max_bytes: handle.data_file_max_bytes,
+        // #11655: the index's configured source and office/PDF caps.
+        size_caps: handle.size_caps,
     }
 }
 
@@ -520,6 +522,7 @@ pub(crate) async fn apply_modified(
                 watched,
                 indexer,
                 indexed_files,
+                handle.size_caps,
             )
             .await;
         }

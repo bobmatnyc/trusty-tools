@@ -83,6 +83,7 @@ fn make_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     })
 }
 

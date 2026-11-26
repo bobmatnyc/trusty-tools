@@ -306,6 +306,11 @@ pub(crate) async fn restore_index_on_demand(
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        // #11655: the persisted caps, defaults when unset.
+        size_caps: crate::service::size_caps::FileSizeCaps::resolve(
+            entry.source_file_max_bytes,
+            entry.office_file_max_bytes,
+        ),
     };
     let registered = state.registry.register(handle);
     // #4390: a cold-parked index reloaded on demand gets the same re-arm the

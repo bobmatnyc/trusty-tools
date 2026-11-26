@@ -57,8 +57,10 @@ pub mod reindex;
 pub mod roots_registry;
 // #8883: indexes this daemon serves but never rebuilds.
 pub(crate) mod serve_only;
+// #11655: per-index source and office/PDF size caps.
 pub mod server;
 pub mod shutdown_budget;
+pub mod size_caps;
 // #9459: close every redb corpus before `process::exit(0)` skips its `Drop`.
 pub mod shutdown_close;
 pub mod shutdown_flush;

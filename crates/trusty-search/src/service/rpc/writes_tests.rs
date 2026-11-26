@@ -295,6 +295,86 @@ async fn a_root_the_allowlist_has_not_approved_is_refused_and_registers_nothing(
     );
 }
 
+/// #11655: caps apply at registration. Re-registering an existing id with caps
+/// it does not hold answers `size_caps_applied: false` with both cap sets, on
+/// the socket and over HTTP alike; equal or absent caps leave the body as it was.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_re_registration_with_other_caps_reports_them_not_applied() {
+    let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
+    let root = safe_root("caps-11655");
+    let (state, rpc) = served(
+        SearchAppState::new(planted_registry("caps-11655", &root))
+            .with_allowlist_paths(allowlist(isolated.path(), &[&root])),
+    )
+    .await;
+    let mut raised = create_body("caps-11655", &root);
+    raised["source_file_max_bytes"] = serde_json::json!(2_097_152u64);
+
+    let over_socket = rpc_ok(&rpc, writes::METHOD_INDEX_CREATE, raised.clone()).await;
+    let over_http = http_body(create_index_report(&state, params(raised)).await);
+    for body in [&over_socket, &over_http] {
+        assert_eq!(body["created"], false, "{body}");
+        assert_eq!(body["size_caps_applied"], false, "{body}");
+        assert_eq!(
+            body["registered_size_caps"]["source_file_max_bytes"], 1_048_576u64,
+            "{body}"
+        );
+        assert_eq!(
+            body["requested_size_caps"]["source_file_max_bytes"], 2_097_152u64,
+            "{body}"
+        );
+        let message = body["message"].as_str().unwrap_or("");
+        assert!(message.contains("re-index"), "{body}");
+    }
+    let handle = state
+        .registry
+        .get(&IndexId::new("caps-11655"))
+        .expect("resident");
+    assert_eq!(
+        handle.size_caps.source, 1_048_576,
+        "the registered caps stay"
+    );
+
+    let mut same = create_body("caps-11655", &root);
+    same["source_file_max_bytes"] = serde_json::json!(1_048_576u64);
+    for body in [create_body("caps-11655", &root), same] {
+        let answer = rpc_ok(&rpc, writes::METHOD_INDEX_CREATE, body).await;
+        assert_eq!(answer["created"], false, "{answer}");
+        assert!(answer.get("size_caps_applied").is_none(), "{answer}");
+    }
+}
+
+/// #11655: an out-of-range size cap is refused on the socket exactly as over
+/// HTTP (`400 invalid_size_cap` → invalid params), and registers nothing.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn create_refuses_an_out_of_range_size_cap_over_the_socket() {
+    let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
+    let root = safe_root("caps-bad-11655");
+    let (state, rpc) = empty_served(isolated.path(), &[&root]).await;
+    let mut body = create_body("caps-bad-11655", &root);
+    body["office_file_max_bytes"] = serde_json::json!(0u64);
+
+    let over_http = http_refusal(create_index_report(&state, params(body.clone())).await);
+    assert_eq!(over_http.0, StatusCode::BAD_REQUEST, "{}", over_http.1);
+    assert_eq!(over_http.1["error"], "invalid_size_cap", "{}", over_http.1);
+    let over_socket = rpc_err(&rpc, writes::METHOD_INDEX_CREATE, body).await;
+    assert_same_refusal(
+        &over_http,
+        &over_socket,
+        trusty_common::uds::server::CODE_INVALID_PARAMS,
+        "out-of-range size cap",
+    );
+    assert!(state
+        .registry
+        .get(&IndexId::new("caps-bad-11655"))
+        .is_none());
+    assert!(!row_exists("caps-bad-11655"));
+}
+
 // ------------------------------------------------------------------ delete ---
 
 /// Why: #6363 — a registration the #767 gate dropped at warm boot lives ONLY in

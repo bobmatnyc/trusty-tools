@@ -285,6 +285,9 @@ pub(crate) async fn relocate_index_report(
         // Issue #1372: preserve hygiene knobs across relocation.
         extra_skip_dirs: existing.extra_skip_dirs.clone(),
         data_file_max_bytes: Some(existing.data_file_max_bytes),
+        // #11655: preserve the size-cap overrides across relocation.
+        source_file_max_bytes: existing.size_caps.overrides().0,
+        office_file_max_bytes: existing.size_caps.overrides().1,
         lexical_only: existing.lexical_only,
         skip_kg: existing.skip_kg,
         skip_vector: existing.skip_vector,
@@ -435,6 +438,7 @@ pub(crate) async fn relocate_index_report(
         // #6524: a rebuild must not drop an operator's pause or the event feed.
         embedding_pause: Arc::clone(&existing.embedding_pause),
         file_events: Arc::clone(&existing.file_events),
+        size_caps: existing.size_caps,
     };
 
     // Issue #3995 round 5 (CRITICAL): snapshot the cold-store entry (if any)

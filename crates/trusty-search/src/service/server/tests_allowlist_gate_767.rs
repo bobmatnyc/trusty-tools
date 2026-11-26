@@ -84,6 +84,8 @@ fn create_req(id: &str, root_path: PathBuf) -> super::router::CreateIndexRequest
         extra_skip_dirs: None,
         data_file_max_bytes: None,
         allow_sensitive_path: false,
+        source_file_max_bytes: None,
+        office_file_max_bytes: None,
     }
 }
 

@@ -65,6 +65,8 @@ fn create_req_with_skip_kg(
         extra_skip_dirs: None,
         data_file_max_bytes: None,
         allow_sensitive_path: false,
+        source_file_max_bytes: None,
+        office_file_max_bytes: None,
     }
 }
 

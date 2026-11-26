@@ -65,6 +65,8 @@ async fn validate_root_path_denylist_rejects_ssh() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;
@@ -266,6 +268,8 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: false,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;
@@ -335,6 +339,8 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
             extra_skip_dirs: None,
             data_file_max_bytes: None,
             allow_sensitive_path: true,
+            source_file_max_bytes: None,
+            office_file_max_bytes: None,
         },
     )
     .await;

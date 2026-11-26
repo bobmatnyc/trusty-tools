@@ -304,6 +304,8 @@ pub(crate) async fn create_index_report(
     let id = IndexId::new(req.id.clone());
     // #8922: refused before anything is registered.
     super::index_config::reject_invalid_globs(req.exclude_globs.as_deref())?;
+    // #11655: an out-of-range size cap is refused before anything registers.
+    super::create_size_caps::reject_invalid(&req)?;
     // Issue #63: validate root_path is absolute and points at an existing
     // directory before registering. Previously the handler accepted any
     // `PathBuf` the client supplied, so a relative path (e.g. `claude-mpm`)
@@ -390,7 +392,7 @@ pub(crate) async fn create_index_report(
         super::create_layout::refuse_layout_change(&req, Some(&*registered)).await?;
         // #7434: `roots` the index does not hold are refused, never dropped.
         super::indexes_roots::refuse_unapplied_roots(&req, &registered)?;
-        return Ok(serde_json::json!({
+        let mut body = serde_json::json!({
             "id": req.id,
             "created": false,
             "reason": "already exists",
@@ -399,7 +401,10 @@ pub(crate) async fn create_index_report(
             // same reason as `root_path_mismatch_response` — serializing a raw
             // `Path` through `json!` panics on a non-UTF-8 path (#5827).
             "root_path": registered_root.display().to_string(),
-        }));
+        });
+        // #11655: caps apply at registration; say so when these were ignored.
+        super::create_size_caps::report_unapplied(&req, &registered, &mut body);
+        return Ok(body);
     }
     // Issue #2336: reject a second live index over the same canonical
     // root_path. Two registrations sharing one colocated root resolve to the
@@ -714,6 +719,8 @@ pub(crate) async fn create_index_report(
             follow_links,
             extra_skip_dirs: extra_skip_dirs.clone(),
             data_file_max_bytes: data_file_max_bytes_opt,
+            source_file_max_bytes: req.source_file_max_bytes,
+            office_file_max_bytes: req.office_file_max_bytes,
             lexical_only,
             skip_kg,
             skip_vector,
@@ -863,6 +870,10 @@ pub(crate) async fn create_index_report(
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: crate::service::size_caps::FileSizeCaps::resolve(
+            req.source_file_max_bytes,
+            req.office_file_max_bytes,
+        ),
     };
     // Issue #3995 round 5 (CRITICAL): snapshot whatever cold-store entry is
     // parked under `id` right now, BEFORE registering the fresh handle below.

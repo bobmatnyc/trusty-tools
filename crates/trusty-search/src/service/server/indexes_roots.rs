@@ -384,6 +384,7 @@ fn handle_with_roots(existing: &IndexHandle, table: Vec<PathBuf>) -> IndexHandle
         walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
         embedding_pause: Arc::clone(&existing.embedding_pause),
         file_events: Arc::clone(&existing.file_events),
+        size_caps: existing.size_caps,
     }
 }
 

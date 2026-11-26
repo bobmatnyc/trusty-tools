@@ -171,18 +171,24 @@ pub async fn handle_index(
     // 5. Single-index path — merge name/exclude (CLI flag > dotfile > default).
     let index_name = resolve_index_name(cli_name, project_cfg.as_ref(), &project_path);
     let exclude_globs = resolve_excludes(cli_exclude, project_cfg.as_ref());
+    // #11655: the `.trusty-search.yaml` size caps reach the daemon here.
+    let source_file_max_bytes = project_cfg.as_ref().and_then(|c| c.source_file_max_bytes);
+    let office_file_max_bytes = project_cfg.as_ref().and_then(|c| c.office_file_max_bytes);
+    let caps_set = source_file_max_bytes.is_some() || office_file_max_bytes.is_some();
 
     // Issue #109, Phase 1: when `--lexical-only` is set, always go through
     // the filtered path so the daemon receives the opt-in even when no
     // other filter fields are populated.
     // Issue #313: `--no-kg` likewise forces the filtered path.
-    if exclude_globs.is_empty() && !lexical_only && !no_kg {
+    if exclude_globs.is_empty() && !lexical_only && !no_kg && !caps_set {
         index_one(&index_name, &project_path, force, timeout).await
     } else {
         let filters = RegisterFilters {
             exclude_globs,
             lexical_only,
             skip_kg: no_kg,
+            source_file_max_bytes,
+            office_file_max_bytes,
             ..RegisterFilters::default()
         };
         index_one_with_filters(&index_name, &project_path, force, timeout, &filters).await
@@ -328,6 +334,9 @@ pub(crate) fn filters_from_index_config(idx: &IndexConfig) -> RegisterFilters {
         // Issue #923: `defer_embed` is a first-class YAML field. Default `true`
         // in `IndexConfig::default()`; only set to `false` by explicit YAML opt-out.
         defer_embed: idx.defer_embed,
+        // #11655: per-index size caps from `trusty-search.yaml`.
+        source_file_max_bytes: idx.source_file_max_bytes,
+        office_file_max_bytes: idx.office_file_max_bytes,
     }
 }
 

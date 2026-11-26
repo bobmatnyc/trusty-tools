@@ -59,6 +59,7 @@ async fn reindex_honours_include_paths_filter() {
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
     let progress = Arc::new(ReindexProgress::new());
     // Issue #2730: deterministic rendezvous — await the task instead of polling.
@@ -146,6 +147,7 @@ async fn reindex_honours_path_filter() {
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     });
     let progress = Arc::new(ReindexProgress::new());
     spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
@@ -908,6 +910,7 @@ fn make_handle_with_flags(
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     })
 }
 
@@ -970,6 +973,7 @@ fn make_handle_with_skip_vector(
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     })
 }
 

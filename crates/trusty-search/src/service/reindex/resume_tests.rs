@@ -116,6 +116,7 @@ fn make_handle_with(root: &Path, id: &str, indexer: CodeIndexer) -> Arc<IndexHan
         )),
         embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
         file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
+        size_caps: Default::default(),
     })
 }
 
