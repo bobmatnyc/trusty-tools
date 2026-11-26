@@ -274,6 +274,52 @@ pub(crate) fn resolve_daemon_gh_env_in(
     origin: &str,
     registry_dir: &Path,
 ) -> Result<GhEnv, GhFailure> {
+    let env = match resolve_tiers(origin, registry_dir)? {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                "worktree-reclaim: {e} — spawning gh with the ambient environment (#6623)"
+            );
+            GhEnv::default()
+        }
+    };
+    // #6867: an unbound gh is the one that consults the keychain on every poll.
+    if consults_the_keychain(&env) {
+        warn_once_about_the_keychain();
+    }
+    Ok(env)
+}
+
+/// The daemon's `gh` identity for `origin`, with NO ambient fallback (#11673).
+///
+/// Why: the PR watch loop binds the same identity worktree reclaim binds, but a
+/// static `github:` binding `resolve_gh_env` refuses must not become a `gh` run
+/// under launchd's bare environment that the loop reads as one more failed PR.
+/// What: [`resolve_daemon_gh_env_in`]'s registry-then-static tiers; a refused
+/// static binding is a [`GhFailure`] here, where reclaim logs it and goes on.
+/// An empty [`GhEnv`] (nothing configured) is still `Ok`: `gh`'s own login
+/// may answer, and the caller reports an exit-4 refusal.
+/// Test: `a_registry_refusal_spawns_no_gh`, `a_pinned_repo_reads_through_its_bound_identity`.
+pub(crate) fn resolve_strict_gh_env_in(
+    origin: &str,
+    registry_dir: &Path,
+) -> Result<GhEnv, GhFailure> {
+    resolve_tiers(origin, registry_dir)?.map_err(|e| {
+        GhFailure::new(format!(
+            "{e} — refusing to spawn gh with the ambient environment"
+        ))
+    })
+}
+
+/// The registry-then-static resolution both daemon callers share (#5850, #11673).
+///
+/// What: `Err` is a registry refusal; `Ok(Err)` is a static `github:` binding
+/// [`gh_identity::resolve_gh_env`] refuses; `Ok(Ok)` is the env to apply.
+fn resolve_tiers(
+    origin: &str,
+    registry_dir: &Path,
+) -> Result<Result<GhEnv, gh_identity::GhIdentityError>, GhFailure> {
     let origin = slug_as_url(origin);
     let config = TrustyToolsConfig::load();
     // #8510: an account-only registry pin uses a candidate token only once
@@ -295,26 +341,12 @@ pub(crate) fn resolve_daemon_gh_env_in(
     // #5850: the registry is what the operator-facing pinning paths write, so
     // it is consulted before the static config — and its failures BLOCK.
     match crate::core::gh_account_registry::pinned_gh_env_with(registry_dir, &origin, &prover) {
-        Ok(Some(env)) => return Ok(env),
+        Ok(Some(env)) => return Ok(Ok(env)),
         Ok(None) => {}
         Err(reason) => return Err(GhFailure::new(reason)),
     }
     let selected = gh_identity::select_config_for_origin(&config, Some(&origin));
-    let env = match gh_identity::resolve_gh_env(selected) {
-        Ok(env) => env,
-        Err(e) => {
-            tracing::warn!(
-                dir = %dir.display(),
-                "worktree-reclaim: {e} — spawning gh with the ambient environment (#6623)"
-            );
-            GhEnv::default()
-        }
-    };
-    // #6867: an unbound gh is the one that consults the keychain on every poll.
-    if consults_the_keychain(&env) {
-        warn_once_about_the_keychain();
-    }
-    Ok(env)
+    Ok(gh_identity::resolve_gh_env(selected))
 }
 
 /// Turn a `repo_slug_for` slug back into a URL `repo_url_matches` can compare.

@@ -28,11 +28,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use trusty_common::control_bus::{EventId, HarnessEvent, HarnessPayload, HarnessSource};
 
 use crate::core::gh_rate_limit::{backoff_secs, classify_any};
-use crate::core::pr_watch::gh::PrReader;
+use crate::core::pr_watch::gh::{IdentityError, PrReader};
 use crate::core::pr_watch::table::{Table, WatchRow};
 use crate::core::pr_watch::verdict::{Kind, Verdict, dedupe_key, detect, judge};
 
@@ -116,6 +116,8 @@ pub struct TickReport {
     pub removed: usize,
     /// Steps that failed and will be retried.
     pub failed: usize,
+    /// #11673: reads refused for want of a GitHub identity; one log line per tick.
+    pub identity_failed: usize,
     /// Whether a rate-limit refusal ended the tick.
     pub rate_limited: bool,
 }
@@ -147,7 +149,8 @@ impl PrWatchLoop {
     ///
     /// Test: `a_green_head_wakes_the_owner_once_across_ticks_and_restart`,
     /// `a_merged_pr_row_is_removed`, `each_tick_reads_at_most_the_bound`,
-    /// `a_rate_limited_read_pauses_the_watch_until_the_reset`.
+    /// `a_rate_limited_read_pauses_the_watch_until_the_reset`,
+    /// `an_unbound_tick_reports_one_identity_failure_for_every_row`.
     pub async fn tick(&mut self, now: u64) -> TickReport {
         let mut report = TickReport::default();
         if now < self.paused_until {
@@ -168,11 +171,17 @@ impl PrWatchLoop {
         let start = self.cursor % rows.len();
         let take = rows.len().min(MAX_ROWS_PER_TICK);
         self.cursor = (start + take) % rows.len();
+        let mut unbound = Vec::new();
         for i in 0..take {
             let row = rows[(start + i) % rows.len()].clone();
             report.read += 1;
             match self.check_row(&row, &mut report).await {
                 Ok(()) => self.streak = 0,
+                // #11673: no identity is one host-wide fault; reported once below.
+                Err(e) if e.downcast_ref::<IdentityError>().is_some() => {
+                    report.identity_failed += 1;
+                    unbound.push((format!("{}#{}", row.repo, row.pr), format!("{e:#}")));
+                }
                 // #11673: the daemon's gh is the real one; real limit texts count too.
                 Err(e) => match classify_any(&e) {
                     Some(hit) => {
@@ -181,6 +190,7 @@ impl PrWatchLoop {
                         self.paused_until = now.saturating_add(wait);
                         warn!("pr watch: gh rate limit; pausing {wait}s: {e:#}");
                         report.rate_limited = true;
+                        report_unbound(&unbound);
                         return report;
                     }
                     None => {
@@ -190,6 +200,7 @@ impl PrWatchLoop {
                 },
             }
         }
+        report_unbound(&unbound);
         report
     }
 
@@ -335,6 +346,30 @@ impl PrWatchLoop {
                 }
             }
         }
+    }
+}
+
+/// The one `error!` a tick's identity failures earn (#11673).
+///
+/// What: `None` for no failures; else one line naming the count, the PRs and
+/// the first failure, and what to configure.
+/// Test: `identity_failures_are_one_line_naming_every_pr`.
+pub fn unbound_summary(failures: &[(String, String)]) -> Option<String> {
+    let (_, first) = failures.first()?;
+    let prs: Vec<&str> = failures.iter().map(|(pr, _)| pr.as_str()).collect();
+    Some(format!(
+        "pr watch: {} read(s) had no usable GitHub identity this tick ({}); first: {first}. \
+         Pin the project's account in the registry, or bind `github:` (`config_dir` or \
+         `token_env`) in trusty-tools config, so the daemon's gh is authenticated (#11673).",
+        failures.len(),
+        prs.join(", ")
+    ))
+}
+
+/// Log [`unbound_summary`] at `error`, when there is one.
+fn report_unbound(failures: &[(String, String)]) {
+    if let Some(line) = unbound_summary(failures) {
+        error!("{line}");
     }
 }
 
