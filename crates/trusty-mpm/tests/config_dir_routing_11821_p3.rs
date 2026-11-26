@@ -324,3 +324,59 @@ fn token_env_shim_fails_closed_on_a_broken_install_file() {
     assert!(!err.contains("tok-11821"), "the token must not leak: {err}");
     assert_refused_closed(&fx, err);
 }
+
+/// An origin whose SSH alias no `~/.ssh/config` renames: the launch refuses
+/// at the host, before gh or `GET /user`, so a pre-fix run stays offline.
+const UNRESOLVED_ORIGIN: &str = "git@nohost-11821:acme/x.git";
+
+/// No gh shim and no per-login account dir landed under the `$HOME` state
+/// root, which only the lenient pin reader may use on a broken install.toml.
+fn assert_no_gh_writes(fx: &Fixture, err: &str) {
+    assert!(
+        err.contains("install.toml"),
+        "must name install.toml: {err}"
+    );
+    for tree in ["gh-shim", "gh-accounts"] {
+        let path = fx.home.join(".trusty-mpm").join(tree);
+        assert!(!path.exists(), "no writer may create {}", path.display());
+    }
+}
+
+/// #11821 P3-f2: an in-place relaunch of a pinned checkout refuses before it
+/// writes the gh shim; before the fix the shim root fell back to
+/// `$HOME/.trusty-mpm` and the refusal named the host, not install.toml. The
+/// pin itself is read from the `$HOME` registry: readers stay lenient.
+/// #9123: a credential test, so `#[serial]` inside `CredentialSandbox`.
+#[test]
+#[serial_test::serial]
+fn pinned_relaunch_env_fails_closed_on_a_broken_install_file() {
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let (fx, _env) = broken_install_home();
+    let registry = fx.home.join(".trusty-mpm/project-registry");
+    std::fs::create_dir_all(&registry).expect("mkdir registry");
+    let row = serde_json::json!({
+        "name": "x", "repo_url": UNRESOLVED_ORIGIN, "default_branch": "main",
+        "gh_account": "octo",
+    });
+    std::fs::write(
+        registry.join("projects.json"),
+        serde_json::to_vec(&serde_json::json!({ "projects": { "x": row } })).expect("json"),
+    )
+    .expect("projects.json");
+    let checkout = fx.cfg.with_file_name("checkout");
+    std::fs::create_dir_all(&checkout).expect("mkdir checkout");
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", UNRESOLVED_ORIGIN][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&checkout)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let err = trusty_mpm::core::gh_session_shim::pinned_relaunch_env(&checkout)
+        .expect_err("the relaunch refuses");
+    assert_no_gh_writes(&fx, &err);
+}
