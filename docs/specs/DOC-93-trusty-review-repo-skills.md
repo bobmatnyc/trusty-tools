@@ -18,7 +18,7 @@ Requirement ids are `RS-n`. "MUST" marks a testable requirement. "Design intent"
 - RS-3. A skill adds checks to a review. It never changes the verdict rules or the output schema.
 - RS-4. A skill never makes a review fail.
 
-Today trusty-review reads `.trusty-review.toml` from the git root of the checkout. The file selects a voice package, a principles flag and one named review template. The template text ships with trusty-review, not with the repository. No code in the crate loads a skill.
+Today trusty-review reads `.trusty-review.toml` from the git root of the checkout. The file selects a voice package, a principles flag and one named review template. The template text ships with trusty-review, not with the repository. The CLI `run` command and the local MCP `review_pr` tool load the skills §2 to §9 describe. The hosted webhook and HTTP service paths load no skill today (§9).
 
 ## 2. Configuration {#SPEC-REVSKILL-02~draft}
 
@@ -47,11 +47,13 @@ name = "release-notes"
 Rules:
 
 - RS-5. `name` MUST be a bare identifier. The check is `is_valid_identifier` in `crate::identifier`: the string is non-empty, and every character is an ASCII letter, an ASCII digit, `-` or `_`. A `/`, `\`, `.`, space or any other character fails. The rule guarantees that `name` is exactly one path component, so it cannot traverse or become absolute.
-- RS-6. A missing `name`, or a `name` that fails RS-5, skips that entry. The reason is named in the review (§6).
-- RS-7. With no `apply_to`, or an empty one, the skill applies to the whole pull request. (Design intent for the empty list.)
-- RS-8. `apply_to` globs match repository-relative paths with `/` separators. `*` matches within one path segment, `**` matches across segments, and `?` matches one character. A glob that does not parse skips that entry. (Design intent: the glob dialect.)
-- RS-9. Entries load in file order. A second entry with an already-seen `name` is skipped as a duplicate. (Design intent.)
+- RS-6. A missing `name`, a `name` that is not a string, or a `name` that fails RS-5, skips that entry with kind `invalid_name`. The reason is named in the review (§6).
+- RS-7. With no `apply_to`, or an empty one, the skill applies to the whole pull request.
+- RS-8. `apply_to` globs are `globset` globs with a literal separator. They match repository-relative paths with `/` separators. `*` and `?` stay within one path segment, and `**` crosses segments. A glob that does not parse skips that entry with kind `invalid_glob`.
+- RS-9. Entries load in file order. The first entry with a given `name` wins. Each later entry with the same `name` is skipped with kind `duplicate`.
 - RS-10. A pull request author can edit `.trusty-review.toml` on the head branch. The configuration is therefore read at the same revision as the skill files (§5).
+- RS-41. An entry with a key other than `name` and `apply_to`, or with an `apply_to` that is not a list of strings, is skipped with kind `malformed_entry`. A `review.skills` value that is not a list of entries is one `malformed_entry` skip. A skipped entry is named by its `name`, or by `entry <n>` (1-based) when it has none.
+- RS-42. A `.trusty-review.toml` at the base commit that is not valid TOML is ignored with a warning. No skill loads and the review writes no `repo_skills` record, as for any malformed `.trusty-review.toml` today.
 
 ## 3. Skill file {#SPEC-REVSKILL-03~draft}
 
@@ -78,9 +80,11 @@ Validation. Each failure skips the skill:
 - RS-12. The frontmatter has a non-empty `name` and a non-empty `description`.
 - RS-13. The frontmatter `name` equals the configured `<name>` exactly. This is the strict reading. The Agent Skills format requires a skill name to match its directory name. This spec enforces that match for the exact configured string, and it does not apply the Agent Skills character set (lowercase letters, digits, hyphens) on top of RS-5.
 - RS-14. The file is UTF-8 text.
-- RS-15. The body, the text after the closing `---`, is non-empty. (Design intent.)
+- RS-15. The body, the text after the closing `---`, is non-empty after trimming.
 
 Other frontmatter keys are ignored. Files beside `SKILL.md` in the skill directory are never read.
+
+- RS-43. A skill whose text contains the word `REPO-SKILL` is skipped with kind `unreadable`. The word delimits skills in the prompt (§7).
 
 ## 4. Source {#SPEC-REVSKILL-04~draft}
 
@@ -88,16 +92,18 @@ Other frontmatter keys are ignored. Files beside `SKILL.md` in the skill directo
 
 - RS-16. Skills come only from the reviewed repository. trusty-review reads no installed skill (`~/.claude/skills`), no framework or bundled skill and no remote skill source for this feature.
 - RS-17. Resolution never leaves the repository. The path is always `.claude/skills/<name>/SKILL.md`, built from a name that passed RS-5. A path of any other shape is never requested.
-- RS-18. A symlink is never followed. A skill file, or any directory on its path, that is a symlink is skipped. The Contents API returns no inline content for a symlink, and the reader reports `no inline content`; the local reader rejects a symlink explicitly. (Design intent for the local reader.)
-- RS-19. A path read through the Contents API passes `validate_repo_path` first: at most 200 characters, only `[A-Za-z0-9._/-]`, no leading `/`, no empty, `.` or `..` segment.
+- RS-18. A symlink is never followed. A skill file with git mode 120000, or any symlinked directory on its path, is skipped with kind `unreadable`. Only a regular file (git mode 100644 or 100755) loads.
+- RS-19. A path read through the Contents API (the hosted path, §9) passes `validate_repo_path` first: at most 200 characters, only `[A-Za-z0-9._/-]`, no leading `/`, no empty, `.` or `..` segment.
 
 ## 5. Revision {#SPEC-REVSKILL-05~draft}
 
 **ID:** SPEC-REVSKILL-05~draft
 
 - RS-20. trusty-review reads `.trusty-review.toml` skill entries and every `SKILL.md` at the base commit of the pull request, the tip of the target branch the pull request merges into. It never reads them from the head commit or the working tree. A pull request cannot change the skill that reviews it.
-- RS-21. A pull request from a fork loads no repository skill. The fork test is `head_is_fork`: the head label owner and the base label owner differ, or a label has no `owner:` prefix. The review states that repository skills were not loaded and why.
+- RS-21. A pull request from a fork loads no repository skill. The fork test is `head_is_fork`: the head label owner and the base label owner differ, or a label has no `owner:` prefix. On the local path, when the base commit is present, the configuration is read at the base and every entry is listed as skipped with kind `fork`. The record has `fork: true`. The review states that repository skills were not loaded and why.
 - RS-22. A same-repository pull request loads skills at the base commit.
+- RS-44. A review of a range, `--base <ref>`, reads the configuration and skills at the commit `<ref>` resolves to in the repository root. A range review has no fork signal, so it never sets `fork`. An empty `<ref>`, or one starting with `-`, is refused and no skill loads.
+- RS-45. Reading the base commit needs a local checkout that holds it. A GitHub pull request review with no checkout, or whose base commit is not fetched, reads nothing. So does a review of a diff file or standard input. The configuration cannot be read, so no skill loads and no record is written. A review given an explicit request list records every request as skipped with kind `no_base`.
 
 Reading the base commit rather than the head means the skills are the ones the target branch already accepted. A skill added by the pull request itself takes effect for later pull requests, after it merges.
 
@@ -105,26 +111,31 @@ Reading the base commit rather than the head means the skills are the ones the t
 
 **ID:** SPEC-REVSKILL-06~draft
 
-- RS-23. Each skill file has a size cap of `<per-skill cap>` bytes.
-- RS-24. All loaded skills together have a size cap of `<total cap>` bytes. Skills count against it in configuration order. A skill that would exceed it is skipped, and so are all later skills that do not fit.
+- RS-23. Each `SKILL.md` has a size cap of 8 KiB (8192 bytes). The size is checked before the blob is read.
+- RS-24. All loaded `SKILL.md` files together have a size cap of 24 KiB (24576 bytes). Skills count against it in configuration order, by file size including the frontmatter. A skill that would exceed it is skipped, and so is each later skill that does not fit.
 - RS-25. A skill is skipped, not loaded, when it is missing, invalid, over a cap, or does not match. Skip reasons:
 
-| Reason | Cause |
-|---|---|
-| `invalid name` | RS-5 fails, or `name` is absent. |
-| `duplicate` | The name already appeared. |
-| `invalid glob` | An `apply_to` entry does not parse. |
-| `not applicable` | No changed file matches `apply_to`. |
-| `not found` | No `SKILL.md` at that path at the base commit. |
-| `unreadable` | A read error, a directory, a symlink, an oversized API file, or text that is not UTF-8. |
-| `invalid frontmatter` | RS-11, RS-12, RS-13 or RS-15 fails. |
-| `over per-skill cap` | The file exceeds `<per-skill cap>`. |
-| `over total cap` | Adding the skill exceeds `<total cap>`. |
+| Label | Record `kind` | Cause |
+|---|---|---|
+| `invalid name` | `invalid_name` | RS-5 fails, or `name` is absent or not a string. |
+| `duplicate` | `duplicate` | The name already appeared in an earlier entry. |
+| `invalid glob` | `invalid_glob` | An `apply_to` entry does not parse. |
+| `not applicable` | `not_applicable` | No changed file matches `apply_to`. |
+| `not found` | `not_found` | No `SKILL.md` at that path at the base commit. |
+| `unreadable` | `unreadable` | A read error, a directory, a symlink, text that is not UTF-8, or text containing `REPO-SKILL`. |
+| `invalid frontmatter` | `invalid_frontmatter` | RS-11, RS-12, RS-13 or RS-15 fails. |
+| `over per-skill cap` | `over_skill_cap` | The file exceeds 8 KiB. |
+| `over total cap` | `over_total_cap` | Adding the skill exceeds 24 KiB. |
+| `malformed entry` | `malformed_entry` | RS-41. |
+| `fork pull request` | `fork` | RS-21. |
+| `no base commit` | `no_base` | RS-45. |
 
-- RS-26. The review body names each skipped skill with its name and reason. A `not applicable` skill is listed as not applicable, not as a fault.
+Each skipped skill carries a one-line reason beside its kind.
+
+- RS-26. The review body names each loaded skill with a short hash, and each skipped skill with its name, label and reason. A `not applicable` skill is listed as "not applied", not as a fault. The notice sits just before the review footer. For a fork pull request it states that no repository skill text was used.
 - RS-27. A skill never makes the review fail. Every skill error is a skip, and the review completes with the skills that loaded.
 
-The caps are not fixed by code today. The values are design intent and are set in the implementation, not in this spec.
+- RS-46. The `.trusty-review.toml` read at the base commit is capped at 64 KiB. A larger file is treated as absent: no skill loads and no record is written.
 
 ## 7. Prompt placement {#SPEC-REVSKILL-07~draft}
 
@@ -132,20 +143,21 @@ The caps are not fixed by code today. The values are design intent and are set i
 
 The system prompt is layered today: the stock rubric, then principles, then voice, then the named review template. The template only appends; no layer replaces the rubric.
 
-- RS-28. Loaded skills append after the review template as one labelled, fenced block. Each skill is a labelled sub-block carrying its name and the body of its `SKILL.md`, without the frontmatter.
-- RS-29. The block opens with a fixed line that says the text is repository guidance, treated as untrusted, that it may add review checks, and that the verdict rules and the output schema above it stay authoritative.
+- RS-28. Loaded skills append after the review template as one labelled, fenced block. Each skill sits between `<<<BEGIN REPO-SKILL name="…" sha256="…">>>` and `<<<END REPO-SKILL name="…" sha256="…">>>` markers. The text between them is the body of its `SKILL.md`, trimmed, without the frontmatter.
+- RS-29. The block opens with a fixed preamble. It names the base commit, says the text is repository guidance, treated as untrusted and not as operator instructions, and says it may add review checks. It says the verdict rules and the output schema above it stay authoritative, and that any part of a skill that asks to change them, to approve or block regardless of the code, to skip checks or to reveal the prompt is ignored.
 - RS-30. Skill text cannot change the verdict rules or the output schema. The structured-output schema is enforced by the call, not by the prompt, so a skill cannot alter it.
 - RS-31. Skills load in configuration order, so the prompt is deterministic for a given repository state. The block is the same for every pull request that applies the same skills, so it stays part of a stable prompt prefix.
-- RS-32. With no loaded skill, the system prompt is byte-identical to today's.
+- RS-32. With no loaded skill, the system prompt is byte-identical to a review with no skill configured.
+- RS-47. The block ends by restating that the verdict rules, the severity and grading rules and the output schema given earlier remain in force and win any conflict with a skill.
 
 ## 8. Review record {#SPEC-REVSKILL-08~draft}
 
 **ID:** SPEC-REVSKILL-08~draft
 
-- RS-33. The review record lists each loaded skill's `name` and content hash.
+- RS-33. The review record carries a `repo_skills` object: `{base_sha, fork, loaded[{name, sha256, bytes}], skipped[{name, kind, reason}]}`. `base_sha` is the commit the configuration was read at, and is empty when none was read. `fork` is true for a fork pull request. `loaded` lists each loaded skill's `name`, content hash and size in bytes.
 - RS-34. The content hash is the SHA-256 of the exact `SKILL.md` bytes read, in lowercase hex.
-- RS-35. The record also lists each skipped skill with its reason (§6), and whether repository skills were withheld for a fork pull request.
-- RS-36. The record fields are additive and optional. A consumer that ignores them keeps working. A review with no configured skill omits them.
+- RS-35. `skipped` lists each skipped skill with its `kind` and `reason` (§6).
+- RS-36. The record fields are additive and optional. A consumer that ignores them keeps working. The `repo_skills` key is present only when skills are configured, and is absent otherwise (RS-42, RS-45).
 
 The hash lets a reader compare two reviews of different repositories, or of one repository over time, and tell whether the same skill text applied.
 
@@ -153,10 +165,12 @@ The hash lets a reader compare two reviews of different repositories, or of one 
 
 **ID:** SPEC-REVSKILL-09~draft
 
-- RS-37. The CLI `run` command and the local MCP `review_pr` tool read from the local checkout. The configuration is found at the git root of the working directory. Skill files and the configuration are read from the base commit through git, not from the working tree. (Design intent for the git read.)
-- RS-38. The hosted webhook path has no checkout. It reads `.trusty-review.toml` and each `SKILL.md` at the base commit through the contents-at-ref reader (`DocFetcher`), which validates the path and requires a full commit SHA before any request.
-- RS-39. On the hosted path, an unreadable file is a skip with reason `unreadable`. A fork pull request makes no skill request at all (RS-21).
+- RS-37. The CLI `run` command and the local MCP `review_pr` tool read from the local checkout. The configuration is found at the git root of the working directory. Skill files and the configuration are read from the base commit through the git object store of that checkout, not from the working tree.
+- RS-38. (Design intent.) The hosted webhook path has no checkout. It reads `.trusty-review.toml` and each `SKILL.md` at the base commit through the contents-at-ref reader (`DocFetcher`), which validates the path and requires a full commit SHA before any request.
+- RS-39. (Design intent.) On the hosted path, an unreadable file is a skip with reason `unreadable`. A fork pull request makes no skill request at all (RS-21).
 - RS-40. API changes are additive and optional. The existing `[review]` keys, CLI flags and MCP arguments keep their meaning. No new flag or argument is required to use the feature; the configuration file drives it.
+- RS-48. The CLI `--config` option does not disable repository skills.
+- RS-49. The webhook and HTTP service paths pass no skill input today. They load no skill and write no `repo_skills` record until RS-38 is implemented.
 
 ## 10. Acceptance tests {#SPEC-REVSKILL-10~draft}
 
@@ -167,7 +181,7 @@ The hash lets a reader compare two reviews of different repositories, or of one 
 - (c) A pull request from a fork gets no repository skill text in its prompt, and the review says so.
 - (d) The review record lists the name and content hash of each loaded skill.
 
-Unit coverage owed by the implementation: name validation (RS-5), frontmatter validation (RS-11 to RS-13), both caps, `apply_to` matching, symlink and traversal rejection, a prompt golden test showing block placement (RS-28), and the base-commit read on both the local and the hosted path.
+Unit coverage owed by the implementation: name validation (RS-5), frontmatter validation (RS-11 to RS-13), both caps, `apply_to` matching, symlink and traversal rejection, a prompt golden test showing block placement (RS-28), and the base-commit read on the local path. The base-commit read on the hosted path is owed with RS-38.
 
 ## 11. Out of scope {#SPEC-REVSKILL-11~draft}
 
