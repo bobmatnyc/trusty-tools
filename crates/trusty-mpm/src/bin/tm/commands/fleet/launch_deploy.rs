@@ -124,7 +124,7 @@ impl Restarter for LiveRestarter {
         let argv = [
             "kill-session".to_owned(),
             "-t".to_owned(),
-            format!("={}", names.poll()),
+            trusty_common::tmux::exact_session_target(names.poll()),
         ];
         let out = trusty_mpm::core::tmux::run_tmux_argv(&argv)?;
         anyhow::ensure!(
