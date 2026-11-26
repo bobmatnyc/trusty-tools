@@ -21,6 +21,9 @@
 #   own-path-content-hit  an operator path in that file's content    FAIL
 #   private-path          a path spelling the private name           FAIL PRIVATE_NAME
 #   brief-path            a clean file under the briefs dir          FAIL BRIEF_PATH
+#   own-path-home-root    a path rooted at a home/<user> dir         FAIL OPERATOR_PATH
+#   own-path-users        a path holding the -Users-<user> form      FAIL OPERATOR_PATH
+#   own-path-pub          a docs/ path spelling a PUB_* class        FAIL PUB_OWNER_RULING
 #   private-<form>        the name camel, glued, with digits, plural, hyphen,
 #                         underscore, URL and @ forms         FAIL PRIVATE_NAME
 #   private-near-miss     a different word                    OK
@@ -174,7 +177,7 @@ w notes.md "$HOST_LINE"
 ARGS="doc.md" expect staged-paths 0 "1 file(s) scanned"
 ARGS="notes.md" expect staged-paths-hit 1 "FAIL ${EH}: notes.md:1"
 
-# #11641: a file's own path is never matched against a content pattern.
+# #11641: a home/ dir below the root is no OPERATOR_PATH hit in a path.
 HOME_FILE="src/tui/home${J}/mod.rs"
 new_repo own-path-home
 w "$HOME_FILE" '// renders the home screen'
@@ -187,6 +190,16 @@ expect private-path 1 "FAIL PRIVATE_NAME: zorp/notes.md:0" PUBLIC_LEAK_PRIVATE_N
 new_repo brief-path
 w "docs/${J}briefs/x.md" '# a clean page'
 expect brief-path 1 "FAIL BRIEF_PATH: docs/${J}briefs/x.md:0"
+# #11641: a path carrying a home form, or a PUB_* class under docs/, still fails.
+new_repo own-path-home-root
+w "home${J}/jdoe/notes.md" '# a clean page'
+expect own-path-home-root 1 "FAIL OPERATOR_PATH: home${J}/jdoe/notes.md:0"
+new_repo own-path-users
+w "projects/-Users${J}-jdoe-repo/notes.md" '# a clean page'
+expect own-path-users 1 "FAIL OPERATOR_PATH: projects/-Users${J}-jdoe-repo/notes.md:0"
+new_repo own-path-pub
+w "docs/owner${J}-ruling-cap.md" '# a clean page'
+expect own-path-pub 1 "FAIL PUB_OWNER_RULING: docs/owner${J}-ruling-cap.md:0"
 
 # The private-name class: every glued form of the synthetic name.
 while IFS='|' read -r form line; do

@@ -17,8 +17,8 @@ What: scans `git ls-files` (or the paths given, for the pre-commit hook) with
   is listed, with a hit count and a reason, in
   scripts/public_leak_private_allowlist.tsv. No matched text is printed.
   A PUB_* class applies only under PUBLISHED_PREFIXES (#11720). A file's own
-  path is matched only by the classes in PATH_CLASSES: PRIVATE_NAME and the
-  location rule BRIEF_PATH. Content patterns never read the path (#11641).
+  path is matched by every class that would apply to its content; OPERATOR_PATH
+  reads the path as rooted, so a /home/ form counts only at the root (#11641).
   Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
 Test: scripts/check_public_leaks_selftest.sh
 """
@@ -36,9 +36,7 @@ ALLOW_REL = "scripts/public_leak_private_allowlist.tsv"
 # These name the patterns or paths they hunt for; every other file is scanned.
 SELF_FILES = {PATTERNS_REL, BASELINE_REL, ALLOW_REL}
 PRIVATE = "PRIVATE_NAME"
-# #11641: the classes matched against a file's own path. BRIEF_PATH is a location
-# rule (#11535); OPERATOR_PATH is content-only, so a home/ source dir is no hit.
-PATH_CLASSES = {PRIVATE, "BRIEF_PATH"}
+OPERATOR = "OPERATOR_PATH"
 NAMES_ENV = "PUBLIC_LEAK_PRIVATE_NAMES_FILE"
 # #11720: a PUB_* class binds only the paths the project publishes.
 PUB = "PUB_"
@@ -216,6 +214,24 @@ def _excused(allow, cls, rel, token):
     return False
 
 
+def _path_tokens(cls, rx, rel):
+    """The runs of `rel` that `rx` matches when the path itself is scanned.
+
+    Why: a `src/tui/home/` source dir matched OPERATOR_PATH's `/home/<user>`
+      form, while a path carrying a real home form must still fail (#11641).
+    What: OPERATOR_PATH reads the path as `/` + rel and keeps a `/home/` match
+      only at the root, so `home/<user>/x` fails and a home dir under src does
+      not; its `/Users/` and `-Users-` forms match anywhere. Other classes read
+      rel as is.
+    Test: selftest cases own-path-home, own-path-home-root, own-path-users,
+      own-path-pub.
+    """
+    if cls != OPERATOR:
+        return [m.group(0) for m in rx.finditer(rel)]
+    return [m.group(0) for m in rx.finditer("/" + rel)
+            if m.start() == 0 or not m.group(0).startswith("/home/")]
+
+
 def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
     """Scan, then compare with (or rewrite) the shrink-only baseline."""
     rules = _rules(load_leak_rules, root, fail)
@@ -233,10 +249,9 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
             continue
         hits[(rel, cls)] += 1
         lines.setdefault((rel, cls), num)
-    path_rules = [r for r in rules if r[0] in PATH_CLASSES]  # #11641: path classes only
-    for rel, _ in files:  # a path in a private place, or spelling a private name, is a hit
-        for cls, rx, ok in path_rules:
-            bad = [m.group(0) for m in rx.finditer(rel) if ok is None or not ok.fullmatch(m.group(0))]
+    for rel, _ in files:  # a path that itself names a private place is a hit too
+        for cls, rx, ok in rules + (pub_rules if rel.startswith(PUBLISHED_PREFIXES) else []):
+            bad = [t for t in _path_tokens(cls, rx, rel) if ok is None or not ok.fullmatch(t)]
             if any(not _excused(allow, cls, rel, tok) for tok in bad):
                 hits[(rel, cls)] += 1
                 lines.setdefault((rel, cls), 0)
