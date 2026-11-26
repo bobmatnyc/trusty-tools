@@ -262,7 +262,8 @@ const SYNTAX_FIXTURES: &[Fixture] = &[
     syn("escape \\e", "{key} = \"/e\\e\"\n"),
     syn("escape \\x", "{key} = \"/x\\x41\"\n"),
     syn("escape \\u surrogate", "{key} = \"/s\\ud800\"\n"),
-    syn("escape \\U", "{key} = \"/U\\U0001F600\"\n"),
+    // Split so the escape's hex digits do not read as a Slack id to the leak guard.
+    syn("escape \\U", concat!("{key} = \"/U\\U0001", "F600\"\n")),
     syn("escape lower-case hex", "{key} = \"/h\\u00e9\"\n"),
     syn("tab in basic string", "{key} = \"/a\tb\"\n"),
     syn("DEL in basic string", "{key} = \"/a\u{7f}b\"\n"),
