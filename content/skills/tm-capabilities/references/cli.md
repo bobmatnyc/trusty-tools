@@ -28,6 +28,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
   - `restart` — Restart the Architect behind the checkpoint gate (#11365)
+  - `restore` — Put back the files the last launch deploy replaced (#11368)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
   - `serve` — The poll cycle as a service, run on local events (#9779)
   - `up` — Bring the Architect up from any state, then attach (#11364)
