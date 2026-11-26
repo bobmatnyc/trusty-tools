@@ -174,13 +174,13 @@ scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
 # scratch, diff against the shipped copy, hand-merge the delta.
 .claude/skills/architect-dashboard/SKILL.md	skills/architect-dashboard.md
 
-# Architect agents and their two skills (D3c, #10161): .claude/agents/<name>.md ->
-# agents/<name>.md. All are hand-merged into trusty-tools form (see the note at
-# the top). token-optimizer ships with the usage set (D3d).
+# Architect agents (D3c, #10161): .claude/agents/<name>.md -> agents/<name>.md.
+# All are hand-merged into trusty-tools form (see the note at the top).
+# token-optimizer ships with the usage set (D3d). #11896 (ruling D2f): the
+# drift-guard and improver skills are folded into their agents' files, so the
+# prototype's two skill rows map to nothing shipped.
 .claude/agents/runner.md	agents/runner.md
 .claude/agents/improver.md	agents/improver.md
-.claude/skills/architect-drift-guard/SKILL.md	skills/architect-drift-guard.md
-.claude/skills/architect-improver/SKILL.md	skills/architect-improver.md
 # Held until the Architect applies .trusty-mpm/plans/d3c-mirror-lines.md at
 # source (each still fails the leak gate there); enable a row once its source
 # exports clean. verify-claim.py is split here into verify-claim.py and

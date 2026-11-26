@@ -302,9 +302,8 @@ pub const SHIPPED: &[ShippedSkill] = &[
     HOST_ADMIN,
     // #10161 D3b: the dashboard skill, with the served page it describes.
     DASHBOARD,
-    // #10161 D3c: the skills that dispatch the drift-guard and improver agents.
-    first_release("architect-drift-guard"),
-    first_release("architect-improver"),
+    // #11896 (ruling D2f): `architect-drift-guard` and `architect-improver`
+    // ship as the `drift-guard` and `improver` agents, not skills.
 ];
 
 /// The deploy record, beside the skills in the project tier.
