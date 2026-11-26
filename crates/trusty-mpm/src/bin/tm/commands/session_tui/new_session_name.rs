@@ -57,6 +57,14 @@ pub(crate) fn open(slot: &mut Option<NameStep>, target: Option<&Target>) -> Step
             repo,
             checkout,
         }) => (name, repo, checkout),
+        // #11822: the cwd row names its session like any other project.
+        Some(Target::Cwd(id)) => {
+            *slot = Some(NameStep {
+                request: super::new_session_cwd::request_for_cwd(id),
+                typed: String::new(),
+            });
+            return Step::Redraw;
+        }
         Some(Target::Other) => return Step::Reject(NOT_A_PROJECT.to_string()),
         None => return Step::Ignore,
     };
