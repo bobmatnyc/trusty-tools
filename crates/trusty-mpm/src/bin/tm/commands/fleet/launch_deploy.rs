@@ -2,8 +2,8 @@
 //!
 //! Why: the bundle deployed only on `tm fleet init`, so an Architect that came
 //! back through a launch or a restart kept the old scripts, and a running
-//! poller or dashboard kept the old code. Owner ruling 2026-11-16: the scripts
-//! stay Python, managed by tm.
+//! poller or dashboard kept the old code. The scripts stay Python, managed by
+//! tm (see #11368).
 //! What: [`run`] plans each file with `seed::plan` (Q7: `dry_run` stops here
 //! and writes nothing), hashes the [`POLLER_SCRIPTS`] and
 //! [`DASHBOARD_SCRIPTS`] (Q5), keeps every file it will replace
