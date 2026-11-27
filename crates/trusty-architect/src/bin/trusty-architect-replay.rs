@@ -32,7 +32,8 @@ const USAGE: &str = "usage:
       [--clock SECS] -- PROGRAM [ARGS...]
       --fakes FILE: JSON {NAME: [{\"argv\": [ARG...], \"stdout\": S, \"stderr\": S, \"exit\": N}]};
       stubs first on PATH on record and replay; first matching answer wins,
-      no argv matches any call; replay diffs the calls
+      no argv matches any call; replay diffs the calls; an answer's
+      \"rpc\": {ID: REPLY} serves JSON-RPC lines on stdin by id
       --clock SECS: freeze the wall clock at epoch second SECS (TZ=UTC unless
       --env TZ=...); replay runs the target at the same instant
   trusty-architect-replay replay [--timeout SECS] FILE... -- PROGRAM [PREFIX_ARGS...]

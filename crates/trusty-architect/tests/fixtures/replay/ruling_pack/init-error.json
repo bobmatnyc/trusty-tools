@@ -1,0 +1,80 @@
+{
+  "version": 3,
+  "argv": [
+    "sapp",
+    "is the migration safe",
+    "--type",
+    "prod-write",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"duetto\": true,\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "# Ruling pack: sample-app @ 2026-11-27T13:00:00Z\nQuestion: is the migration safe\nType: prod-write. Repo: example-org/sample-app. Palaces: sample-app, supervisor. Index: sample-app-idx (last_indexed n/a).\n\n## Prior rulings (memory)\n- none found\n\n## Facts (search + exact grep)\n- none found\n\n## Direct read-only check to run\n- read the migration file text and row counts / schema (read-only); confirm the named restore branch or snapshot exists\n\n## Backend problems (counted as not found)\n- sample-app: memory unavailable: init refused\n- supervisor: memory unavailable: init refused\n- sample-app-idx: search output not JSON: Extra data: line 1 column 33 (char 32)\nMake these MCP calls instead:\n- memory_recall(palace=\"sample-app\", query=\"is the migration safe\", top_k=3, min_score=0.4)\n- memory_recall(palace=\"supervisor\", query=\"is the migration safe\", top_k=3, min_score=0.4)\n- grep(index_id=\"sample-app-idx\", pattern=\"<identifier>\", compact=true) / search(index_id=\"sample-app-idx\", query=\"is the migration safe\", mode=\"text\", compact=true, top_k=5)\n\nPrior ruling: no. Fact: no. Direct check done: NO (run it, then rerun with --checked).\nConfidence: LOW. Rule: HIGH = prior ruling + fact + direct check agree; MEDIUM = two of three; LOW = PM report only. Downgrade if sources disagree.\nRelay line: `Confidence: <label>. Checked: <items I read>. From PM report: <items>. Prior rulings: <ids or none found>.`\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "rg": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "trusty-memory": [
+        {
+          "argv": [
+            "serve"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0,
+          "rpc": {
+            "1": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": \"init refused\"}"
+          }
+        }
+      ],
+      "trusty-search": [
+        {
+          "stdout": "x {\"results\": [{\"path\": \"a.rs\"}]} trailing",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "trusty-memory",
+        "serve"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"ruling_pack\", \"version\": \"1\"}}}"
+      ],
+      [
+        "trusty-search",
+        "search",
+        "-i",
+        "sample-app-idx",
+        "--json",
+        "-k",
+        "5",
+        "is the migration safe"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

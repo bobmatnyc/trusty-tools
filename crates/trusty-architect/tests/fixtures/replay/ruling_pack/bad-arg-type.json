@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "argv": [
+    "a",
+    "b",
+    "--type",
+    "x"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: ruling_pack.py [-h] [--issue ISSUE] [--pr PR] [--file FILE]\n                      [--symbol SYMBOL]\n                      [--type {merge,prod-write,spec,decision,waiver}]\n                      [--checked] [--keys KEYS] [--no-write]\n                      project question\nruling_pack.py: error: argument --type: invalid choice: 'x' (choose from 'merge', 'prod-write', 'spec', 'decision', 'waiver')\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}
