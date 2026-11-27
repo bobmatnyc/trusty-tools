@@ -23,7 +23,9 @@
 #     weigh that before relying on this fast path.
 #   - Otherwise: `cargo run --locked` for <crate>'s <cargo-bin-name>, scoped to
 #     a dedicated CARGO_TARGET_DIR (never the workspace's shared target/, so it
-#     cannot contend with an agent's own build) and `--offline` when
+#     cannot contend with an agent's own build: TRUSTY_SCRIPTS_TARGET_DIR, else
+#     <config_dir>/.trusty-tools/cargo-target/scripts from scripts/lib/install_paths.py,
+#     #11821) and `--offline` when
 #     `cargo metadata --offline` already resolves. A 180s timeout (GNU
 #     `timeout`/`gtimeout` if present, else a portable bash watchdog) turns a
 #     stuck build-lock wait into a named, non-zero-exit error instead of a
@@ -36,7 +38,8 @@
 #
 # Exit: never returns on success or on the installed-binary path (execs into
 #   the target process). On the cargo-run fallback, exits with the wrapped
-#   command's own exit code, or 1 with a named error line on timeout.
+#   command's own exit code, 1 with a named error line on timeout, or 2 when
+#   the install config dir cannot be resolved (nothing is built or created).
 #
 # Test: manual verification only (shell-only helper, no cargo target of its
 #   own); exercised indirectly by running check_sld.sh / check-version-parity.sh
@@ -44,6 +47,9 @@
 #   PATH (their real state on a stock dev machine — see PR description).
 
 TRUSTY_RUN_OR_CARGO_TIMEOUT_SECS="${TRUSTY_RUN_OR_CARGO_TIMEOUT_SECS:-180}"
+# #11821: this file's directory, for install_paths.py; builtins only (cd, pwd).
+case "${BASH_SOURCE[0]}" in */*) _RUN_OR_CARGO_LIB="${BASH_SOURCE[0]%/*}" ;; *) _RUN_OR_CARGO_LIB=. ;; esac
+_RUN_OR_CARGO_LIB="$(cd "$_RUN_OR_CARGO_LIB" && pwd)"
 
 # _run_or_cargo_bash_timeout <secs> <cmd...> — portable fallback for hosts with
 # neither GNU `timeout` nor `gtimeout` (e.g. stock macOS system bash). Runs
@@ -86,7 +92,17 @@ run_or_cargo() {
     exec "$installed" "$@"
   fi
 
-  local target_dir="${TRUSTY_SCRIPTS_TARGET_DIR:-$HOME/.trusty-tools/cargo-target/scripts}"
+  local target_dir="${TRUSTY_SCRIPTS_TARGET_DIR:-}"
+  if [ -z "$target_dir" ]; then
+    # #11821: the config dir is configurable per install; ask the shared resolver, never guess $HOME.
+    local config_dir
+    config_dir="$(python3 -I "$_RUN_OR_CARGO_LIB/install_paths.py" | awk -F'\t' '$1 == "config_dir" && $2 ~ /^\// { print $2 }')" || config_dir=""
+    if [ -z "$config_dir" ]; then
+      echo "FAIL: run_or_cargo: cannot resolve the install config dir via scripts/lib/install_paths.py (needs python3); install ${bin_name} or set TRUSTY_SCRIPTS_TARGET_DIR" >&2
+      exit 2
+    fi
+    target_dir="$config_dir/.trusty-tools/cargo-target/scripts"
+  fi
   echo "run_or_cargo: '${bin_name}' not found on PATH; falling back to 'cargo run -p ${crate} --bin ${cargo_bin}' (CARGO_TARGET_DIR=${target_dir})" >&2
 
   local offline_flags=()

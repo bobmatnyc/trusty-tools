@@ -167,6 +167,3 @@ python/trusty-architect/scripts/dashboard_viz.py	2
 python/trusty-architect/tests/test_architect_config.py	1
 python/trusty-architect/tests/test_config.py	2
 python/trusty-architect/tests/test_dashboard_projects_registry.py	8
-scripts/check_architect_subproject_selftest.sh	1
-scripts/lib/run_or_cargo.sh	1
-scripts/release-gate.sh	1

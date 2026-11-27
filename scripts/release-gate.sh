@@ -23,7 +23,8 @@
 #   substring (`-` for none; required when the expected exit is not 0, so an
 #   error row cannot pass on the wrong error). A lane that runs no row fails. SKIP and NETWORK rows never
 #   run. After each lane it proves the host is as it was: the real
-#   ~/.trusty-mpm/config.toml and ~/.trusty-tools/trusty-mpm/config.yaml hash
+#   <config_dir>/.trusty-mpm/config.toml and <config_dir>/.trusty-tools/trusty-mpm/config.yaml
+#   (config_dir from scripts/lib/install_paths.py, #11821) hash
 #   the same, `tmux ls` on the user server prints the same, the count of
 #   `tm daemon` processes is the same, and no process names S.
 # Usage:
@@ -34,7 +35,7 @@
 #   --calibrate prints each row's actual exit and output tail and never fails
 #     on a mismatch; it exists to pin a table's `?` exits once.
 # Exit: 0 every row matched; 1 a row, an empty lane or the host check failed;
-#   2 usage, a table with an unpinned (`?`) exit, or a non-zero-exit row with
+#   2 usage, an unresolvable install config dir, a table with an unpinned (`?`) exit, or a non-zero-exit row with
 #   no expected output.
 # Test: scripts/release-gate-selftest.sh (stub binary, no network).
 # Portability: bash 3.2 (macOS) and bash 5 (Linux).
@@ -78,9 +79,16 @@ fi
 
 # --- host state ----------------------------------------------------------
 REAL_HOME="$(cd ~ && pwd -P)"
+# #11821: the host's config dir comes from the install resolver, never from $HOME alone; no fallback.
+HOST_CONFIG_DIR="$(HOME="${REAL_HOME}" python3 -I "${REPO_ROOT}/scripts/lib/install_paths.py" \
+  | awk -F'\t' '$1 == "config_dir" && $2 ~ /^\// { print $2 }')" || HOST_CONFIG_DIR=""
+if [ -z "${HOST_CONFIG_DIR}" ]; then
+  echo "release-gate: cannot resolve the install config dir via scripts/lib/install_paths.py (needs python3)" >&2
+  exit 2
+fi
 host_state() {
   local f
-  for f in "${REAL_HOME}/.trusty-mpm/config.toml" "${REAL_HOME}/.trusty-tools/trusty-mpm/config.yaml"; do
+  for f in "${HOST_CONFIG_DIR}/.trusty-mpm/config.toml" "${HOST_CONFIG_DIR}/.trusty-tools/trusty-mpm/config.yaml"; do
     if [ -f "$f" ]; then echo "$f $(shasum -a 256 < "$f" | cut -d' ' -f1)"; else echo "$f absent"; fi
   done
   echo "tmux: $(env -u TMUX -u TMUX_TMPDIR tmux ls 2>&1 | sort | shasum -a 256 | cut -d' ' -f1)"
