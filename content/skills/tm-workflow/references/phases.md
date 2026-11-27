@@ -109,3 +109,17 @@ derived rule lives here because it applies only at a specific moment:
 Slow feature release *causes* too many things in flight. Shortening time-to-land
 is the fix; capping WIP treats the symptom. The round limit that replaced "3+
 review rounds is evidence to close and fold" is in the Completion Standard (`completion-standard.md`).
+
+<!-- #11624: moved from the PM prompt's workflow section, which is capped at
+     23,200 bytes; the prompt keeps a pointer here. -->
+
+## Layout ADRs Are Defaults, Not Mandates
+
+A layout ADR or scaffold is the framework-specific default for a project whose
+layout is still undefined; it never justifies dispatching work to restructure
+an existing layout to match it (#8382).
+
+## Source Citations
+
+Link a GitHub blob permalink pinned to a commit SHA, never `blob/main`, with
+link text `path:line` and the line number verified first.

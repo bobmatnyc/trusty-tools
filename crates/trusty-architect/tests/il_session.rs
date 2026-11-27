@@ -164,7 +164,7 @@ fn refs_merge_replace_and_remove() {
     let key = r.datg(&["session", "set", "--ref", "Bad Key=x"], "");
     assert_eq!(
         key.stderr,
-        "datg: refs.key must match ^[a-z0-9][a-z0-9_.-]{0,31}$\n"
+        "datg: the refs key must match ^[a-z0-9][a-z0-9_.-]{0,31}$\n"
     );
     assert_eq!(r.datg(&["session", "set", "--ref", "none"], "").code, 0);
     assert_eq!(refs(), "[]", "`none` clears every ref");

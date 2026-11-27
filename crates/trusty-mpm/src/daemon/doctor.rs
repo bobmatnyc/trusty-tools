@@ -657,7 +657,7 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(check_worktree_disk(repos_root, active).await);
     // #7497: and this is the mount the store sits ON — the number the
     // `disk.max_usage_pct` gate reads before creating the next worktree.
-    checks.push(check_disk_usage(repos_root, &home));
+    checks.push(check_disk_usage(repos_root, &home).await);
     // #8994: what the worktree ledger records — no git, no filesystem walk.
     checks.push(doctor_worktree_registry::check_worktree_registry(&home));
     // See #6868: the rows above measure what disk has ALREADY gone; this one
