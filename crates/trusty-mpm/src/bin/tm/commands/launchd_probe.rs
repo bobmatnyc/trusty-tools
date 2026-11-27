@@ -284,13 +284,19 @@ pub(crate) fn launchd_may_own_daemon() -> bool {
 /// most visibly `tm doctor`, which printed "run `tm restart`" two lines above the
 /// new orphan check. One resolver keeps the remediation correct per host instead
 /// of hardcoding a verb that is wrong half the time.
-/// What: the `launchctl kickstart -k` recipe for `label` when a daemon unit is
-/// registered; plain `tm restart` otherwise.
-/// Test: `restart_command_names_kickstart_when_launchd_owns_the_daemon`,
+/// What: the `launchctl bootout` then `bootstrap` recipe for `label` when a
+/// daemon unit is registered; plain `tm restart` otherwise. Never
+/// `kickstart -k`: it SIGKILLs and skips request draining
+/// (release-workflow.md, "Connection-Safe Daemon Restart").
+/// Test: `restart_command_names_bootout_then_bootstrap_when_launchd_owns_the_daemon`,
 /// `restart_command_names_tm_restart_without_a_unit`.
 pub(crate) fn daemon_restart_command_for(label: Option<&str>) -> String {
     match label {
-        Some(l) => format!("launchctl kickstart -k gui/$(id -u)/{l}"),
+        // #11809: bootout sends SIGTERM, so the daemon drains in-flight requests.
+        Some(l) => format!(
+            "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/{l}.plist; \
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{l}.plist"
+        ),
         None => "tm restart".to_string(),
     }
 }
@@ -931,11 +937,15 @@ mod tests {
     }
 
     #[test]
-    fn restart_command_names_kickstart_when_launchd_owns_the_daemon() {
+    fn restart_command_names_bootout_then_bootstrap_when_launchd_owns_the_daemon() {
+        // #11809: the doctor suggestion matches release-workflow.md.
+        let cmd = daemon_restart_command_for(Some("com.trusty.mpm"));
         assert_eq!(
-            daemon_restart_command_for(Some("com.trusty.mpm")),
-            "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm"
+            cmd,
+            "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist; \
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist"
         );
+        assert!(!cmd.contains("kickstart"), "{cmd}");
     }
 
     #[test]
