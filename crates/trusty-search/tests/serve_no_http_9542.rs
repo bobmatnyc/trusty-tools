@@ -11,7 +11,7 @@
 //! a held port that bind fails, so the run cannot exit 1 naming #9542.
 //! Test: `cargo test -p trusty-search --test integration serve_no_http_9542::`.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,7 +27,7 @@ const RUN_BOUND: Duration = Duration::from_secs(15);
 /// test opened and report it as serve's.
 /// What: keeps the `127.0.0.1:0` listener open; nothing else can bind or
 /// answer on [`ReservedPort::port`] while it lives.
-/// Test: `reserved_port_refuses_a_rival_bind_11953`.
+/// Test: `reserved_port_is_held_by_its_own_listener_11953`.
 struct ReservedPort {
     listener: TcpListener,
 }
@@ -115,16 +115,25 @@ fn serve_binds_no_tcp_listener_9542() {
 
 /// Why (#11953): the serve test may only judge sockets it created; a rival
 /// socket that takes its port mid-run made it fail on another test's listener.
-/// What: while a [`ReservedPort`] lives, binding its port again is refused
-/// with `AddrInUse`.
+/// What: while a [`ReservedPort`] lives, a connect to its port succeeds and
+/// the reservation's own listener accepts that exact connection, so the port
+/// is occupied by the reservation and no other socket. Probes with a client
+/// connect, never a second bind (ADR-0032 allows tests only `127.0.0.1:0`).
 /// Test: this function.
 #[test]
-fn reserved_port_refuses_a_rival_bind_11953() {
+fn reserved_port_is_held_by_its_own_listener_11953() {
     let reserved = ReservedPort::new();
     let port = reserved.port();
-    let rival = TcpListener::bind(("127.0.0.1", port));
-    assert!(
-        matches!(&rival, Err(e) if e.kind() == std::io::ErrorKind::AddrInUse),
-        "#11953: a rival bound reserved port {port}: {rival:?}"
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let probe = TcpStream::connect_timeout(&addr, RUN_BOUND)
+        .unwrap_or_else(|e| panic!("#11953: nothing holds reserved port {port}: {e}"));
+    let (_accepted, peer) = reserved
+        .listener
+        .accept()
+        .expect("#11953: the reservation accepts the probe");
+    assert_eq!(
+        peer,
+        probe.local_addr().expect("probe local addr"),
+        "#11953: reserved port {port} answered a socket other than the reservation"
     );
 }
