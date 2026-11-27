@@ -54,6 +54,8 @@ mod process;
 mod pyjson;
 mod pyjson_load;
 mod pystr;
+mod pystrptime; // See #12028
+mod pyval; // See #12028
 pub mod quiet;
 // #12026: record-then-replay parity tool for the script ports.
 pub mod replay;
@@ -68,6 +70,7 @@ mod sha1;
 mod sha256;
 // See #12028: the spec_drift_check.py port (P1b).
 pub mod spec_drift;
+pub mod tasks; // See #12028 P1d
 pub mod technical_level;
 mod tmux;
 pub mod verbs;

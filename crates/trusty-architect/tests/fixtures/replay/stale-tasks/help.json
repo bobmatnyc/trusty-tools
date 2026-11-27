@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "-h"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "usage: stale-tasks.py [-h] [--root ROOT] [--hours HOURS] [--json]\n\nstale-tasks.py: list open, unparked dashboard tasks (kind task) with no recent\nactivity.\n\noptions:\n  -h, --help     show this help message and exit\n  --root ROOT\n  --hours HOURS\n  --json         print rows as JSON\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

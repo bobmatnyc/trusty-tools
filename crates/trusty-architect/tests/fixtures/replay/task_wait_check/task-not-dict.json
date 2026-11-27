@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T0005\",\n      \"status\": \"open\",\n      \"done_when\": \"two words\"\n    },\n    3\n  ],\n  \"session\": {}\n}\n"
+  },
+  "reads": [
+    "local/il/.trusty-mpm/datg/state.json"
+  ],
+  "stdout": "task_wait_check failed: AttributeError: 'int' object has no attribute 'get'\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

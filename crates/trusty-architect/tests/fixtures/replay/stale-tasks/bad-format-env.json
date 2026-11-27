@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_FORMAT": "yaml",
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items/T01.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s1\",\n  \"goal\": \"G01\",\n  \"title\": \"Port the checker\",\n  \"progress_at\": \"2026-11-26T07:00:00Z\",\n  \"version\": 4\n}\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "stale-tasks: cannot read store: DASHBOARD_FORMAT='yaml': use dir or jsonl\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q",
+    "--json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items/.keep": ""
+  },
+  "reads": [
+    "q/items/.keep"
+  ],
+  "stdout": "[]\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

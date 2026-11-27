@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_ROOT": "{ROOT}/q",
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items/T01.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s1\",\n  \"goal\": \"G01\",\n  \"title\": \"Port the checker\",\n  \"progress_at\": \"2026-11-26T07:00:00Z\",\n  \"version\": 4\n}\n",
+    "q/items/T02.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s1\",\n  \"title\": \"fresh by a minute\",\n  \"progress_at\": \"2026-11-26T13:01:00Z\"\n}\n",
+    "q/items/T03.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s2\",\n  \"title\": \"exactly 24 h\",\n  \"progress_at\": \"2026-11-26T13:00:00Z\"\n}\n",
+    "q/items/T04.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s2\",\n  \"goal\": \"G02\",\n  \"title\": \"24 h and a second\",\n  \"progress_at\": \"2026-11-26T12:59:59Z\",\n  \"steps\": [\n    \"a\",\n    \"b\"\n  ]\n}\n",
+    "q/items/T05.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"never dated\"\n}\n",
+    "q/items/T06.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"parked until\",\n  \"parked\": {\n    \"until\": \"2026-12-01\",\n    \"at\": \"2026-11-01T00:00Z\"\n  }\n}\n",
+    "q/items/T07.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s3\",\n  \"goal\": \"G03\",\n  \"title\": \"parked eight days\",\n  \"parked\": {\n    \"at\": \"2026-11-19T12:00:00Z\",\n    \"note\": \"later\"\n  }\n}\n",
+    "q/items/T08.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"parked six days\",\n  \"parked\": {\n    \"at\": \"2026-11-21T13:00Z\"\n  }\n}\n",
+    "q/items/T09.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"factory\",\n  \"factory\": {\n    \"every\": \"1d\"\n  },\n  \"progress_at\": \"2026-11-01T00:00Z\"\n}\n",
+    "q/items/T10.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"open\",\n  \"title\": \"not a task\"\n}\n",
+    "q/items/T11.json": "{\n  \"kind\": \"task\",\n  \"status\": \"done\",\n  \"title\": \"done\",\n  \"progress_at\": \"2026-11-01T00:00Z\"\n}\n",
+    "q/items/T12.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \" \",\n  \"goal\": \"Gzz\",\n  \"title\": \"offset café\",\n  \"progress_at\": \"2026-11-25T10:00:00+05:00\",\n  \"progress\": {\n    \"pct\": 40,\n    \"eta\": \"2026-11-26T00:00Z\"\n  },\n  \"log\": [\n    {\n      \"at\": \"2026-11-24T00:00Z\"\n    },\n    \"x\",\n    {\n      \"at\": \"bad\"\n    }\n  ],\n  \"reported\": {\n    \"at\": \"2026-11-25T01:00Z\"\n  },\n  \"updated\": \"2026-11-27T12:00:00Z\"\n}\n",
+    "q/items/T13.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s4\",\n  \"title\": \"legacy estimate\",\n  \"progress\": {\n    \"estimated_at\": \"2026-11-25T21:00Z\",\n    \"eta\": \"2027-01-01\"\n  },\n  \"updated\": \"2026-11-27T12:00:00Z\",\n  \"updates\": [\n    {\n      \"at\": \"2026-11-27T12:30:00Z\"\n    },\n    5\n  ],\n  \"created\": \"2026-11-01T00:00Z\"\n}\n",
+    "q/items/T14.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s5\",\n  \"goal\": \"G04\",\n  \"title\": \"rank true goal\",\n  \"created\": \"2026-11-20T00:00:00.250000Z\",\n  \"parked\": \"\"\n}\n",
+    "q/items/T15.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": null,\n  \"goal\": 7,\n  \"title\": null,\n  \"progress_at\": \"2026-11-26T12:30:00.5Z\"\n}\n"
+  },
+  "reads": [
+    "q/items/T01.json",
+    "q/items/T02.json",
+    "q/items/T03.json",
+    "q/items/T04.json",
+    "q/items/T05.json",
+    "q/items/T06.json",
+    "q/items/T07.json",
+    "q/items/T08.json",
+    "q/items/T09.json",
+    "q/items/T10.json",
+    "q/items/T11.json",
+    "q/items/T12.json",
+    "q/items/T13.json",
+    "q/items/T14.json",
+    "q/items/T15.json"
+  ],
+  "stdout": "T05\t\tnever\t-\t-\tnever dated\t-\tstale\tno_progress,no_session\nT07\ts3\t2026-11-19T12:00:00Z\tG03\t-\tparked eight days\t8.0\tparked\tno_progress,park_no_event\nT14\ts5\t2026-11-20T00:00:00Z\tG04\t-\trank true goal\t7.5\tstale\tno_progress\nT12\t \t2026-11-25T10:00:00Z\tGzz\t-\toffset café\t2.3\tstale\tpast_eta,no_session\nT13\ts4\t2026-11-25T21:00:00Z\t-\t-\tlegacy estimate\t1.7\tstale\tno_progress\nT01\ts1\t2026-11-26T07:00:00Z\tG01\t-\tPort the checker\t1.2\tstale\tno_progress\nT15\tNone\t2026-11-26T12:30:00Z\t7\t-\tNone\t1.0\tstale\tno_progress,no_session\nT04\ts2\t2026-11-26T12:59:59Z\tG02\t-\t24 h and a second\t1.0\tstale\t-\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

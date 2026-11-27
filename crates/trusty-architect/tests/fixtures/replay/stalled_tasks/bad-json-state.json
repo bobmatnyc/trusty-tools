@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\" 7\n}\n",
+    "local/owner-queue/items/.keep": ""
+  },
+  "reads": [
+    "local/il/.trusty-mpm/datg/state.json"
+  ],
+  "stdout": "",
+  "stderr": "datg.DatgError: state.json malformed (Expecting ':' delimiter: line 3 column 7 (char 24)); refusing to write\n",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

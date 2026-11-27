@@ -21,7 +21,7 @@
 
 mod args;
 mod checks;
-mod py;
+pub(crate) mod py; // #12028 P1d: the task checkers read files the same way
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

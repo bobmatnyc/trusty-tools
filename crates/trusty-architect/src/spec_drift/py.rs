@@ -20,9 +20,9 @@ use crate::pystr::py_repr;
 
 /// One Python exception: its class name and `str(exc)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PyExc {
-    pub(super) class: String,
-    pub(super) msg: String,
+pub(crate) struct PyExc {
+    pub(crate) class: String,
+    pub(crate) msg: String,
 }
 
 /// An exception raised inside a check.
@@ -176,7 +176,7 @@ pub(super) fn list_repr(items: &[&str]) -> String {
 }
 
 /// The `OSError` subclass and `str()` Python raises for `e` on `path`.
-pub(super) fn os_error(path: &Path, e: &std::io::Error) -> PyExc {
+pub(crate) fn os_error(path: &Path, e: &std::io::Error) -> PyExc {
     let code = e.raw_os_error().unwrap_or(0);
     let class = match code {
         libc::ENOENT => "FileNotFoundError",
@@ -199,7 +199,7 @@ pub(super) fn os_error(path: &Path, e: &std::io::Error) -> PyExc {
 }
 
 /// `UnicodeDecodeError` for bytes that are not UTF-8.
-fn decode_error(bytes: &[u8], e: &std::str::Utf8Error) -> PyExc {
+pub(crate) fn decode_error(bytes: &[u8], e: &std::str::Utf8Error) -> PyExc {
     let at = e.valid_up_to();
     let lead = bytes.get(at).copied().unwrap_or(0);
     let (len, reason) = match e.error_len() {
@@ -222,7 +222,7 @@ fn decode_error(bytes: &[u8], e: &std::str::Utf8Error) -> PyExc {
 }
 
 /// `open(path, encoding="utf-8").read()`: `\r\n` and `\r` read as `\n`.
-pub(super) fn read(path: &Path) -> Result<String, PyExc> {
+pub(crate) fn read(path: &Path) -> Result<String, PyExc> {
     let bytes = fs::read(path).map_err(|e| os_error(path, &e))?;
     let s = std::str::from_utf8(&bytes).map_err(|e| decode_error(&bytes, &e))?;
     Ok(s.replace("\r\n", "\n").replace('\r', "\n"))

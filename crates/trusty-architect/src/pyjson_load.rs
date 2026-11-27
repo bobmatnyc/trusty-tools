@@ -56,6 +56,18 @@ pub(crate) struct DecodeError {
     pub(crate) lineno: usize,
     /// `err.colno`.
     pub(crate) colno: usize,
+    /// `err.pos`, a code-point index (#12028 P1d: `str(err)` prints it).
+    pub(crate) pos: usize,
+}
+
+impl DecodeError {
+    /// `str(err)`: `<msg>: line L column C (char P)`.
+    pub(crate) fn py_str(&self) -> String {
+        format!(
+            "{}: line {} column {} (char {})",
+            self.msg, self.lineno, self.colno, self.pos
+        )
+    }
 }
 
 enum Fail {
@@ -80,6 +92,7 @@ fn error(s: &[char], msg: &str, pos: usize) -> DecodeError {
         msg: msg.to_owned(),
         lineno,
         colno,
+        pos,
     }
 }
 

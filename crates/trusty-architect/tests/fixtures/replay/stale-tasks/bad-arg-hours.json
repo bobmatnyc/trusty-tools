@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "argv": [
+    "--hours",
+    "abc"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: stale-tasks.py [-h] [--root ROOT] [--hours HOURS] [--json]\nstale-tasks.py: error: argument --hours: invalid float value: 'abc'\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "argv": [],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: driver.py PROJECT=DIR... [-- EPOCH...]\n",
+  "exit": 2,
+  "writes": {}
+}

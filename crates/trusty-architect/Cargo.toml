@@ -37,6 +37,19 @@ path = "src/bin/trusty-architect-spec-drift-check.rs"
 name = "trusty-architect-level-lint"
 path = "src/bin/trusty-architect-level-lint.rs"
 
+# #12028 P1d: the task checker ports (stale-tasks.py, stalled_tasks.py, task_wait_check.py).
+[[bin]]
+name = "trusty-architect-stale-tasks"
+path = "src/bin/trusty-architect-stale-tasks.rs"
+
+[[bin]]
+name = "trusty-architect-stalled-tasks"
+path = "src/bin/trusty-architect-stalled-tasks.rs"
+
+[[bin]]
+name = "trusty-architect-task-wait-check"
+path = "src/bin/trusty-architect-task-wait-check.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are
