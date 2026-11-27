@@ -79,29 +79,30 @@ struct DoctorRequest {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Unavailable {
+    // See #11786: discriminants pinned to their 0.9.3 positions.
     /// This build does not link the backend.
-    NotCompiled,
+    NotCompiled = 0,
     /// The account's machine config does not enable it.
-    NotEnabled,
+    NotEnabled = 1,
     /// Its CLI is missing, relative, or not executable.
-    CliNotInstalled,
+    CliNotInstalled = 2,
     /// A config it reads is unreadable, does not parse, or is refused.
-    ConfigInvalid,
+    ConfigInvalid = 3,
     /// The project's tracked config sets something only the machine may.
-    TrackedSettingRefused,
+    TrackedSettingRefused = 4,
     /// It reported itself locked or signed out.
-    Locked,
+    Locked = 5,
     /// It failed to open for another reason; the detail says which.
-    OpenFailed,
+    OpenFailed = 6,
     /// The server's own process has no GUI session access to it (#10589).
-    NoSession,
+    NoSession = 7,
     /// A read of an existing Keychain item waits on an authorization prompt
     /// (#11786).
-    AuthorizationPending,
+    AuthorizationPending = 9,
     /// A reason this client does not know.
     // #7519 P4: `serde(other)`, so a reason added later never fails a decode.
     #[serde(other)]
-    Other,
+    Other = 8,
 }
 
 impl Unavailable {

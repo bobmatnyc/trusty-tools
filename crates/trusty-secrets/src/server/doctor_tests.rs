@@ -615,6 +615,30 @@ fn doctor_unknown_reason_decodes_as_other() {
     }
 }
 
+/// Why: #11786 — a variant inserted before `Other` moved its 0.9.3
+/// discriminant, a SemVer break; each kind must also still round-trip.
+/// Test: itself.
+#[test]
+fn doctor_unavailable_discriminants_stay_stable() {
+    let pinned = [
+        (Unavailable::NotCompiled, 0),
+        (Unavailable::NotEnabled, 1),
+        (Unavailable::CliNotInstalled, 2),
+        (Unavailable::ConfigInvalid, 3),
+        (Unavailable::TrackedSettingRefused, 4),
+        (Unavailable::Locked, 5),
+        (Unavailable::OpenFailed, 6),
+        (Unavailable::NoSession, 7),
+        (Unavailable::Other, 8),
+        (Unavailable::AuthorizationPending, 9),
+    ];
+    for (kind, value) in pinned {
+        assert_eq!(kind as usize, value, "{kind:?} moved");
+        let wire = serde_json::to_value(kind).unwrap();
+        assert_eq!(serde_json::from_value::<Unavailable>(wire).unwrap(), kind);
+    }
+}
+
 /// A Keychain double whose OS calls fail as one from a server with no GUI
 /// login session access, or with another `probe` error (#10589).
 #[derive(Debug)]
