@@ -1,0 +1,3 @@
+Added
+
+- The daemon now pulls trusty-mpm's active-project set (`mpm.residency.active`) every `TRUSTY_RESIDENCY_PULL_SECS` (default 30 s). An index named in the set is never parked by the resident cap, and a cold-parked one is loaded before its first query. A resident index outside the set parks once it has been out of the set and unqueried for `TRUSTY_RESIDENCY_GRACE_SECS` (default 120 s). A set that is stale (`TRUSTY_RESIDENCY_STALE_SECS`, default 600 s), never fetched or empty changes nothing; `TRUSTY_RESIDENCY=off` turns the pull off. `lazy_loader::ids_to_park` takes the pinned ids as a third argument (Refs #10533).

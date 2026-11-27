@@ -32,6 +32,7 @@
 //! `cold_park_index_*` below; end-to-end round-trip coverage lives in
 //! `tests/residency_cold_park.rs`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::core::memory_policy::{detect_total_ram_mb, MemoryTier};
@@ -277,16 +278,31 @@ pub fn residency_sweep_secs() -> u64 {
 /// [`select_warmboot_entries`] — the exact comparator `start.rs` uses to
 /// decide the boot-time eager/cold split — so "keep the hottest N" means the
 /// same thing at boot and at runtime.
+/// Why (#10533): an index in tm's active-project set must stay resident however
+/// cold its recency stamp is, so the cap ranks only the indexes outside it.
 /// What: `resident_entries` is the `PersistedIndex` snapshot (from
 /// `indexes.toml`) for every index currently in the hot `IndexRegistry`.
-/// Returns the subset (beyond the top `cap` by recency) that should be
-/// parked; empty when `resident_entries.len() <= cap` (nothing to do).
-/// Test: `ids_to_park_keeps_top_n_by_recency`, `ids_to_park_empty_when_under_cap`.
-pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<PersistedIndex> {
+/// `pinned` is the active set's index ids (empty when the set is stale or
+/// absent). A pinned entry is never returned. Pinned residents still count
+/// against `cap`, so the non-pinned rest keep the top `cap - pinned` slots by
+/// recency and the remainder is returned; empty when `resident_entries.len() <=
+/// cap`. With `pinned` empty this is the pre-#10533 selection exactly.
+/// Test: `ids_to_park_keeps_top_n_by_recency`, `ids_to_park_empty_when_under_cap`,
+/// `ids_to_park_never_chooses_an_active_set_member`.
+pub fn ids_to_park(
+    resident_entries: Vec<PersistedIndex>,
+    cap: usize,
+    pinned: &HashSet<String>,
+) -> Vec<PersistedIndex> {
     if resident_entries.len() <= cap {
         return Vec::new();
     }
-    let (_keep_resident, park) = select_warmboot_entries(resident_entries, Some(cap));
+    // #10533: pinned residents take their slots off the top; only the rest rank.
+    let (kept, rankable): (Vec<_>, Vec<_>) = resident_entries
+        .into_iter()
+        .partition(|e| pinned.contains(&e.id));
+    let budget = cap.saturating_sub(kept.len());
+    let (_keep_resident, park) = select_warmboot_entries(rankable, Some(budget));
     park
 }
 
@@ -928,7 +944,7 @@ mod tests {
     #[test]
     fn ids_to_park_empty_when_under_cap() {
         let entries = vec![mk_entry("a", Some(1)), mk_entry("b", Some(2))];
-        assert!(ids_to_park(entries, 5).is_empty());
+        assert!(ids_to_park(entries, 5, &HashSet::new()).is_empty());
     }
 
     #[test]
@@ -939,7 +955,7 @@ mod tests {
             mk_entry("b", Some(200)),
             mk_entry("c", Some(100)),
         ];
-        let parked = ids_to_park(entries, 2);
+        let parked = ids_to_park(entries, 2, &HashSet::new());
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0].id, "c");
     }
@@ -947,7 +963,7 @@ mod tests {
     #[test]
     fn ids_to_park_cap_zero_parks_everything() {
         let entries = vec![mk_entry("a", Some(1)), mk_entry("b", Some(2))];
-        let parked = ids_to_park(entries, 0);
+        let parked = ids_to_park(entries, 0, &HashSet::new());
         assert_eq!(parked.len(), 2);
     }
 

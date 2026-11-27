@@ -589,6 +589,10 @@ pub struct SearchAppState {
     /// `POST /warm`, `GET /warm/status`, their socket twins, and the
     /// idle-eviction and residency tickers that honour the pins.
     pub warm: Arc<super::warm_all::WarmTracker>,
+    /// #10533: tm's last pulled active-project set. Written by the residency
+    /// pull ticker, read by the residency sweep to pin members and park
+    /// non-members after the grace period.
+    pub residency_pins: Arc<super::residency_pins::ResidencyPins>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.

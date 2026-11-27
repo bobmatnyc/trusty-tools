@@ -83,6 +83,9 @@ mod remove_files;
 mod remove_files_tests;
 // #9236: maps a remove-file path onto the stored index-relative key.
 mod remove_path;
+// #10533: tm's active-project set drives residency (pins + pull ticker).
+mod residency_pins;
+mod residency_pull;
 mod residency_sweep;
 // #4289: the create-index-time containment guard over registered index roots.
 mod root_overlap;
@@ -399,6 +402,8 @@ pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
     spawn_watcher_idle_suspend_ticker(Arc::clone(state_arc));
     spawn_orphan_reaper_ticker(Arc::clone(state_arc));
     spawn_residency_sweep_ticker(Arc::clone(state_arc));
+    // #10533: pull tm's active-project set; pin, pre-wake, and feed the sweep.
+    residency_pull::spawn_residency_pull_ticker(Arc::clone(state_arc));
     spawn_memory_pressure_ticker(Arc::clone(state_arc));
     graph_refresh_ticker::spawn_graph_refresh_ticker(Arc::clone(state_arc));
     // #4250: drive indexes parked by a warm-boot restore timeout back into the

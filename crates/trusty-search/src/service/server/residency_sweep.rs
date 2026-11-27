@@ -6,14 +6,21 @@
 //! body — which is where the registry / cold-store / reindex-progress
 //! interactions actually live — moves here with its own tests.
 //! What: [`run_residency_sweep_tick`] and the `#[cfg(test)]` seam
-//! [`run_residency_sweep_tick_inner`] it delegates to.
-//! Test: `residency_sweep_tests`.
+//! [`run_residency_sweep_tick_inner`] it delegates to. #10533: the tick reads
+//! tm's active set from `state.residency_pins` — members are never parked,
+//! non-members park after the grace period — through the clock-injected
+//! [`run_residency_sweep_tick_at`].
+//! Test: `residency_sweep_tests`, `residency_pins_10533_tests`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
+use super::residency_pins::grace_expired;
 use super::state::SearchAppState;
 use crate::core::registry::IndexId;
+use crate::service::persistence::PersistedIndex;
+use crate::service::persistence_timestamps::warmboot_sort_key;
 use crate::service::reindex::ReindexStatus;
 
 /// One residency-sweep tick: rank resident indexes, cold-park everything
@@ -78,6 +85,35 @@ pub(super) async fn run_residency_sweep_tick(state: &Arc<SearchAppState>) {
 /// reindex check has already passed — the exact window a `POST
 /// /indexes/<id>/reindex` lands in. Production passes a no-op.
 async fn run_residency_sweep_tick_inner(state: &Arc<SearchAppState>, hook: impl Fn(&IndexId)) {
+    run_residency_sweep_tick_at(
+        state,
+        Instant::now(),
+        crate::core::project_map::now_unix(),
+        hook,
+    )
+    .await
+}
+
+/// [`run_residency_sweep_tick_inner`] at an injected clock (#10533).
+///
+/// Why: the active-set grace period is a time rule, and a test must walk it
+/// without sleeping.
+/// What: two candidate sources feed one park loop. (1) Grace: when the active
+/// set is trusted, a resident non-member whose absence and last activity both
+/// reach the grace period parks, even under the cap. (2) Cap: over the cap,
+/// [`crate::service::lazy_loader::ids_to_park`] ranks only non-members. A
+/// stale or absent set leaves (1) empty and (2) unpinned, which is the
+/// pre-#10533 tick. Warm pins and a `Running` reindex block either source.
+/// Test: `sweep_keeps_an_active_set_member_resident_past_the_cap`,
+/// `non_member_parks_only_after_the_grace_period_with_no_query`,
+/// `stale_or_absent_set_sweep_behaves_as_today`,
+/// `running_reindex_blocks_an_active_set_grace_park`.
+async fn run_residency_sweep_tick_at(
+    state: &Arc<SearchAppState>,
+    now: Instant,
+    now_unix: u64,
+    hook: impl Fn(&IndexId),
+) {
     // #6821: an unset TRUSTY_MAX_RESIDENT_INDEXES now resolves to the machine
     // tier's default instead of disabling the sweep; `off` is what disables it.
     let resolved =
@@ -86,8 +122,10 @@ async fn run_residency_sweep_tick_inner(state: &Arc<SearchAppState>, hook: impl 
         return; // TRUSTY_MAX_RESIDENT_INDEXES=off — nothing is ever parked.
     };
 
+    // #10533: `None` when the active set is stale, absent or empty.
+    let members = state.residency_pins.members(now);
     let resident_ids: HashSet<String> = state.registry.list().into_iter().map(|id| id.0).collect();
-    if resident_ids.len() <= cap {
+    if resident_ids.len() <= cap && members.is_none() {
         return;
     }
 
@@ -103,7 +141,13 @@ async fn run_residency_sweep_tick_inner(state: &Arc<SearchAppState>, hook: impl 
         .filter(|e| resident_ids.contains(&e.id))
         .collect();
 
-    let mut to_park = crate::service::lazy_loader::ids_to_park(resident_entries, cap);
+    // #10533: grace parks first, so the cap ranks what is left after them.
+    let pinned = members.unwrap_or_default();
+    let (mut to_park, rest): (Vec<_>, Vec<_>) = resident_entries
+        .into_iter()
+        .partition(|e| grace_candidate(state, e, &pinned, now, now_unix));
+    let grace_parks = to_park.len();
+    to_park.extend(crate::service::lazy_loader::ids_to_park(rest, cap, &pinned));
     // #9027: a warm-all pin keeps the index resident for its window, even past
     // the cap; the warm's own RSS ceiling bounds what that can cost.
     to_park.retain(|entry| !state.warm.is_pinned(&entry.id));
@@ -150,8 +194,56 @@ async fn run_residency_sweep_tick_inner(state: &Arc<SearchAppState>, hook: impl 
             "residency-sweep: cold-parked {parked} index(es) beyond top-{cap} resident cap"
         );
     }
+    if grace_parks > 0 {
+        // #10533: the grace share of the candidates, for the live check.
+        tracing::info!(
+            "residency-sweep: {grace_parks} candidate(s) idled past the active-set grace period"
+        );
+    }
+}
+
+/// Is `entry` a non-member that has idled past the active-set grace period?
+///
+/// Why (#10533): design section 3, ACTIVE to PARKED. A warm pin or a
+/// `Running` reindex keeps it out of the grace list up front, so the cap stage
+/// still counts it as resident.
+/// What: `false` whenever `pinned` is empty (stale, absent or empty set). The
+/// last activity is the later of the persisted recency key and the in-memory
+/// `last_queried_write_cache` stamp.
+/// Test: `non_member_parks_only_after_the_grace_period_with_no_query`,
+/// `running_reindex_blocks_an_active_set_grace_park`.
+fn grace_candidate(
+    state: &SearchAppState,
+    entry: &PersistedIndex,
+    pinned: &HashSet<String>,
+    now: Instant,
+    now_unix: u64,
+) -> bool {
+    if pinned.is_empty() || pinned.contains(&entry.id) {
+        return false;
+    }
+    let id = IndexId::new(entry.id.clone());
+    if state.warm.is_pinned(&entry.id) || reindex_running(state, &id) {
+        return false;
+    }
+    let cached = state
+        .last_queried_write_cache
+        .get(&id)
+        .map_or(0, |stamp| *stamp);
+    let last_activity = warmboot_sort_key(entry).max(cached);
+    let pins = &state.residency_pins;
+    grace_expired(
+        pins.absent_for(&entry.id, now),
+        last_activity,
+        pins.grace(),
+        now_unix,
+    )
 }
 
 #[cfg(test)]
 #[path = "residency_sweep_tests.rs"]
 mod residency_sweep_tests;
+
+#[cfg(test)]
+#[path = "residency_pins_10533_tests.rs"]
+mod residency_pins_10533_tests;
