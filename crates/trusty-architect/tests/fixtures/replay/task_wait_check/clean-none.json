@@ -6,7 +6,7 @@
     "TZ": "UTC"
   },
   "files": {
-    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T01\",\n      \"status\": \"open\",\n      \"remaining\": \"\",\n      \"waiting_on\": null,\n      \"done_when\": \"the replay test passes on CI\"\n    }\n  ],\n  \"session\": {}\n}\n",
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T0001\",\n      \"status\": \"open\",\n      \"remaining\": \"\",\n      \"waiting_on\": null,\n      \"done_when\": \"the replay test passes on CI\"\n    }\n  ],\n  \"session\": {}\n}\n",
     "local/owner-queue/items/.keep": ""
   },
   "reads": [

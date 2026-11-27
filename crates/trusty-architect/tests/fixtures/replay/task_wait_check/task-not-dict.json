@@ -6,7 +6,7 @@
     "TZ": "UTC"
   },
   "files": {
-    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T05\",\n      \"status\": \"open\",\n      \"done_when\": \"two words\"\n    },\n    3\n  ],\n  \"session\": {}\n}\n"
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T0005\",\n      \"status\": \"open\",\n      \"done_when\": \"two words\"\n    },\n    3\n  ],\n  \"session\": {}\n}\n"
   },
   "reads": [
     "local/il/.trusty-mpm/datg/state.json"

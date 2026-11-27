@@ -89,7 +89,7 @@ fn shipped_task_commands_read_the_working_directory_ledger() {
         r#"{"status": "answered", "answered_at": "2026-11-26T10:11Z"}"#,
     );
     let state = r#"{"code": "ar", "v": 1, "next": {}, "goals": [], "items": [], "tasks": [
-        {"id": "ar-T01", "status": "open", "priority": 1, "created": "2000-01-01T00:00Z",
+        {"id": "ar-T0001", "status": "open", "priority": 1, "created": "2000-01-01T00:00Z",
          "remaining": "waits on D12", "done_when": "Bob confirms"}]}"#;
     put(root, "local/il/.trusty-mpm/datg/state.json", state);
 
@@ -97,7 +97,7 @@ fn shipped_task_commands_read_the_working_directory_ledger() {
     assert_eq!(code, Some(0), "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(
-        lines[0].starts_with("STALLED (no progress past priority limit): ar-T01 P1 "),
+        lines[0].starts_with("STALLED (no progress past priority limit): ar-T0001 P1 "),
         "{stdout}"
     );
     assert_eq!(lines[1], "none");
@@ -106,8 +106,8 @@ fn shipped_task_commands_read_the_working_directory_ledger() {
     assert_eq!(code, Some(0));
     assert_eq!(
         stdout,
-        "STALE-WAIT ar-T01 names D12 in remaining, but D12 is answered (2026-11-26T10:11Z)\n\
-         UNCHECKABLE ar-T01 done_when has no observable: \"Bob confirms\"\n"
+        "STALE-WAIT ar-T0001 names D12 in remaining, but D12 is answered (2026-11-26T10:11Z)\n\
+         UNCHECKABLE ar-T0001 done_when has no observable: \"Bob confirms\"\n"
     );
 
     // An unreadable ledger is reported, never "none".
