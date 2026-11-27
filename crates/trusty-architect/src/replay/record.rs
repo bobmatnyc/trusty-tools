@@ -183,14 +183,30 @@ fn text(bytes: Vec<u8>, field: &str) -> Result<String, ReplayError> {
 ///
 /// Why: see the module doc; `parent_env` is a parameter so a test can prove
 /// a variable outside the allowlist never arrives.
-/// What: seed, run, diff the sandbox, scrub, [`check`]. Returns the
+/// What: refuse an env rule for `HOME` or `PATH` (#12028), then seed, run,
+/// diff the sandbox, scrub, [`check`]. Returns the
 /// scrubbed recording; nothing is written.
 /// Test: `record_captures_argv_stdin_env_files_and_writes`,
-/// `record_keeps_env_outside_the_allowlist_out`.
+/// `record_keeps_env_outside_the_allowlist_out`,
+/// `a_recorded_path_env_cannot_displace_the_fake_stubs`.
 pub fn record(
     spec: &RecordSpec,
     parent_env: &BTreeMap<String, String>,
 ) -> Result<Recording, ReplayError> {
+    // See #12028: the sandbox owns HOME and PATH; a recorded value would
+    // claim an environment the program never saw.
+    if let Some(k) = spec
+        .env
+        .iter()
+        .map(|r| match r {
+            EnvRule::Set(k, _) | EnvRule::Pass(k) => k,
+        })
+        .find(|k| *k == "HOME" || *k == "PATH")
+    {
+        return Err(ReplayError::BadArg(format!(
+            "--env {k}: the sandbox sets HOME and PATH itself"
+        )));
+    }
     // Inputs are scrubbed before the run, so the program sees exactly what is
     // recorded and a replay of the recorded inputs is faithful by construction.
     let input = home_rules(Scrubber::new(), parent_env).sessions(&spec.sessions);

@@ -155,3 +155,38 @@ fn a_secret_shaped_value_in_a_fake_is_refused() {
     assert!(err.contains("fakes#") && err.contains("Secret"), "{err}");
     assert!(!out.exists());
 }
+
+#[test]
+fn a_recorded_path_env_cannot_displace_the_fake_stubs() {
+    // #12028 fix round: `--env PATH=...` used to replace the stub PATH, so
+    // the host git ran untrapped and the fixture held no calls.
+    let dir = tempfile::tempdir().unwrap();
+    let f = fakes_file(dir.path(), &json!({"gh": [{"stdout": "ok\n"}]}));
+    let out = dir.path().join("path.json");
+    let o = out.to_str().unwrap();
+    for env in ["PATH=/usr/bin:/bin", "PATH", "HOME=/tmp"] {
+        let rec = run(&[
+            "record",
+            "--fakes",
+            &f,
+            "--env",
+            env,
+            "--out",
+            o,
+            "--",
+            "/bin/sh",
+            "-c",
+            "git --version; gh pr list",
+        ]);
+        let err = text(&rec.stderr);
+        assert_eq!(rec.status.code(), Some(2), "--env {env}: {err}");
+        assert!(
+            err.contains("sets HOME and PATH itself"),
+            "--env {env}: {err}"
+        );
+        assert!(
+            !out.exists(),
+            "--env {env}: a refused record writes no fixture"
+        );
+    }
+}

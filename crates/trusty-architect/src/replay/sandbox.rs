@@ -97,7 +97,7 @@ impl Sandbox {
 
     /// Runs `program prefix.. argv..` in the sandbox with exactly `env` plus
     /// `HOME` (the root) and `PATH` ([`SANDBOX_PATH`], after `fakes` when
-    /// given); every value expanded.
+    /// given); every value expanded. `HOME` and `PATH` win over `env`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
         &self,
@@ -118,12 +118,13 @@ impl Sandbox {
         cmd.args(prefix)
             .args(argv.iter().map(|a| self.expand(a)))
             .current_dir(&self.root)
-            .env_clear()
-            .env("HOME", &self.root)
-            .env("PATH", path);
+            .env_clear();
         for (k, v) in env {
             cmd.env(k, self.expand(v));
         }
+        // See #12028: set last, so no recorded env entry displaces the root
+        // or the fake stubs.
+        cmd.env("HOME", &self.root).env("PATH", path);
         run_bounded_input(cmd, Some(self.expand(stdin).into_bytes()), timeout).map_err(
             |e| match e {
                 RunFailure::Spawn(e) | RunFailure::Wait(e) => ReplayError::Spawn(e),
