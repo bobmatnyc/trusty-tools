@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::{
     GH_SHIM_ENV, LaunchSeams, PinnedCredential, RATE_LIMIT_REFUSAL_MARKER,
-    RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER, REAP_FN, find_real_gh,
-    launch_pinned_login, prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
+    RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER, RATE_LIMIT_UNKNOWN_KIND_MARKER,
+    REAP_FN, find_real_gh, launch_pinned_login, prefixed_path, shim_dir, shim_root, shim_script,
+    write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_dir::AccountDirSources;
@@ -911,6 +912,10 @@ fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
     assert!(out.stdout.is_empty(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.starts_with(RATE_LIMIT_UNKNOWN_KIND_MARKER),
+        "{stderr}"
+    );
     assert!(!stderr.contains("primary GraphQL rate limit"), "{stderr}");
     assert!(stderr.contains("did not answer"), "{stderr}");
     // #11233: gh's own limit line is kept on the fallback path too.

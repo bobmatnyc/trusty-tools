@@ -307,6 +307,19 @@ pub const RATE_LIMIT_RESET_EPOCH_OPEN: &str = "(epoch ";
 pub const RATE_LIMIT_SHORT_WINDOW_MARKER: &str =
     "tm: GitHub refused this gh call on a short-window or secondary GraphQL rate limit";
 
+/// The fixed opening of the shim's refusal line when its lookup could not read
+/// the remaining GraphQL quota (#11803).
+///
+/// Why: without `remaining` the shim cannot tell the primary limit from a
+/// secondary one, so it must not claim "primary" or the hourly reset.
+/// What: the line carries no reset epoch, so
+/// [`crate::core::gh_rate_limit::classify`] reads it as a short backoff.
+/// Shell-safe, and contains neither of the other two markers.
+/// Test: `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
+/// `classify_reads_the_unknown_kind_line_as_a_backoff_with_no_reset`.
+pub const RATE_LIMIT_UNKNOWN_KIND_MARKER: &str =
+    "tm: GitHub refused this gh call on a GraphQL rate limit of unknown kind";
+
 /// The shim's tail: run the real gh, refusing a primary GraphQL rate-limit
 /// refusal cleanly (#10550, ruling D8f, option A).
 ///
@@ -320,9 +333,10 @@ pub const RATE_LIMIT_SHORT_WINDOW_MARKER: &str =
 /// `HTTP <status>` (a REST quota, 403 or 429, passes through; #10550) it
 /// reads `remaining` and `reset` from one bounded REST `gh api rate_limit`
 /// call. With `remaining > 0` it prints one line naming a short-window or
-/// secondary limit and the remaining count (#11233). Otherwise, or when the
-/// lookup fails, it prints one line naming the primary GraphQL limit and the
-/// reset, or "unknown". Either line ends with gh's own first rate-limit
+/// secondary limit and the remaining count (#11233). When the lookup fails or
+/// `remaining` is unreadable it prints [`RATE_LIMIT_UNKNOWN_KIND_MARKER`] and
+/// no reset (#11803). Only `remaining` 0 prints the line naming the primary
+/// GraphQL limit and the reset, or "unknown". Each line ends with gh's own first rate-limit
 /// stderr line, verbatim, and the shim exits 1 with no stdout. The call is
 /// never retried. Otherwise it replays stdout, then stderr, and the exit
 /// status.
@@ -337,6 +351,7 @@ pub const RATE_LIMIT_SHORT_WINDOW_MARKER: &str =
 /// `a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout`,
 /// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
 /// `a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary`,
+/// `the_primary_reset_line_needs_remaining_zero_and_a_secondary_limit_is_never_primary`,
 /// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
 /// `a_non_rate_limit_graphql_error_passes_through_unchanged`,
 /// `a_large_buffered_output_passes_through_whole`,
@@ -346,6 +361,8 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
     // so a TERM-then-KILL supervisor never orphans gh or leaks the buffer dir.
     // #11233: one REST lookup reads `remaining` and `reset`; quota left means
     // a short-window limit, not the primary one, and gh's own line is kept.
+    // #11803: "primary … resets at" only when `remaining` reads 0; an unread
+    // `remaining` gets the unknown-kind line, never the primary one.
     format!(
         "[ -t 1 ] && exec \"$real\" \"$@\"\n\
          case \" $* \" in *' --watch '*|*' --watch='*) exec \"$real\" \"$@\" ;; esac\n\
@@ -379,6 +396,10 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          \x20 case \"$remaining\" in *[!0-9]*) remaining= ;; esac\n\
          \x20 if [ -n \"$remaining\" ] && [ \"$remaining\" -gt 0 ]; then\n\
          \x20   printf '%s\\n' \"{RATE_LIMIT_SHORT_WINDOW_MARKER} (gh account '{login}' on {shown}); the hourly GraphQL quota still has $remaining points left, so this is not the primary limit. tm did not retry it. gh said: $said\" >&2\n\
+         \x20   exit 1\n\
+         \x20 fi\n\
+         \x20 if [ -z \"$remaining\" ]; then\n\
+         \x20   printf '%s\\n' \"{RATE_LIMIT_UNKNOWN_KIND_MARKER} (gh account '{login}' on {shown}); gh api rate_limit did not answer with the remaining quota, so tm cannot tell the primary limit from a secondary one. tm did not retry it. gh said: $said\" >&2\n\
          \x20   exit 1\n\
          \x20 fi\n\
          \x20 case \"$reset\" in\n\
