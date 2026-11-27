@@ -116,6 +116,19 @@ fn floor_holds_the_builtins_and_chrome() {
     assert!(!is_floor("slack-mcp"));
 }
 
+/// #11933: the floor names the server key `tm install` registers
+/// (`auto_setup::SERVERS`, the binary name), not the crate name, so an owner
+/// `deny` can never strip web-qa's browser tools.
+#[test]
+fn the_floor_names_the_registered_trusty_browser_mcp_server() {
+    assert!(is_floor("trusty-browser-mcp"));
+    assert!(is_tool_floor("mcp__trusty-browser-mcp__page_navigate"));
+    assert!(
+        !is_floor("trusty-browser"),
+        "the crate name is not a registered MCP server"
+    );
+}
+
 /// #8988 Q2 drift guard: a new agent MCP grant must join the floor, or an
 /// owner `deny` could break that agent.
 #[test]

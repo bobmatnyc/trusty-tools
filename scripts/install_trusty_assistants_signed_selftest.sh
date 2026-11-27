@@ -22,11 +22,17 @@
 #     fingerprint-fails a failing or empty-output `shasum` or `stat` makes the
 #                       script exit 1 before cargo runs, never "unchanged"
 #     path-cargo-home   `--from-source` into the cargo home exits 2 (ADR-0043)
-#     sign-fail-soft    a failing tctl leaves `ta` in place and exits 0
-#     old-tctl          a tctl that does not accept `trusty-assistants` is
+#     sign-fail-soft    a tctl exiting 3 (no certificate) leaves `ta` in
+#                       place, exits 0, and the last line of stdout and of
+#                       stderr is exactly `NOT SIGNED` (#11683)
+#     sign-fail-hard    a tctl exiting 1 (any other sign failure) leaves `ta`
+#                       in place and exits 1 with an ERROR line (#11683)
+#     old-tctl          a tctl that does not accept `trusty-assistants` (but
+#                       names it outside its possible-values list, #11683) is
 #                       never asked to sign; this checkout's trusty-installer
 #                       is built and signs the staging dir (only `ta`)
-#     source-argv       `--git-rev` and the registry default build the
+#     signer-unbuildable  that fallback failing to build exits 1 (#11683)
+#     source-argv      `--git-rev` and the registry default build the
 #                       expected `cargo install` argv
 #     fresh-target      cargo install gets CARGO_NET_GIT_FETCH_WITH_CLI=true,
 #                       no inherited CARGO_TARGET_DIR, and a `--target-dir`
@@ -71,7 +77,10 @@ set -eu
 printf '%s\n' "$*" >> "$STUB_LOG/cargo.argv"
 case "${1:-}" in
   install) ;;
-  build) exit 0 ;;
+  build)
+    # #11683: STUB_CARGO_BUILD_FAIL=1 makes the fallback signer unbuildable.
+    if [ "${STUB_CARGO_BUILD_FAIL:-0}" = "1" ]; then exit 101; fi
+    exit 0 ;;
   run)
     # `cargo run -p trusty-installer -- sign <set> --dir D`: sign like tctl.
     dir=""
@@ -116,12 +125,17 @@ STUB
 cat > "$STUBS/tctl" <<'STUB'
 #!/usr/bin/env bash
 set -eu
-if [ "${2:-}" = "--help" ]; then
-  # STUB_TCTL_OLD: a tctl from before #11632, which knows only trusty-agents.
+if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
+  # STUB_TCTL_OLD: a tctl from before #11632, which knows only trusty-agents;
+  # its prose still names trusty-assistants, so only the possible-values list
+  # may decide (#11683). The name comes last, so a reader that stops early
+  # (`grep -q`) cannot SIGPIPE this stub and hide the mismatch.
+  echo "      --scope <SCOPE>  Scope to act on [possible values: project, system, all]"
   if [ "${STUB_TCTL_OLD:-0}" = "1" ]; then
-    echo "[possible values: trusty-search, trusty-mpm, trusty-agents]"
+    echo "  <TARGET>  Which signable set to sign [possible values: trusty-search, trusty-mpm, trusty-agents]"
+    echo "Developer-ID codesign; trusty-assistants is signed by scripts/install-trusty-assistants-signed.sh"
   else
-    echo "[possible values: trusty-search, trusty-mpm, trusty-assistants]"
+    echo "  <TARGET>  Which signable set to sign [possible values: trusty-search, trusty-mpm, trusty-assistants]"
   fi
   exit 0
 fi
@@ -132,7 +146,8 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 ls -A "$dir" > "$STUB_LOG/tctl.dir"
-[ "${STUB_TCTL_FAIL:-0}" = "1" ] && exit 1
+# #11683: STUB_TCTL_FAIL=<code> makes the sign step exit <code>.
+if [ "${STUB_TCTL_FAIL:-0}" != "0" ]; then exit "$STUB_TCTL_FAIL"; fi
 for f in "$dir"/*; do printf 'signed\n' >> "$f"; done
 STUB
 chmod +x "$STUBS/cargo" "$STUBS/tctl"
@@ -239,11 +254,30 @@ grep -q 'ADR-0043' "$WORK/path-cargo-home.out" || fail "path-cargo-home: no ADR-
 # --- sign-fail-soft -----------------------------------------------------
 root="$(new_root_with_tagent sign-fail-soft)"
 before="$(fp "$root/bin/tagent")"
-STUB_TCTL_FAIL=1 run sign-fail-soft --from-source --root "$root"
+STUB_TCTL_FAIL=3 run sign-fail-soft --from-source --root "$root"
 [ "$RC" -eq 0 ] || fail "sign-fail-soft: exit $RC, want 0"
 [ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "sign-fail-soft: ta not restored unsigned"
 [ "$(fp "$root/bin/tagent")" = "$before" ] || fail "sign-fail-soft: tagent changed"
-grep -q 'signing ta failed' "$WORK/sign-fail-soft.out" || fail "sign-fail-soft: no warning"
+grep -q 'WARNING: signing ta failed (exit 3: no Developer ID certificate)' "$WORK/sign-fail-soft.out" \
+  || fail "sign-fail-soft: no warning"
+[ "$(tail -n 1 "$WORK/sign-fail-soft.out")" = "NOT SIGNED" ] || fail "sign-fail-soft: last line is not 'NOT SIGNED'"
+# #11683: and the last line of each stream on its own.
+root="$(new_root_with_tagent sign-fail-soft-split)"
+mkdir -p "$WORK/sign-fail-soft-split"
+STUB_TCTL_FAIL=3 STUB_LOG="$WORK/sign-fail-soft-split" PATH="$STUBS:/usr/bin:/bin" CARGO_HOME="$WORK/cargo-home" \
+  "$SUT" --from-source --root "$root" > "$WORK/sign-fail-soft-split.stdout" 2> "$WORK/sign-fail-soft-split.stderr" \
+  || fail "sign-fail-soft: split-stream run exited non-zero"
+[ "$(tail -n 1 "$WORK/sign-fail-soft-split.stdout")" = "NOT SIGNED" ] || fail "sign-fail-soft: last stdout line is not 'NOT SIGNED'"
+[ "$(tail -n 1 "$WORK/sign-fail-soft-split.stderr")" = "NOT SIGNED" ] || fail "sign-fail-soft: last stderr line is not 'NOT SIGNED'"
+
+# --- sign-fail-hard (#11683) -----------------------------------------------
+root="$(new_root_with_tagent sign-fail-hard)"
+before="$(fp "$root/bin/tagent")"
+STUB_TCTL_FAIL=1 run sign-fail-hard --from-source --root "$root"
+[ "$RC" -eq 1 ] || fail "sign-fail-hard: exit $RC, want 1"
+[ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "sign-fail-hard: ta not restored unsigned"
+[ "$(fp "$root/bin/tagent")" = "$before" ] || fail "sign-fail-hard: tagent changed"
+grep -q 'ERROR: signing ta failed (exit 1)' "$WORK/sign-fail-hard.out" || fail "sign-fail-hard: no ERROR line"
 
 # --- old-tctl -----------------------------------------------------------
 root="$(new_root_with_tagent old-tctl)"
@@ -257,6 +291,17 @@ grep -q '^run --quiet -p trusty-installer --bin tctl -- sign trusty-assistants -
 [ "$(cat "$WORK/old-tctl/tctl.dir" 2>/dev/null)" = "ta" ] || fail "old-tctl: fallback saw more than ta"
 grep -q 'signed' "$root/bin/ta" || fail "old-tctl: ta not signed"
 [ "$(fp "$root/bin/tagent")" = "$before" ] || fail "old-tctl: tagent changed"
+
+# --- signer-unbuildable (#11683) -----------------------------------------
+# A stale tctl plus a checkout whose tctl will not build is a broken install,
+# not the no-certificate case: it must exit 1, never warn and exit 0.
+root="$(new_root_with_tagent signer-unbuildable)"
+before="$(fp "$root/bin/tagent")"
+STUB_TCTL_OLD=1 STUB_CARGO_BUILD_FAIL=1 run signer-unbuildable --from-source --root "$root"
+[ "$RC" -eq 1 ] || fail "signer-unbuildable: exit $RC, want 1"
+grep -q 'could not build this checkout' "$WORK/signer-unbuildable.out" || fail "signer-unbuildable: no error"
+[ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "signer-unbuildable: ta moved or changed"
+[ "$(fp "$root/bin/tagent")" = "$before" ] || fail "signer-unbuildable: tagent changed"
 
 # --- source-argv --------------------------------------------------------
 root="$WORK/git/root"

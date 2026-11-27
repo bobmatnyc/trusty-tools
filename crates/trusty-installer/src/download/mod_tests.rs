@@ -213,21 +213,62 @@ fn mismatch_message_names_both_digests_and_never_offers_a_source_build() {
     );
 }
 
-/// The host target, or `None` when this host publishes no prebuilts.
-fn tier1() -> Option<&'static str> {
-    platform::current_target()
+/// The host's Tier-1 target; panics on a host that publishes no prebuilts.
+///
+/// Why (#11817): the download suites returned early on a non-Tier-1 host, so
+/// every test behind the guard passed there without running.
+/// What: `Some(target)` returns `target`; `None` panics, naming the host's OS
+/// and architecture, so the test fails visibly instead of passing silently.
+/// Shared with `pinned::tests`.
+/// Test: `require_tier1_returns_the_target_it_is_given`,
+/// `require_tier1_fails_on_a_host_without_prebuilts`.
+pub(super) fn require_tier1(target: Option<&'static str>) -> &'static str {
+    // #11817: fail visibly; an early return here was a silent pass.
+    target.unwrap_or_else(|| {
+        panic!(
+            "this test needs a Tier-1 host; {}/{} publishes no prebuilts, so it cannot run here",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })
+}
+
+/// The host target; fails the test on a host that publishes no prebuilts.
+// #11817: was `Option` plus an early return, a silent pass off Tier-1.
+fn tier1() -> &'static str {
+    require_tier1(platform::current_target())
+}
+
+/// Why (#11817): the Tier-1 guard must fail visibly off Tier-1, never pass.
+/// What: a `None` host target panics with a message naming the host.
+/// Test: This is the test.
+#[test]
+#[should_panic(expected = "this test needs a Tier-1 host")]
+fn require_tier1_fails_on_a_host_without_prebuilts() {
+    require_tier1(None);
+}
+
+/// Why (#11817): the guard must hand the target through unchanged on Tier-1.
+/// What: asserts `Some(target)` returns that target.
+/// Test: This is the test.
+#[test]
+fn require_tier1_returns_the_target_it_is_given() {
+    assert_eq!(
+        require_tier1(Some(platform::TARGET_LINUX_X86_64)),
+        platform::TARGET_LINUX_X86_64
+    );
 }
 
 /// Why: End-to-end proof through the real entry point — tag resolution, asset
 /// selection, download, verify — so the fix is not only true of the pieces.
 /// What: Publishes one release whose `.sha256` names other bytes; asserts
 /// `try_install_prebuilt_at` returns `ChecksumMismatch` and installs nothing.
-/// Test: This is the test. Skipped on a host with no Tier-1 target, where the
-/// orchestrator returns `Fallback` before any network call — the same guard
-/// `pinned::tests` uses.
+/// Test: This is the test. Fails on a host with no Tier-1 target (#11817),
+/// where the orchestrator returns `Fallback` before any network call — the
+/// same guard `pinned::tests` uses.
 #[tokio::test]
 async fn a_checksum_mismatch_is_reported_as_a_checksum_mismatch() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let (name, version) = ("demo-tool", "1.2.3");
     let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
     let archive = release::asset_filename(name, version, &suffix);
@@ -295,7 +336,7 @@ async fn a_checksum_mismatch_is_reported_as_a_checksum_mismatch() {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_missing_asset_still_falls_back() {
-    let Some(_) = tier1() else { return };
+    tier1();
     let (name, version) = ("demo-tool", "1.2.3");
     let mut routes: Routes = std::collections::HashMap::new();
     routes.insert(
@@ -338,7 +379,7 @@ async fn a_missing_asset_still_falls_back() {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_release_not_newer_than_the_floor_falls_back_before_download() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let (name, version) = ("demo-tool", "1.2.3");
     let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
     let archive = release::asset_filename(name, version, &suffix);
@@ -411,9 +452,7 @@ fn floor_reason_names_both_versions() {
 #[tokio::test]
 #[ignore = "performs a live GitHub download; run with --include-ignored"]
 async fn tga_prebuilt_live_installs_past_the_old_repo_ceiling() {
-    if tier1().is_none() {
-        return;
-    }
+    tier1();
     let dir = tempfile::tempdir().unwrap();
     let outcome = try_install_prebuilt_with_floor("tga", dir.path(), Some("8.0.0")).await;
     let Outcome::Installed { paths, version } = &outcome else {
@@ -429,11 +468,11 @@ async fn tga_prebuilt_live_installs_past_the_old_repo_ceiling() {
 /// What: publishes a valid 1.0.0 release; with a 2.0.0 build installed, the
 /// guarded pipeline returns `Refused` naming both versions and leaves the
 /// installed file untouched.
-/// Test: This is the test. Skipped on a non-Tier-1 host (see above).
+/// Test: This is the test. Fails on a non-Tier-1 host (see above).
 #[cfg(unix)]
 #[tokio::test]
 async fn a_release_older_than_the_installed_build_is_refused_before_download() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let (name, version) = ("demo-tool", "1.0.0");
     let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
     let archive = release::asset_filename(name, version, &suffix);

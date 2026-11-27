@@ -19,8 +19,11 @@ use crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS;
 ///
 /// Why: the web-QA agent grants access to these browser servers for its configured workflows.
 /// What: keeps both browser server names available to the web-QA agent.
-/// Test: `floor_covers_every_agent_tools_mcp_grant`.
-pub const EXTRA_FLOOR: &[&str] = &["claude-in-chrome", "trusty-browser"];
+/// Test: `floor_covers_every_agent_tools_mcp_grant`,
+/// `the_floor_names_the_registered_trusty_browser_mcp_server`.
+// #11933: `trusty-browser-mcp` is the key `tm install` registers; the bare
+// crate name `trusty-browser` matched no registered server.
+pub const EXTRA_FLOOR: &[&str] = &["claude-in-chrome", "trusty-browser-mcp"];
 
 /// Whether `name` is a never-deny MCP server.
 ///

@@ -15,7 +15,9 @@ function returning (wake|hold, reason): kinds decision, blocker, head, done alwa
 wakes as unknown; ack/progress/fyi are held, unless the text asks for a ruling
 (`?` or approve|choose|which), which raises it to a wake. `read_new` reads by byte
 offset and drops a repeat of (session, kind, pr, head, text) within 30 min.
-Cursor commands (D39): `unread [--wake-only]`, `ack <id>... --outcome T`, `ack-through <id> --outcome T`,
+fleet-poll.py calls `skip_backlog` then `poll_step` each cycle (#10764); an MCP message's wake text
+carries the `origin` prefix.
+Cursor commands (D39): `unread [--wake-only]`, `ack <id>... --outcome T [--no-reply-needed]`, `ack-through <id> --outcome T [--no-reply-needed]`,
 `push-due [--mark]` (logic in pm_cursor.py; acks go to inbox/pm-acks.jsonl).
 Test: scripts/test_pm_intake.py, scripts/test_pm_cursor.py, tests/test_pm_intake_receipt.py
 """
@@ -135,9 +137,44 @@ def step(state, alert_fn, now):
                 bits.append(f"PR#{msg['pr']}")
             if msg.get("head"):
                 bits.append(str(msg["head"])[:10])
-            alerts.append(alert_fn("pm_message", mid, f"{' '.join(bits)}: {msg.get('text') or ''}",
+            alerts.append(alert_fn("pm_message", mid, f"{origin(msg, mid)}{' '.join(bits)}: {msg.get('text') or ''}",
                                    session, "", now))
     return alerts, recs
+
+
+def origin(msg, mid):
+    """The wake-text prefix naming an outside MCP sender; empty for a PM's own message.
+
+    Why: #10764: an architect_send message is not the owner's word (DOC-82 LDG-9.4.2), and the wake must say so.
+    What: `[OUTSIDE MCP sender=<sender>, not the owner; id <mid>] ` when source is "mcp" (sender capped at 64
+    characters, "?" when absent), else "".
+    Test: test_outside_mcp_wake_text_names_the_sender
+    """
+    if msg.get("source") != "mcp":
+        return ""
+    sender = str(msg.get("sender") or "?")[:64]
+    return f"[OUTSIDE MCP sender={sender}, not the owner; id {mid}] "
+
+
+def skip_backlog(state, path=None):
+    """Start an upgraded poller's cursor at the queue's last whole line.
+
+    Why: #10764: a poll state from before the poller read the queue has no pm_offset, and the queue holds
+    every message ever sent; reading from byte 0 would wake the Architect with all of them.
+    `pm_intake.py unread` still lists the unacked ones.
+    What: when `state` has poll history ("sessions") but no "pm_offset", sets pm_offset to the end of the
+    queue's last complete line (0 when the file is absent). A fresh state is untouched: a fresh install reads
+    from byte 0.
+    Test: test_an_upgraded_poll_state_skips_the_backlog
+    """
+    if "pm_offset" in state or "sessions" not in state:
+        return
+    try:
+        with open(path or messages_path(), "rb") as f:
+            data = f.read()
+    except OSError:
+        data = b""
+    state["pm_offset"] = data.rfind(b"\n") + 1
 
 
 def poll_step(state, alert_fn, now, triage_path, dry_run=False):
@@ -239,6 +276,8 @@ def cursor_cli(cmd, argv):
     else:
         ap.add_argument("ids", nargs="+" if cmd == "ack" else 1)
         ap.add_argument("--outcome", required=True)
+        # #10764: the escape pm_cursor's ReplyRequired names, for an MCP message that needs no reply.
+        ap.add_argument("--no-reply-needed", action="store_true")
     a = ap.parse_args(argv)
     try:
         if cmd == "unread":
@@ -247,9 +286,9 @@ def cursor_cli(cmd, argv):
         elif cmd == "push-due":
             print("\n".join(pm_cursor.push_due(a.mark)))
         elif cmd == "ack":
-            print(_ack_summary(pm_cursor.ack(a.ids, a.outcome)))
+            print(_ack_summary(pm_cursor.ack(a.ids, a.outcome, no_reply_needed=a.no_reply_needed)))
         else:
-            print(_ack_summary(pm_cursor.ack_through(a.ids[0], a.outcome)))
+            print(_ack_summary(pm_cursor.ack_through(a.ids[0], a.outcome, no_reply_needed=a.no_reply_needed)))
     except ValueError as e:
         sys.exit(f"pm_intake: {e}")
 
@@ -265,4 +304,4 @@ if __name__ == "__main__":
         cursor_cli(sys.argv[1], sys.argv[2:])
     else:
         sys.exit("usage: pm_intake.py notify --kind K --session S [--pr N --head SHA --urgent] text"
-                 " | receipt <id> | unread [--wake-only] | ack <id>... --outcome T | ack-through <id> --outcome T | push-due [--mark]")
+                 " | receipt <id> | unread [--wake-only] | ack <id>... --outcome T [--no-reply-needed] | ack-through <id> --outcome T [--no-reply-needed] | push-due [--mark]")

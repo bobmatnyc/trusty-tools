@@ -61,11 +61,19 @@
 # not abort the run.
 #   1. `cargo install --path crates/trusty-memory --locked` always runs and,
 #      if IT fails, that is a real build failure — the script exits non-zero.
-#   2. The signing step (`tctl sign trusty-memory`) is wrapped so a non-zero
-#      exit (no cert, or any other codesign failure) becomes a clear stderr
-#      warning and the script continues, exiting 0 overall.
+#   2. #11683: the signing step (`tctl sign trusty-memory`) soft-passes ONLY
+#      its no-certificate exit (3): a stderr warning, the run ends with the
+#      line `NOT SIGNED` as its last stdout line, and the script exits 0.
+#      Any other non-zero sign exit (a codesign error, a locked keychain, a
+#      signature that reads back ad-hoc or with the wrong Team ID, a failed
+#      record refresh) prints an ERROR line and exits 1. The soft-pass is
+#      pending an owner decision; flipping `NO_CERT_SOFT_PASS` to 0 below
+#      makes it fail too.
+#   3. #11683: a signer that cannot be built (no usable tctl on PATH and the
+#      checkout's `tctl` fails to build) exits 1 — that is a broken install.
 #
-# Test: `bash -n scripts/install-trusty-memory-signed.sh` for syntax check.
+# Test: scripts/install_signed_tctl_fallback_selftest.sh (stub cargo and tctl).
+# `bash -n scripts/install-trusty-memory-signed.sh` for syntax check.
 # `shellcheck scripts/install-trusty-memory-signed.sh` for lint.
 # `--dry-run` (or `TRUSTY_CODESIGN_DRY_RUN=1`) prints every cargo/tctl command
 # WITHOUT executing it. Run on a machine without a Developer ID cert to
@@ -118,6 +126,14 @@ TRUSTY_INSTALL_PATH="${TRUSTY_INSTALL_PATH:-}"
 # Dry-run mode: print commands without executing. Set via env or --dry-run flag.
 TRUSTY_CODESIGN_DRY_RUN="${TRUSTY_CODESIGN_DRY_RUN:-0}"
 
+# #11683: `tctl sign` exits 3 (`EXIT_NO_CERTIFICATE`) when no Developer ID
+# certificate is available; only that exit soft-passes. Set to 0 to make it a
+# hard failure like every other sign exit (pending an owner decision).
+readonly TCTL_SIGN_NO_CERT_RC=3
+readonly NO_CERT_SOFT_PASS=1
+# #11683: set by the no-cert soft-pass; `main` then ends with `NOT SIGNED`.
+NOT_SIGNED=0
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -140,19 +156,26 @@ detect_repo_root() {
 # Resolve the `tctl` (or `trusty-installer`) binary to run the sign step.
 # Why: The unified signing logic (#2558) lives in trusty-installer; this
 # script must not duplicate `codesign`/`security find-identity` calls. Prefers
-# an already-installed `tctl`/`trusty-installer` on PATH; falls back to
-# `cargo run -p trusty-installer` from the detected repo root so a fresh
+# an already-installed `tctl`/`trusty-installer` on PATH whose `sign` accepts
+# SET; falls back to building and running this checkout's `tctl` so a fresh
 # checkout with no prior tctl install still works. Mirrors
-# `install-trusty-assistants-signed.sh`'s `resolve_tctl()` exactly.
+# `install-trusty-assistants-signed.sh`'s `resolve_tctl()`.
+# #11683: a tctl on PATH whose `sign` does not list SET is stale; say so and
+# skip it rather than let it fail the sign step with a clap usage error.
+# Test: scripts/install_signed_tctl_fallback_selftest.sh.
 resolve_tctl() {
-    if command -v tctl >/dev/null 2>&1; then
-        echo "tctl"
-        return 0
-    fi
-    if command -v trusty-installer >/dev/null 2>&1; then
-        echo "trusty-installer"
-        return 0
-    fi
+    local set="$1" candidate help values
+    for candidate in tctl trusty-installer; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        # #11683: read SET only from clap's `[possible values: ...]` list for
+        # <TARGET> (`-h` prints it; `--help` prints a long form without it).
+        help="$("$candidate" sign -h 2>&1 || true)"
+        values="$(printf '%s\n' "$help" | sed -n 's/^.*<TARGET>.*\[possible values: \([^]]*\)\].*$/\1/p')"
+        case ", $values, " in
+            *", $set, "*) echo "$candidate"; return 0 ;;
+        esac
+        warn "$candidate on PATH is stale: its 'sign' does not accept '$set'; reinstall trusty-installer to refresh it"
+    done
     return 1
 }
 
@@ -196,7 +219,7 @@ run_cargo_install() {
 
 # ---------------------------------------------------------------------------
 # Step 2: sign the set (delegates to `tctl sign trusty-memory` — #2558)
-# fail-soft: a signing failure is a WARNING, not a script-aborting error.
+# #11683: only a missing certificate is a WARNING; any other failure exits 1.
 # ---------------------------------------------------------------------------
 
 run_sign() {
@@ -210,22 +233,35 @@ run_sign() {
     fi
 
     local tctl_bin repo_root rc=0
-    if tctl_bin="$(resolve_tctl)"; then
+    if tctl_bin="$(resolve_tctl trusty-memory)"; then
         info "Using $tctl_bin on PATH"
         "$tctl_bin" sign trusty-memory --dir "$CARGO_BIN_DIR" || rc=$?
     else
         repo_root="$(detect_repo_root)"
-        warn "tctl/trusty-installer not found on PATH — running via 'cargo run -p trusty-installer'"
+        warn "no usable tctl/trusty-installer on PATH — running via 'cargo run -p trusty-installer --bin tctl'"
         warn "(install trusty-installer once — cargo install --path $repo_root/crates/trusty-installer --locked — to skip this rebuild next time)"
-        (cd "$repo_root" && cargo run --quiet -p trusty-installer -- sign trusty-memory --dir "$CARGO_BIN_DIR") || rc=$?
+        # #11683: a signer that cannot be built is a broken install, not the
+        # missing-certificate case fail-soft covers; `--bin` because the crate
+        # has two binaries and cargo cannot pick one.
+        if ! (cd "$repo_root" && cargo build --quiet -p trusty-installer --bin tctl); then
+            error "could not build this checkout's tctl in $repo_root; nothing was signed"
+            exit 1
+        fi
+        (cd "$repo_root" && cargo run --quiet -p trusty-installer --bin tctl -- sign trusty-memory --dir "$CARGO_BIN_DIR") || rc=$?
     fi
 
-    if [[ "$rc" -ne 0 ]]; then
-        warn "Signing the trusty-memory set failed (exit $rc) — the binaries remain ad-hoc signed."
+    # #11683: the one soft-pass — no Developer ID certificate.
+    if [[ "$rc" -eq "$TCTL_SIGN_NO_CERT_RC" && "$NO_CERT_SOFT_PASS" == "1" ]]; then
+        warn "Signing the trusty-memory set failed (exit $rc: no Developer ID certificate) — the binaries remain ad-hoc signed."
         warn "macOS will re-prompt for any TCC-gated permission after the next rebuild — this"
         warn "is EXPECTED on CI or any machine without a Developer ID Application cert."
         warn "See docs/reference/release-workflow.md for one-time cert setup."
+        NOT_SIGNED=1
         return 0
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        error "Signing the trusty-memory set failed (exit $rc); see the tctl output above."
+        exit 1
     fi
     info "trusty-memory set signed successfully."
 }
@@ -299,6 +335,11 @@ main() {
     run_cargo_install
     run_sign
     print_next_steps
+    # #11683 (Architect ruling on AC3): an unsigned run's last line, on stdout
+    # with the other final status lines.
+    if [[ "$NOT_SIGNED" == "1" ]]; then
+        printf 'NOT SIGNED\n'
+    fi
 }
 
 main "$@"
