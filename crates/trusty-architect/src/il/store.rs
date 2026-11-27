@@ -4,20 +4,23 @@
 //! and write a log line in several buffered pieces. The port keeps the files,
 //! the lock file and the resolution rules, and fixes those three gaps.
 //! What: state-directory resolution (`--state-dir`, `$DATG_STATE_DIR`,
-//! `--session`, `$DATG_SESSION`, tmux), a bounded exclusive lock on `.lock` (the
+//! `--session`, `$DATG_SESSION`, tmux bounded at 5 s), a bounded exclusive lock on `.lock` (the
 //! file the Python also locks, so mixed writers serialise), the atomic write
 //! (temp, fsync file, rename, fsync dir), and the one-`write` append that
 //! repairs a missing final newline first.
-//! Test: `resolve_*`, `lock_times_out_when_held`, `atomic_write_replaces_and_leaves_no_temp`,
+//! Test: `resolve_*`, `tmux_session_lookup_is_bounded_and_reaps_the_child`,
+//! `lock_times_out_when_held`, `atomic_write_replaces_and_leaves_no_temp`,
 //! `append_lines_is_one_write_and_repairs_a_torn_tail`.
 
 use super::error::{IlError, IlResult, invalid};
 use super::json::Json;
+use crate::process::run_bounded;
 use crate::pystr::py_repr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// How long a writer waits for `.lock` before it gives up (exit 2, nothing changed).
@@ -79,11 +82,23 @@ pub fn session_ok(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
+/// The bound on the tmux session lookup; `datg._tmux_session` uses `timeout=5`.
+const TMUX_WAIT: Duration = Duration::from_secs(5);
+
+fn tmux_command(pane: &str) -> Command {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["display-message", "-p", "-t", pane, "#{session_name}"]);
+    cmd
+}
+
 fn tmux_session(pane: &str) -> Option<String> {
-    let out = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "-t", pane, "#{session_name}"])
-        .output()
-        .ok()?;
+    session_from(tmux_command(pane), TMUX_WAIT)
+}
+
+/// Runs a session lookup within `timeout`; a spawn failure or a timeout is
+/// "no session", and the child is killed and reaped. See #12028.
+fn session_from(cmd: Command, timeout: Duration) -> Option<String> {
+    let out = run_bounded(cmd, timeout).ok()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (out.status.success() && !name.is_empty()).then_some(name)
 }
@@ -366,5 +381,52 @@ mod tests {
             fs::read_to_string(&f).unwrap(),
             "{\"a\":1}\n{\"torn\":\n{\"b\":2}\n"
         );
+    }
+
+    /// Writes an executable `tmux` running `body` into a fresh directory.
+    fn stub_tmux(body: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp();
+        let path = dir.path().join("tmux");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tmux_session_lookup_is_bounded_and_reaps_the_child() {
+        // #12028: a tmux that never answers is "no session", within the bound.
+        let ok = stub_tmux("echo pm-1");
+        let mut cmd = tmux_command("%1");
+        cmd.env("PATH", ok.path());
+        assert_eq!(
+            session_from(cmd, Duration::from_secs(5)).as_deref(),
+            Some("pm-1")
+        );
+
+        let pid_dir = tmp();
+        let pid_file = pid_dir.path().join("pid");
+        let hung = stub_tmux(&format!(
+            "echo $$ > '{}'; exec /bin/sleep 30",
+            pid_file.display()
+        ));
+        let mut cmd = tmux_command("%1");
+        cmd.env("PATH", hung.path());
+        let bound = Duration::from_millis(300);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(session_from(cmd, bound));
+        });
+        let got = rx.recv_timeout(bound + Duration::from_secs(2));
+        assert_eq!(got, Ok(None), "lookup did not end within the bound");
+        assert!(start.elapsed() < bound + Duration::from_secs(1));
+        let pid: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only probes; a reaped pid answers ESRCH.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "child {pid} not reaped");
     }
 }
