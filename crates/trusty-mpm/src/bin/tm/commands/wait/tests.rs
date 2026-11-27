@@ -807,6 +807,50 @@ fn rate_limit_exhaustion_errors_not_met() {
     assert_eq!(Status::Error.exit_code(), EXIT_ERROR);
 }
 
+/// A probe error carrying the shim's quota-left refusal (#11233). A LITERAL
+/// copy of the shim's line, like [`shim_refusal`].
+fn shim_short_window_refusal() -> String {
+    "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on a \
+     short-window or secondary GraphQL rate limit (gh account 'bot' on github.com); the \
+     hourly GraphQL quota still has 4186 points left, so this is not the primary limit. \
+     tm did not retry it. gh said: GraphQL: API rate limit already exceeded for user ID 1."
+        .to_string()
+}
+
+/// Why: #11233 — a refusal with quota left must not be reported as the
+/// primary limit, neither in the pending detail nor in the fail-closed error.
+#[test]
+fn a_short_window_refusal_is_not_reported_as_the_primary_limit() {
+    const SHORT: &str = "short-window or secondary GraphQL rate limit";
+    let cond = FakeCondition::new(vec![Err(shim_short_window_refusal())]);
+    let clock = FakeClock::at(1_000);
+    let mut b = budget_at(1_000, 1800);
+    let out = poll_until(&cond, &plan(20, 10, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Pending);
+    assert!(
+        out.detail
+            .starts_with(&format!("GitHub {SHORT} (refusal 1)")),
+        "{}",
+        out.detail
+    );
+    assert!(
+        !out.detail.contains("primary GraphQL rate limit"),
+        "{}",
+        out.detail
+    );
+
+    let cond = FakeCondition::new(vec![Err(shim_short_window_refusal())]);
+    let clock = FakeClock::at(0);
+    let mut b = budget_at(0, 1800);
+    let err = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.starts_with(&format!("GitHub's {SHORT} refused")),
+        "{text}"
+    );
+    assert!(!text.contains("primary GraphQL rate limit"), "{text}");
+}
+
 /// Why: a reset past the hard deadline must not stretch the wait past it.
 #[test]
 fn loop_rate_limit_sleep_never_extends_the_hard_deadline() {

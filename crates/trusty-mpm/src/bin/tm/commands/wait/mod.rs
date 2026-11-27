@@ -281,6 +281,7 @@ pub(crate) struct Outcome {
 /// `loop_backs_off_to_the_reset_on_a_rate_limited_probe`,
 /// `loop_backs_off_exponentially_when_the_reset_is_unknown`,
 /// `rate_limit_exhaustion_errors_not_met`,
+/// `a_short_window_refusal_is_not_reported_as_the_primary_limit`,
 /// `loop_rate_limit_sleep_never_extends_the_hard_deadline`,
 /// `loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff`,
 /// `rate_limit_streak_spans_slices_and_errors_on_the_fifth_refusal`,
@@ -337,15 +338,16 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
                 Some(hit) => {
                     budget.rate_limited_streak += 1;
                     let consecutive_rate_limited = budget.rate_limited_streak;
+                    // #11233: name the limit the shim named; "primary" only for its primary line.
+                    let limit = rate_limit::limit_name(&e);
                     if consecutive_rate_limited >= rate_limit::MAX_CONSECUTIVE_RATE_LIMITED {
                         return Err(e.context(format!(
-                            "GitHub's primary GraphQL rate limit refused the probe \
+                            "GitHub's {limit} refused the probe \
                              {consecutive_rate_limited} polls in a row"
                         )));
                     }
                     detail = format!(
-                        "GitHub primary GraphQL rate limit (refusal \
-                         {consecutive_rate_limited}), backing off: {e}"
+                        "GitHub {limit} (refusal {consecutive_rate_limited}), backing off: {e}"
                     );
                     rate_limited = Some(hit);
                 }
