@@ -60,12 +60,14 @@ impl FleetEnv {
             ),
         )
         .expect("fake claude");
-        // #11961: a `launchctl` that logs its argv and reaches no launchd:
-        // `print` answers 113 ("could not find service"), anything else fails.
+        // #11961: a `launchctl` that logs its argv and reaches no launchd.
+        // `print` answers 0 ("loaded"), so a missing guard goes on to a
+        // logged `kickstart`; `probe` is the harness's own PATH check.
         trusty_common::exec_stub::write_executable(
             &bin.path().join("launchctl"),
             format!(
-                "#!/bin/sh\necho \"$*\" >> {:?}\n[ \"$1\" = print ] && exit 113\nexit 1\n",
+                "#!/bin/sh\necho \"$*\" >> {:?}\ncase \"$1\" in print|kickstart|probe) exit 0;; \
+                 esac\nexit 1\n",
                 bin.path().join(LAUNCHCTL_LOG).display().to_string(),
             ),
         )
@@ -129,11 +131,7 @@ impl FleetEnv {
 
     /// Run `cmd` with `args` on this environment's tmux server and `PATH`.
     fn confine(&self, mut cmd: Command, args: &[&str]) -> Output {
-        let path = format!(
-            "{}:{}",
-            self.bin.path().display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = self.path();
         cmd.args(args)
             .env("TMUX_TMPDIR", self.tmux_dir.path())
             // #8436 P4 fix: the fleet scripts read TMUX_SOCKET, which would
@@ -156,9 +154,34 @@ impl FleetEnv {
         self.home.path().join("arch")
     }
 
-    /// #11961: the fake `launchctl` never ran `kickstart`.
+    /// The `PATH` every confined `tm` runs with: the fake `bin` dir first.
+    fn path(&self) -> String {
+        format!(
+            "{}:{}",
+            self.bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    /// #11961: the fake `launchctl` is what `tm`'s `PATH` resolves, and it
+    /// never ran `kickstart`.
+    ///
+    /// The probe runs `launchctl` through [`Self::path`], so a stub that is
+    /// missing or shadowed leaves no `probe` line and fails here, instead of
+    /// passing on an empty log.
     fn assert_no_kickstart(&self) {
-        let log = std::fs::read_to_string(self.bin.path().join(LAUNCHCTL_LOG)).unwrap_or_default();
+        let probe = Command::new("sh")
+            .args(["-c", "launchctl probe"])
+            .env("PATH", self.path())
+            .output()
+            .expect("spawn the launchctl probe");
+        let log_path = self.bin.path().join(LAUNCHCTL_LOG);
+        let log = std::fs::read_to_string(&log_path)
+            .unwrap_or_else(|e| panic!("no fake launchctl log at {}: {e}", log_path.display()));
+        assert!(
+            probe.status.success() && log.lines().any(|l| l == "probe"),
+            "the fake launchctl is not first on PATH: {log}"
+        );
         assert!(
             !log.lines().any(|l| l.starts_with("kickstart")),
             "tm ran launchctl kickstart: {log}"

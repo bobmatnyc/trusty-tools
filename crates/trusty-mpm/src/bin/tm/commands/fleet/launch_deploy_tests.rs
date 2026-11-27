@@ -15,7 +15,7 @@ use super::super::seed;
 use super::super::session_name::SessionNames;
 use super::{
     Ctx, DASHBOARD_SCRIPTS, Mode, POLLER_SCRIPTS, Restarter, failed_text, foreign_home_of,
-    loaded_from, pane_running, run,
+    home_from_env, loaded_from, pane_running, run,
 };
 
 /// The poller's entry script.
@@ -614,14 +614,31 @@ fn a_scratch_home_skips_the_dashboard_restart_and_says_so_11961() {
     assert_eq!(host.kickstarts.get(), 0, "{steps:?}");
     assert!(
         steps.iter().any(|s| matches!(s, Step::Skipped(t)
-            if t.starts_with("dashboard restart: skipped") && t.contains("not this user's home"))),
+            if t.starts_with("dashboard restart: skipped") && t.contains("not this user's home")
+                && t.contains("launchctl kickstart -k gui/")
+                && t.contains("from the login shell"))),
         "{steps:?}"
     );
     assert!(failed_text(&steps).is_none(), "{steps:?}");
-    assert!(
-        foreign_home_of(None, Some(real.path())).is_some(),
-        "unset HOME"
-    );
+}
+
+/// #11961 critic: an unset or empty `$HOME` is foreign, never a passwd
+/// fallback, even when the passwd home is a real directory.
+#[test]
+fn an_unset_or_empty_home_is_foreign_11961() {
+    let real = tempfile::tempdir().expect("the login home");
+    for env in [None, Some(std::ffi::OsString::new())] {
+        let home = home_from_env(env.clone());
+        assert_eq!(home, None, "{env:?}");
+        assert_eq!(
+            foreign_home_of(home.as_deref(), Some(real.path())).as_deref(),
+            Some("an unset HOME"),
+            "{env:?}"
+        );
+    }
+    let set = home_from_env(Some(real.path().as_os_str().to_owned()));
+    assert_eq!(set.as_deref(), Some(real.path()));
+    assert_eq!(foreign_home_of(set.as_deref(), Some(real.path())), None);
 }
 
 /// #11961: with HOME the passwd home, the same deploy still plans and runs

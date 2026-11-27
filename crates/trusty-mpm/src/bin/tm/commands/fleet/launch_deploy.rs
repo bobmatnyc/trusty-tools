@@ -146,20 +146,32 @@ impl Restarter for LiveRestarter {
         dashboard_agent::kickstart()
     }
 
+    // #11961: read `$HOME` itself; `dirs::home_dir()` falls back to the
+    // passwd home when it is unset or empty, which would pass the rule.
     fn foreign_home(&self) -> Option<String> {
         foreign_home_of(
-            dirs::home_dir().as_deref(),
+            home_from_env(std::env::var_os("HOME")).as_deref(),
             dashboard_agent::passwd_home().as_deref(),
         )
     }
 }
 
+/// `$HOME` as read from the environment; unset or empty is `None`.
+///
+/// Test: `an_unset_or_empty_home_is_foreign_11961`.
+pub(crate) fn home_from_env(home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    home.filter(|h| !h.is_empty()).map(std::path::PathBuf::from)
+}
+
 /// `Some(home)` unless `home` is the `passwd` home, by the `login_steps` rule.
 ///
 /// Why: #11961 — `tm architect up` and `restart` kickstarted the login
-/// user's dashboard job from a test's scratch HOME. An unset HOME is foreign
+/// user's dashboard job from a test's scratch HOME.
+/// What: `home` is `$HOME` through [`home_from_env`], never a passwd
+/// fallback, so an unset or empty `$HOME` is `None` here and is foreign
 /// (fail closed).
 /// Test: `a_scratch_home_skips_the_dashboard_restart_and_says_so_11961`,
+/// `an_unset_or_empty_home_is_foreign_11961`,
 /// `the_login_home_still_kickstarts_the_dashboard_11961`.
 pub(crate) fn foreign_home_of(home: Option<&Path>, passwd: Option<&Path>) -> Option<String> {
     match home {
@@ -461,9 +473,12 @@ fn restarts(
         // #11961: a test, sandbox or scratch HOME never reads or restarts
         // the login user's launchd job; the skip is a reported step.
         if let Some(home) = host.foreign_home() {
+            // #11961: name the recovery the login user runs.
             steps.push(Step::Skipped(format!(
                 "dashboard restart: skipped, because {home} is not this user's home folder; \
-                 the dashboard agent belongs to the real login"
+                 to restart it, run `launchctl kickstart -k gui/{}/{}` from the login shell",
+                nix::unistd::Uid::current(),
+                dashboard_agent::label()
             )));
             return steps;
         }
