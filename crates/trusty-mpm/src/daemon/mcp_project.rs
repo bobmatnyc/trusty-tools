@@ -68,8 +68,11 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// the SHARED [`adopt_pre_existing_worktrees`] (#7357 — the CLI transport runs
 /// the same function, so neither can adopt what the other does not), and
 /// returns the persisted record with that adoption report beside it as
-/// [`RegisterProjectResponse`].
+/// [`RegisterProjectResponse`]. A decommissioned or archived project keeps
+/// both flags, and the response's `inactive_reason` names a session start as
+/// the way back (#11969).
 /// Test: `dispatch_project_register_tool` in `crate::mcp::tests`;
+/// `mcp_project_register_keeps_a_decommissioned_project_and_names_the_way_back`;
 /// `project_register_backfills_pre_existing_worktrees`,
 /// `project_register_backfill_is_idempotent`,
 /// `parity_register_adopts_the_same_worktrees_across_transports`.
@@ -133,7 +136,8 @@ pub async fn project_register(
     // #7357: the SAME function the CLI transport calls, so the two surfaces
     // cannot diverge on what registration adopts.
     let adoption = adopt_pre_existing_worktrees(state, &project);
-    serde_json::to_value(RegisterProjectResponse { project, adoption }).map_err(|e| e.to_string())
+    // #11969: a decommissioned project stays so; the response says how to revive it.
+    serde_json::to_value(RegisterProjectResponse::new(project, adoption)).map_err(|e| e.to_string())
 }
 
 /// Look up a single project by name.
