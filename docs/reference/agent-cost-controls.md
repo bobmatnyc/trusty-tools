@@ -191,3 +191,24 @@ A plain Claude Code session that uses tm's machine-global agents without tm's
 hooks has no carrier. Its subagents get neither the project CLAUDE.md nor the
 rules block; they run on their own prompt and the delegation brief only. Run
 such sessions through `tm`, or let `tm install` write the project hooks first.
+
+## 5. The PM prompt has a 23,200-byte cap (#8999, #11624)
+
+The composed bundled-fallback PM prompt is resident in every PM turn, so its
+size is capped. The Architect ruled on 2026-11-27 (#11624) to keep the cap and
+to move text into skills, never to raise it.
+
+| Test (`crates/trusty-mpm/src/core/pm_prompt_golden_tests.rs`) | Asserts |
+|---|---|
+| `the_bundled_fallback_prompt_stays_within_its_resident_budget` | the composed prompt is at most 23,200 bytes |
+| `the_bundled_fallback_prompt_keeps_headroom_under_its_cap_11624` | it leaves at least 500 bytes free |
+| `golden_bundled_fallback_prompt`, `golden_roster_absent_assembly_prompt`, `golden_claude_md_override_prompt` | the delivered bytes match `core/testdata/pm-prompt-*.md` |
+
+The prompt is composed from `content/instructions/sections/*.md`. An edit there
+is rung 3: run `cargo test -p trusty-mpm --lib core::pm_prompt_golden_tests`
+and refresh the goldens with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`.
+
+When a rule does not fit, move detail that the PM needs only at one moment
+into a skill (`content/skills/<skill>/references/*.md`), verbatim, and leave a
+one-line pointer naming when to load it, as in `sections/workflow.md`'s
+"More Workflow Rules".

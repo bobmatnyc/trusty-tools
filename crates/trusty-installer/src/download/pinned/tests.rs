@@ -5,6 +5,8 @@ use crate::download::platform;
 use std::collections::HashMap;
 
 // #5518: one fixture server for the crate's download suites, not one per suite.
+// #11817: the visible-failure Tier-1 guard is shared with `download::mod_tests`.
+use crate::download::mod_tests::require_tier1;
 use crate::download::test_fixture::{fake_tarball, serve_fixture, sha256_hex, Routes};
 
 /// The asset suffix the code under test will pick for this host.
@@ -132,9 +134,10 @@ fn assert_nothing_installed(install_dir: &Path) {
     );
 }
 
-/// The host target, or `None` when this host publishes no prebuilts.
-fn tier1() -> Option<&'static str> {
-    platform::current_target()
+/// The host target; fails the test on a host that publishes no prebuilts.
+// #11817: was `Option` plus an early return, a silent pass off Tier-1.
+fn tier1() -> &'static str {
+    require_tier1(platform::current_target())
 }
 
 /// Why: A pin is normally proved by the binary of the same name; requiring
@@ -157,7 +160,7 @@ fn pinned_tool_defaults_binary_to_crate_name() {
 /// Test: This is the test.
 #[tokio::test]
 async fn pinned_install_places_and_reports_the_pinned_version() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .start()
@@ -181,7 +184,7 @@ async fn pinned_install_places_and_reports_the_pinned_version() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_when_the_pinned_version_was_never_published() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .start()
@@ -212,7 +215,7 @@ async fn fails_closed_when_the_pinned_version_was_never_published() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_on_a_checksum_mismatch() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::BadChecksum)
         .start()
@@ -242,7 +245,7 @@ async fn fails_closed_on_a_checksum_mismatch() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_when_the_artifact_does_not_match_a_caller_pinned_digest() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .start()
@@ -274,7 +277,7 @@ async fn fails_closed_when_the_artifact_does_not_match_a_caller_pinned_digest() 
 /// Test: This is the test.
 #[tokio::test]
 async fn a_matching_caller_pinned_digest_installs() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let fixture = Fixture::new(target).publish("demo-tool", "1.2.3", Flaw::None);
     let digest = fixture.digest_of("demo-tool", "1.2.3");
     let base = fixture.start().await;
@@ -297,7 +300,7 @@ async fn a_matching_caller_pinned_digest_installs() {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_github_prefixed_pin_installs() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let fixture = Fixture::new(target).publish("demo-tool", "1.2.3", Flaw::None);
     let digest = fixture.digest_of("demo-tool", "1.2.3");
     let base = fixture.start().await;
@@ -353,7 +356,7 @@ async fn a_malformed_pin_is_invalid_not_a_mismatch() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_when_the_artifact_is_unavailable() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::AssetMissing)
         .start()
@@ -382,7 +385,7 @@ async fn fails_closed_when_the_artifact_is_unavailable() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_when_the_downloaded_binary_reports_another_version() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::WrongBinaryVersion)
         .start()
@@ -413,7 +416,7 @@ async fn fails_closed_when_the_downloaded_binary_reports_another_version() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_when_the_archive_lacks_the_binary_that_proves_the_pin() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .start()
@@ -444,7 +447,7 @@ async fn fails_closed_when_the_archive_lacks_the_binary_that_proves_the_pin() {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_set_installs_nothing_when_any_tool_fails() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("good-tool", "1.0.0", Flaw::None)
         .publish("bad-tool", "2.0.0", Flaw::AssetMissing)
@@ -485,7 +488,7 @@ async fn a_set_installs_nothing_when_any_tool_fails() {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_set_places_nothing_when_a_later_tool_cannot_be_placed() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("good-tool", "1.0.0", Flaw::None)
         .publish("bad-place-tool", "2.0.0", Flaw::None)
@@ -695,7 +698,7 @@ fn assert_nothing_installed_under_final_names(install_dir: &Path) {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_set_installs_every_tool_when_all_verify() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("tool-a", "1.0.0", Flaw::None)
         .publish("tool-b", "2.0.0", Flaw::None)
@@ -731,7 +734,7 @@ async fn a_set_installs_every_tool_when_all_verify() {
 /// Test: This is the test.
 #[tokio::test]
 async fn documentation_files_are_not_installed() {
-    let Some(target) = tier1() else { return };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("tool-a", "1.0.0", Flaw::None)
         .publish("tool-b", "2.0.0", Flaw::None)
@@ -770,9 +773,7 @@ async fn documentation_files_are_not_installed() {
 /// Test: This is the test.
 #[tokio::test]
 async fn fails_closed_when_the_release_list_is_unreachable() {
-    if tier1().is_none() {
-        return;
-    }
+    tier1();
     let dir = tempfile::tempdir().unwrap();
     // #9613: the crate's address whose connect fails at once on every host.
     let base = format!("http://{}", crate::commands::test_support::dead_addr());
@@ -809,9 +810,7 @@ async fn preflight(base: &str, tools: &[PinnedTool]) -> Vec<PinnedPreflight> {
 /// Test: This is the test.
 #[tokio::test]
 async fn preflight_reports_every_tool_as_installable() {
-    let Some(target) = tier1() else {
-        return;
-    };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .publish("other-tool", "0.4.0", Flaw::None)
@@ -843,9 +842,7 @@ async fn preflight_reports_every_tool_as_installable() {
 /// Test: This is the test.
 #[tokio::test]
 async fn preflight_names_the_tool_whose_version_was_never_published() {
-    let Some(target) = tier1() else {
-        return;
-    };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .start()
@@ -888,9 +885,7 @@ async fn preflight_names_the_tool_whose_version_was_never_published() {
 /// published versions.
 #[tokio::test]
 async fn a_pin_that_names_no_release_still_fails_after_retrying() {
-    let Some(target) = tier1() else {
-        return;
-    };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "0.22.1", Flaw::None)
         .start()
@@ -952,9 +947,7 @@ fn only_a_missing_version_of_a_known_crate_is_retried() {
 /// Test: This is the test.
 #[tokio::test]
 async fn preflight_reports_every_tool_even_after_one_fails() {
-    let Some(target) = tier1() else {
-        return;
-    };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::None)
         .publish("other-tool", "0.4.0", Flaw::None)
@@ -985,9 +978,7 @@ async fn preflight_reports_every_tool_even_after_one_fails() {
 /// Test: This is the test.
 #[tokio::test]
 async fn preflight_downloads_nothing() {
-    let Some(target) = tier1() else {
-        return;
-    };
+    let target = tier1();
     let base = Fixture::new(target)
         .publish("demo-tool", "1.2.3", Flaw::AssetMissing)
         .start()
@@ -1016,9 +1007,7 @@ async fn preflight_downloads_nothing() {
 /// Test: This is the test.
 #[tokio::test]
 async fn preflight_distinguishes_an_unreachable_list_from_an_unpublished_pin() {
-    if tier1().is_none() {
-        return;
-    }
+    tier1();
     let base = format!("http://{}", crate::commands::test_support::dead_addr());
     let checked = preflight(&base, &[PinnedTool::new("demo-tool", "1.2.3")]).await;
 
