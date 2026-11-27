@@ -187,7 +187,7 @@ fn latency_report_skips_when_inputs_absent() {
 /// The report body; returns the skip line when a live input is absent, else `None`.
 fn latency_report_with(var: Var) -> Option<String> {
     // #11968: skip with a named reason instead of panicking in `copy_files` on a host
-    // without the live ledgers (EVO).
+    // without the live ledgers.
     if let Some(reason) = missing_input(var) {
         println!("{reason}");
         return Some(reason);
