@@ -1327,7 +1327,7 @@ fn gone_within(pid: libc::pid_t, bound: std::time::Duration) -> bool {
 const SHIM_EXIT_AFTER_REAP: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 🔴 #11988: the shim-exit bound must leave a loaded host room for the
-/// trap's tail; 1 s did not (`unix_wait_status(9)` on EVO).
+/// trap's tail; 1 s did not (`unix_wait_status(9)` on a loaded Linux runner).
 #[cfg(unix)]
 #[test]
 fn the_shim_exit_bound_leaves_room_for_a_loaded_host() {
