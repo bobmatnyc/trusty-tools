@@ -6,7 +6,7 @@
   "stdin": "",
   "env": {},
   "files": {
-    "a/log.jsonl": "[\"ev\", \"ar-T01\"]\n"
+    "a/log.jsonl": "[\"ev\", \"ab-T01\"]\n"
   },
   "reads": [
     "a/log.jsonl"

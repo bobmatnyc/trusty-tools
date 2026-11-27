@@ -6,7 +6,7 @@
     "TZ": "UTC"
   },
   "files": {
-    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T02\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T11:00:00Z\",\n      \"remaining\": \"at the limit\"\n    },\n    {\n      \"id\": \"ar-T05\",\n      \"status\": \"open\",\n      \"priority\": \"3\",\n      \"progress_at\": \"2026-11-27T02:00Z\"\n    }\n  ],\n  \"session\": {}\n}\n",
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T0002\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T11:00:00Z\",\n      \"remaining\": \"at the limit\"\n    },\n    {\n      \"id\": \"ar-T0005\",\n      \"status\": \"open\",\n      \"priority\": \"3\",\n      \"progress_at\": \"2026-11-27T02:00Z\"\n    }\n  ],\n  \"session\": {}\n}\n",
     "local/owner-queue/items/.keep": ""
   },
   "reads": [

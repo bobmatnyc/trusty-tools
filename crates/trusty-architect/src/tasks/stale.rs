@@ -54,7 +54,7 @@ pub struct Options {
 #[derive(Debug, Clone, Copy)]
 struct Time {
     utc: i64,
-    local: i64,
+    wall: i64,
 }
 
 /// `_ts(value)` of `dashboard_derive.py`.
@@ -62,9 +62,9 @@ fn ts(v: Option<&PyValue>) -> Option<Time> {
     let text = v
         .map_or_else(|| "None".to_owned(), py_str)
         .replace('Z', "+00:00");
-    from_iso_parts(&text).map(|(local, offset)| Time {
-        utc: local - offset,
-        local,
+    from_iso_parts(&text).map(|(wall, offset)| Time {
+        utc: wall - offset,
+        wall,
     })
 }
 
@@ -251,7 +251,7 @@ pub(crate) fn ranked(
             session: text(d, "session"),
             goal,
             rank,
-            last: last.map(|t| strftime(t.local)),
+            last: last.map(|t| strftime(t.wall)),
             age_h: last.map(|t| round1(now_us - t.utc, 3600.0)),
             days: last.map(|t| round1(now_us - t.utc, 86_400.0)),
             touch_h: act.map(|t| round1(now_us - t.utc, 3600.0)),

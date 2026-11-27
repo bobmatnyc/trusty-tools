@@ -6,7 +6,7 @@
     "TZ": "UTC"
   },
   "files": {
-    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T01\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T10:59Z\",\n      \"remaining\": \"review the port\"\n    },\n    \"ar-T99\"\n  ],\n  \"session\": {}\n}\n",
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T0001\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T10:59Z\",\n      \"remaining\": \"review the port\"\n    },\n    \"ar-T0099\"\n  ],\n  \"session\": {}\n}\n",
     "local/owner-queue/items/.keep": ""
   },
   "reads": [
