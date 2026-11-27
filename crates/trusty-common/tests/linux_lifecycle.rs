@@ -77,8 +77,8 @@ fn run_arg() -> String {
     format!("{RUN_FLAG}={}", run_id())
 }
 
-// #11996: a fixture of another run in another user namespace (a concurrent
-// EVO job's bwrap) hides its exe and environ (EACCES); a shared name let its
+// #11996: a fixture of another run in another user namespace (a sandboxed
+// job's bwrap) hides its exe and environ (EACCES); a shared name let its
 // argv0 match and fail every scan with InstanceUnreadable. The run id keeps
 // another run's fixtures out of this run's name check.
 fn daemon() -> &'static str {
@@ -947,6 +947,7 @@ async fn start_from_another_process_spawns_the_install_dir_binary_and_it_outlive
     let marker = fx.path("marker");
     let status = Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", "child_entry", "-q", ROLE_RUNNER])
+        // #11996: the runner names this run's fixtures.
         .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
@@ -1016,6 +1017,7 @@ fn start_kills_the_child_when_its_pidfd_cannot_be_opened() {
     let out = fx.path("out");
     let status = Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", "child_entry", "-q", ROLE_RUNNER, "no-pidfd"])
+        // #11996: the runner names this run's fixtures.
         .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
@@ -1421,6 +1423,7 @@ fn start_runs_the_daemon_in_its_working_dir_with_only_the_allowed_environment() 
             ROLE_RUNNER,
             "allow=TC_LC_ALLOWED",
         ])
+        // #11996: the runner names this run's fixtures.
         .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
@@ -1776,6 +1779,7 @@ fn stop_fails_closed_when_the_scan_cannot_open_proc_files() {
     let out = fx.path("out");
     let status = Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", "child_entry", "-q", ROLE_RUNNER, "emfile"])
+        // #11996: the runner names this run's fixtures.
         .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
