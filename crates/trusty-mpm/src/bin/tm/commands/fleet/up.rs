@@ -232,31 +232,30 @@ fn deploy_into(
     mode: Mode,
     ops: &Ops,
 ) -> bool {
-    let failed = match (ops.deploy)(dir, names, mode) {
+    let ok = match (ops.deploy)(dir, names, mode) {
         Ok(steps) => {
+            let ok = !steps.iter().any(|s| matches!(s, Step::Failed(_)));
             report
                 .steps
                 .extend(steps.iter().map(|s| s.render_line().trim().to_owned()));
-            launch_deploy::failed_text(&steps)
+            ok
         }
         Err(e) => {
             report
                 .steps
                 .push(format!("FAILED     bundle deploy: {e:#}"));
-            Some(format!("{e:#}"))
+            false
         }
     };
-    let Some(why) = failed else {
-        return true;
-    };
-    report.exit = 1;
-    if !mode.dry_run {
-        // #11961: name the failed step's own text, not only a fixed line.
-        report.steps.push(format!(
-            "the bundle deploy failed ({why}), so nothing was launched"
-        ));
+    if !ok {
+        report.exit = 1;
+        if !mode.dry_run {
+            report
+                .steps
+                .push("the bundle deploy failed, so nothing was launched".to_owned());
+        }
     }
-    false
+    ok
 }
 
 /// Bring the Architect in `dir` up; see the module doc.

@@ -176,8 +176,16 @@ pub(crate) fn login_steps(
                 .to_owned(),
         )];
     }
-    // #11961: the rule is shared with the bundle deploy's dashboard restart.
-    if !is_login_home(home) {
+    let real = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+        .ok()
+        .flatten()
+        .map(|u| u.dir);
+    let same = real
+        .as_deref()
+        .and_then(|r| std::fs::canonicalize(r).ok())
+        .zip(std::fs::canonicalize(home).ok())
+        .is_some_and(|(a, b)| a == b);
+    if !same {
         return vec![Step::Skipped(format!(
             "dashboard login start: skipped, because {} is not this user's home folder; a \
              login start belongs to the real login",
@@ -185,32 +193,6 @@ pub(crate) fn login_steps(
         ))];
     }
     steps(dir, home, launch, takeover_ok, &RealHost, shipped)
-}
-
-/// Whether `home` is this uid's password-database home (#10571, #11961).
-///
-/// Why: launchd's `gui/<uid>` domain belongs to the login user; a run under
-/// another `HOME` (a test, a sandbox) must never load or restart a job there.
-/// Test: `login_home_is_the_passwd_home_and_nothing_else_11961`.
-pub(crate) fn is_login_home(home: &Path) -> bool {
-    same_home(passwd_home().as_deref(), home)
-}
-
-/// This uid's password-database home; `None` when it cannot be read.
-pub(crate) fn passwd_home() -> Option<std::path::PathBuf> {
-    nix::unistd::User::from_uid(nix::unistd::Uid::current())
-        .ok()
-        .flatten()
-        .map(|u| u.dir)
-}
-
-/// Whether `home` and the `passwd` home canonicalize to one directory; an
-/// absent or unreadable one is never the same (fail closed).
-pub(crate) fn same_home(passwd: Option<&Path>, home: &Path) -> bool {
-    passwd
-        .and_then(|r| std::fs::canonicalize(r).ok())
-        .zip(std::fs::canonicalize(home).ok())
-        .is_some_and(|(a, b)| a == b)
 }
 
 /// The report lines for the dashboard's login start.
@@ -457,17 +439,10 @@ pub(crate) fn kickstart() -> anyhow::Result<()> {
         let out = std::process::Command::new("launchctl")
             .args(["kickstart", "-k", &target])
             .output()?;
-        // #11961: launchd's refusal had an empty stderr; name the exit too.
-        let stderr = String::from_utf8_lossy(&out.stderr);
         anyhow::ensure!(
             out.status.success(),
-            "launchctl kickstart -k {target} failed ({}): {}",
-            out.status,
-            if stderr.trim().is_empty() {
-                "no stderr"
-            } else {
-                stderr.trim()
-            }
+            "launchctl kickstart -k {target} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
         );
         Ok(())
     }
