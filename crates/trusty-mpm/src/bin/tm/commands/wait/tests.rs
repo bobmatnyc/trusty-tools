@@ -720,7 +720,7 @@ fn loop_recovers_from_a_transient_probe_error() {
 fn shim_refusal(reset_epoch: Option<u64>) -> String {
     let when = match reset_epoch {
         Some(epoch) => format!("it resets at 2026-11-09 02:00:00 UTC (epoch {epoch})"),
-        None => "the reset time is unknown (gh api rate_limit did not answer)".to_string(),
+        None => "the reset time is unknown (gh api rate_limit gave no reset)".to_string(),
     };
     format!(
         "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on its \
@@ -740,6 +740,16 @@ fn classify_reads_the_shim_refusal_and_its_reset_epoch() {
     );
     assert_eq!(
         hit(shim_refusal(None)),
+        Some(rate_limit::RateLimited { reset_epoch: None })
+    );
+    // #11803: a LITERAL copy of the shim's unknown-kind line backs off with no
+    // reset, even though it carries gh's own limit text.
+    let unknown = "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on a \
+         GraphQL rate limit of unknown kind (gh account 'bot' on github.com); gh api rate_limit \
+         did not answer with the remaining quota, so tm cannot tell the primary limit from a \
+         secondary one. tm did not retry it. gh said: GraphQL: API rate limit already exceeded.";
+    assert_eq!(
+        hit(unknown.to_string()),
         Some(rate_limit::RateLimited { reset_epoch: None })
     );
     // A REST quota and gh's own unmarked text are generic probe errors.
@@ -1363,6 +1373,80 @@ fn check_condition_required_only_ignores_other_checks() {
     assert!(matches!(poll(ci_running), Poll::Pending(_)));
     let ci_absent = r#"{"state":"OPEN","statusCheckRollup":[]}"#;
     assert!(matches!(poll(ci_absent), Poll::Pending(_)));
+}
+
+/// #11948: PR #11944's shape. Seven of main's eight required contexts have
+/// passed and `CI gate` has not registered yet (or is still running). The
+/// wait stays pending, but its detail must name only `CI gate`: naming all
+/// eight read as "all 8 pending" while `gh pr checks --required` showed seven
+/// passes. Once `CI gate` passes, the next poll is met.
+#[test]
+fn check_condition_required_only_names_only_unsettled_contexts_11948() {
+    const PASSED: [&str; 7] = [
+        "500-line file-size cap",
+        "PR version bump vs crates.io (issue #4421)",
+        "Doc-comment pointer lint (Why/What/Test)",
+        "No leaked AI-generation / tool-call artifacts",
+        "tm-capabilities generated-skill drift check",
+        "Architect bundle PR is current with main",
+        "Architect bundle history/provenance check",
+    ];
+    let required: Vec<String> = PASSED
+        .iter()
+        .copied()
+        .chain(["CI gate"])
+        .map(String::from)
+        .collect();
+    let poll = |gate: Option<&str>| {
+        let mut runs: Vec<String> = PASSED
+            .iter()
+            .map(|n| {
+                format!(
+                    r#"{{"__typename":"CheckRun","name":"{n}","status":"COMPLETED","conclusion":"SUCCESS"}}"#
+                )
+            })
+            .collect();
+        runs.push(
+            r#"{"__typename":"CheckRun","name":"Notify on version drift on main","status":"COMPLETED","conclusion":"SKIPPED"}"#
+                .to_string(),
+        );
+        runs.extend(gate.map(str::to_string));
+        let json = format!(
+            r#"{{"state":"OPEN","statusCheckRollup":[{}]}}"#,
+            runs.join(",")
+        );
+        CheckCondition::new(FakeProbe { json }, 11944, None, false)
+            .with_required(Some(required.clone()))
+            .poll(ANY_BUDGET)
+            .unwrap()
+    };
+
+    let running =
+        r#"{"__typename":"CheckRun","name":"CI gate","status":"IN_PROGRESS","conclusion":""}"#;
+    for gate in [None, Some(running)] {
+        let Poll::Pending(detail) = poll(gate) else {
+            panic!("`CI gate` unsettled ({gate:?}) must keep the wait pending");
+        };
+        assert!(
+            detail.contains("1 of 8 required unsettled: CI gate"),
+            "{detail}"
+        );
+        assert_eq!(
+            detail.contains("(not registered)"),
+            gate.is_none(),
+            "only an absent `CI gate` is marked unregistered: {detail}"
+        );
+        for passed in PASSED {
+            assert!(
+                !detail.contains(passed),
+                "passed context `{passed}` reported as unsettled: {detail}"
+            );
+        }
+    }
+
+    let green =
+        r#"{"__typename":"CheckRun","name":"CI gate","status":"COMPLETED","conclusion":"SUCCESS"}"#;
+    assert!(matches!(poll(Some(green)), Poll::Met(d) if d.contains("green")));
 }
 
 /// #11673: the new flags belong to `--for check`, and `--owner` to `--watch`.

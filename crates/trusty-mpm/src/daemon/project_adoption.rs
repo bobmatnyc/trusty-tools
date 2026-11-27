@@ -35,9 +35,13 @@ use crate::project::{BackfillReport, Project};
 /// the record is flattened and the report rides beside it under one key. A
 /// consumer that only knows `Project` (the `tm` HTTP client does) ignores the
 /// extra key.
-/// What: the persisted record's own fields, plus `adoption`.
+/// What: the persisted record's own fields, plus `adoption`, plus
+/// `inactive_reason` when the record is decommissioned or archived (#11969).
 /// Test: `register_response_names_a_skipped_worktree`,
-/// `parity_projects_registry_register_agrees_across_transports`.
+/// `parity_projects_registry_register_agrees_across_transports`,
+/// `mcp_project_register_keeps_a_decommissioned_project_and_names_the_way_back`,
+/// `http_project_register_keeps_a_decommissioned_project_and_names_the_way_back`,
+/// `register_of_an_active_project_omits_the_inactive_reason`.
 #[derive(Debug, Serialize)]
 pub struct RegisterProjectResponse {
     /// The persisted project record, inlined at the top level.
@@ -45,6 +49,46 @@ pub struct RegisterProjectResponse {
     pub project: Project,
     /// What registration did with the checkout's pre-existing worktrees.
     pub adoption: BackfillReport,
+    /// Why the registered project is still inactive and how to reactivate it
+    /// (#11969). Absent, never `null`, for an active project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactive_reason: Option<String>,
+}
+
+impl RegisterProjectResponse {
+    /// Build the response both transports return.
+    ///
+    /// Why: #11969 (Architect ruling, option B) — a register upsert never
+    /// reactivates a decommissioned project (#10988); only a session start
+    /// does, since it also unparks the index. A caller that re-registers one
+    /// must learn that, on either transport.
+    /// What: `inactive_reason` is set when `project` is decommissioned or
+    /// archived, naming a session start as the way back; else `None`.
+    /// Test: `mcp_project_register_keeps_a_decommissioned_project_and_names_the_way_back`,
+    /// `http_project_register_keeps_a_decommissioned_project_and_names_the_way_back`,
+    /// `register_of_an_active_project_omits_the_inactive_reason`.
+    pub fn new(project: Project, adoption: BackfillReport) -> Self {
+        // #11969: one place names the way back, so the transports cannot drift.
+        let state = match (project.is_decommissioned(), project.is_archived()) {
+            (true, true) => Some("decommissioned and archived"),
+            (true, false) => Some("decommissioned"),
+            (false, true) => Some("archived"),
+            (false, false) => None,
+        };
+        let inactive_reason = state.map(|s| {
+            format!(
+                "project {} is {s}; registering it does not reactivate it — start a \
+                 session for it (`tm session new`) to reactivate it and reload its \
+                 search index",
+                project.name
+            )
+        });
+        Self {
+            project,
+            adoption,
+            inactive_reason,
+        }
+    }
 }
 
 /// Adopt the worktrees a project's checkout ALREADY has (#7357).

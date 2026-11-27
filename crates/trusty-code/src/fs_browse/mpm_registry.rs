@@ -379,6 +379,8 @@ pub async fn merged_roster() -> ProjectRoster {
 mod tests {
     use serde_json::{Value, json};
     use trusty_common::uds::server::{RpcError, RpcRouter, RpcServeOptions, serve_until};
+    // #11821: the projects-root dir name comes from the shared resolver's default.
+    use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
     use super::*;
 
@@ -460,13 +462,13 @@ mod tests {
         mk_git_repo(
             &home
                 .path()
-                .join("trusty-mpm-projects")
+                .join(DEFAULT_WORKSPACE_DIR)
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
         let fs_roster = super::super::roster::list_projects_in(
             home.path(),
-            &home.path().join("trusty-mpm-projects"),
+            &home.path().join(DEFAULT_WORKSPACE_DIR),
         );
         let registry = vec![RegistryProject {
             name: "trusty-tools".to_string(),
@@ -476,7 +478,7 @@ mod tests {
         let merged = merge(
             fs_roster,
             &registry,
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         );
 
         assert_eq!(merged.entries.len(), 1);
@@ -494,19 +496,19 @@ mod tests {
         mk_git_repo(
             &home
                 .path()
-                .join("trusty-mpm-projects")
+                .join(DEFAULT_WORKSPACE_DIR)
                 .join("bobmatnyc")
                 .join("bakeoff-l1"),
         );
         let fs_roster = super::super::roster::list_projects_in(
             home.path(),
-            &home.path().join("trusty-mpm-projects"),
+            &home.path().join(DEFAULT_WORKSPACE_DIR),
         );
 
         let merged = merge(
             fs_roster,
             &[],
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         );
 
         assert_eq!(merged.entries.len(), 1);
@@ -523,7 +525,7 @@ mod tests {
         // No `trusty-mpm-projects` dir at all on this machine.
         let fs_roster = super::super::roster::list_projects_in(
             home.path(),
-            &home.path().join("trusty-mpm-projects"),
+            &home.path().join(DEFAULT_WORKSPACE_DIR),
         );
         let registry = vec![RegistryProject {
             name: "ghost-project".to_string(),
@@ -533,7 +535,7 @@ mod tests {
         let merged = merge(
             fs_roster,
             &registry,
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         );
 
         assert!(merged.entries.is_empty());
@@ -573,13 +575,13 @@ mod tests {
         mk_git_repo(
             &home
                 .path()
-                .join("trusty-mpm-projects")
+                .join(DEFAULT_WORKSPACE_DIR)
                 .join("bobmatnyc")
                 .join("Trusty-Tools"),
         );
         let fs_roster = super::super::roster::list_projects_in(
             home.path(),
-            &home.path().join("trusty-mpm-projects"),
+            &home.path().join(DEFAULT_WORKSPACE_DIR),
         );
         assert_eq!(fs_roster.entries.len(), 1, "fs scan must find the repo");
 
@@ -592,7 +594,7 @@ mod tests {
         let merged = merge(
             fs_roster,
             &registry,
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         );
 
         assert_eq!(
@@ -617,13 +619,13 @@ mod tests {
         mk_git_repo(
             &real_home
                 .path()
-                .join("trusty-mpm-projects")
+                .join(DEFAULT_WORKSPACE_DIR)
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
         let fs_roster = super::super::roster::list_projects_in(
             real_home.path(),
-            &real_home.path().join("trusty-mpm-projects"),
+            &real_home.path().join(DEFAULT_WORKSPACE_DIR),
         );
         assert_eq!(fs_roster.entries.len(), 1, "fs scan must find the repo");
 
@@ -648,7 +650,7 @@ mod tests {
         let merged = merge(
             fs_roster,
             &registry,
-            Some(&alias.join("trusty-mpm-projects")),
+            Some(&alias.join(DEFAULT_WORKSPACE_DIR)),
         );
         let _ = std::fs::remove_file(&alias);
 
@@ -692,13 +694,13 @@ mod tests {
         mk_git_repo(
             &home
                 .path()
-                .join("trusty-mpm-projects")
+                .join(DEFAULT_WORKSPACE_DIR)
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
         let fs_roster = super::super::roster::list_projects_in(
             home.path(),
-            &home.path().join("trusty-mpm-projects"),
+            &home.path().join(DEFAULT_WORKSPACE_DIR),
         );
         (fs_roster, home)
     }
@@ -719,7 +721,7 @@ mod tests {
         let roster = merged_roster_with(
             &socket,
             fs_roster,
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         )
         .await;
 
@@ -742,7 +744,7 @@ mod tests {
         let roster = merged_roster_with(
             &absent,
             fs_roster,
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         )
         .await;
 
@@ -770,7 +772,7 @@ mod tests {
         let roster = merged_roster_with(
             &socket,
             fs_roster,
-            Some(&home.path().join("trusty-mpm-projects")),
+            Some(&home.path().join(DEFAULT_WORKSPACE_DIR)),
         )
         .await;
 

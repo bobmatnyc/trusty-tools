@@ -461,6 +461,27 @@ async fn concurrent_feed_calls_run_one_pass() {
     assert_eq!((a.reason, a.indexed), (None, 2), "A ran its pass");
 }
 
+/// Why: #11987 — a child process forked by another test (or by `ta
+/// mcp-serve`) holds a copy of the lock fd until it execs; a flock taken on
+/// that open file description outlives the guard, so the next pass reported
+/// "feed already running" and fed nothing.
+/// What: a `try_clone()` of the guard's file stands in for the forked
+/// child's copy; after the guard drops, the lock is free again.
+/// Test: self-contained.
+#[test]
+fn feed_lock_is_released_while_a_duplicated_fd_stays_open() {
+    let (tmp, store, _) = fixture();
+    let st = IndexStateRef::new(tmp.path().join("state"), "idx");
+    let guard = FeedLock::try_acquire(&store.root, &st).unwrap().unwrap();
+    let child_copy = guard._file.try_clone().unwrap();
+    drop(guard);
+    assert!(
+        FeedLock::try_acquire(&store.root, &st).unwrap().is_some(),
+        "the dropped guard released the lock despite an open fd copy"
+    );
+    drop(child_copy);
+}
+
 /// Pass 1 under identity `i1` settles both entities; pass 2 runs under a
 /// re-created index (`i2`, F14) whose daemon refuses `notes/one.md` with
 /// `refuse` (put) or `refuse_remove` (the old-revision remove).

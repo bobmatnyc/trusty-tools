@@ -17,6 +17,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_doctor_standalone::`.
 
 use crate::common;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// Run `tm doctor` with no daemon socket to dial.
 ///
@@ -205,7 +206,7 @@ fn tm_doctor_dir_that_does_not_exist_fails_closed() {
 fn tm_doctor_rotate_deps_fail_row_exits_non_zero() {
     let home = tempfile::tempdir().expect("scratch home");
     let cwd = tempfile::tempdir().expect("scratch cwd");
-    let tools = home.path().join(".trusty-tools");
+    let tools = home.path().join(TOOLS_DIR_NAME);
     std::fs::create_dir_all(&tools).expect("tools dir");
     std::fs::write(tools.join("cargo-target"), b"not a dir").expect("file");
     let output = common::tm_command_in(home.path())

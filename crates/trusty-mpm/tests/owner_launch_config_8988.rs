@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
 
 use trusty_mpm::core::standalone::hooks::TEST_HOOK_EXE_ENV;
 use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
@@ -145,7 +146,7 @@ impl Fixture {
         let project = repos_root.join("acme").join("widget");
         std::fs::create_dir_all(&project).expect("mkdir project");
         // The `.claude.json` the managed launch actually reads.
-        let config_dir = home.join(".trusty-tools/trusty-mpm/claude-config");
+        let config_dir = home.join(TOOLS_DIR_NAME).join("trusty-mpm/claude-config");
         std::fs::create_dir_all(&config_dir).expect("mkdir config dir");
         std::fs::write(
             config_dir.join(".claude.json"),
@@ -170,7 +171,7 @@ impl Fixture {
     }
 
     fn adapter(&self, tmux: &Arc<Recorder>) -> ClaudeCodeAdapter {
-        ClaudeCodeAdapter::new(tmux.clone(), &self.home.join(".trusty-mpm"))
+        ClaudeCodeAdapter::new(tmux.clone(), &self.home.join(MPM_DIR_NAME))
     }
 
     /// Make the project an Architect (#8453): it asks for the supervisor
@@ -181,7 +182,7 @@ impl Fixture {
             "profile = \"supervisor\"\n",
         )
         .expect("write project config");
-        let root = self.home.join(".trusty-mpm");
+        let root = self.home.join(MPM_DIR_NAME);
         std::fs::create_dir_all(&root).expect("mkdir framework root");
         std::fs::write(
             root.join("config.toml"),
@@ -369,7 +370,11 @@ fn a_managed_spawn_under_an_owner_file_denies_the_unallowed_user_scope_servers()
         serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
     );
     assert!(
-        path.starts_with(fx.home.join(".trusty-tools/trusty-mpm/session-settings")),
+        path.starts_with(
+            fx.home
+                .join(TOOLS_DIR_NAME)
+                .join("trusty-mpm/session-settings")
+        ),
         "{}",
         path.display()
     );

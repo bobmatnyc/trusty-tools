@@ -19,6 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use super::common;
 
@@ -59,7 +60,7 @@ impl Sandbox {
     }
 
     fn lock(&self) -> PathBuf {
-        self.home.join(".trusty-mpm").join("daemon.lock")
+        self.home.join(MPM_DIR_NAME).join("daemon.lock")
     }
 
     /// `tm daemon --sandbox <extra…>`, stderr captured to `log`.

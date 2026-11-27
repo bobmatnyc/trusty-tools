@@ -357,7 +357,7 @@ impl ProjectRegistry {
     /// ([`super::resolve_session_project`]) and returns the names it cleared.
     /// A list or update failure is returned, never logged and dropped: the
     /// caller (`spawn_managed`, the one place every spawn path returns
-    /// through) reports it to its client.
+    /// through, and `resume_managed`, #11983) reports it to its client.
     /// Test: `reactivate_for_session_clears_a_decommissioned_project`,
     /// `reactivate_for_session_returns_a_list_failure`,
     /// `auto_register_keeps_a_decommissioned_project_decommissioned`.

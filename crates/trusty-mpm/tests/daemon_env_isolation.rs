@@ -11,6 +11,7 @@
 //! Test: `cargo test -p trusty-mpm --test env_serial daemon_env_isolation::`.
 
 use crate::common;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 use std::process::Command;
 
@@ -58,7 +59,7 @@ fn secret_shaped(names: &[String]) -> Vec<&str> {
 #[test]
 fn a_test_daemon_env_carries_no_secret_shaped_variable() {
     let home = tempfile::tempdir().expect("scratch home");
-    let root = home.path().join("trusty-mpm-projects");
+    let root = home.path().join(DEFAULT_WORKSPACE_DIR);
     let _fake = FakeSecret::plant();
 
     let daemon = common::daemon_command(home.path(), &root);

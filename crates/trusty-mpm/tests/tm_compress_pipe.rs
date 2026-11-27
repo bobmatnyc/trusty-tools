@@ -27,6 +27,7 @@
 //! byte-for-byte passthrough — never a corruption or crash.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -407,7 +408,7 @@ fn tm_compress_takes_the_rtk_path_when_rtk_is_installed() {
 /// environment, which is the CI case and asserts vacuously.
 /// Test: used by `a_fixture_payload_never_lands_as_a_session_savings_row`.
 fn operator_savings_ledger() -> Option<std::path::PathBuf> {
-    common::operator_home().map(|home| home.join(".trusty-mpm").join("usage").join("savings.jsonl"))
+    common::operator_home().map(|home| home.join(MPM_DIR_NAME).join("usage").join("savings.jsonl"))
 }
 
 /// Count `compress` rows in `ledger` whose `tokens_before` is `tokens`.

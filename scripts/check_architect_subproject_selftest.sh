@@ -118,7 +118,7 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     users-path) printf 'ROOT = "/Users/someone/work"\n' >"$sub/scripts/bad.py" ;;
     home-path) printf 'ROOT = "/home/someone/work"\n' >"$sub/scripts/bad.py" ;;
     claude-slug) printf 'D = "projects/-Users-someone-work"\n' >"$sub/scripts/bad.py" ;;
-    private-checkout) printf 'see ~/trusty-mpm-projects/acme/supervisor\n' >"$sub/notes.md" ;;
+    private-checkout) printf 'see ~/trusty-mpm-projects/acme/supervisor\n' >"$sub/notes.md" ;; # path-literal: allow (the planted leak)
     secret) printf 'TOKEN = "%s"\n' "$TOKEN" >"$sub/scripts/bad.py" ;;
     leak-*) plant_leak "$1" "$t" ;;
     drift) printf 'edited\n' >>"$t/$SKILL_DST" ;;

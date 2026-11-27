@@ -28,6 +28,22 @@ use super::DaemonClient;
 use super::error::response_or_body_error;
 use crate::project::Project;
 
+/// The `POST /api/v1/projects` response as the client reads it (#11969).
+///
+/// What: the stored [`Project`] (the body's flattened top level) and the
+/// daemon's `inactive_reason`, `None` when absent. Other keys, such as
+/// `adoption`, are ignored.
+/// Test: `register_with_reason_reports_a_decommissioned_project_11969`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisteredProject {
+    /// The stored project record.
+    #[serde(flatten)]
+    pub project: Project,
+    /// Why the project is still inactive and how to reactivate it.
+    #[serde(default)]
+    pub inactive_reason: Option<String>,
+}
+
 /// Serializable body for `POST /api/v1/projects` (registry-B register).
 ///
 /// Why: `tm projects register` builds this from its flags; a typed struct keeps
@@ -242,14 +258,31 @@ impl DaemonClient {
         &self,
         args: &RegisterProjectArgs,
     ) -> anyhow::Result<Project> {
+        Ok(self
+            .registry_register_project_with_reason(args)
+            .await?
+            .project)
+    }
+
+    /// [`Self::registry_register_project`], keeping the daemon's
+    /// `inactive_reason` (#11969).
+    ///
+    /// Why: a register upsert never reactivates a decommissioned project, and
+    /// `tm projects register` must tell the operator so; the `Project`-only
+    /// return drops the reason.
+    /// What: POSTs `args`, returns the stored record with the reason beside it.
+    /// Test: `register_with_reason_reports_a_decommissioned_project_11969`.
+    pub async fn registry_register_project_with_reason(
+        &self,
+        args: &RegisterProjectArgs,
+    ) -> anyhow::Result<RegisteredProject> {
         let url = "/api/v1/projects".to_string();
         let resp = self.post(&url).json(args).send().await?;
-        let project: Project = response_or_body_error(resp)
+        response_or_body_error(resp)
             .await?
             .json()
             .await
-            .context("deserialize registered project")?;
-        Ok(project)
+            .context("deserialize registered project")
     }
 
     /// Fetch one project via `GET /api/v1/projects/{name}`.
