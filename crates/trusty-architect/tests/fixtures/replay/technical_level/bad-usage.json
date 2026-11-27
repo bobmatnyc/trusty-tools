@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "read"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: driver.py table | value V... | read ROOT\n",
+  "exit": 2,
+  "writes": {}
+}

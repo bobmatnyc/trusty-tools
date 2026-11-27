@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/local/architect.json/note.txt": "not a config\n"
+  },
+  "reads": [],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: {ROOT}/r/local/architect.json: cannot read: IsADirectoryError\n",
+  "exit": 1,
+  "writes": {}
+}

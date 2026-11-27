@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "value",
+    "pm",
+    "cto",
+    "PM",
+    "",
+    "wizard",
+    "non-technical",
+    "senior-engineer"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "'pm' normalize=pm below_engineer=True\nTECHNICAL LEVEL: pm (outcome, cost, risk, reversibility, 4-6 sentences; issue and PR links ok, no file paths, SHAs, flags or job names)\n'cto' normalize=cto below_engineer=False\nTECHNICAL LEVEL: cto (risk to production and customers, cost, reversibility, the contract at stake; line detail stays in the brief)\n'PM' normalize=pm below_engineer=True\nTECHNICAL LEVEL: pm (outcome, cost, risk, reversibility, 4-6 sentences; issue and PR links ok, no file paths, SHAs, flags or job names)\n'' normalize=pm below_engineer=True\nTECHNICAL LEVEL: pm (outcome, cost, risk, reversibility, 4-6 sentences; issue and PR links ok, no file paths, SHAs, flags or job names)\n'wizard' normalize=pm below_engineer=True\nTECHNICAL LEVEL: pm (outcome, cost, risk, reversibility, 4-6 sentences; issue and PR links ok, no file paths, SHAs, flags or job names)\n'non-technical' normalize=non-technical below_engineer=True\nTECHNICAL LEVEL: non-technical (everyday words, business impact, 2-3 sentences, no paths, SHAs, flags or tool names)\n'senior-engineer' normalize=senior-engineer below_engineer=False\nTECHNICAL LEVEL: senior-engineer (design trade-offs, failure modes, rollout and rollback, file:line evidence, blast radius)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

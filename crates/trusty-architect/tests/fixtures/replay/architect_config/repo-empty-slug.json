@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/local/architect.json": "{\"repos\": {\"r1\": {\"slug\": \"acme/r1\"}, \"r2\": {\"slug\": \"\"}}}\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: {ROOT}/r/local/architect.json: repos.r2.slug: must be a non-empty string\n",
+  "exit": 1,
+  "writes": {}
+}

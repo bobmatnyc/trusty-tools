@@ -5,8 +5,8 @@
 //! check only logs in warn mode and is off when no schemas are attached, so
 //! the refusal must hold whatever the schema mode, as the prototype's
 //! `technical_level.refusal` does.
-//! What: [`TECHNICAL_LEVELS`] is the one Rust list of the six levels, in
-//! `technical_level.py`'s `LEVELS` order. [`Store::refuse_bad_levels`]
+//! What: [`TECHNICAL_LEVELS`] is [`crate::technical_level::LEVELS`], the one
+//! Rust list of the six levels. [`Store::refuse_bad_levels`]
 //! refuses the first `set` or `update` whose written fields carry the level
 //! key of its document with any other value (`null` included). Only a key
 //! present in the write is checked, so an unrelated write never fails on it.
@@ -19,16 +19,9 @@ use serde_json::Value;
 use super::{Op, Store};
 use crate::dashboard::error::DashError;
 
-// #11064: the six levels; mirrors `LEVELS` in `scripts/technical_level.py`.
+// #11064: the six levels; #12028: the one list now lives in `technical_level`.
 /// The six technical levels, lowest to highest.
-pub(crate) const TECHNICAL_LEVELS: [&str; 6] = [
-    "non-technical",
-    "vibe-coder",
-    "pm",
-    "engineer",
-    "senior-engineer",
-    "cto",
-];
+pub(crate) const TECHNICAL_LEVELS: [&str; 6] = crate::technical_level::LEVELS;
 
 /// The level key a write to `coll/id` may carry, if any.
 fn level_key(coll: &str, id: &str) -> Option<&'static str> {

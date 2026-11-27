@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "table"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "LEVELS non-technical vibe-coder pm engineer senior-engineer cto\nDEFAULT pm\nTECHNICAL LEVEL: non-technical (everyday words, business impact, 2-3 sentences, no paths, SHAs, flags or tool names)\nTECHNICAL LEVEL: vibe-coder (product words (app, deploy, repo), what the user sees, 3-4 sentences, no line numbers, SHAs or flags)\nTECHNICAL LEVEL: pm (outcome, cost, risk, reversibility, 4-6 sentences; issue and PR links ok, no file paths, SHAs, flags or job names)\nTECHNICAL LEVEL: engineer (full technical terms, module names, root cause and trade-offs, 6-10 sentences with a short evidence list)\nTECHNICAL LEVEL: senior-engineer (design trade-offs, failure modes, rollout and rollback, file:line evidence, blast radius)\nTECHNICAL LEVEL: cto (risk to production and customers, cost, reversibility, the contract at stake; line detail stays in the brief)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

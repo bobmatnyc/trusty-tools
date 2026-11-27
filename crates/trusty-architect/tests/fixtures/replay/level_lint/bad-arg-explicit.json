@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "--strict=yes",
+    "cargo"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: level_lint.py [-h] [--level LEVEL] [--strict] [--file FILE] [text ...]\nlevel_lint.py: error: argument --strict: ignored explicit argument 'yes'\n",
+  "exit": 2,
+  "writes": {}
+}

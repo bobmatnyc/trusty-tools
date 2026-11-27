@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/local/architect.json": "﻿{\"owner_name\": \"x\"}\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: {ROOT}/r/local/architect.json: not valid JSON (Unexpected UTF-8 BOM (decode using utf-8-sig) at line 1 column 1)\n",
+  "exit": 1,
+  "writes": {}
+}

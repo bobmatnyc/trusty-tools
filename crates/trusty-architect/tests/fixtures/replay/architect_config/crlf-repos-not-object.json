@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/local/architect.json": "{\r\n  \"owner_name\": \"x\",\r\n  \"repos\": [1]\r\n}\r\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: {ROOT}/r/local/architect.json: repos: must be an object of name -> {slug, gh_config_dir, checkout}\n",
+  "exit": 1,
+  "writes": {}
+}

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCHITECT_OWNER_NAME": "",
+    "DASHBOARD_PORT": "",
+    "LOAD_FACTOR": ""
+  },
+  "files": {
+    "r/local/architect.json": "{\"caps\": {\"load_factor\": 1.5, \"other\": 3}, \"owner_name\": \"File Owner\", \"dashboard_port\": 7000}\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npath: {ROOT}/r/local/architect.json\nowner_name: File Owner\nmemory_palace: \ndashboard_port: 7000\ntailnet_url: \ncap load_factor: 1.5\ncap other: 3\nunknown: \nprojects_root: {ROOT}/trusty-mpm-projects\nclaude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npoll_interval_s: 60\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}
