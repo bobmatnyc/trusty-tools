@@ -317,16 +317,12 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
     if !supervised {
         // #4868: name the labels from the registry, not from literals. A hint
         // that prescribes a unit the host does not have is #2827 exactly.
-        // #11809: bootout then bootstrap, never `kickstart -k` (SIGKILL, no drain).
+        // #11809: the recipe comes from `launchd_restart_remedy`, never a literal.
         tracing::warn!(
             "unsupervised trusty-mpm daemon running alongside a launchd unit — \
-             likely spawned by a client during a restart race; kill it and use \
-             `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist; \
-             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist` \
-             (or the same for `{daemon}`) \
+             likely spawned by a client during a restart race; kill it and use {} \
              to let launchd own the daemon.",
-            supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR,
-            daemon = trusty_common::launchd_labels::MPM,
+            launchd_restart_remedy(&resolved_daemon_label()),
         );
     }
     supervised
@@ -350,19 +346,53 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
 /// both the runtime call site and any future caller.
 /// Test: `unsupervised_daemon_error_names_remedies` below.
 fn unsupervised_daemon_error() -> anyhow::Error {
-    // #4868: labels come from the canonical registry so this remedy always
-    // names units that exist. #11809: bootout then bootstrap, never `kickstart -k`.
+    unsupervised_daemon_error_for(&resolved_daemon_label())
+}
+
+/// [`unsupervised_daemon_error`] for a given daemon label, so the text is
+/// testable without reading this host's `~/Library/LaunchAgents`.
+fn unsupervised_daemon_error_for(daemon_label: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "refusing to start: a trusty-mpm launchd unit is registered but this \
          process was not started by launchd (issue #2486/#4397) — starting \
          anyway would create a duplicate, unsupervised daemon that can hold a \
-         stale binary indefinitely. Use \
-         `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist; \
-         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist` \
-         (or the same for `{daemon}`) to let launchd own the daemon, or pass `tm daemon --force` to start \
-         unsupervised anyway.",
-        supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR,
-        daemon = trusty_common::launchd_labels::MPM,
+         stale binary indefinitely. Use {} to let launchd own the daemon, or \
+         pass `tm daemon --force` to start unsupervised anyway.",
+        launchd_restart_remedy(daemon_label),
+    )
+}
+
+/// The daemon job's launchd label: the resolved one, else the registry default.
+///
+/// Why (#11809): the restart hint must name the job actually being restarted —
+/// a drifted label resolves through [`daemon_launchd_label`]. An unreadable
+/// `LaunchAgents` resolves none; the registry label is the #4868 fallback.
+/// What: [`daemon_launchd_label`]'s label, or `launchd_labels::MPM`.
+/// Test: the pure [`launchd_restart_remedy`] is tested below.
+///
+/// [`daemon_launchd_label`]: crate::commands::launchd_probe::daemon_launchd_label
+fn resolved_daemon_label() -> String {
+    crate::commands::launchd_probe::daemon_launchd_label()
+        .label()
+        .unwrap_or(trusty_common::launchd_labels::MPM)
+        .to_string()
+}
+
+/// The launchd recipe both unsupervised-daemon messages name.
+///
+/// Why (#11809): two hand-written copies of the recipe drifted from
+/// release-workflow.md; one builder over `daemon_restart_command_for` keeps the
+/// bootout → wait → bootstrap sequence in one place.
+/// What: the supervisor's recipe (`launchd_labels::MPM_SUPERVISOR`, per #4868),
+/// then the daemon job's recipe for `daemon_label`, each from
+/// `launchd_probe::daemon_restart_command_for`.
+/// Test: `unsupervised_daemon_error_names_remedies`.
+fn launchd_restart_remedy(daemon_label: &str) -> String {
+    use crate::commands::launchd_probe::daemon_restart_command_for;
+    format!(
+        "`{}` (or, for the daemon job, `{}`)",
+        daemon_restart_command_for(Some(trusty_common::launchd_labels::MPM_SUPERVISOR)),
+        daemon_restart_command_for(Some(daemon_label)),
     )
 }
 
@@ -583,18 +613,23 @@ mod tests {
     /// operator hitting it has an immediate next step either way.
     #[test]
     fn unsupervised_daemon_error_names_remedies() {
-        let msg = unsupervised_daemon_error().to_string();
-        // #11809: the supervisor's own plist, bootout then bootstrap, no kickstart.
-        let plist = format!(
-            "~/Library/LaunchAgents/{}.plist",
-            trusty_common::launchd_labels::MPM_SUPERVISOR
+        use crate::commands::launchd_probe::assert_restart_order;
+        let daemon = "com.trusty.mpm.dogfood";
+        let msg = unsupervised_daemon_error_for(daemon).to_string();
+        // #11809: bootout, wait, bootstrap — first for the registry supervisor
+        // label, then for the daemon label passed in; never kickstart.
+        let supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR;
+        assert_restart_order(&msg, supervisor);
+        let split = msg
+            .find(&format!("gui/$(id -u)/{daemon};"))
+            .unwrap_or_else(|| panic!("no daemon-job recipe; message was: {msg}"));
+        assert!(
+            msg.find(supervisor).is_some_and(|at| at < split),
+            "the supervisor recipe must come first; message was: {msg}"
         );
-        for verb in ["bootout", "bootstrap"] {
-            let want = format!("launchctl {verb} gui/$(id -u) {plist}");
-            assert!(msg.contains(&want), "no `{want}`; message was: {msg}");
-        }
-        assert!(!msg.contains("kickstart"), "message was: {msg}");
-        assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
+        assert_restart_order(&msg[split - "launchctl bootout ".len()..], daemon);
+        // The warning and the error share the one remedy.
+        assert!(msg.contains(&launchd_restart_remedy(daemon)), "{msg}");
         assert!(msg.contains("--force"), "message was: {msg}");
         assert!(msg.contains("#2486"), "message was: {msg}");
         assert!(msg.contains("#4397"), "message was: {msg}");

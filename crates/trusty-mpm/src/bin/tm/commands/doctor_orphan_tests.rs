@@ -212,7 +212,8 @@ fn warns_not_fails_when_the_operator_forced_it() {
 /// reading the source: it must name how to find the PID, how to kill it, and the
 /// launchctl verbs that restart the supervised job once the orphan is killed
 /// (`bootout` alone is a no-op against the orphan, which is why the incident
-/// dragged on). #11809: `bootout` then `bootstrap`, never `kickstart -k`.
+/// dragged on). #11809: `bootout`, wait for the job to go, then `bootstrap`;
+/// never `kickstart -k`.
 #[test]
 fn failure_names_the_pid_lookup_the_kill_and_the_launchctl_restart() {
     let msg = verdict(
@@ -226,11 +227,7 @@ fn failure_names_the_pid_lookup_the_kill_and_the_launchctl_restart() {
     .message;
     assert!(msg.contains("lsof"), "message was: {msg}");
     assert!(msg.contains("kill -TERM"), "message was: {msg}");
-    for verb in ["bootout", "bootstrap"] {
-        let want = format!("launchctl {verb} gui/$(id -u) ~/Library/LaunchAgents/{LABEL}.plist");
-        assert!(msg.contains(&want), "no `{want}`; message was: {msg}");
-    }
-    assert!(!msg.contains("kickstart"), "message was: {msg}");
+    crate::commands::launchd_probe::assert_restart_order(&msg, LABEL);
     assert!(msg.contains("#4230"), "message was: {msg}");
 }
 

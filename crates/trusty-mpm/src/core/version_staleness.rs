@@ -267,8 +267,11 @@ mod tests {
     /// verb refuse on launchd hosts, and a test that passed the old hardcoded
     /// string could not tell whether the message used the caller's value or a
     /// leftover literal.
-    // #11809: the shape `daemon_restart_command_for` now returns.
-    const HINT: &str = "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist; \
+    // #11809: the shape `daemon_restart_command_for` now returns — bootout, wait
+    // until the job is gone, then bootstrap.
+    const HINT: &str = "launchctl bootout gui/$(id -u)/com.trusty.mpm; \
+         for i in $(seq 30); do launchctl print gui/$(id -u)/com.trusty.mpm >/dev/null 2>&1 \
+         || break; sleep 1; done; \
          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist";
 
     /// One arbitrary build fingerprint, shaped like what

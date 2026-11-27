@@ -68,8 +68,11 @@ fn write_lock(path: &std::path::Path, addr: &str, pid: u32) {
 }
 
 /// The restart command the stop message must name.
-// #11809: the shape `daemon_restart_command_for` now returns.
-const RESTART_CMD: &str = "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist; \
+// #11809: the shape `daemon_restart_command_for` now returns — bootout, wait
+// until the job is gone, then bootstrap.
+const RESTART_CMD: &str = "launchctl bootout gui/$(id -u)/com.trusty.mpm; \
+     for i in $(seq 30); do launchctl print gui/$(id -u)/com.trusty.mpm >/dev/null 2>&1 \
+     || break; sleep 1; done; \
      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist";
 
 /// [`run_flow_with`] where every live pid counts as a daemon.
@@ -248,6 +251,12 @@ async fn slow_listing_stops_without_autostart() {
         msg.contains(RESTART_CMD),
         "message must name the restart command: {msg}"
     );
+    // #11809: the fixture is the shared helper's output, wait step included.
+    assert_eq!(
+        RESTART_CMD,
+        crate::commands::launchd_probe::daemon_restart_command_for(Some("com.trusty.mpm"))
+    );
+    crate::commands::launchd_probe::assert_restart_order(&msg, "com.trusty.mpm");
 }
 
 #[tokio::test]
