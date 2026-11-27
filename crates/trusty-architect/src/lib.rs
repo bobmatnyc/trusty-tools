@@ -82,6 +82,7 @@ pub mod tasks; // See #12028 P1d
 pub mod technical_level;
 mod tmux;
 pub mod verbs;
+pub mod verify_claim; // See #12028 P1g
 pub mod writers; // See #12028 P1e
 
 pub use classify::input_state_for_send;

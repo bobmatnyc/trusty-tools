@@ -135,6 +135,12 @@ fn abs(value: &str, env: Env<'_>) -> Result<String, ConfigError> {
     ))
 }
 
+/// `os.path.expanduser(path)` with `home` as `os.environ.get("HOME")`
+/// (#12028 P1g: `verify-claim` expands a repo's checkout and gh config dir).
+pub(crate) fn expand_home(path: &str, home: Option<&str>) -> String {
+    paths::expanduser(path, home)
+}
+
 /// `default_claude_config_dir(environ)`: `CLAUDE_CONFIG_DIR`, else the default; absolute.
 ///
 /// # Errors
