@@ -89,6 +89,17 @@ pub struct BuildConfig {
     /// Whether the operator wants `RUSTC_WRAPPER=sccache` on cargo invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sccache: Option<bool>,
+    // #11886: per-install, so no runner name lives in the public repo.
+    /// Program words that run a build on another host.
+    ///
+    /// Why: the pm-guard hook refuses a heavy build it cannot lease, and a
+    /// build a remote runner starts uses no local build slot.
+    /// What: the exact program words (as the shell spells them, quotes
+    /// dropped) whose build the lease rule lets through. Absent or empty: none.
+    /// Read fail-closed by `trusty_tools_config::load_remote_runners`.
+    /// Test: `a_listed_remote_runner_is_read_from_the_settings_file`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_runners: Vec<String>,
 }
 
 /// What the `build:` section resolves to once defaults are applied.

@@ -710,3 +710,30 @@ fn a_broken_install_file_yields_an_unreadable_keep_list() {
             .is_some()
     );
 }
+
+/// #11886: a runner listed under `build.remote_runners` is read; an absent
+/// file or an unset field lists none.
+#[test]
+fn a_listed_remote_runner_is_read_from_the_settings_file() {
+    let home = config_home("build:\n  remote_runners:\n    - remote-runner-x\n");
+    assert_eq!(load_remote_runners_at(home.path()), ["remote-runner-x"]);
+    let unset = config_home("build:\n  build_jobs: 2\n");
+    assert!(load_remote_runners_at(unset.path()).is_empty());
+    let absent = tempfile::tempdir().expect("tempdir");
+    assert!(load_remote_runners_at(absent.path()).is_empty());
+}
+
+/// #11886: a broken settings file or `install.toml` lists no runner, even
+/// when the settings file names one; `load` would have defaulted silently.
+#[test]
+fn an_unreadable_settings_file_lists_no_remote_runner() {
+    let broken = config_home("build:\n  remote_runners: [remote-runner-x]\nprojects: {broken\n");
+    assert!(load_remote_runners_at(broken.path()).is_empty());
+    let home = config_home("build:\n  remote_runners: [remote-runner-x]\n");
+    std::fs::write(
+        trusty_common::install_paths::install_file_path(home.path()),
+        "bogus = 1\n",
+    )
+    .expect("broken install.toml");
+    assert!(load_remote_runners_at(home.path()).is_empty());
+}

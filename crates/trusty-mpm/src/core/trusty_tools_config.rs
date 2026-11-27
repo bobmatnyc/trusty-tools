@@ -929,6 +929,47 @@ pub(crate) fn load_disk_keep_list_at(base: &Path) -> KeepList {
     }
 }
 
+/// The remote-runner program words the pm-guard lease rule lets through,
+/// failing closed (#11886).
+///
+/// Why: [`TrustyToolsConfig::load`] collapses a parse error to defaults. This
+/// list RELAXES a refusal, so an unreadable file must list no runner, never a
+/// built-in one.
+/// What: `build.remote_runners` of the settings file under the home's config
+/// dir. No home, no file, no field, an unreadable or unparsable file, or a
+/// broken `install.toml`: empty (the last three logged at `warn`).
+/// Test: `a_listed_remote_runner_is_read_from_the_settings_file`,
+/// `an_unreadable_settings_file_lists_no_remote_runner`.
+pub fn load_remote_runners() -> Vec<String> {
+    dirs::home_dir()
+        .map(|home| load_remote_runners_at(&home))
+        .unwrap_or_default()
+}
+
+/// [`load_remote_runners`] against an explicit home directory (hermetic).
+///
+/// Test: `a_listed_remote_runner_is_read_from_the_settings_file`,
+/// `an_unreadable_settings_file_lists_no_remote_runner`.
+pub fn load_remote_runners_at(base: &Path) -> Vec<String> {
+    let loaded = crate::core::config_base::try_config_base_under(base)
+        .map_err(|e| e.to_string())
+        .and_then(|dir| {
+            let path = trusty_common::crate_config::crate_config_path_at(&dir, CRATE_NAME);
+            trusty_common::crate_config::load_at::<TrustyToolsConfig>(&path)
+                .map_err(|e| e.to_string())
+        });
+    match loaded {
+        Ok(config) => config
+            .and_then(|c| c.build)
+            .map(|b| b.remote_runners)
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "settings unreadable; no remote runners (fail closed)");
+            Vec::new()
+        }
+    }
+}
+
 /// Join a project's `<owner>/<repo>` identity onto the workspace root.
 ///
 /// Why: #1220 nests sessions under `<root>/<owner>/<repo>/` so multiple sessions
