@@ -208,12 +208,27 @@ pub(crate) fn nested_dirt(candidate: &Path) -> Option<DirtyWorktree> {
 /// Why: a spawn writes `.claude/settings.json.bak` and a timestamped snapshot
 /// into a `.claude/` many repositories gitignore, so every fresh project read
 /// as holding two kept backups and `tm session delete --project-dir` refused.
-/// What: only the routes that already excuse provisioning dirt
-/// (`inspect_dirt_excusing`) call this; a missing or corrupt ledger, or any
-/// byte difference, vouches for nothing and the file still counts.
+/// What: the one direct caller is `inspect_dirt_with`
+/// (`worktree_safety.rs:421`), and only when the caller passed an excuse, so
+/// only `inspect_dirt_excusing` (`worktree_safety.rs:351`) reaches it. Its
+/// callers, none of which prompts:
+/// - `tm session delete --project-dir`: `OsProbes::dirt`
+///   (`project_dir_delete.rs:273`);
+/// - `decommission --force` of an in-project worktree: `keep_reason`
+///   (`decommission_force.rs:492`, `:500`);
+/// - decommission of an SM-owned workspace: `owned_workspace_keep_reason`
+///   (`decommission_owned.rs:84`, `:97`), reached from
+///   `decommission_with_root_checked` through `remove_owned_workspace`
+///   (`decommission.rs:1194`).
+///
+/// A missing or corrupt ledger, or any byte difference, vouches for nothing
+/// and the file still counts. `inspect_dirt` and `inspect_dirt_at` pass no
+/// excuse and never vouch.
 /// Test: `the_spawn_written_settings_backups_do_not_refuse_11218`,
 /// `a_user_backup_beside_the_daemon_s_still_refuses_11218`,
-/// `a_corrupt_ledger_vouches_for_no_settings_backup_11218`.
+/// `a_corrupt_ledger_vouches_for_no_settings_backup_11218`,
+/// `force_decommission_removes_a_worktree_holding_only_tm_s_backups_11267`,
+/// `owned_decommission_removes_a_clone_holding_only_tm_s_backups_11267`.
 pub(super) fn nested_dirt_vouched(candidate: &Path) -> Option<DirtyWorktree> {
     nested_dirt_with(candidate, true)
 }
