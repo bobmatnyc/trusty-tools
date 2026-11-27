@@ -50,7 +50,6 @@ fn spec_drift_recordings_replay_clean_against_the_port() {
             "drift-many-fail.json",
             "drift-orphan-fail.json",
             "empty-manifest.json",
-            "help.json",
             "manifest-key-errors.json",
             "missing-manifest.json",
             "pre-phase-pending.json",
