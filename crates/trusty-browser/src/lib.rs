@@ -51,6 +51,7 @@ pub mod pages;
 pub mod pages_capture;
 mod pages_frames;
 mod pages_ops;
+mod pages_shapes;
 pub mod pages_url;
 pub mod pairing;
 pub mod peer;
