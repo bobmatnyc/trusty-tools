@@ -295,7 +295,8 @@ CODESIGN_CRATE="trusty-common"
 # or runs: check_line_cap -> lib/sloc_awk.sh; check_changelog_fragment ->
 # lib/source_class.sh, assemble-changelog.sh, check-changelog-assembled.sh;
 # check_sld -> lib/run_or_cargo.sh -> lib/install_paths.py; release-gate ->
-# sandbox_daemon.sh, lib/install_paths.py. Add a line when a test starts
+# sandbox_daemon.sh (-> lib/bin_fresh.sh, lib/sandbox_install_paths.sh ->
+# .py, lib/sandbox_exec.sh), lib/install_paths.py. Add a line when a test starts
 # reading another script; ci-affected-test-plan-selftest.sh fails when a gate
 # that test names, or a lib file a gate sources, is missing here.
 SCRIPT_READERS="
@@ -311,6 +312,10 @@ trusty-mpm scripts/lib/sloc_awk.sh
 trusty-mpm scripts/lib/source_class.sh
 trusty-mpm scripts/lib/run_or_cargo.sh
 trusty-mpm scripts/lib/install_paths.py
+trusty-mpm scripts/lib/bin_fresh.sh
+trusty-mpm scripts/lib/sandbox_install_paths.sh
+trusty-mpm scripts/lib/sandbox_install_paths.py
+trusty-mpm scripts/lib/sandbox_exec.sh
 "
 # The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
 # list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.

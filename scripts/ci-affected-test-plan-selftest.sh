@@ -182,25 +182,45 @@ if [ "$(field "$out" count)" = 0 ]; then
   pass "live: unread lib script -> count=0 (over-selection bounded)"
 else fail "live unread lib script: $out"; fi
 # Drift guard (#12023): every gate the trusty-mpm test names, and every
-# scripts/lib file those gates source, is covered by the declared map.
+# scripts/lib file a gate sources, and (one level further) every lib file a
+# MAPPED script sources or runs, is covered by the declared map.
 MPM_TEST="${REPO}/crates/trusty-mpm/src/bin/tm/commands/pm_guard_secret_script_tests.rs"
-gates="$(awk '/fn the_repo_gate_scripts_allow_8879/ { on = 1 } on && /^}/ { exit } on' "$MPM_TEST" |
-  grep -oE '\("[A-Za-z0-9_.-]+\.sh", "' | sed -E 's/^\("//; s/", "$//')"
-libs=""
+gate_fn="$(awk '/fn the_repo_gate_scripts_allow_8879/ { on = 1 } on && /^}/ { exit } on' "$MPM_TEST")"
+gates="$(printf '%s\n' "$gate_fn" | grep -oE '\("[A-Za-z0-9_.-]+\.sh", "' | sed -E 's/^\("//; s/", "$//')"
+# Independent count: every line of the gate table naming a `.sh`, however
+# rustfmt wraps it. A tuple the extraction above missed makes the two differ.
+want_gates="$(printf '%s\n' "$gate_fn" | awk '/for \(gate, args\) in \[/ { on = 1; next } /\] \{/ { on = 0 } on' | grep -c '\.sh"')"
+n_gates="$(printf '%s\n' "$gates" | grep -c .)"
+# Non-comment, non-echo lines only: a usage message naming a script is no source.
+lib_refs() { grep -vE '^[[:space:]]*(#|echo )' "$1" | grep -oE 'lib/[A-Za-z0-9_.-]+\.(sh|py)' | sort -u; }
+mapped="$(awk '/^SCRIPT_READERS="/ { on = 1; next } on && /^"/ { exit } on && NF { print $2 }' "${REPO}/scripts/select-test-crates.sh")"
+paths=""
 for g in $gates; do
-  libs="${libs} $(grep -v '^[[:space:]]*#' "${REPO}/scripts/${g}" |
-    grep -oE 'lib/[A-Za-z0-9_.-]+\.(sh|py)' | sort -u)"
+  paths="${paths} scripts/${g}"
+  for l in $(lib_refs "${REPO}/scripts/${g}"); do paths="${paths} scripts/${l}"; done
+done
+for m in $mapped; do
+  [ -f "${REPO}/${m}" ] || continue
+  for l in $(lib_refs "${REPO}/${m}"); do paths="${paths} scripts/${l}"; done
 done
 drift=""
 checked=0
-for p in $(for g in $gates; do echo "scripts/$g"; done; for l in $libs; do echo "scripts/$l"; done); do
+for p in $(printf '%s' "$paths" | tr ' ' '\n' | sort -u); do
   checked=$((checked + 1))
   out="$(plan -- --files "$p")"
   case " $(field "$out" crates) " in *" trusty-mpm "*) ;; *) drift="${drift} ${p}" ;; esac
 done
-if [ "$checked" -ge 5 ] && [ -z "$drift" ]; then
-  pass "drift guard: ${checked} script(s) the trusty-mpm gate test reads are all mapped"
-else fail "drift guard: checked ${checked}, unmapped:${drift}"; fi
+if [ "$n_gates" -eq "$want_gates" ] && [ "$n_gates" -gt 0 ] && [ -z "$drift" ]; then
+  pass "drift guard: ${n_gates} gate(s) + ${checked} path(s) the trusty-mpm test reaches are all mapped"
+else fail "drift guard: gates extracted ${n_gates} of ${want_gates}, checked ${checked}, unmapped:${drift}"; fi
+# A SCRIPT_READERS crate that is not a workspace member fails open to ALL crates.
+sed 's#^trusty-mpm scripts/lib/run_or_cargo.sh$#no-such-crate scripts/lib/run_or_cargo.sh#' \
+  "${REPO}/scripts/select-test-crates.sh" >"${WORK}/select-test-crates.sh"
+out="$(plan -- --files scripts/lib/run_or_cargo.sh)"
+if [ "$(field "$out" count)" -gt 3 ] && field "$out" crates | grep -q trusty-mpm; then
+  pass "live: SCRIPT_READERS non-member crate -> fail open to ALL crates"
+else fail "live non-member reader crate: $out"; fi
+cp "${REPO}/scripts/select-test-crates.sh" "${WORK}/select-test-crates.sh"
 out="$(plan -- --files crates/trusty-common/src/lib.rs)"
 crates=" $(field "$out" crates) "
 case "$crates" in
