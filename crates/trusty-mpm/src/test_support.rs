@@ -102,7 +102,9 @@ pub(crate) use crate::core::trusty_tools_config::env_test_lock as lock_path_env;
 /// test hands them one without rewriting `$HOME`.
 pub(crate) fn broken_install_error() -> trusty_common::install_paths::InstallPathsError {
     let home = tempfile::tempdir().expect("scratch home");
-    let tools = home.path().join(".trusty-tools");
+    let tools = home
+        .path()
+        .join(trusty_common::install_paths::TOOLS_DIR_NAME);
     std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
     std::fs::write(tools.join("install.toml"), "bogus = 1\n").expect("write install.toml");
     trusty_common::install_paths::read_install_file(home.path())
@@ -736,7 +738,8 @@ mod tests {
         use crate::core::home_write_fence::{armed_roots, fenced_root};
         let home = crate::core::host_state_gate::passwd_home_dir().expect("a passwd home");
         for dest in [
-            home.join(".trusty-mpm").join("usage"),
+            home.join(trusty_common::install_paths::MPM_DIR_NAME)
+                .join("usage"),
             home.join(".claude").join("settings.json"),
             home.join(".claude.json"),
         ] {

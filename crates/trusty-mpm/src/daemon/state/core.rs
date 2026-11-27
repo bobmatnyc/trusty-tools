@@ -1123,7 +1123,7 @@ impl DaemonState {
             assert_ne!(
                 root, prod_root,
                 "with_root_isolated_managed must NOT point at the production \
-                 store (~/.trusty-mpm). Pass a tempfile::TempDir path instead."
+                 store (~/.trusty-mpm). Pass a tempfile::TempDir path instead." // path-literal: allow
             );
         }
 

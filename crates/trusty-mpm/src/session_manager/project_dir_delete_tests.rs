@@ -10,6 +10,7 @@ use super::super::worktree_git_fixture::{
 };
 use super::*;
 use crate::core::presence_local::{Authenticator, PresenceOutcome};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// A fake presence check that answers `outcome` and counts its calls.
 struct FakeAuth {
@@ -964,8 +965,8 @@ fn non_canonical_repo(fx: &GitWorktreeFixture) -> PathBuf {
 /// A user home whose `.trusty-mpm/config.toml` holds `text`.
 fn home_with_config(text: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("home");
-    std::fs::create_dir_all(home.path().join(".trusty-mpm")).expect("mkdir .trusty-mpm");
-    std::fs::write(home.path().join(".trusty-mpm/config.toml"), text).expect("write config");
+    std::fs::create_dir_all(home.path().join(MPM_DIR_NAME)).expect("mkdir .trusty-mpm");
+    std::fs::write(home.path().join(MPM_DIR_NAME).join("config.toml"), text).expect("write config");
     home
 }
 
@@ -1024,7 +1025,7 @@ fn an_env_named_architect_dir_is_protected() {
 fn an_unreadable_or_malformed_user_config_refuses_the_delete() {
     // #10992 critic HIGH: never proceed on a defaulted config.
     let home = home_with_config("[architect\nprojects = 3\n");
-    let config = home.path().join(".trusty-mpm/config.toml");
+    let config = home.path().join(MPM_DIR_NAME).join("config.toml");
     let err = crate::core::architect_store::protected_architect_dirs(&no_env, Some(home.path()))
         .expect_err("malformed config");
     assert!(err.contains(&config.display().to_string()), "{err}");
@@ -1032,7 +1033,7 @@ fn an_unreadable_or_malformed_user_config_refuses_the_delete() {
         return;
     }
     std::fs::write(&config, "[architect]\nprojects = []\n").expect("rewrite config");
-    let _lock = Locked::new(&home.path().join(".trusty-mpm"));
+    let _lock = Locked::new(&home.path().join(MPM_DIR_NAME));
     let err = crate::core::architect_store::protected_architect_dirs(&no_env, Some(home.path()))
         .expect_err("unreadable config");
     assert!(err.contains(&config.display().to_string()), "{err}");
@@ -1271,9 +1272,15 @@ fn a_corrupt_ledger_vouches_for_no_settings_backup_11218() {
         matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
         "{err}"
     );
-    // An unreadable ledger refuses too (pass one already counts its files).
+    // An unreadable ledger refuses too, and earlier than the half above: with
+    // no ledger pass one already counts tm's other provisioning files, so the
+    // refusal names those, never the gitignored-file walk (#11267).
     std::fs::write(&ledger, "not json").expect("corrupt the ledger");
     let err = plan_repo(&fx).expect_err("a corrupt ledger vouches for nothing");
-    assert!(matches!(err, DirDeleteError::Dirty { .. }), "{err}");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. }
+            if reason.contains("uncommitted/untracked file(s)") && !reason.contains("gitignored")),
+        "{err}"
+    );
     assert!(fx.repo.join(".claude/settings.json.bak").exists());
 }

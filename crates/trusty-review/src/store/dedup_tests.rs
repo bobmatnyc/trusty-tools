@@ -258,8 +258,9 @@ fn store_holds_no_lock_between_operations() {
 /// Why: the dedup gate is what stops two workers posting the same review
 /// comment. Under real contention exactly one caller must win — never zero
 /// (silent degradation) and never two.
-/// What: eight threads, each with its own `DedupStore` handle on one file,
-/// released together by a barrier, all claim the same SHA.
+/// What: eight threads, each with its own `DedupStore` handle on one file
+/// (opened before the threads start, #12040), released together by a
+/// barrier, all claim the same SHA.
 /// Test: this test. Fails before the fix: seven of the eight `open` calls
 /// return `DatabaseAlreadyOpen`.
 #[test]
@@ -272,13 +273,18 @@ fn concurrent_threads_claim_exactly_once() {
     // Create the file up front so every thread races on `claim`, not on create.
     DedupStore::open(&path).expect("seed store");
 
+    // #12040: open every handle here, before any thread starts. Opened inside
+    // the thread, a contended `open` returned before `barrier.wait()`, and the
+    // other seven threads waited on the barrier forever.
+    let stores: Vec<DedupStore> = (0..THREADS)
+        .map(|_| DedupStore::open(&path).expect("open a handle before the race"))
+        .collect();
     let barrier = Arc::new(Barrier::new(THREADS));
-    let handles: Vec<_> = (0..THREADS)
-        .map(|_| {
-            let path = path.clone();
+    let handles: Vec<_> = stores
+        .into_iter()
+        .map(|store| {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || -> Result<ClaimOutcome, DedupError> {
-                let store = DedupStore::open(&path)?;
                 barrier.wait();
                 store.claim_blocking("acme", "backend", 42, "sha-race")
             })

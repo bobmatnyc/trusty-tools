@@ -12,7 +12,8 @@
 //! them with `None`.
 //! Test: `state_save_load_roundtrip`, `state_missing_file_returns_none`,
 //! `state_parse_failure_returns_none`, `catchup_dir_honours_state_root`,
-//! `catchup_dir_falls_back_to_home`, `load_wrapper_delegates_with_the_home_default`.
+//! `catchup_dir_falls_back_to_home`, `catchup_dir_follows_the_configured_config_dir`,
+//! `load_wrapper_delegates_with_the_home_default`.
 //!
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
@@ -20,6 +21,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::install_paths::{InstallPathsError, MPM_DIR_NAME, try_config_dir};
 
 /// Persisted watermark for the catch-up system.
 ///
@@ -46,15 +49,20 @@ pub struct CatchupState {
 /// real `~/.trusty-mpm/projects/` — 39,749 of them, named after the tempdir the
 /// palace id was derived from.
 /// What: when `state_root` is `Some`, uses it as the `.trusty-mpm` framework
-/// root; otherwise derives `~/.trusty-mpm` from the home directory. Returns
-/// `<root>/projects/<palace-id>/`.
-/// Test: `catchup_dir_honours_state_root`, `catchup_dir_falls_back_to_home`.
-fn catchup_dir(palace_id: &str, state_root: Option<&Path>) -> Option<PathBuf> {
+/// root; otherwise `<config dir>/.trusty-mpm` from the shared reader
+/// ([`try_config_dir`]), which is `~/.trusty-mpm` on an install with no
+/// `install.toml` and no `TRUSTY_MPM_CONFIG_DIR`. Returns
+/// `<root>/projects/<palace-id>/`. A broken install file is an error, never
+/// a `$HOME` guess.
+/// Test: `catchup_dir_honours_state_root`, `catchup_dir_falls_back_to_home`,
+/// `catchup_dir_follows_the_configured_config_dir`.
+fn catchup_dir(palace_id: &str, state_root: Option<&Path>) -> Result<PathBuf, InstallPathsError> {
     let root = match state_root {
         Some(root) => root.to_path_buf(),
-        None => dirs::home_dir()?.join(".trusty-mpm"),
+        // #11821: the config dir comes from the shared reader, not `$HOME`.
+        None => try_config_dir()?.join(MPM_DIR_NAME),
     };
-    Some(root.join("projects").join(palace_id))
+    Ok(root.join("projects").join(palace_id))
 }
 
 /// Resolve the path to the catch-up state JSON file for a palace.
@@ -63,7 +71,12 @@ fn catchup_dir(palace_id: &str, state_root: Option<&Path>) -> Option<PathBuf> {
 /// What: `<state_root|~/.trusty-mpm>/projects/<palace-id>/catchup-state.json`.
 /// Test: covered indirectly by `state_save_load_roundtrip`.
 fn state_path(palace_id: &str, state_root: Option<&Path>) -> Option<PathBuf> {
-    Some(catchup_dir(palace_id, state_root)?.join("catchup-state.json"))
+    // #11821: an unresolvable config dir reads as "no watermark" (fail-open read).
+    Some(
+        catchup_dir(palace_id, state_root)
+            .ok()?
+            .join("catchup-state.json"),
+    )
 }
 
 /// Load the catch-up watermark state for a palace, fail-open.
@@ -128,8 +141,9 @@ pub fn save_catchup_state_in(
     state: &CatchupState,
     state_root: Option<&Path>,
 ) -> anyhow::Result<()> {
+    // #11821: an unresolvable config dir fails before any directory is created.
     let dir = catchup_dir(palace_id, state_root)
-        .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for catchup state"))?;
+        .map_err(|e| anyhow::anyhow!("could not resolve the config dir for catchup state: {e}"))?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("catchup-state.json");
     let json = serde_json::to_vec_pretty(state)?;
@@ -140,6 +154,7 @@ pub fn save_catchup_state_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install_paths::{CONFIG_DIR_ENV, install_file_path};
     use tempfile::TempDir;
 
     fn sample(palace_id: &str) -> CatchupState {
@@ -193,20 +208,79 @@ mod tests {
         );
     }
 
-    /// #4323: `None` keeps the production layout — `~/.trusty-mpm/projects/…`.
-    /// Path derivation only; nothing is written.
-    #[test]
-    fn catchup_dir_falls_back_to_home() {
-        // #5937: reads HOME twice; other tests in this binary set it.
+    /// Run `f` with `$HOME` at `home` and `TRUSTY_MPM_CONFIG_DIR` set to
+    /// `config_dir` (or cleared), under `ENV_LOCK`, restoring both after.
+    fn with_env<R>(home: &Path, config_dir: Option<&Path>, f: impl FnOnce() -> R) -> R {
+        // #5937: other tests in this binary set HOME.
         let _env = crate::data_dir::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(home) = dirs::home_dir() else {
-            return; // No home dir resolvable: the `None` arm is unreachable here.
-        };
+        let saved = [
+            ("HOME", std::env::var_os("HOME")),
+            (CONFIG_DIR_ENV, std::env::var_os(CONFIG_DIR_ENV)),
+        ];
+        // SAFETY: guarded by `ENV_LOCK`; restored below before returning.
+        unsafe {
+            std::env::set_var("HOME", home);
+            match config_dir {
+                Some(dir) => std::env::set_var(CONFIG_DIR_ENV, dir),
+                None => std::env::remove_var(CONFIG_DIR_ENV),
+            }
+        }
+        let out = f();
+        for (name, value) in saved {
+            // SAFETY: as above.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        out
+    }
+
+    /// #4323: `None` keeps the production layout — `~/.trusty-mpm/projects/…`
+    /// on an install with no `install.toml` and no config-dir env (#11821).
+    /// Path derivation only; nothing is written.
+    #[test]
+    fn catchup_dir_falls_back_to_home() {
+        let home = TempDir::new().unwrap();
+        let got = with_env(home.path(), None, || catchup_dir("p", None));
+        assert_eq!(MPM_DIR_NAME, ".trusty-mpm");
         assert_eq!(
-            catchup_dir("p", None),
-            Some(home.join(".trusty-mpm").join("projects").join("p"))
+            got.expect("a home with no install.toml resolves"),
+            home.path().join(MPM_DIR_NAME).join("projects").join("p")
+        );
+    }
+
+    /// #11821: the default root follows the configured config dir, and a
+    /// broken `install.toml` fails the write closed with nothing created.
+    #[test]
+    fn catchup_dir_follows_the_configured_config_dir() {
+        let home = TempDir::new().unwrap();
+        let cfg = TempDir::new().unwrap();
+        let got = with_env(home.path(), Some(cfg.path()), || catchup_dir("p", None));
+        assert_eq!(
+            got.expect("the env config dir resolves"),
+            cfg.path().join(MPM_DIR_NAME).join("projects").join("p")
+        );
+
+        let install = install_file_path(home.path());
+        std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+        std::fs::write(&install, "bogus = 1\n").unwrap();
+        let saved = with_env(home.path(), None, || {
+            save_catchup_state_in("p", &sample("p"), None)
+        });
+        assert!(saved.is_err(), "a broken install.toml must fail the write");
+        assert!(
+            !home.path().join(MPM_DIR_NAME).exists(),
+            "a failed resolve must create no state dir under $HOME"
+        );
+        let loaded = with_env(home.path(), None, || load_catchup_state_in("p", None));
+        assert!(
+            loaded.is_none(),
+            "an unresolvable config dir reads as no watermark"
         );
     }
 
@@ -215,8 +289,8 @@ mod tests {
     fn catchup_dir_honours_state_root() {
         let tmp = TempDir::new().unwrap();
         assert_eq!(
-            catchup_dir("p", Some(tmp.path())),
-            Some(tmp.path().join("projects").join("p"))
+            catchup_dir("p", Some(tmp.path())).expect("a state root needs no resolve"),
+            tmp.path().join("projects").join("p")
         );
     }
 

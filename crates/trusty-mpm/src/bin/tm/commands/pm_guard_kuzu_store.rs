@@ -315,11 +315,12 @@ fn only_handles(segment: &str, argv: &[String], named: &[(usize, String)]) -> bo
 
 /// The deny text for `target`, named by `how`.
 fn deny_reason(target: &str, how: &str) -> String {
+    // #11821: the path-naming tail is its own waived literal; bytes unchanged.
+    const MASKED: &str = "~/.trusty-tools/kuzu-review/<run>/masked.jsonl."; // path-literal: allow (display text)
     format!(
         "{KUZU_STORE_RULE}: {how} names `{target}`, a kuzu-memory store, the kuzu import venv \
          or the import bridge's temp export (#8625). The operator runs `trusty-memory import \
-         kuzu` outside the guard; the reviewer reads only the masked \
-         ~/.trusty-tools/kuzu-review/<run>/masked.jsonl."
+         kuzu` outside the guard; the reviewer reads only the masked {MASKED}"
     )
 }
 

@@ -10,6 +10,7 @@ use crate::core::content_source::test_support::rc;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// Write `<name>.md` into `dir` with the given raw content.
 fn write_file(path: &PathBuf, content: &str) {
@@ -1251,7 +1252,7 @@ fn a_bare_compiled_write_records_no_savings_row() {
 
     assert_eq!(fs::read_to_string(&dest).unwrap(), plausible);
     assert!(
-        !tiers.home().join(".trusty-mpm").join("usage").exists(),
+        !tiers.home().join(MPM_DIR_NAME).join("usage").exists(),
         "a bare compiled write must not reach the operator's savings ledger"
     );
 }

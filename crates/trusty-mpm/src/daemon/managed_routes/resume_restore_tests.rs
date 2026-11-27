@@ -67,7 +67,7 @@ impl ManagedTmuxDriver for RefuseLaunchDriver {
 
 /// A daemon with project `widget` registered and one `Active` session bound
 /// to it, over [`RefuseLaunchDriver`].
-async fn bound_session(dir: &std::path::Path) -> (Arc<DaemonState>, ManagedSessionId) {
+pub(super) async fn bound_session(dir: &std::path::Path) -> (Arc<DaemonState>, ManagedSessionId) {
     let state = Arc::new(
         DaemonState::with_root_isolated_managed_and_driver(
             dir.join("framework"),
@@ -123,7 +123,11 @@ async fn bound_session(dir: &std::path::Path) -> (Arc<DaemonState>, ManagedSessi
 
 /// Decommission `widget` against a stateful search that parks into `parked`.
 /// Returns the rig, which must outlive the test's restore.
-async fn decommission(state: &Arc<DaemonState>, id: &ManagedSessionId, parked: &Parked) -> Rig {
+pub(super) async fn decommission(
+    state: &Arc<DaemonState>,
+    id: &ManagedSessionId,
+    parked: &Parked,
+) -> Rig {
     let mgr = state.session_manager().await;
     let rig = rig(stateful_search(parked), healthy_memory()).await;
     mgr.decommission_project_with(

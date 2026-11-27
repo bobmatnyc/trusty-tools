@@ -44,10 +44,10 @@ const ALLOWLISTED_BOOTSTRAP_SITES: &[(&str, usize, &str)] = &[
         "the trusty-mpm supervisor: `RealLaunchctl::bootstrap`'s `launchctl` argv, and \
          `install_mpm_supervisor_for`'s `target.launchctl.bootstrap(...)`. NEEDS NO \
          PORT GATE since #6288: the supervisor binds no listener — it publishes its \
-         metrics to `~/.trusty-mpm/supervisor-metrics.json` — so no foreign process \
-         can hold a port it wants and `KeepAlive=true` cannot restart it into a \
-         collision. #4470 HIGH-2 gated this site with `LaunchctlPort::port_guard` \
-         while it did bind `127.0.0.1:7881`; \
+         metrics to `~/.trusty-mpm/supervisor-metrics.json` (path-literal: allow) \
+         — so no foreign process can hold a port it wants and `KeepAlive=true` \
+         cannot restart it into a collision. #4470 HIGH-2 gated this site with \
+         `LaunchctlPort::port_guard` while it did bind `127.0.0.1:7881`; \
          `plist_bootstrap_tests::supervisor_plist_binds_no_port` fails if the \
          template seeds a bind address again, which is when a gate would be owed \
          here once more",

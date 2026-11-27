@@ -23,6 +23,7 @@ use std::sync::Arc;
 use trusty_common::content::{
     ContentLock, DevOverride, LOCK_FILE_NAME, ResolveOptions, ResolvedContent, resolve,
 };
+use trusty_common::install_paths::{MPM_DIR_NAME, try_config_dir_under};
 use trusty_common::integrity::Sha256Digest;
 
 /// The bundle directory every trusty-review content file lives under.
@@ -94,9 +95,13 @@ pub enum Staged<'a> {
     Emptied(&'a str),
 }
 
-/// Installs a verified bundle of the content into `<home>/.trusty-mpm/content`.
+/// Installs a verified bundle of the content into `<home>/.trusty-mpm/content`,
+/// the cache `default_cache_dir` resolves for a spawned binary with `$HOME` at
+/// `home` and a cleared environment.
 pub fn stage_bundle(home: &Path, staged: Staged<'_>) {
-    stage_bundle_in(&home.join(".trusty-mpm").join("content"), staged);
+    // #11821: mirror the content cache through the shared config-dir reader.
+    let config_dir = try_config_dir_under(home).expect("resolve the scratch home's config dir");
+    stage_bundle_in(&config_dir.join(MPM_DIR_NAME).join("content"), staged);
 }
 
 /// The checkout's content, verified and resolved in memory; for an in-process

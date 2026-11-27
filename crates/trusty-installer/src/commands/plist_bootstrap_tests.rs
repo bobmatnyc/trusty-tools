@@ -57,6 +57,10 @@ fn fill_template_replaces_all_tokens() {
         !filled.contains("__TM_BINARY_PATH__"),
         "unfilled __TM_BINARY_PATH__ token"
     );
+    assert!(
+        !filled.contains("__LOG_DIR__"),
+        "unfilled __LOG_DIR__ token"
+    );
     assert!(filled.contains("/home/testuser"), "home not in output");
     assert!(
         filled.contains("/usr/local/bin/tm"),
@@ -350,6 +354,93 @@ fn install_mpm_supervisor_for_writes_plist_and_never_touches_real_launchctl() {
     );
     assert!(calls[0].starts_with("bootout "), "calls: {calls:?}");
     assert!(calls[1].starts_with("bootstrap "), "calls: {calls:?}");
+}
+
+/// Why: #11821 — the supervisor's log dir follows the configured config dir,
+/// and the plist must name the directory the installer creates.
+/// What: an `install.toml` moves `config_dir`; the log dir is created there,
+/// not under home, and both plist log paths point into it.
+/// Test: itself.
+#[test]
+fn install_mpm_supervisor_for_logs_under_the_configured_config_dir() {
+    use trusty_common::install_paths::{write_install_file, InstallFile, MPM_DIR_NAME};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path().join("cfg");
+    let values = InstallFile {
+        config_dir: Some(config_dir.clone()),
+        ..InstallFile::default()
+    };
+    write_install_file(tmp.path(), &values).expect("write install.toml");
+    let stub = StubLaunchctl::new();
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    let result = install_mpm_supervisor_for(&target, false, &tmp.path().join("tm"));
+
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+    let log_dir = config_dir.join(MPM_DIR_NAME).join("logs");
+    assert!(
+        log_dir.is_dir(),
+        "log dir not created at {}",
+        log_dir.display()
+    );
+    assert!(
+        !tmp.path().join(MPM_DIR_NAME).exists(),
+        "nothing may be created under home's default tm dir"
+    );
+    let plist = std::fs::read_to_string(
+        tmp.path()
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{PLIST_LABEL}.plist")),
+    )
+    .expect("plist written");
+    for name in ["supervisor.out.log", "supervisor.err.log"] {
+        let want = log_dir.join(name);
+        assert!(
+            plist.contains(&*want.to_string_lossy()),
+            "plist must log to {}: {plist}",
+            want.display()
+        );
+    }
+}
+
+/// Why: #11821 — a broken `install.toml` must fail the install closed, not
+/// put the supervisor's logs under home.
+/// What: an unparseable `install.toml` makes the install an `Err` that names
+/// the config dir, with no plist, no log dir and no launchctl call.
+/// Test: itself.
+#[test]
+fn install_mpm_supervisor_for_fails_closed_on_a_broken_install_file() {
+    use trusty_common::install_paths::{install_file_path, MPM_DIR_NAME};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let file = install_file_path(tmp.path());
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&file, "bogus = 1\n").expect("write install.toml");
+    let stub = StubLaunchctl::new();
+    let target = SupervisorTarget {
+        home: tmp.path().to_owned(),
+        domain: "gui/999999-isolated-test-domain".to_owned(),
+        launchctl: &stub,
+    };
+
+    let result = install_mpm_supervisor_for(&target, false, &tmp.path().join("tm"));
+
+    let err = result.expect_err("a broken install.toml must fail closed");
+    assert!(
+        format!("{err:#}").contains("config dir"),
+        "error must name the config dir: {err:#}"
+    );
+    assert!(!tmp.path().join(MPM_DIR_NAME).exists(), "no log dir");
+    assert!(!tmp.path().join("Library").exists(), "no plist");
+    assert!(
+        stub.calls().is_empty(),
+        "no launchctl call: {:?}",
+        stub.calls()
+    );
 }
 
 /// Why: when a plist is ALREADY registered but its `ProgramArguments`

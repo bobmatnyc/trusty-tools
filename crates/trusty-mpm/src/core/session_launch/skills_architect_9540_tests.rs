@@ -18,6 +18,7 @@ use crate::core::project_skill_tier::architect_seed::test_support::{shipped, shi
 use crate::core::project_skill_tier::architect_skills::{self, SHIPPED};
 use crate::core::session_profile::SessionProfile;
 use tempfile::tempdir;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// Launch `project` with `home` as `$HOME`.
 fn launch(project: &Path, home: &Path) -> PrepReport {
@@ -42,7 +43,7 @@ fn launch(project: &Path, home: &Path) -> PrepReport {
 /// A scratch `$HOME` whose user config allow-lists `project`.
 fn home_allowing(project: &Path) -> tempfile::TempDir {
     let home = tempdir().unwrap();
-    let root = home.path().join(".trusty-mpm");
+    let root = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("config.toml"),

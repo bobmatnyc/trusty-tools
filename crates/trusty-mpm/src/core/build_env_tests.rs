@@ -6,6 +6,7 @@
 //! Test: this file.
 
 use super::*;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// A `GithubPath` for the repo this workspace lives in.
 fn identity() -> GithubPath {
@@ -28,11 +29,11 @@ fn rust_build_env_defaults_target_dir_from_git_remote() {
 
     assert_eq!(
         resolved.cargo_target_dir,
-        home.join(".trusty-tools")
+        home.join(TOOLS_DIR_NAME)
             .join("cargo-target")
             .join("bobmatnyc")
             .join("trusty-tools"),
-        "the default must be ~/.trusty-tools/cargo-target/<owner>/<repo>"
+        "the default must be ~/.trusty-tools/cargo-target/<owner>/<repo>" // path-literal: allow
     );
     assert!(
         !resolved.target_dir_configured,
