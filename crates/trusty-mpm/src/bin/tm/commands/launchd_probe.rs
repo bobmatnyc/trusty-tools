@@ -373,7 +373,7 @@ pub(crate) fn compute_no_spawn(plist_exists: bool) -> bool {
 /// Taking the label as a parameter is the #4230-review fix for a hint that
 /// previously hardcoded `com.trusty.mpm` and so prescribed a nonexistent unit on
 /// a host whose label had drifted.
-/// Test: `cli_spawn_refusal_names_kickstart_and_force`,
+/// Test: `cli_spawn_refusal_names_bootout_bootstrap_and_force`,
 /// `cli_spawn_refusal_names_the_resolved_label`.
 pub(crate) fn cli_spawn_refusal_hint(label: &str) -> String {
     format!(
@@ -655,24 +655,36 @@ mod tests {
     /// actually works and the `--force` opt-in, so an operator hitting it has
     /// an immediate next step either way.
     #[test]
-    fn cli_spawn_refusal_names_kickstart_and_force() {
+    fn cli_spawn_refusal_names_bootout_bootstrap_and_force() {
         let msg = cli_spawn_refusal_hint(DAEMON_LAUNCHD_LABEL);
-        assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
-        assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
+        // #11809: bootout then bootstrap of the registered plist, never kickstart -k.
+        for verb in ["bootout", "bootstrap"] {
+            let want = format!(
+                "launchctl {verb} gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist"
+            );
+            assert!(msg.contains(&want), "no `{want}`; message was: {msg}");
+        }
+        assert!(!msg.contains("kickstart"), "message was: {msg}");
         assert!(msg.contains("tm daemon --force"), "message was: {msg}");
         assert!(msg.contains("#4230"), "message was: {msg}");
     }
 
     /// #4230 review: the hint must name the label actually registered on this
     /// host. Hardcoding `com.trusty.mpm` prescribed a nonexistent unit —
-    /// `launchctl kickstart` on it fails with "Could not find service".
+    /// `launchctl` on it fails with "Could not find service".
     #[test]
     fn cli_spawn_refusal_names_the_resolved_label() {
         let msg = cli_spawn_refusal_hint("com.trusty.mpm.dogfood");
-        assert!(msg.contains("com.trusty.mpm.dogfood"), "message was: {msg}");
+        // #11809: both verbs name the resolved label's plist, not the default one.
+        for verb in ["bootout", "bootstrap"] {
+            let want = format!(
+                "launchctl {verb} gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.dogfood.plist"
+            );
+            assert!(msg.contains(&want), "no `{want}`; message was: {msg}");
+        }
         assert!(
-            msg.contains("gui/$(id -u)/com.trusty.mpm.dogfood"),
-            "message was: {msg}"
+            !msg.contains("LaunchAgents/com.trusty.mpm.plist"),
+            "the default plist leaked into the hint: {msg}"
         );
     }
 

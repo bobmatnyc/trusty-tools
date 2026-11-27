@@ -317,10 +317,13 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
     if !supervised {
         // #4868: name the labels from the registry, not from literals. A hint
         // that prescribes a unit the host does not have is #2827 exactly.
+        // #11809: bootout then bootstrap, never `kickstart -k` (SIGKILL, no drain).
         tracing::warn!(
             "unsupervised trusty-mpm daemon running alongside a launchd unit — \
              likely spawned by a client during a restart race; kill it and use \
-             `launchctl kickstart -k gui/$(id -u)/{supervisor}` (or `{daemon}`) \
+             `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist; \
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist` \
+             (or the same for `{daemon}`) \
              to let launchd own the daemon.",
             supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR,
             daemon = trusty_common::launchd_labels::MPM,
@@ -339,7 +342,7 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
 /// unsupervised daemon that can hold a stale binary indefinitely (observed:
 /// PID 35895 serving a stale 1.2.3 image since 2026-07-29 while the on-disk
 /// binary was 1.3.0). The error names both remedies: let launchd own the
-/// daemon via `launchctl kickstart`/`bootstrap`, or explicitly opt in with
+/// daemon via `launchctl bootout`/`bootstrap`, or explicitly opt in with
 /// `--force` when the operator really does want an unsupervised run (e.g.
 /// local dev alongside a supervised instance on a different port).
 /// What: returns an `anyhow::Error` with the actionable message; kept as a
@@ -348,14 +351,15 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
 /// Test: `unsupervised_daemon_error_names_remedies` below.
 fn unsupervised_daemon_error() -> anyhow::Error {
     // #4868: labels come from the canonical registry so this remedy always
-    // names units that exist.
+    // names units that exist. #11809: bootout then bootstrap, never `kickstart -k`.
     anyhow::anyhow!(
         "refusing to start: a trusty-mpm launchd unit is registered but this \
          process was not started by launchd (issue #2486/#4397) — starting \
          anyway would create a duplicate, unsupervised daemon that can hold a \
          stale binary indefinitely. Use \
-         `launchctl kickstart -k gui/$(id -u)/{supervisor}` (or `{daemon}`) to \
-         let launchd own the daemon, or pass `tm daemon --force` to start \
+         `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist; \
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{supervisor}.plist` \
+         (or the same for `{daemon}`) to let launchd own the daemon, or pass `tm daemon --force` to start \
          unsupervised anyway.",
         supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR,
         daemon = trusty_common::launchd_labels::MPM,
@@ -575,12 +579,21 @@ mod tests {
     }
 
     /// Issue #4397: the bare-CLI refusal message must name both remedies —
-    /// the `launchctl kickstart` recipe and the `--force` opt-in — so an
+    /// the `launchctl bootout`/`bootstrap` recipe and the `--force` opt-in — so an
     /// operator hitting it has an immediate next step either way.
     #[test]
     fn unsupervised_daemon_error_names_remedies() {
         let msg = unsupervised_daemon_error().to_string();
-        assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
+        // #11809: the supervisor's own plist, bootout then bootstrap, no kickstart.
+        let plist = format!(
+            "~/Library/LaunchAgents/{}.plist",
+            trusty_common::launchd_labels::MPM_SUPERVISOR
+        );
+        for verb in ["bootout", "bootstrap"] {
+            let want = format!("launchctl {verb} gui/$(id -u) {plist}");
+            assert!(msg.contains(&want), "no `{want}`; message was: {msg}");
+        }
+        assert!(!msg.contains("kickstart"), "message was: {msg}");
         assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
         assert!(msg.contains("--force"), "message was: {msg}");
         assert!(msg.contains("#2486"), "message was: {msg}");

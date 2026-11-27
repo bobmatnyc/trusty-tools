@@ -267,7 +267,9 @@ mod tests {
     /// verb refuse on launchd hosts, and a test that passed the old hardcoded
     /// string could not tell whether the message used the caller's value or a
     /// leftover literal.
-    const HINT: &str = "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm";
+    // #11809: the shape `daemon_restart_command_for` now returns.
+    const HINT: &str = "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist; \
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist";
 
     /// One arbitrary build fingerprint, shaped like what
     /// [`crate::core::build_identity::identity_of`] produces.

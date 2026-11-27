@@ -68,7 +68,9 @@ fn write_lock(path: &std::path::Path, addr: &str, pid: u32) {
 }
 
 /// The restart command the stop message must name.
-const RESTART_CMD: &str = "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm";
+// #11809: the shape `daemon_restart_command_for` now returns.
+const RESTART_CMD: &str = "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist; \
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist";
 
 /// [`run_flow_with`] where every live pid counts as a daemon.
 async fn run_flow(
