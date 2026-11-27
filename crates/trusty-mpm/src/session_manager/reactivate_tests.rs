@@ -516,6 +516,13 @@ async fn revert_reactivation_from_an_active_prior_keeps_the_conversation() {
     let workspace = TempDir::new().unwrap();
     let (mgr, _fake) = make_manager(&dir).await;
     let id = session_with_conversation(&mgr, workspace.path()).await;
+    mgr.set_workspace(
+        &id,
+        workspace.path().to_owned(),
+        ManagedSessionState::Active,
+    )
+    .await
+    .expect("set Active");
     let prior = mgr.get(&id).await.expect("prior");
     assert_eq!(prior.state, ManagedSessionState::Active, "premise");
     mgr.stop(&id).await.expect("stop");
