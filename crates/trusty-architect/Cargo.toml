@@ -22,6 +22,11 @@ include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
 name = "trusty-architect-il"
 path = "src/bin/trusty-architect-il.rs"
 
+# #12026: record-then-replay parity tool for the Architect script ports.
+[[bin]]
+name = "trusty-architect-replay"
+path = "src/bin/trusty-architect-replay.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are
