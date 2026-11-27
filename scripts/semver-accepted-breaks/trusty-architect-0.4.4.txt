@@ -1,0 +1,4 @@
+crate   trusty-architect
+version 0.4.4
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field AnswerStore.ilio_trial

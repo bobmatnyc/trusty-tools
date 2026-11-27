@@ -1,4 +1,13 @@
 crate   trusty-search
 version 1.1.1
 reason  Accepted under the versioning policy of 2026-09-26; Architect approval 2026-11-23. Additive field on a constructible struct, added by #11732 after the 1.1.0 tag.
+accept  constructible_struct_adds_field field CreateIndexRequest.office_file_max_bytes
+accept  constructible_struct_adds_field field CreateIndexRequest.source_file_max_bytes
+accept  constructible_struct_adds_field field IndexConfig.office_file_max_bytes
+accept  constructible_struct_adds_field field IndexConfig.source_file_max_bytes
+accept  constructible_struct_adds_field field IndexHandle.size_caps
+accept  constructible_struct_adds_field field ProjectConfig.office_file_max_bytes
+accept  constructible_struct_adds_field field ProjectConfig.source_file_max_bytes
 accept  constructible_struct_adds_field field WalkDiagnostics.walk_refused
+accept  constructible_struct_adds_field field WalkOptions.size_caps
+accept  function_parameter_count_changed trusty_search::core::extract::xlsx::extract now takes 2 parameters instead of 1

@@ -419,13 +419,16 @@ fn the_repo_gate_scripts_allow_8879() {
     let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     // #8879: bare names, joined below, so no `scripts/<name>.sh` literal sits in
     // crate source for scripts/select-test-crates.sh to read as a reference.
-    for gate in [
-        "check_line_cap.sh",
-        "check_test_pointers.sh",
-        "check_changelog_fragment.sh",
-        "check_sld.sh",
+    // #12021: both run scripts/lib/install_paths.py; release-gate takes no
+    // `--staged`, so it runs in its own `--bin <abs> --lane` form.
+    for (gate, args) in [
+        ("check_line_cap.sh", "--staged"),
+        ("check_test_pointers.sh", "--staged"),
+        ("check_changelog_fragment.sh", "--staged"),
+        ("check_sld.sh", "--staged"),
+        ("release-gate.sh", "--bin /usr/bin/true --lane safe"),
     ] {
-        let command = format!("./scripts/{gate} --staged");
+        let command = format!("./scripts/{gate} {args}");
         assert_eq!(eval(&command, &root), None, "`{command}` must allow");
     }
 }
