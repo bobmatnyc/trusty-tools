@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.17.3] — 2026-11-27
+
+### Breaking
+
+- trusty-installer 0.17.2 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-installer-0.17.2.txt` (Refs #8699).
+
+### Added
+
+- `tctl sign trusty-secrets` signs the registry-installed `trusty-secrets` binary with the Developer ID identity (identifier `com.trusty.trusty-secrets`), so its Keychain items keep trusting it across upgrades. `scripts/install-trusty-secrets-signed.sh --version <v>` runs `cargo install trusty-secrets --version <v> --locked` and then the sign step, and exits non-zero if either fails (Refs #11587).
+
+### Fixed
+
+- `tctl sign <target>` no longer reports "signed with Developer ID" for a signature that reads back ad-hoc, without a Team ID, with a non-Developer-ID certificate, or with a Team ID other than the identity's. It exits 1 and names the cause; `codesign --verify --strict` alone accepted an ad-hoc signature (Refs #11587).
+
+### Changed
+
+- The trusty-mpm supervisor's log directory follows the configured config dir (`<config_dir>/.trusty-mpm/logs`), and the plist's `StandardOutPath`/`StandardErrorPath` point into it; the default path is unchanged. A broken `install.toml` now fails the supervisor install closed instead of logging under home (#11821).
+
 ## [0.17.2] — 2026-11-27
 
 ### Fixed

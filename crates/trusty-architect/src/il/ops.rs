@@ -329,7 +329,7 @@ pub fn apply_op(st: &mut Json, a: &Json, ctx: &mut Ctx) -> IlResult<Vec<Ev>> {
             apply_update(st, &u, ctx)
         }
         other => invalid(format!(
-            "unknown op {}",
+            "unknown operation {}", // See #11800
             other.map_or_else(|| "None".to_owned(), py_repr)
         )),
     }
