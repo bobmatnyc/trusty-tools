@@ -9,8 +9,9 @@
 //! What: [`note`] records a [`TimeoutNote`] for the current thread each time
 //! the time limit builds a [`crate::api::SecretsError::Timeout`]; [`last`]
 //! reads the latest one; [`scoped`] runs a request body with an empty note
-//! and hands back the note it left. The note holds a backend id, a duration
-//! and a flag: never a vault, key or value.
+//! and hands back the note it left. The note holds a backend id, a duration,
+//! a flag and the Keychain service of the item that did not answer (#11786):
+//! never a key or value.
 //! Test: `time_limited_timeout_notes_its_wait_and_an_abandoned_item_refusal`,
 //! `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`.
 
@@ -27,6 +28,13 @@ pub(crate) struct TimeoutNote {
     /// `true` when the call was refused at once because an earlier,
     /// abandoned call on the same item is still running.
     pub(crate) abandoned_item: bool,
+    /// #11786: the Keychain service of the item the call read or wrote, so
+    /// the reply can name the item whose access prompt waits. `None` for a
+    /// vault-wide call or another backend.
+    pub(crate) service: Option<String>,
+    /// #11786: `true` when that item may live inside the vault blob
+    /// (`tm secrets migrate`), so the prompt can name the blob instead.
+    pub(crate) in_blob: bool,
 }
 
 thread_local! {
@@ -34,11 +42,19 @@ thread_local! {
 }
 
 /// Record a time-out on this thread; the latest one wins.
-pub(crate) fn note(backend: String, waited: Duration, abandoned_item: bool) {
+pub(crate) fn note(
+    backend: String,
+    waited: Duration,
+    abandoned_item: bool,
+    service: Option<String>,
+    in_blob: bool,
+) {
     LAST.set(Some(TimeoutNote {
         backend,
         waited,
         abandoned_item,
+        service,
+        in_blob,
     }));
 }
 

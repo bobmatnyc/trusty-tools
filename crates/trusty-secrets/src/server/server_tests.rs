@@ -1917,6 +1917,10 @@ mod delete_tests;
 #[path = "doctor_tests.rs"]
 mod doctor_tests;
 
+// #11786: the Keychain authorization-prompt tests share this module's fixture.
+#[path = "keychain_prompt_tests.rs"]
+mod keychain_prompt_tests;
+
 // #7524: the Keychain-to-file write posture tests share this module's fixture.
 #[path = "posture_tests.rs"]
 mod posture_tests;

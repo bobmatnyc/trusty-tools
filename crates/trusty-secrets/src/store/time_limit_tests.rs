@@ -30,6 +30,8 @@ fn names() -> (VaultName, SecretKey) {
 #[derive(Debug, Default)]
 struct Hangs {
     calls: AtomicUsize,
+    /// #11786: answer the `keychain` id instead of `hangs`.
+    keychain: bool,
 }
 
 impl Hangs {
@@ -43,6 +45,9 @@ impl Hangs {
 
 impl SecretBackend for Hangs {
     fn id(&self) -> BackendId {
+        if self.keychain {
+            return BackendId::keychain();
+        }
         BackendId::from_static("hangs")
     }
 
@@ -517,4 +522,37 @@ fn time_limited_timeout_notes_its_wait_and_an_abandoned_item_refusal() {
     assert!(note.abandoned_item, "{note:?}");
     assert_eq!(note.waited, Duration::ZERO);
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "no second thread");
+}
+
+/// Why: #11786 — a time-out reply named no Keychain item, so the operator
+/// could not tell which item's access prompt waited.
+/// What: a Keychain time-out notes the vault as a value item's service and
+/// the control item's own service for a control item; a vault-wide call and
+/// a backend that is not the Keychain note none.
+/// Test: itself.
+#[test]
+fn time_limited_timeout_names_the_keychain_service_of_the_item() {
+    use crate::store::timeout_note::scoped;
+    let (vault, key) = names();
+    let keychain = Arc::new(Hangs {
+        keychain: true,
+        ..Hangs::default()
+    });
+    let limited = TimeLimited::new(keychain as Arc<dyn SecretBackend>, LIMIT);
+    let service = |note: Option<super::super::timeout_note::TimeoutNote>| {
+        note.expect("a timed-out call leaves a note").service
+    };
+    let (_, note) = scoped(|| limited.control_item(ControlItem::DenyMigrated, &vault, None));
+    assert_eq!(
+        service(note).as_deref(),
+        Some("trusty-secrets.agents-deny-migrated")
+    );
+    let (_, note) = scoped(|| limited.get(&vault, &key));
+    assert_eq!(service(note).as_deref(), Some("trusty/acme/web"));
+    let (_, note) = scoped(|| limited.list_names(&vault));
+    assert_eq!(service(note), None);
+
+    let other = TimeLimited::new(Arc::new(Hangs::default()) as Arc<dyn SecretBackend>, LIMIT);
+    let (_, note) = scoped(|| other.control_item(ControlItem::DenyMigrated, &vault, None));
+    assert_eq!(service(note), None);
 }
