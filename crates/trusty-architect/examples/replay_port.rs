@@ -258,8 +258,8 @@ fn main() -> ExitCode {
             &rest,
             &state_archive::Options {
                 prog: "state-archive.py".into(),
-                default_state: PathBuf::from("local/state.md"),
-                default_archive: PathBuf::from("local/state-archive.md"),
+                default_state: Some(PathBuf::from("local/state.md")),
+                default_archive: Some(PathBuf::from("local/state-archive.md")),
             },
         ),
         "aliases" => aliases::run(

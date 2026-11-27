@@ -71,10 +71,10 @@ const OPTS: [Opt; 5] = [
 pub struct Options {
     /// The program name argparse prints.
     pub prog: String,
-    /// `--state`'s default (`<checkout>/local/state.md`).
-    pub default_state: PathBuf,
-    /// `--archive`'s default (`<checkout>/local/state-archive.md`).
-    pub default_archive: PathBuf,
+    /// `--state`'s default (`<checkout>/local/state.md`); `None` with no checkout.
+    pub default_state: Option<PathBuf>,
+    /// `--archive`'s default (`<checkout>/local/state-archive.md`); `None` with no checkout.
+    pub default_archive: Option<PathBuf>,
 }
 
 /// Runs the script's command line on `args` (argv after the program name).
@@ -99,13 +99,18 @@ pub fn run(args: &[String], opts: &Options) -> Outcome {
             return outcome(String::new(), argparse::error(&usage, &opts.prog, &m), 2);
         }
     };
-    let text_of = |i: usize, d: &Path| {
+    let text_of = |i: usize, d: Option<&Path>| {
         a.values[i]
             .clone()
-            .unwrap_or_else(|| d.to_string_lossy().into_owned())
+            .or_else(|| d.map(|d| d.to_string_lossy().into_owned()))
     };
-    let state = text_of(1, &opts.default_state);
-    let archive = text_of(2, &opts.default_archive);
+    // #12073: a default needed with no checkout found is refused, never the cwd's.
+    let (Some(state), Some(archive)) = (
+        text_of(1, opts.default_state.as_deref()),
+        text_of(2, opts.default_archive.as_deref()),
+    ) else {
+        return super::no_checkout(&opts.prog, "; pass --state and --archive");
+    };
     let keep = a.values[3].as_deref().and_then(keep_value).unwrap_or(3);
     match move_sections(&state, &archive, keep, a.flags[4]) {
         Ok(Moved::Dry(report)) => outcome(report, String::new(), 0),

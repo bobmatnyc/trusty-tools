@@ -16,7 +16,7 @@ pub mod brief_ids;
 pub mod state_archive;
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use crate::spec_drift::Outcome;
 
@@ -27,6 +27,51 @@ pub(crate) fn outcome(stdout: String, stderr: String, code: i32) -> Outcome {
         stderr,
         code,
     }
+}
+
+/// The file at the root of an Architect checkout.
+pub const CHECKOUT_MARKER: &str = "ARCHITECT.md";
+
+/// The Architect checkout at or above `start`: the nearest directory holding
+/// [`CHECKOUT_MARKER`].
+///
+/// Why: the scripts take the checkout from their own location
+/// (`dirname(dirname(abspath(__file__)))`); a binary has no such location,
+/// and the working directory alone let a run outside the checkout reuse ids
+/// and write stray files (#12073).
+/// What: walks `start`'s ancestors, `start` first; `None` when none holds
+/// the marker. Callers refuse on `None`, never fall back to `start`.
+/// Test: `shipped_brief_id_finds_the_checkout_from_a_foreign_directory`.
+pub fn find_checkout(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|d| d.join(CHECKOUT_MARKER).is_file())
+        .map(Path::to_path_buf)
+}
+
+/// The checkout above the working directory, or the refusal to print.
+///
+/// Why: one lookup and one message for the three binaries (#12073).
+/// What: `Ok((cwd, checkout))`, else an exit-1 [`Outcome`] naming `prog`
+/// and `hint` (how to run without a checkout, if there is a way).
+/// Test: the `*_finds_the_checkout_from_a_foreign_directory` tests.
+pub fn checkout_from_cwd(prog: &str, hint: &str) -> Result<(PathBuf, PathBuf), Outcome> {
+    let cwd = std::env::current_dir().ok();
+    match cwd.as_deref().and_then(find_checkout) {
+        Some(root) => Ok((cwd.unwrap_or_default(), root)),
+        None => Err(no_checkout(prog, hint)),
+    }
+}
+
+/// The exit-1 refusal for a run that needs a checkout and found none (#12073).
+pub fn no_checkout(prog: &str, hint: &str) -> Outcome {
+    outcome(
+        String::new(),
+        format!(
+            "{prog}: no Architect checkout ({CHECKOUT_MARKER}) at or above the working directory{hint}\n"
+        ),
+        1,
+    )
 }
 
 /// Python's `OSError` text for `e` on `path`: `[Errno N] <message>: '<path>'`.
