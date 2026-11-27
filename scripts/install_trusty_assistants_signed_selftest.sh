@@ -22,7 +22,10 @@
 #     fingerprint-fails a failing or empty-output `shasum` or `stat` makes the
 #                       script exit 1 before cargo runs, never "unchanged"
 #     path-cargo-home   `--from-source` into the cargo home exits 2 (ADR-0043)
-#     sign-fail-soft    a failing tctl leaves `ta` in place and exits 0
+#     sign-fail-soft    a tctl exiting 3 (no certificate) leaves `ta` in
+#                       place and exits 0 (#11683)
+#     sign-fail-hard    a tctl exiting 1 (any other sign failure) leaves `ta`
+#                       in place and exits 1 with an ERROR line (#11683)
 #     old-tctl          a tctl that does not accept `trusty-assistants` is
 #                       never asked to sign; this checkout's trusty-installer
 #                       is built and signs the staging dir (only `ta`)
@@ -136,7 +139,8 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 ls -A "$dir" > "$STUB_LOG/tctl.dir"
-[ "${STUB_TCTL_FAIL:-0}" = "1" ] && exit 1
+# #11683: STUB_TCTL_FAIL=<code> makes the sign step exit <code>.
+if [ "${STUB_TCTL_FAIL:-0}" != "0" ]; then exit "$STUB_TCTL_FAIL"; fi
 for f in "$dir"/*; do printf 'signed\n' >> "$f"; done
 STUB
 chmod +x "$STUBS/cargo" "$STUBS/tctl"
@@ -243,11 +247,21 @@ grep -q 'ADR-0043' "$WORK/path-cargo-home.out" || fail "path-cargo-home: no ADR-
 # --- sign-fail-soft -----------------------------------------------------
 root="$(new_root_with_tagent sign-fail-soft)"
 before="$(fp "$root/bin/tagent")"
-STUB_TCTL_FAIL=1 run sign-fail-soft --from-source --root "$root"
+STUB_TCTL_FAIL=3 run sign-fail-soft --from-source --root "$root"
 [ "$RC" -eq 0 ] || fail "sign-fail-soft: exit $RC, want 0"
 [ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "sign-fail-soft: ta not restored unsigned"
 [ "$(fp "$root/bin/tagent")" = "$before" ] || fail "sign-fail-soft: tagent changed"
-grep -q 'signing ta failed' "$WORK/sign-fail-soft.out" || fail "sign-fail-soft: no warning"
+grep -q 'WARNING: signing ta failed (exit 3: no Developer ID certificate)' "$WORK/sign-fail-soft.out" \
+  || fail "sign-fail-soft: no warning"
+
+# --- sign-fail-hard (#11683) -----------------------------------------------
+root="$(new_root_with_tagent sign-fail-hard)"
+before="$(fp "$root/bin/tagent")"
+STUB_TCTL_FAIL=1 run sign-fail-hard --from-source --root "$root"
+[ "$RC" -eq 1 ] || fail "sign-fail-hard: exit $RC, want 1"
+[ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "sign-fail-hard: ta not restored unsigned"
+[ "$(fp "$root/bin/tagent")" = "$before" ] || fail "sign-fail-hard: tagent changed"
+grep -q 'ERROR: signing ta failed (exit 1)' "$WORK/sign-fail-hard.out" || fail "sign-fail-hard: no ERROR line"
 
 # --- old-tctl -----------------------------------------------------------
 root="$(new_root_with_tagent old-tctl)"

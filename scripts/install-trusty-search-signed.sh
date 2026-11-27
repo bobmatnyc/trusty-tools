@@ -23,6 +23,8 @@
 # guidance paths without running cargo install or `tctl sign`. Run on a machine
 # without a Developer ID cert to validate the no-cert error path and exit code.
 # Run `shellcheck scripts/install-trusty-search-signed.sh` for lint.
+# scripts/install_signed_tctl_fallback_selftest.sh covers signer resolution
+# and the sign-failure exit with stub cargo and tctl.
 #
 # Usage:
 #   # Standard: build from repo source (default)
@@ -104,12 +106,15 @@ detect_repo_root() {
 # skip it rather than let it fail the sign step with a clap usage error.
 # Test: scripts/install_signed_tctl_fallback_selftest.sh.
 resolve_tctl() {
-    local set="$1" candidate help
+    local set="$1" candidate help values
     for candidate in tctl trusty-installer; do
         command -v "$candidate" >/dev/null 2>&1 || continue
-        help="$("$candidate" sign --help 2>&1 || true)"
-        case "$help" in
-            *"$set"*) echo "$candidate"; return 0 ;;
+        # #11683: read SET only from clap's `[possible values: ...]` list for
+        # <TARGET> (`-h` prints it; `--help` prints a long form without it).
+        help="$("$candidate" sign -h 2>&1 || true)"
+        values="$(printf '%s\n' "$help" | sed -n 's/^.*<TARGET>.*\[possible values: \([^]]*\)\].*$/\1/p')"
+        case ", $values, " in
+            *", $set, "*) echo "$candidate"; return 0 ;;
         esac
         warn "$candidate on PATH is stale: its 'sign' does not accept '$set'; reinstall trusty-installer to refresh it"
     done

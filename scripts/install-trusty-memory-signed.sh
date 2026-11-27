@@ -61,9 +61,13 @@
 # not abort the run.
 #   1. `cargo install --path crates/trusty-memory --locked` always runs and,
 #      if IT fails, that is a real build failure — the script exits non-zero.
-#   2. The signing step (`tctl sign trusty-memory`) is wrapped so a non-zero
-#      exit (no cert, or any other codesign failure) becomes a clear stderr
-#      warning and the script continues, exiting 0 overall.
+#   2. #11683: the signing step (`tctl sign trusty-memory`) soft-passes ONLY
+#      its no-certificate exit (3): a stderr warning, and the script exits 0.
+#      Any other non-zero sign exit (a codesign error, a locked keychain, a
+#      signature that reads back ad-hoc or with the wrong Team ID, a failed
+#      record refresh) prints an ERROR line and exits 1. The soft-pass is
+#      pending an owner decision; flipping `NO_CERT_SOFT_PASS` to 0 below
+#      makes it fail too.
 #   3. #11683: a signer that cannot be built (no usable tctl on PATH and the
 #      checkout's `tctl` fails to build) exits 1 — that is a broken install.
 #
@@ -121,6 +125,12 @@ TRUSTY_INSTALL_PATH="${TRUSTY_INSTALL_PATH:-}"
 # Dry-run mode: print commands without executing. Set via env or --dry-run flag.
 TRUSTY_CODESIGN_DRY_RUN="${TRUSTY_CODESIGN_DRY_RUN:-0}"
 
+# #11683: `tctl sign` exits 3 (`EXIT_NO_CERTIFICATE`) when no Developer ID
+# certificate is available; only that exit soft-passes. Set to 0 to make it a
+# hard failure like every other sign exit (pending an owner decision).
+readonly TCTL_SIGN_NO_CERT_RC=3
+readonly NO_CERT_SOFT_PASS=1
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -151,12 +161,15 @@ detect_repo_root() {
 # skip it rather than let it fail the sign step with a clap usage error.
 # Test: scripts/install_signed_tctl_fallback_selftest.sh.
 resolve_tctl() {
-    local set="$1" candidate help
+    local set="$1" candidate help values
     for candidate in tctl trusty-installer; do
         command -v "$candidate" >/dev/null 2>&1 || continue
-        help="$("$candidate" sign --help 2>&1 || true)"
-        case "$help" in
-            *"$set"*) echo "$candidate"; return 0 ;;
+        # #11683: read SET only from clap's `[possible values: ...]` list for
+        # <TARGET> (`-h` prints it; `--help` prints a long form without it).
+        help="$("$candidate" sign -h 2>&1 || true)"
+        values="$(printf '%s\n' "$help" | sed -n 's/^.*<TARGET>.*\[possible values: \([^]]*\)\].*$/\1/p')"
+        case ", $values, " in
+            *", $set, "*) echo "$candidate"; return 0 ;;
         esac
         warn "$candidate on PATH is stale: its 'sign' does not accept '$set'; reinstall trusty-installer to refresh it"
     done
@@ -203,7 +216,7 @@ run_cargo_install() {
 
 # ---------------------------------------------------------------------------
 # Step 2: sign the set (delegates to `tctl sign trusty-memory` — #2558)
-# fail-soft: a signing failure is a WARNING, not a script-aborting error.
+# #11683: only a missing certificate is a WARNING; any other failure exits 1.
 # ---------------------------------------------------------------------------
 
 run_sign() {
@@ -234,12 +247,17 @@ run_sign() {
         (cd "$repo_root" && cargo run --quiet -p trusty-installer --bin tctl -- sign trusty-memory --dir "$CARGO_BIN_DIR") || rc=$?
     fi
 
-    if [[ "$rc" -ne 0 ]]; then
-        warn "Signing the trusty-memory set failed (exit $rc) — the binaries remain ad-hoc signed."
+    # #11683: the one soft-pass — no Developer ID certificate.
+    if [[ "$rc" -eq "$TCTL_SIGN_NO_CERT_RC" && "$NO_CERT_SOFT_PASS" == "1" ]]; then
+        warn "Signing the trusty-memory set failed (exit $rc: no Developer ID certificate) — the binaries remain ad-hoc signed."
         warn "macOS will re-prompt for any TCC-gated permission after the next rebuild — this"
         warn "is EXPECTED on CI or any machine without a Developer ID Application cert."
         warn "See docs/reference/release-workflow.md for one-time cert setup."
         return 0
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        error "Signing the trusty-memory set failed (exit $rc); see the tctl output above."
+        exit 1
     fi
     info "trusty-memory set signed successfully."
 }

@@ -11,18 +11,22 @@
 #   binaries. Either way nothing is signed, and the memory script only warned.
 # What: runs each script with a stub `cargo` (install writes the binaries into
 #   a temp CARGO_HOME; `run` without `--bin tctl` fails the way real cargo
-#   does) and a stub `tctl` (its `sign --help` lists the set unless
-#   STUB_TCTL_OLD=1). PATH holds only the stubs and /usr/bin:/bin, so no real
+#   does) and a stub `tctl` (its `sign -h` lists the set under <TARGET>'s
+#   `[possible values: ...]` unless STUB_TCTL_OLD=1, which names the set only
+#   in prose). PATH holds only the stubs and /usr/bin:/bin, so no real
 #   cargo, tctl or codesign runs. Cases, per script:
 #     current-tctl        a tctl that accepts the set signs; cargo never runs
 #                         the fallback
-#     stale-tctl          a tctl that does not accept the set is named stale
+#     stale-tctl          a tctl that does not accept the set (but names it
+#                         outside the possible-values list) is named stale
 #                         and never asked to sign; the fallback signs with
 #                         `--bin tctl`
 #     no-tctl             no tctl on PATH; the fallback signs with `--bin tctl`
 #   and per script:
 #     search sign-fails   a failing sign exits 1 with an ERROR line
-#     memory sign-soft    a failing sign warns and exits 0 (no certificate)
+#     memory sign-soft    a sign exiting 3 (no certificate) warns, exits 0
+#     memory sign-fails   a sign exiting 1 (any other failure) prints an
+#                         ERROR line and exits 1 (#11683)
 #     memory unbuildable  a fallback tctl that will not build exits 1
 #
 # Usage: ./scripts/install_signed_tctl_fallback_selftest.sh
@@ -81,13 +85,16 @@ cp "$NO_TCTL/cargo" "$WITH_TCTL/cargo"
 cat > "$WITH_TCTL/tctl" <<'STUB'
 #!/usr/bin/env bash
 set -eu
-if [ "${2:-}" = "--help" ]; then
-  # STUB_TCTL_OLD: a tctl that predates every set this test signs.
+if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
+  # STUB_TCTL_OLD: a tctl that predates every set this test signs; its prose
+  # still names them, so only the possible-values list may decide (#11683).
   if [ "${STUB_TCTL_OLD:-0}" = "1" ]; then
-    echo "[possible values: trusty-mpm, trusty-agents]"
+    echo "Developer-ID codesign; scripts/install-trusty-search-signed.sh and trusty-memory call this"
+    echo "  <TARGET>  Which signable set to sign [possible values: trusty-mpm, trusty-agents]"
   else
-    echo "[possible values: trusty-search, trusty-mpm, trusty-memory, trusty-assistants]"
+    echo "  <TARGET>  Which signable set to sign [possible values: trusty-search, trusty-mpm, trusty-memory, trusty-assistants]"
   fi
+  echo "      --scope <SCOPE>  Scope to act on [possible values: project, system, all]"
   exit 0
 fi
 printf '%s\n' "$*" >> "$STUB_LOG/tctl.argv"
@@ -141,10 +148,17 @@ STUB_SIGN_RC=1 run install-trusty-search-signed.sh search-signfail "$WITH_TCTL"
 [ "$RC" -eq 1 ] || fail "search sign-fails: exit $RC, want 1"
 grep -q 'ERROR: Signing trusty-search failed' "$WORK/search-signfail.out" || fail "search sign-fails: no ERROR line"
 
-# --- memory sign-soft -----------------------------------------------------
-STUB_SIGN_RC=1 run install-trusty-memory-signed.sh memory-signsoft "$WITH_TCTL"
+# --- memory sign-soft (#11683: exit 3 = no certificate) --------------------
+STUB_SIGN_RC=3 run install-trusty-memory-signed.sh memory-signsoft "$WITH_TCTL"
 [ "$RC" -eq 0 ] || fail "memory sign-soft: exit $RC, want 0"
-grep -q 'Signing the trusty-memory set failed' "$WORK/memory-signsoft.out" || fail "memory sign-soft: no warning"
+grep -q 'WARNING: Signing the trusty-memory set failed (exit 3: no Developer ID certificate)' \
+  "$WORK/memory-signsoft.out" || fail "memory sign-soft: no warning"
+
+# --- memory sign-fails (#11683: any other sign exit) -----------------------
+STUB_SIGN_RC=1 run install-trusty-memory-signed.sh memory-signfail "$WITH_TCTL"
+[ "$RC" -eq 1 ] || fail "memory sign-fails: exit $RC, want 1"
+grep -q 'ERROR: Signing the trusty-memory set failed (exit 1)' "$WORK/memory-signfail.out" \
+  || fail "memory sign-fails: no ERROR line"
 
 # --- memory unbuildable ---------------------------------------------------
 STUB_CARGO_BUILD_FAIL=1 run install-trusty-memory-signed.sh memory-unbuildable "$NO_TCTL"
