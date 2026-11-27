@@ -4,8 +4,9 @@
 //! credential file, so the seeded `dashboard-serve.py`, which names the usage
 //! tally `token-hourly.jsonl`, refused as a secret-file read.
 //! What: [`is_token_tally`] answers for a stem starting `token`, carrying a
-//! tally word, with a log extension, whose name without the `token` prefix no
-//! other secret family claims (`token-hourly-credentials.jsonl` still counts).
+//! tally word, with a log extension (or `.json` for `watch`/`thresholds`,
+//! #11800), whose name without the `token` prefix no other secret family
+//! claims (`token-hourly-credentials.jsonl` still counts).
 //! Test: `a_token_tally_exempts_only_the_token_family_10570`.
 
 use super::is_secret_read_target;
@@ -14,9 +15,22 @@ use super::is_secret_read_target;
 const RECORD_EXTENSIONS: &[&str] = &["jsonl", "ndjson", "log"];
 
 /// Stem words that make a `token*` log a tally of token counts.
+// #11800: `watch` and `thresholds` name token_watch.py's state and limits.
 const TALLY_WORDS: &[&str] = &[
-    "hourly", "daily", "weekly", "usage", "count", "counts", "tally", "stats",
+    "hourly",
+    "daily",
+    "weekly",
+    "usage",
+    "count",
+    "counts",
+    "tally",
+    "stats",
+    "watch",
+    "thresholds",
 ];
+
+/// Tally words whose file may also be a `.json` document (#11800).
+const JSON_TALLY_WORDS: &[&str] = &["watch", "thresholds"];
 
 /// Whether basename `base` is a token-count log rather than a token file.
 pub(super) fn is_token_tally(base: &str) -> bool {
@@ -35,8 +49,11 @@ pub(super) fn is_token_tally(base: &str) -> bool {
         return false;
     }
     let last = ext.rsplit('.').next().unwrap_or_default();
-    RECORD_EXTENSIONS.contains(&last)
-        && rest.split(['-', '_']).any(|w| TALLY_WORDS.contains(&w))
+    let has = |words: &[&str]| rest.split(['-', '_']).any(|w| words.contains(&w));
+    // #11800: `token-watch-state.json` and `token-thresholds.json` are tallies.
+    let record = RECORD_EXTENSIONS.contains(&last) || (last == "json" && has(JSON_TALLY_WORDS));
+    record
+        && has(TALLY_WORDS)
         && !is_secret_read_target(&format!("{rest}.{ext}"))
         // #10641: `token-usage.key.log` keeps its inner `.key` family.
         && !ext
@@ -73,6 +90,13 @@ mod tests {
             ("cat token-hourly.jsonl", false),
             ("cat local/usage/token-usage.jsonl", false),
             ("cat token-hourly.jsonl; cat ~/.netrc", true),
+            // #11800: token_watch.py's state and threshold files are tallies.
+            ("cat local/usage/token-thresholds.json", false),
+            ("cat inbox/token-watch-state.json", false),
+            ("cat token-watch.pem.json", true),
+            ("cat token-credentials.json", true),
+            ("cat token-watch-credentials.json", true),
+            ("cat token-hourly.json", true),
         ]
         .iter()
         .filter(|(c, deny)| evaluate_secret_file_read_command(c).is_some() != *deny)
