@@ -247,9 +247,9 @@ fn detached_command(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // #11904: never the spawner's cwd, which can be a checkout. A daemon that
-    // walks up from cwd for a project-tier `.env.local` (credentials::dotenv)
-    // no longer finds one; `$HOME/.env.local`, the secure store and the process
-    // env still apply. Callers resolve relative path arguments before this.
+    // walks up from cwd for a project-level dotenv file (credentials::dotenv)
+    // no longer finds one; the dotenv file in `$HOME`, the secure store and the
+    // process env still apply. Callers resolve relative path arguments before this.
     cmd.current_dir(neutral_cwd());
     // #8783: out of the spawner's process group, so a group kill aimed at the
     // spawner (trusty-audit's budget kill, a terminal Ctrl-C) spares the daemon.
