@@ -30,7 +30,12 @@ use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
 };
 
-use super::{parse_id, record_to_summary};
+use super::parse_id;
+
+// #12019: the post-mark steps and their rollback, split for the SLOC cap.
+#[path = "reactivate_steps.rs"]
+mod steps;
+use steps::{Detached, detach};
 
 /// Query parameters for the reactivate route.
 ///
@@ -52,7 +57,7 @@ use super::{parse_id, record_to_summary};
 /// [`should_reconcile_stale_active`].
 /// Test: `should_reconcile_stale_active_true_when_only_caller_pane_busy`,
 /// `should_reconcile_stale_active_true_when_confirmed_dead_and_pane_missing`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct ReactivateQuery {
     /// The stable tmux `pane_id` of the pane the reactivate request originates
     /// from (the pane about to `exec` `claude` in place).
@@ -120,7 +125,7 @@ pub async fn reactivate_managed_session(
 ///
 /// #9101: [`caller_pane_refusal`] answers 409 first, so a caller in a pane
 /// that only looks like the record's never gets the record reactivated.
-/// #12012: a reactivated record then runs [`finish_detached`]; a failure is a
+/// #12012: a reactivated record then runs its steps in [`detach`]'s task; a failure is a
 /// 500 and the record is rolled back off `Active`.
 /// Test: `managed_reactivate_parity` in `daemon::rpc::managed_tests`;
 /// `a_failed_unpark_rolls_the_reactivate_back_to_stopped`.
@@ -138,26 +143,52 @@ pub(crate) async fn reactivate_core(
 pub const REACTIVATE_STEPS_BUDGET: Duration = Duration::from_secs(45);
 
 /// [`reactivate_core`] with an explicit steps budget (tests shorten it).
+///
+/// #12019: [`mark_then_detach`] runs in its own task, so a route dropped on a
+/// socket hang-up cannot stop between the mark and the spawn of the steps task
+/// that rolls it back. Dropping this future at any `.await` therefore leaves
+/// the record off `Active` (the `mark_cancel_on_hangup` contract).
 async fn reactivate_core_within(
     state: &Arc<DaemonState>,
     id_str: &str,
     params: &ReactivateQuery,
     budget: Duration,
 ) -> RouteOutcome {
-    let id = match parse_id(id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
-    };
+    let (state, id, params) = (Arc::clone(state), id_str.to_string(), params.clone());
+    match tokio::spawn(mark_then_detach(state, id, params, budget)).await {
+        Ok(Ok(detached)) => detached.answer().await,
+        Ok(Err(refused)) => refused,
+        Err(e) => RouteOutcome::text(500, format!("the in-place reactivate task failed: {e}")),
+    }
+}
+
+/// Mark the record reactivated and spawn its steps task, or answer why not.
+///
+/// What: the refusal checks and `mark_reactivated` (or the stale-`Active`
+/// reconcile); `Err` carries the 404/409/500 answer. On success the returned
+/// [`Detached`] owns the steps task's answer channel; dropping it unanswered
+/// rolls a successful reactivate back.
+/// Test: `a_socket_hangup_during_a_slow_unpark_rolls_the_reactivate_back_12019`.
+async fn mark_then_detach(
+    state: Arc<DaemonState>,
+    id_str: String,
+    params: ReactivateQuery,
+    budget: Duration,
+) -> Result<Detached, RouteOutcome> {
+    let id = parse_id(&id_str).map_err(|(code, msg)| RouteOutcome::text(code.as_u16(), msg))?;
     let mgr = state.session_manager().await;
     if let Some(why) = caller_pane_refusal(&mgr, &id, params.caller_pane_id.as_deref()).await {
-        return RouteOutcome::text(409, why);
+        return Err(RouteOutcome::text(409, why));
     }
     // #12012: the snapshot a failed project/index step rolls the record back to.
     let snapshot = mgr.get(&id).await.ok();
     let (record, prior) = match mgr.mark_reactivated(&id).await {
         Ok(record) => (record, snapshot),
         Err(ManagedError::SessionNotFound(_)) => {
-            return RouteOutcome::text(404, format!("session {id_str} not found"));
+            return Err(RouteOutcome::text(
+                404,
+                format!("session {id_str} not found"),
+            ));
         }
         Err(ManagedError::InvalidState(_, reason)) => match reconcile_stale_active_then_reactivate(
             &mgr,
@@ -169,118 +200,13 @@ async fn reactivate_core_within(
         {
             // #12012: the intermediate Stopped record keeps its stop_cause.
             Some((stopped, record)) => (record, Some(stopped)),
-            None => return RouteOutcome::text(409, reason),
+            None => return Err(RouteOutcome::text(409, reason)),
         },
-        Err(e) => return RouteOutcome::text(500, e.to_string()),
+        Err(e) => return Err(RouteOutcome::text(500, e.to_string())),
     };
     // No await between the mark above and this spawn, so a dropped route
     // cannot leave the record Active without the rollback below.
-    finish_detached(Arc::clone(state), mgr, record, prior, budget).await
-}
-
-/// Run the post-mark steps in a task the route cannot cancel (#12012).
-///
-/// Why: the steps wait on trusty-search, and the client or the transport can
-/// drop the route meanwhile. A dropped future would stop between the mark and
-/// the rollback, leaving an `Active` record no client execs into.
-/// What: a `tokio::spawn`ed task runs [`reactivate_project_and_index`] under
-/// `budget` and [`roll_back`]s on its failure or timeout. Its answer goes
-/// back on a oneshot; when the route is gone (the send fails) a success is
-/// rolled back too, since no client will exec. A task that ends without an
-/// answer is a 500 and is rolled back from here.
-/// Test: `a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active`,
-/// `an_unpark_slower_than_the_daemon_budget_fails_and_rolls_back`.
-async fn finish_detached(
-    state: Arc<DaemonState>,
-    mgr: Arc<SessionManager>,
-    record: SessionRecord,
-    prior: Option<SessionRecord>,
-    budget: Duration,
-) -> RouteOutcome {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let task_mgr = Arc::clone(&mgr);
-    let task_prior = prior.clone();
-    tokio::spawn(async move {
-        let (mgr, prior) = (task_mgr, task_prior);
-        let work = reactivate_project_and_index(&state, &mgr, &record);
-        let steps = match tokio::time::timeout(budget, work).await {
-            Ok(steps) => steps,
-            Err(_) => Err(format!(
-                "session {} ({}): its project and search index did not come back within \
-                 {}s (#12012)",
-                record.id,
-                record.tmux_name,
-                budget.as_secs_f32()
-            )),
-        };
-        let outcome = match steps {
-            Ok(()) => RouteOutcome::ok(&record_to_summary(&record)),
-            Err(why) => RouteOutcome::text(500, roll_back(&mgr, prior.as_ref(), why).await),
-        };
-        if let Err(outcome) = tx.send(outcome)
-            && outcome.is_success()
-        {
-            let why = "the reactivate caller went away before the answer (#12012)".to_string();
-            tracing::warn!(id = %record.id, "{}", roll_back(&mgr, prior.as_ref(), why).await);
-        }
-    });
-    match rx.await {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            let why = "the in-place reactivate task ended without an answer (#12012)".to_string();
-            RouteOutcome::text(500, roll_back(&mgr, prior.as_ref(), why).await)
-        }
-    }
-}
-
-/// Bring back the project `record` binds to, then its search index (#12012).
-///
-/// Why: spawn and resume reactivate a decommissioned project and unpark its
-/// index (#10988, #10989); the in-place relaunch is a third way a session of
-/// that project runs again, so it owes the same two steps.
-/// What: [`crate::project::ProjectRegistry::reactivate_for_session`] (the
-/// spawn rule: only projects the record binds to), then
-/// [`SessionManager::restore_parked_index`]. The first failure is `Err`.
-/// Test: `an_inplace_reactivate_reactivates_the_bound_project_and_unparks_its_index`,
-/// `an_inplace_reactivate_leaves_an_unbound_decommissioned_project_alone`.
-async fn reactivate_project_and_index(
-    state: &Arc<DaemonState>,
-    mgr: &SessionManager,
-    record: &SessionRecord,
-) -> Result<(), String> {
-    let registry = state.project_registry().await;
-    registry.reactivate_for_session(record).await.map_err(|e| {
-        format!(
-            "session {} ({}): its project could not be reactivated and still reads \
-             decommissioned (#12012): {e}",
-            record.id, record.tmux_name
-        )
-    })?;
-    mgr.restore_parked_index(&registry, record).await?;
-    Ok(())
-}
-
-/// Roll a failed in-place reactivate back off `Active`; answers the route's
-/// error text (#12012).
-///
-/// What: [`SessionManager::revert_reactivation`] to `prior`; a missing
-/// snapshot or a failed rollback is named in the text and logged.
-/// Test: `a_failed_unpark_rolls_the_reactivate_back_to_stopped`.
-async fn roll_back(mgr: &SessionManager, prior: Option<&SessionRecord>, why: String) -> String {
-    let Some(prior) = prior else {
-        tracing::error!("in-place reactivate failed with no prior record to roll back to: {why}");
-        return format!("{why}; the session record could not be rolled back (no prior record)");
-    };
-    match mgr.revert_reactivation(prior).await {
-        Ok(record) => format!(
-            "{why}; the session record was rolled back to {}",
-            record.state
-        ),
-        Err(e) => {
-            tracing::error!(id = %prior.id, "in-place reactivate rollback failed: {e}");
-            format!("{why}; rolling the session record back also failed: {e}")
-        }
-    }
+    Ok(detach(state, mgr, record, prior, budget))
 }
 
 /// Why a caller claiming `id`'s own pane may not reactivate it, or `None`

@@ -494,9 +494,12 @@ async fn revert_reactivation_restores_the_conversation_and_stop_cause() {
     mgr.stop(&id).await.expect("stop");
     let prior = mgr.get(&id).await.expect("prior");
     assert!(prior.stop_cause.is_some(), "premise: stop records a cause");
-    mgr.mark_reactivated(&id).await.expect("reactivate");
+    let marked = mgr.mark_reactivated(&id).await.expect("reactivate");
 
-    let after = mgr.revert_reactivation(&prior).await.expect("revert");
+    let after = mgr
+        .revert_reactivation(&prior, &marked)
+        .await
+        .expect("revert");
 
     assert_eq!(after.state, ManagedSessionState::Stopped);
     assert_eq!(after.claude_session_id.as_deref(), Some("uuid-before"));
@@ -526,9 +529,12 @@ async fn revert_reactivation_from_an_active_prior_keeps_the_conversation() {
     let prior = mgr.get(&id).await.expect("prior");
     assert_eq!(prior.state, ManagedSessionState::Active, "premise");
     mgr.stop(&id).await.expect("stop");
-    mgr.mark_reactivated(&id).await.expect("reactivate");
+    let marked = mgr.mark_reactivated(&id).await.expect("reactivate");
 
-    let after = mgr.revert_reactivation(&prior).await.expect("revert");
+    let after = mgr
+        .revert_reactivation(&prior, &marked)
+        .await
+        .expect("revert");
 
     assert_eq!(after.state, ManagedSessionState::Stopped);
     assert_eq!(after.claude_session_id.as_deref(), Some("uuid-before"));
@@ -545,7 +551,7 @@ async fn revert_reactivation_leaves_a_record_that_left_active_alone() {
     let id = session_with_conversation(&mgr, workspace.path()).await;
     mgr.stop(&id).await.expect("stop");
     let prior = mgr.get(&id).await.expect("prior");
-    mgr.mark_reactivated(&id).await.expect("reactivate");
+    let marked = mgr.mark_reactivated(&id).await.expect("reactivate");
     mgr.set_workspace(
         &id,
         workspace.path().to_owned(),
@@ -554,7 +560,36 @@ async fn revert_reactivation_leaves_a_record_that_left_active_alone() {
     .await
     .expect("decommission");
 
-    let after = mgr.revert_reactivation(&prior).await.expect("revert");
+    let after = mgr
+        .revert_reactivation(&prior, &marked)
+        .await
+        .expect("revert");
 
     assert_eq!(after.state, ManagedSessionState::Decommissioned);
+}
+
+/// #12019 (critic HIGH 2): a rollback from an earlier attempt never undoes a
+/// later reactivate of the same record.
+/// Test: this function IS the test. Fails if the revert checks only that the
+/// record reads `Active`.
+#[tokio::test]
+async fn revert_reactivation_never_undoes_a_later_reactivate_12019() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = session_with_conversation(&mgr, workspace.path()).await;
+    mgr.stop(&id).await.expect("stop");
+    let prior = mgr.get(&id).await.expect("prior");
+    let first = mgr.mark_reactivated(&id).await.expect("first reactivate");
+    mgr.stop(&id).await.expect("stop again");
+    mgr.mark_reactivated(&id).await.expect("second reactivate");
+
+    let after = mgr
+        .revert_reactivation(&prior, &first)
+        .await
+        .expect("revert");
+
+    assert_eq!(after.state, ManagedSessionState::Active);
+    let stored = mgr.get(&id).await.expect("stored");
+    assert_eq!(stored.state, ManagedSessionState::Active, "persisted");
 }

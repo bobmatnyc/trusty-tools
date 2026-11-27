@@ -198,6 +198,8 @@ pub struct RpcRouter {
     liveness: BTreeSet<String>,
     /// #11256: names whose handler is cancelled when the client hangs up.
     read_only: BTreeSet<String>,
+    /// #12019: cancel-safe names with side effects, also cancelled on hang-up.
+    cancel_on_hangup: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for RpcRouter {
@@ -209,6 +211,10 @@ impl std::fmt::Debug for RpcRouter {
             .field("streams", &self.stream_names().collect::<Vec<_>>())
             .field("liveness", &self.liveness_names().collect::<Vec<_>>())
             .field("read_only", &self.read_only.iter().collect::<Vec<_>>())
+            .field(
+                "cancel_on_hangup",
+                &self.cancel_on_hangup.iter().collect::<Vec<_>>(),
+            )
             .field("fallback", &self.fallback.is_some())
             .finish()
     }
@@ -342,18 +348,53 @@ impl RpcRouter {
         self
     }
 
-    /// The method `frame` names when it is marked with [`mark_read_only`]
-    /// (#11256); `None` for an unmarked or unparseable frame.
+    /// Mark `name` as CANCEL-ON-HANGUP: its handler is cancelled when the
+    /// client hangs up before the answer is written, although it has side
+    /// effects (#12019).
+    ///
+    /// Why: a write that waits a long time (an in-place reactivate waiting on
+    /// an index reload) keeps running after an operator abort and answers into
+    /// a dead socket. Its own clean-up only runs when its future is dropped,
+    /// which an unmarked method's never is. [`mark_read_only`] cannot carry it,
+    /// because that marker promises no side effect at all.
+    /// What: records the NAME, like [`mark_read_only`], and
+    /// [`super::handle_connection`] treats both markers the same way: it races
+    /// the handler against a peer hang-up and drops the handler future when
+    /// the peer goes.
+    ///
+    /// 🔴 Cancel-safety contract. A marked method must meet all three:
+    /// - No state change may stay applied when the handler future is dropped
+    ///   at any `.await`, unless a task that outlives the future completes or
+    ///   reverses it.
+    /// - That task must never undo the state of a later call; it reverses only
+    ///   what its own call applied.
+    /// - The caller gets no answer, so it must treat the outcome as unknown.
     ///
     /// [`mark_read_only`]: RpcRouter::mark_read_only
-    pub(super) fn read_only_method(&self, frame: &[u8]) -> Option<String> {
-        if self.read_only.is_empty() {
+    ///
+    /// Test: `a_cancel_on_hangup_handler_is_cancelled_and_an_unmarked_one_is_not_12019`,
+    /// `cancel_on_hangup_method_names_either_marker_12019`.
+    pub fn mark_cancel_on_hangup(mut self, name: impl Into<String>) -> Self {
+        self.cancel_on_hangup.insert(name.into());
+        self
+    }
+
+    /// The method `frame` names when it is marked with [`mark_read_only`]
+    /// (#11256) or [`mark_cancel_on_hangup`] (#12019); `None` for an unmarked
+    /// or unparseable frame.
+    ///
+    /// [`mark_read_only`]: RpcRouter::mark_read_only
+    /// [`mark_cancel_on_hangup`]: RpcRouter::mark_cancel_on_hangup
+    pub(super) fn cancel_on_hangup_method(&self, frame: &[u8]) -> Option<String> {
+        if self.read_only.is_empty() && self.cancel_on_hangup.is_empty() {
             return None;
         }
         serde_json::from_slice::<MethodName>(frame)
             .ok()
             .map(|named| named.method)
-            .filter(|method| self.read_only.contains(method))
+            .filter(|method| {
+                self.read_only.contains(method) || self.cancel_on_hangup.contains(method)
+            })
     }
 
     /// Register a streaming `handler` under `name`, replacing any previous

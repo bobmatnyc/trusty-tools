@@ -242,9 +242,10 @@ pub enum RpcServerError {
 
     // #11256: appended last so no existing variant's discriminant shifts.
     /// The client hung up while a method marked with
-    /// [`RpcRouter::mark_read_only`] was running, so the handler was cancelled
-    /// and nothing was answered (#11256).
-    #[error("client hung up; cancelled read-only method {method}")]
+    /// [`RpcRouter::mark_read_only`] (#11256) or
+    /// [`RpcRouter::mark_cancel_on_hangup`] (#12019) was running, so the
+    /// handler was cancelled and nothing was answered.
+    #[error("client hung up; cancelled method {method}")]
     ClientGone {
         /// The cancelled method.
         method: String,
@@ -466,9 +467,10 @@ pub async fn handle_connection(
     // #8531: the connection's peer, so a handler can bind a privilege to the
     // kernel's word rather than to a caller-written param.
     let dispatch = REQUEST_PEER.scope(peer, router.dispatch_streaming(&frame));
-    let outcome = match router.read_only_method(&frame) {
+    let outcome = match router.cancel_on_hangup_method(&frame) {
         // #11256: a read-only handler is dropped when its client hangs up; a
         // write (unmarked) runs to completion. Both cancel arms are errors.
+        // #12019: a cancel-on-hangup handler is dropped the same way.
         Some(method) => tokio::select! {
             biased;
             outcome = dispatch => outcome,

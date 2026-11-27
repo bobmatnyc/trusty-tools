@@ -278,7 +278,12 @@ const SLOW_UNPARK: Duration = Duration::from_secs(3);
 /// A trusty-search whose map lists `widget-idx` as decommission-parked and
 /// whose unpark answers only after [`SLOW_UNPARK`] (an index reload).
 async fn slow_unpark_search() -> crate::uds_mock::MockUdsDaemon {
-    crate::uds_mock::spawn(|method, _params| {
+    unpark_search_after(SLOW_UNPARK, true).await
+}
+
+/// [`slow_unpark_search`] with its delay, and whether the unpark confirms.
+async fn unpark_search_after(delay: Duration, confirms: bool) -> crate::uds_mock::MockUdsDaemon {
+    crate::uds_mock::spawn(move |method, _params| {
         let method = method.to_string();
         Box::pin(async move {
             match method.as_str() {
@@ -286,8 +291,8 @@ async fn slow_unpark_search() -> crate::uds_mock::MockUdsDaemon {
                     "parked": [row("widget-idx", "acme/widget", "decommissioned")]
                 })),
                 METHOD_UNPARK => {
-                    tokio::time::sleep(SLOW_UNPARK).await;
-                    Ok(serde_json::json!({ "unparked": true }))
+                    tokio::time::sleep(delay).await;
+                    Ok(serde_json::json!({ "unparked": confirms }))
                 }
                 _ => Ok(serde_json::json!({})),
             }
@@ -375,5 +380,189 @@ async fn an_unpark_slower_than_the_daemon_budget_fails_and_rolls_back() {
     assert_eq!(
         session_state(&state, &id).await,
         ManagedSessionState::Stopped
+    );
+}
+
+/// #12019 AC1+AC2: a `tm` client that hangs up on the daemon SOCKET during a
+/// slow unpark leaves the record rolled back off `Active` by the route itself,
+/// with its prior stop cause kept (no runtime death recorded).
+/// Test: this function IS the test. Drives the real `managed::register` router
+/// through `handle_connection`; fails if `mpm.managed.reactivate` is not marked
+/// `mark_cancel_on_hangup`, where the route runs on and answers 200 into the
+/// dead socket.
+#[tokio::test]
+async fn a_socket_hangup_during_a_slow_unpark_rolls_the_reactivate_back_12019() {
+    use tokio::io::AsyncWriteExt as _;
+    use trusty_common::uds::server::{
+        RpcRouter, RpcServeOptions, RpcServerError, handle_connection,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session(dir.path()).await;
+    let parked: Parked = Arc::default();
+    let _decommission_rig = decommission(&state, &id, &parked).await;
+    let search = slow_unpark_search().await;
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(search.socket().to_path_buf());
+    let before = state
+        .session_manager()
+        .await
+        .get(&id)
+        .await
+        .expect("record");
+    assert_eq!(before.state, ManagedSessionState::Stopped, "premise");
+
+    let router = Arc::new(crate::daemon::rpc::managed::register(
+        RpcRouter::new(),
+        &state,
+    ));
+    let (server, mut client) = tokio::net::UnixStream::pair().expect("socket pair");
+    let served = tokio::spawn(handle_connection(
+        server,
+        router,
+        RpcServeOptions::default(),
+    ));
+    let mut frame = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "mpm.managed.reactivate",
+        "params": { "id": id.to_string() }
+    }))
+    .expect("serialize frame");
+    frame.push(b'\n');
+    client.write_all(&frame).await.expect("write frame");
+    client.shutdown().await.expect("half-close");
+
+    // Hang up once the record is marked Active, while the unpark still waits.
+    let deadline = tokio::time::Instant::now() + SLOW_UNPARK;
+    while session_state(&state, &id).await != ManagedSessionState::Active {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never marked Active"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(client);
+
+    let after = state_after_settling(&state, &id, SLOW_UNPARK * 4).await;
+    assert_eq!(
+        after,
+        ManagedSessionState::Stopped,
+        "a socket hang-up left the session record Active"
+    );
+    let record = state
+        .session_manager()
+        .await
+        .get(&id)
+        .await
+        .expect("record");
+    assert_eq!(record.stop_cause, before.stop_cause, "a death was recorded");
+    let served = tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .expect("handle_connection returned")
+        .expect("connection task did not panic");
+    assert!(
+        matches!(&served, Err(RpcServerError::ClientGone { method })
+            if method == "mpm.managed.reactivate"),
+        "expected ClientGone, got {served:?}"
+    );
+}
+
+/// The rig every #12019 route test starts from: a Stopped session bound to a
+/// decommissioned project, with `search` as its trusty-search.
+async fn hangup_rig(
+    dir: &std::path::Path,
+    search: &crate::uds_mock::MockUdsDaemon,
+) -> (Arc<DaemonState>, ManagedSessionId, Rig) {
+    let (state, id) = bound_session(dir).await;
+    let parked: Parked = Arc::default();
+    let rig = decommission(&state, &id, &parked).await;
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(search.socket().to_path_buf());
+    (state, id, rig)
+}
+
+/// #12019 (critic HIGH 1): a hang-up early in a long unpark rolls the record
+/// back at once, long before the unpark ends, so the runtime reaper never
+/// finds an `Active` record with an idle pane and records no death.
+/// Test: this function IS the test. Fails if the rollback waits for the
+/// steps to finish or for the daemon budget.
+#[tokio::test]
+async fn an_early_socket_hangup_rolls_back_before_the_unpark_ends_12019() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let search = unpark_search_after(Duration::from_secs(30), true).await;
+    let (state, id, _rig) = hangup_rig(dir.path(), &search).await;
+    let before = state
+        .session_manager()
+        .await
+        .get(&id)
+        .await
+        .expect("record");
+
+    let route = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { reactivate(&state, &id).await }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while session_state(&state, &id).await != ManagedSessionState::Active {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never marked Active"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    route.abort(); // the route future is dropped, as on a socket hang-up
+
+    assert_eq!(
+        state_after_settling(&state, &id, Duration::from_secs(2)).await,
+        ManagedSessionState::Stopped,
+        "the record stayed Active after the hang-up, waiting on the unpark"
+    );
+    let record = state
+        .session_manager()
+        .await
+        .get(&id)
+        .await
+        .expect("record");
+    assert_eq!(record.stop_cause, before.stop_cause, "a death was recorded");
+}
+
+/// #12019 (critic HIGH 2): attempt 1's late rollback never undoes a later
+/// reactivate of the same record.
+/// Test: this function IS the test. Fails if the rollback checks only that
+/// the record reads `Active`.
+#[tokio::test]
+async fn a_late_rollback_never_undoes_a_later_reactivate_12019() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let search = unpark_search_after(Duration::from_secs(2), false).await;
+    let (state, id, _rig) = hangup_rig(dir.path(), &search).await;
+
+    let first = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { reactivate(&state, &id).await }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while session_state(&state, &id).await != ManagedSessionState::Active {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never marked Active"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A second attempt lands while the first still waits on its unpark.
+    let mgr = state.session_manager().await;
+    mgr.stop(&id).await.expect("stop");
+    mgr.mark_reactivated(&id).await.expect("second reactivate");
+
+    let got = first.await.expect("first route");
+    assert_eq!(got.status, 500, "premise: attempt 1 fails late: {got:?}");
+    assert_eq!(
+        session_state(&state, &id).await,
+        ManagedSessionState::Active,
+        "attempt 1's rollback undid attempt 2"
     );
 }

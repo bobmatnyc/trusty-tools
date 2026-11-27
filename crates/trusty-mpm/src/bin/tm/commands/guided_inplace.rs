@@ -419,6 +419,19 @@ async fn fetch_managed_session_until_stopped(
     }
 }
 
+/// The one line printed before the reactivate request (#12019).
+///
+/// Why: the route may wait up to `REACTIVATE_STEPS_BUDGET` for the project's
+/// search index to reload, and a silent wait reads as a hang.
+/// Test: `reactivate_wait_notice_is_one_line_naming_the_session_12019`.
+fn reactivate_wait_notice(id: &str) -> String {
+    format!(
+        "tm: reactivating session {id}; waiting for the daemon to restore the project \
+         index (up to {}s)...",
+        REACTIVATE_TIMEOUT.as_secs()
+    )
+}
+
 /// POST `/api/v1/sessions/managed/{id}/reactivate` — flip Stopped -> Active
 /// in place, with no tmux mutation (#2023 C step 3).
 ///
@@ -465,6 +478,7 @@ async fn reactivate_managed_session(
         // #6288: typed, so the socket's params struct decodes it.
         req = req.query(&[("pane_confirmed_dead", true)]);
     }
+    eprintln!("{}", reactivate_wait_notice(id)); // #12019: a long wait is not a hang
     let result = req.send().await;
     match result {
         Ok(resp) if resp.status().is_success() => true,
