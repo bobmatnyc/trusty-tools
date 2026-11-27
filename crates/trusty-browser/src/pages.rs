@@ -351,8 +351,7 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
     controls(request)?;
     for name in ["lease", "request_id", "ref", "target"] {
         let nullable = op == "page_scroll"
-            || (op == "page_press"
-                && matches!(request.get(name), None | Some(Json::Null)));
+            || (op == "page_press" && matches!(request.get(name), None | Some(Json::Null)));
         if request.get(name).is_some() && !(name == "ref" && nullable) {
             request_string(request, name)?;
         }
