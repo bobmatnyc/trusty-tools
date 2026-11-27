@@ -64,8 +64,11 @@
 #   2. The signing step (`tctl sign trusty-memory`) is wrapped so a non-zero
 #      exit (no cert, or any other codesign failure) becomes a clear stderr
 #      warning and the script continues, exiting 0 overall.
+#   3. #11683: a signer that cannot be built (no usable tctl on PATH and the
+#      checkout's `tctl` fails to build) exits 1 — that is a broken install.
 #
-# Test: `bash -n scripts/install-trusty-memory-signed.sh` for syntax check.
+# Test: scripts/install_signed_tctl_fallback_selftest.sh (stub cargo and tctl).
+# `bash -n scripts/install-trusty-memory-signed.sh` for syntax check.
 # `shellcheck scripts/install-trusty-memory-signed.sh` for lint.
 # `--dry-run` (or `TRUSTY_CODESIGN_DRY_RUN=1`) prints every cargo/tctl command
 # WITHOUT executing it. Run on a machine without a Developer ID cert to
@@ -140,19 +143,23 @@ detect_repo_root() {
 # Resolve the `tctl` (or `trusty-installer`) binary to run the sign step.
 # Why: The unified signing logic (#2558) lives in trusty-installer; this
 # script must not duplicate `codesign`/`security find-identity` calls. Prefers
-# an already-installed `tctl`/`trusty-installer` on PATH; falls back to
-# `cargo run -p trusty-installer` from the detected repo root so a fresh
+# an already-installed `tctl`/`trusty-installer` on PATH whose `sign` accepts
+# SET; falls back to building and running this checkout's `tctl` so a fresh
 # checkout with no prior tctl install still works. Mirrors
-# `install-trusty-assistants-signed.sh`'s `resolve_tctl()` exactly.
+# `install-trusty-assistants-signed.sh`'s `resolve_tctl()`.
+# #11683: a tctl on PATH whose `sign` does not list SET is stale; say so and
+# skip it rather than let it fail the sign step with a clap usage error.
+# Test: scripts/install_signed_tctl_fallback_selftest.sh.
 resolve_tctl() {
-    if command -v tctl >/dev/null 2>&1; then
-        echo "tctl"
-        return 0
-    fi
-    if command -v trusty-installer >/dev/null 2>&1; then
-        echo "trusty-installer"
-        return 0
-    fi
+    local set="$1" candidate help
+    for candidate in tctl trusty-installer; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        help="$("$candidate" sign --help 2>&1 || true)"
+        case "$help" in
+            *"$set"*) echo "$candidate"; return 0 ;;
+        esac
+        warn "$candidate on PATH is stale: its 'sign' does not accept '$set'; reinstall trusty-installer to refresh it"
+    done
     return 1
 }
 
@@ -210,14 +217,21 @@ run_sign() {
     fi
 
     local tctl_bin repo_root rc=0
-    if tctl_bin="$(resolve_tctl)"; then
+    if tctl_bin="$(resolve_tctl trusty-memory)"; then
         info "Using $tctl_bin on PATH"
         "$tctl_bin" sign trusty-memory --dir "$CARGO_BIN_DIR" || rc=$?
     else
         repo_root="$(detect_repo_root)"
-        warn "tctl/trusty-installer not found on PATH — running via 'cargo run -p trusty-installer'"
+        warn "no usable tctl/trusty-installer on PATH — running via 'cargo run -p trusty-installer --bin tctl'"
         warn "(install trusty-installer once — cargo install --path $repo_root/crates/trusty-installer --locked — to skip this rebuild next time)"
-        (cd "$repo_root" && cargo run --quiet -p trusty-installer -- sign trusty-memory --dir "$CARGO_BIN_DIR") || rc=$?
+        # #11683: a signer that cannot be built is a broken install, not the
+        # missing-certificate case fail-soft covers; `--bin` because the crate
+        # has two binaries and cargo cannot pick one.
+        if ! (cd "$repo_root" && cargo build --quiet -p trusty-installer --bin tctl); then
+            error "could not build this checkout's tctl in $repo_root; nothing was signed"
+            exit 1
+        fi
+        (cd "$repo_root" && cargo run --quiet -p trusty-installer --bin tctl -- sign trusty-memory --dir "$CARGO_BIN_DIR") || rc=$?
     fi
 
     if [[ "$rc" -ne 0 ]]; then

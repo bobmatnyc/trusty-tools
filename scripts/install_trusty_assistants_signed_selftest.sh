@@ -26,7 +26,8 @@
 #     old-tctl          a tctl that does not accept `trusty-assistants` is
 #                       never asked to sign; this checkout's trusty-installer
 #                       is built and signs the staging dir (only `ta`)
-#     source-argv       `--git-rev` and the registry default build the
+#     signer-unbuildable  that fallback failing to build exits 1 (#11683)
+#     source-argv      `--git-rev` and the registry default build the
 #                       expected `cargo install` argv
 #     fresh-target      cargo install gets CARGO_NET_GIT_FETCH_WITH_CLI=true,
 #                       no inherited CARGO_TARGET_DIR, and a `--target-dir`
@@ -71,7 +72,10 @@ set -eu
 printf '%s\n' "$*" >> "$STUB_LOG/cargo.argv"
 case "${1:-}" in
   install) ;;
-  build) exit 0 ;;
+  build)
+    # #11683: STUB_CARGO_BUILD_FAIL=1 makes the fallback signer unbuildable.
+    if [ "${STUB_CARGO_BUILD_FAIL:-0}" = "1" ]; then exit 101; fi
+    exit 0 ;;
   run)
     # `cargo run -p trusty-installer -- sign <set> --dir D`: sign like tctl.
     dir=""
@@ -257,6 +261,17 @@ grep -q '^run --quiet -p trusty-installer --bin tctl -- sign trusty-assistants -
 [ "$(cat "$WORK/old-tctl/tctl.dir" 2>/dev/null)" = "ta" ] || fail "old-tctl: fallback saw more than ta"
 grep -q 'signed' "$root/bin/ta" || fail "old-tctl: ta not signed"
 [ "$(fp "$root/bin/tagent")" = "$before" ] || fail "old-tctl: tagent changed"
+
+# --- signer-unbuildable (#11683) -----------------------------------------
+# A stale tctl plus a checkout whose tctl will not build is a broken install,
+# not the no-certificate case: it must exit 1, never warn and exit 0.
+root="$(new_root_with_tagent signer-unbuildable)"
+before="$(fp "$root/bin/tagent")"
+STUB_TCTL_OLD=1 STUB_CARGO_BUILD_FAIL=1 run signer-unbuildable --from-source --root "$root"
+[ "$RC" -eq 1 ] || fail "signer-unbuildable: exit $RC, want 1"
+grep -q 'could not build this checkout' "$WORK/signer-unbuildable.out" || fail "signer-unbuildable: no error"
+[ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "signer-unbuildable: ta moved or changed"
+[ "$(fp "$root/bin/tagent")" = "$before" ] || fail "signer-unbuildable: tagent changed"
 
 # --- source-argv --------------------------------------------------------
 root="$WORK/git/root"

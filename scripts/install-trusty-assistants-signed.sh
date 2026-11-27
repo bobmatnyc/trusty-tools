@@ -48,6 +48,8 @@
 #
 #   Fail-soft signing: a cargo failure exits non-zero; a signing failure (no
 #   certificate, or any codesign error) is a warning and the run exits 0.
+#   A signer that cannot be built (no usable tctl on PATH and this checkout's
+#   `tctl` fails to build) exits 1 (#11683).
 #
 # Test: scripts/install_trusty_assistants_signed_selftest.sh (stub cargo and
 # tctl; tagent untouched, refusals, staging, dry run).
@@ -69,7 +71,8 @@
 #   TRUSTY_SIGN_IDENTITY=...   override the identity `tctl sign` selects
 #   TRUSTY_CODESIGN_DRY_RUN=1  same as --dry-run
 #
-# Exit: 0 installed (signed or not); 1 install failed or `tagent` changed;
+# Exit: 0 installed (signed or not); 1 install failed, signer could not be
+# built, or `tagent` changed;
 # 2 usage error or refused argument.
 
 # #7812: re-exec under bash when started from zsh.
@@ -288,7 +291,12 @@ run_sign_ta() {
     if ! tctl_bin="$(resolve_tctl)"; then
         tctl_bin=""
         warn "no usable tctl on PATH; building this checkout's trusty-installer"
-        (cd "$(repo_root)" && cargo build --quiet -p trusty-installer --bin tctl) || rc=$?
+        # #11683: a signer that cannot be built is a broken install, not the
+        # missing-certificate case fail-soft covers.
+        if ! (cd "$(repo_root)" && cargo build --quiet -p trusty-installer --bin tctl); then
+            error "could not build this checkout's tctl in $(repo_root); $BIN_NAME was not signed"
+            exit 1
+        fi
     fi
 
     if [ "$rc" -eq 0 ]; then
