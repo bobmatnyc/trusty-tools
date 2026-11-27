@@ -62,7 +62,10 @@ fn ruling_pack_recordings_replay_clean_against_the_port() {
             "recall-errors.json",
             "recall-miss.json",
             "recall-no-result.json",
+            "recall-results-str.json",
             "recall-shapes.json",
+            "search-results-dict.json",
+            "search-results-int.json",
             "unknown-project.json",
             "write.json",
         ]

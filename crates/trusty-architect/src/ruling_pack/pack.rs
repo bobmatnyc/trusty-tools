@@ -19,7 +19,7 @@ use crate::classify::alerts::civil_from_days;
 use crate::clock::Clock;
 use crate::pyjson_load::PyValue;
 use crate::pystr::py_repr;
-use crate::pyval::{get, py_str, truthy};
+use crate::pyval::{get, py_str, truthy, type_name};
 use crate::writers::os_error;
 
 /// The script's `MAX_CHARS`: the pack's cap, about 1.5k tokens.
@@ -120,12 +120,20 @@ fn mcp_hints(palaces: &[String], query: &str, index: Option<&str>) -> Vec<String
     h
 }
 
-/// The first `n` items of a list value (`v[:n]`); a value of another shape
-/// gives none (a script crash the port does not reproduce).
-fn head(v: &PyValue, n: usize) -> &[PyValue] {
+/// `v[:n]` of a `results` value: a list's items, a string's characters, or
+/// the error the script dies with on a shape it cannot slice.
+/// Test: the `search-results-*` and `recall-results-str` recordings.
+fn head(v: &PyValue, n: usize) -> Result<Vec<PyValue>, BuildError> {
     match v {
-        PyValue::List(items) => &items[..items.len().min(n)],
-        _ => &[],
+        PyValue::List(items) => Ok(items[..items.len().min(n)].to_vec()),
+        PyValue::Str(s) => Ok(s.chars().take(n).map(|c| PyValue::Str(c.into())).collect()),
+        // #12028: a dict looks the slice up as a key; `main()` reports the KeyError (exit 2).
+        PyValue::Dict(_) => Err(BuildError::Unknown(format!("slice(None, {n}, None)"))),
+        other => Err(PyErr::new(
+            "TypeError",
+            format!("'{}' object is not subscriptable", type_name(other)),
+        )
+        .into()),
     }
 }
 
@@ -183,7 +191,7 @@ pub(crate) fn build(
         if let Some(err) = &r.error {
             notes.push(format!("{p}: {err}"));
         }
-        for h in head(&r.hits, 3) {
+        for h in &head(&r.hits, 3)? {
             prior = true;
             let content = dict_get(h, "content")?.unwrap_or(h);
             mem_lines.push(format!("- [{p}] {}", trim(&py_str(content), HIT_CHARS)));
@@ -205,7 +213,7 @@ pub(crate) fn build(
             }) => {
                 last_indexed = li;
                 fact = truthy(&hits);
-                for h in head(&hits, 5) {
+                for h in &head(&hits, 5)? {
                     let path = or(dict_get(h, "path")?, dict_get(h, "file")?);
                     let line = dict_get(h, "start_line")?;
                     let empty = PyValue::Str(String::new());

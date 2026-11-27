@@ -403,7 +403,7 @@ $R replay $D/*.json -- <target>/debug/examples/replay_port gh-session-track
 
 ## ruling_pack (#12028 P1i)
 
-Twenty-two runs of the frozen Python reference, the Architect's
+Twenty-five runs of the frozen Python reference, the Architect's
 `ruling_pack.py`, recorded on 2026-11-27 with `--clock 1795784400` and
 replayed in `tests/replay_ruling_pack.rs` against
 `examples/replay_port.rs ruling_pack`. Every recording is the recorder's
@@ -432,13 +432,13 @@ pack to `{ROOT}/local/packs/`, which the replay compares.
 | `memory-absent`, `no-fakes` | No `trusty-memory` on `PATH`; no backend at all (`rg` absent) |
 | `no-root`, `memory-only` | An entry with no palace, index or root; the `cto` palace and no search |
 | `cap` | A pack over 6000 characters, cut with the label block kept |
+| `search-results-dict`, `search-results-int`, `recall-results-str` | A `results` the script cannot slice: a dict (`KeyError`, exit 2), an int (`TypeError`), a string whose characters have no `.get` (`AttributeError`) |
 | `write` | The write arm, default key map, pack under the sandbox |
 | `unknown-project`, `keys-*` | Exit 2 and the traceback lines for a missing, invalid and `projects`-less key map |
 | `help`, `bad-arg-*` | argparse paths, abbreviations, `type=int` and `choices` |
 
 Not recorded: a recall that times out waits 25 s per reply line, and a
-closed memory pipe races the next request; a backend reply of a shape the
-script crashes on is read leniently by the port. `tests/ruling_pack_smoke.rs`
+closed memory pipe races the next request. `tests/ruling_pack_smoke.rs`
 covers the shipped binary: the checkout default key map, the write under
 the checkout's `local/packs`, the search run without `TRUSTY_INDEX`, and
 the run without a checkout.

@@ -1,0 +1,87 @@
+{
+  "version": 3,
+  "argv": [
+    "Sample",
+    "plain question without identifiers",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write",
+    "--type",
+    "spec"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"duetto\": true,\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "",
+  "stderr": "AttributeError: 'str' object has no attribute 'get'\n",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "rg": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "trusty-memory": [
+        {
+          "argv": [
+            "serve"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0,
+          "rpc": {
+            "1": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}}}",
+            "2": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"results\\\": \\\"oops\\\"}\"}]}}",
+            "3": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"results\\\": \\\"oops\\\"}\"}]}}"
+          }
+        }
+      ],
+      "trusty-search": [
+        {
+          "stdout": "{\"results\": [], \"meta\": {}}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "trusty-memory",
+        "serve"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"ruling_pack\", \"version\": \"1\"}}}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"memory_recall\", \"arguments\": {\"palace\": \"sample-app\", \"query\": \"plain question without identifiers\", \"top_k\": 3, \"min_score\": 0.4}}}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"memory_recall\", \"arguments\": {\"palace\": \"supervisor\", \"query\": \"plain question without identifiers\", \"top_k\": 3, \"min_score\": 0.4}}}"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

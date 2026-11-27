@@ -11,10 +11,9 @@
 //! and `rg -F` give facts; a backend that is down is reported and counts as
 //! not found. The pack goes to stdout and, unless `--no-write`, to
 //! `<checkout>/local/packs/<utc>-<key>.md`.
-//! Known gap: a key map, memory reply or search reply of a shape the script
-//! would crash on (a non-list `results`, a non-string `aliases` entry) is
-//! read leniently, not as the script's traceback; a recall that times out
-//! waits the script's 25 s per reply line.
+//! Known gap: a key map of a shape the script would crash on (a non-string
+//! `aliases` entry) is read leniently, not as the script's traceback; a
+//! recall that times out waits the script's 25 s per reply line.
 //! Test: `tests/replay_ruling_pack.rs`, `tests/ruling_pack_smoke.rs`,
 //! `src/ruling_pack/tests.rs`.
 
