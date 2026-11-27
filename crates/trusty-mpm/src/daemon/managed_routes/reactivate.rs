@@ -419,6 +419,10 @@ fn neutralize_caller_pane(panes: &[PaneInfo], caller_pane_id: Option<&str>) -> V
 }
 
 #[cfg(test)]
+#[path = "reactivate_project_tests.rs"]
+mod project_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::daemon::orphan_gc::AlwaysIdleProbe;
