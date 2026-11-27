@@ -41,6 +41,9 @@ mod machine_tests;
 // #10908: `console_metrics` over UDS against stub sockets.
 #[cfg(test)]
 mod metrics_uds_tests;
+// #10908: `by_*` breakdowns as nested tables in the service view.
+#[cfg(test)]
+mod metrics_table_tests;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
