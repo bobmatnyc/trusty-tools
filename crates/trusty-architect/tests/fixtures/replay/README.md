@@ -76,7 +76,7 @@ Python guards to run, so #12028 P1c leaves it unported.
 
 ## spec_drift_check
 
-Twelve runs of the frozen Python reference, the Architect's
+Eleven runs of the frozen Python reference, the Architect's
 `spec_drift_check.py`, recorded on 2026-11-27 with `--clock 1795784400` and
 replayed in `tests/replay_spec_drift_check.rs` against
 `examples/replay_port.rs`. Each recording passes the root as `--root {ROOT}`.
@@ -85,6 +85,10 @@ none was written or edited by hand. The input of each is its `files`: a
 curated sample checkout (manifest, spec, instruction files, skills,
 references, codex docs, owner-queue items, soak log, improvement ledger)
 built with sample names only. It is not a copy of any live tree.
+
+The `-h` path is not recorded: the reference's help description names an
+instance id, which the port omits. A unit test in `src/spec_drift/args.rs`
+pins that one difference.
 
 `daily-pass` and `daily-no-log` run the reference on a sample checkout shaped
 like the daily input, with no orphan reference, so every check passes or is
@@ -99,7 +103,7 @@ reproduces the reference's current orphan-reference failure (INV-03).
 | `drift-many-fail` | Every check fails, CRLF and non-ASCII text included |
 | `pre-phase-pending` | Before phase 1: no skill index, no owner queue, an unenforced sentence (WARN) |
 | `missing-manifest`, `empty-manifest`, `manifest-key-errors` | Error and empty inputs |
-| `bad-arg-unrecognized`, `bad-arg-root-value`, `bad-arg-explicit`, `help` | argparse paths |
+| `bad-arg-unrecognized`, `bad-arg-root-value`, `bad-arg-explicit` | argparse paths |
 
 Regenerate: lay a recording's `files` into a directory `S`, then, with the
 script and the `dashboard_*.py` modules it imports copied to a sandbox
