@@ -154,6 +154,11 @@ macro_rules! refusal {
     };
 }
 
+/// The body runs a credential CLI word in order (`op` … `read`).
+const CRED: &str = refusal!(
+    "its body, or a script it runs, runs a credential-reading command (a Keychain, token or \
+     secret CLI; #8596, #8248)"
+);
 /// The body names a secret-bearing file.
 const FILE: &str = refusal!("its body, or a script it runs, names a secret-bearing file (#7266)");
 
@@ -233,10 +238,12 @@ const RESIDUALS: &[Residual] = &[
     residual("dashboard_docs.py", FILE, OWNED_BY_10571),
     residual("dashboard_harness.py", FILE, OWNED_BY_10571),
     residual("dashboard_projects.py", FILE, OWNED_BY_10571),
-    // #11800: datg_ops.py's `refs.key must match` error text names a `.key` file.
-    residual("datg_ops.py", FILE, OWNED_BY_10571),
+    residual("datg_ops.py", CRED, OWNED_BY_10571),
+    // #10571 S2: the `{"op": "remind_fire"}` and `{"op": "remind_done"}` ledger ops it writes
+    // read as a 1Password `op` call, as datg_ops.py's `unknown op` does (#10598).
+    residual("il_remind.py", CRED, GUARD_FP_10598),
     // #11800: the docstring's `local/usage/token-hourly.jsonl.` and the module attribute
-    // `token_watch_rules.ScanRules` read as token files. il_remind.py passes.
+    // `token_watch_rules.ScanRules` read as token files; its data files pass now.
     residual("token_watch.py", FILE, GUARD_FP_10598),
 ];
 

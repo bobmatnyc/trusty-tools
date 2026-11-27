@@ -27,7 +27,8 @@ const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
     ),
     (
         "token_watch.py",
-        "#11800: its docstring's `local/usage/token-hourly.jsonl.` and the module attribute `token_watch_rules.ScanRules` read as token files (#10598)",
+        // #11800: the token-tally fix releases its data files; these two words remain.
+        "its docstring's `local/usage/token-hourly.jsonl.` and the module attribute `token_watch_rules.ScanRules` read as token files (#10598)",
     ),
 ];
 
@@ -87,13 +88,13 @@ fn every_seeded_script_passes_the_guard_at_its_installed_path() {
 /// reason each cannot be changed without changing what it does (#10570).
 /// The first four rows are modules with no `__main__`; the commands that
 /// import them (`datg.py`, `dashboard-serve.py`) pass. `token_watch.py` is a
-/// command; fleet-poll.py loads it in-process (#10571 S1). #11800: il_remind.py
-/// left the list when the `op` rule narrowed.
+/// command; fleet-poll.py loads it in-process (#10571 S1). `il_remind.py` is a
+/// module datg.py and the poller import (#10571 S2).
 const STILL_REFUSED_10570: &[(&str, &str)] = &[
     (
         "datg_ops.py",
-        "#11800: the error text `refs.key must match` names a `.key` file; a passing body \
-         changes the message the caller sees",
+        "the error texts `refs.key must match` (a `.key` file name) and `unknown op` read as \
+         a 1Password call; a passing body changes the message the caller sees",
     ),
     (
         "dashboard_docs.py",
@@ -113,13 +114,22 @@ const STILL_REFUSED_10570: &[(&str, &str)] = &[
         "#11800: its docstring's `local/usage/token-hourly.jsonl.` and the module attribute \
          `token_watch_rules.ScanRules` read as token files (#10598)",
     ),
+    (
+        "il_remind.py",
+        "#10571 S2: the ledger ops it writes, `{\"op\": \"remind_fire\"}` and `{\"op\": \"remind_done\"}`, \
+         read as a 1Password call, as datg_ops.py's `unknown op` does; renaming the key changes \
+         the datg op format (#10598)",
+    ),
 ];
 
 /// #10641: the text each [`STILL_REFUSED_10570`] row's refusal must carry, so a
 /// row that starts refusing for another reason is seen.
 const REFUSAL_TEXT_10570: &[(&str, &str)] = &[
     // #10641: each text is the phrase only the intended refusal carries.
-    ("datg_ops.py", "names a secret-bearing file (#7266)"),
+    (
+        "datg_ops.py",
+        "runs a credential-reading command (a Keychain, token or secret CLI",
+    ),
     ("dashboard_docs.py", "names a secret-bearing file (#7266)"),
     (
         "dashboard_harness.py",
@@ -130,6 +140,10 @@ const REFUSAL_TEXT_10570: &[(&str, &str)] = &[
         "names a secret-bearing file (#7266)",
     ),
     ("token_watch.py", "names a secret-bearing file (#7266)"),
+    (
+        "il_remind.py",
+        "runs a credential-reading command (a Keychain, token or secret CLI",
+    ),
 ];
 
 /// 🔴 REGRESSION (#10570, #10598): every script `tm fleet init` seeds under
