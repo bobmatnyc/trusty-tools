@@ -135,6 +135,10 @@ pub struct ShutdownTarget {
     /// #11643: why the palace id may name another project's palace; when set,
     /// the unload is skipped and this is the reported reason.
     pub palace_shared: Option<String>,
+    /// #11977: each other active project's name and its different derived
+    /// palace id; the unload is skipped when trusty-memory's alias map sends
+    /// one of them to this target's canonical palace.
+    pub palace_peers: Vec<(String, String)>,
 }
 
 impl ShutdownTarget {
@@ -170,6 +174,7 @@ impl ShutdownTarget {
             palace: palace_for(repo_url, root),
             palace_lookup: root.is_none(),
             palace_shared: None,
+            palace_peers: Vec::new(),
         }
     }
 
@@ -183,6 +188,8 @@ impl ShutdownTarget {
     /// derived (`Err`, so it might match), sets `palace_shared`, which makes
     /// the unload a reported [`ShutdownState::Skipped`]. An `Ok(None)` names
     /// no palace and cannot collide. A target with no id is left as is.
+    /// #11977: every other different `Ok(Some)` id is kept in `palace_peers`,
+    /// which the unload compares by canonical id (see [`shared_canonical`]).
     /// Test: `a_palace_id_another_project_derives_is_never_unloaded`,
     /// `decommission_skips_the_unload_when_another_project_shares_the_palace_id`.
     pub fn refuse_shared_palace(
@@ -204,6 +211,16 @@ impl ShutdownTarget {
             )),
             _ => None,
         });
+        // #11977: derived ids differ, but an alias may join them; the unload
+        // asks trusty-memory's alias map before it sends anything.
+        let id = id.clone();
+        self.palace_peers = others
+            .iter()
+            .filter_map(|(name, other)| match other {
+                Ok(Some(other)) if *other != id => Some((name.clone(), other.clone())),
+                _ => None,
+            })
+            .collect();
         self
     }
 }
@@ -476,6 +493,69 @@ async fn palace_absent(socket: &Path, palace: &str) -> Option<ShutdownState> {
     }
 }
 
+/// `memory.config` — answers the daemon's palace registry dir as `data_root`.
+pub(crate) const METHOD_CONFIG: &str = "memory.config";
+
+/// Why the palace unload must be skipped because `palace` and a peer's id
+/// reach one canonical palace, or `None` when no peer shares it.
+///
+/// Why: #11977 — trusty-memory unloads by canonical id and follows the alias
+/// map, so `code-app` and `work-app` can both reach a folder palace `app`.
+/// What: asks `memory.config` for the daemon's `data_root` (the directory its
+/// own unload resolves aliases in), then applies the shared rule
+/// [`trusty_common::palace_alias::try_alias_target_if_absent`] to `palace`
+/// and each peer id. A failed call, a missing `data_root` or an unreadable
+/// alias file is a skip too (fail closed: a kept palace is safe, a shared
+/// one unloaded is not).
+/// Test: `an_aliased_palace_another_project_reaches_is_never_unloaded`,
+/// `an_unresolvable_canonical_id_skips_the_unload`.
+async fn shared_canonical(
+    socket: &Path,
+    palace: &str,
+    peers: &[(String, String)],
+) -> Option<String> {
+    let answer = memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        METHOD_CONFIG,
+        json!({}),
+        CALL_TIMEOUT,
+    )
+    .await;
+    let root = match answer {
+        Ok(body) => match body.get("data_root").and_then(Value::as_str) {
+            Some(root) => PathBuf::from(root),
+            None => {
+                return Some(format!(
+                    "{METHOD_CONFIG} named no data_root, so palace {palace}'s canonical id is \
+                     unknown; palace unload skipped"
+                ));
+            }
+        },
+        Err(e) => {
+            return Some(format!(
+                "could not resolve palace {palace}'s canonical id ({e:#}); palace unload skipped"
+            ));
+        }
+    };
+    let canonical = |id: &str| {
+        trusty_common::palace_alias::try_alias_target_if_absent(&root, id)
+            .map(|target| target.unwrap_or_else(|| id.to_string()))
+            .map_err(|e| format!("could not read the palace alias map for {id}: {e:#}"))
+    };
+    let mine = match canonical(palace) {
+        Ok(mine) => mine,
+        Err(why) => return Some(format!("{why}; palace unload skipped")),
+    };
+    peers.iter().find_map(|(name, id)| match canonical(id) {
+        Ok(theirs) if theirs == mine => Some(format!(
+            "project '{name}' palace {id} and {palace} both resolve to palace {mine}; \
+             palace unload skipped"
+        )),
+        Ok(_) => None,
+        Err(why) => Some(format!("{why} (project '{name}'); palace unload skipped")),
+    })
+}
+
 /// Unload the project's palace.
 async fn unload_palace(socket: Option<&Path>, target: &ShutdownTarget) -> ShutdownState {
     let palace = &target.palace;
@@ -508,6 +588,13 @@ async fn unload_palace(socket: Option<&Path>, target: &ShutdownTarget) -> Shutdo
         return ShutdownState::Skipped {
             reason: reason.clone(),
         };
+    }
+    // #11977: a palace another project reaches through an alias is shared too.
+    if !target.palace_peers.is_empty()
+        && let Some(reason) = shared_canonical(socket, palace, &target.palace_peers).await
+    {
+        tracing::warn!(palace = %palace, "project decommission: {reason}");
+        return ShutdownState::Skipped { reason };
     }
     if target.palace_lookup
         && let Some(skipped) = palace_absent(socket, palace).await
