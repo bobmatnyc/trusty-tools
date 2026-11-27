@@ -111,7 +111,7 @@ fn default_root_is_under_home() {
     let home = dirs::home_dir().expect("home");
     assert_eq!(
         default_root().expect("root"),
-        home.join(".trusty-tools").join("kuzu-review")
+        home.join(".trusty-tools").join("kuzu-review") // path-literal: allow — ruling Q4 #8624: masked export root fixed under $HOME, outside git/palace
     );
 }
 
