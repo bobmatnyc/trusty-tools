@@ -1,4 +1,0 @@
-Fixed
-- `tctl restart` on Linux restarts trusty-search, trusty-memory, trusty-console and trusty-mpm through each daemon's own `restart` verb, run as the absolute `<install dir>/<binary>` (`tm` for trusty-mpm), never a copy found on `PATH` ([#11086](https://github.com/bobmatnyc/trusty-tools/issues/11086))
-- After each restart on Linux, `tctl restart` compares the version the daemon's health reply reports with the install-dir binary's `--version`; a different version, a refused probe, or a binary that rejects `restart` marks the member FAILED with both versions named and exits 2, and the remaining members are still restarted
-- On Linux, `tctl start`, `stop` and `restart` of a member without Linux lifecycle verbs say `<verb> the <member> daemon manually (launchd is macOS-only)` instead of "only supported on macOS"; macOS behaviour is unchanged

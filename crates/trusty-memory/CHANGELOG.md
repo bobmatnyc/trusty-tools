@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] — 2026-11-27
+
+### Fixed
+
+- `palace_create` (MCP and `MemoryService::create_palace`) now accepts exactly the palace name the shared resolver gives the client's project — the pin, else git `owner-repo`, else `parent-dir` — instead of the folder name, and ignores the daemon's own `TRUSTY_MEMORY_PALACE` and working directory. A project create without `cwd` is rejected, and a malformed pin is reported, never replaced by a fallback name (#11823).
+- Creating a palace that already exists, or whose name is a live alias, no longer rewrites its `palace.json`; it answers `{"palace_id", "status": "exists", "alias_of"?}`. When the resolved name is missing but the project's folder-named palace exists, the create registers the alias instead of making an empty palace and answers `"status": "aliased"` (#11823).
+- `trusty-memory link` pins the resolver's name unless `--slug` is given, `project_slug_at` no longer writes a pin file, and `doctor --fix-palaces` matches palaces by the resolver's name (#11823).
+
+### Changed
+
+- `trusty-memory setup` writes the Codex registration under the configured Codex home and refuses the write on a broken `install.toml`; `doctor` reads the same file and reports a broken `install.toml` as `Unknown` (#11821).
+
 ## [1.0.2] — 2026-11-23
 
 ### Fixed

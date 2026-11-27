@@ -8,6 +8,21 @@ Unreleased changes live as fragments in `changelog.d/`.
 
 ---
 
+## [0.8.2] — 2026-11-27
+
+### Breaking
+
+- trusty-browser 0.8.1 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-browser-0.8.1.txt` (Refs #8699).
+
+### Added
+
+- `page_click`, `page_hover`, `page_type`, `page_press`, `page_select` and `page_scroll` act inside cross-origin child frames, addressed by the frame-scoped refs (`<frame>:<epoch>.<n>`) that `page_read` and `page_find` return. Tool names and inputs are unchanged. The action runs only in the child document the read recorded, under the lease's current top document, and only while the extension holds host permission for the child's own origin; otherwise it answers `DocumentChanged`, `StaleElement` or `PermissionNeeded` (with the child's `origin`) and never falls back to the top frame. A click stays trusted CDP input: the child's point maps through its owner iframe's transformed content quad from the top debugger session (no page-visible message places it) once that quad holds still across drawn frames, so a scroll the action itself causes cannot misdirect the press, an ambiguous, covered or perspective-transformed owner answers `Obscured`, and a click the child did not see arrive answers `OutcomeUnknown`. A `page_press` with no `ref` while focus is inside a cross-origin child answers `NotEditable`. The reply, and every refusal raised after the child resolved, adds `frame` (`id`, `origin`), and the `operation` audit line lists the child's host in `frames` for a success and a refusal alike ([#11808](https://github.com/bobmatnyc/trusty-tools/issues/11808)).
+
+### Fixed
+
+- `page_find` with only `role`, only `name`, or both no longer answers `InvalidRequest`; the broker refused the null `text` the MCP server sends for an unused term. A refused `page_find` now names the argument in `field` (Refs #11860).
+
 ## [0.8.1] — 2026-11-24
 
 ### Added

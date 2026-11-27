@@ -1,2 +1,0 @@
-Added
-- `trusty-search lexical`, `semantic` and `kg`: CLI verbs for the MCP `search_lexical`, `search_semantic` and `search_kg` tools. Each sends `search.query` with the same `stage` and `expand_graph` as its tool, and takes `-k`, `--path-prefix`, `--mode`, `--exclude-archived`, `--lexical-limit` and (for `kg`) `--refine-query`. `semantic` and `kg` refuse with a stage-not-ready error, and send no query, when the index status lacks the `vector` or `kg` capability or carries no `search_capabilities` at all (#11625).
