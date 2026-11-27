@@ -32,7 +32,7 @@ Sections are rolled up from `content/changelog.d/` by
 
 - BASE-AGENT moves its changelog-fragment and doc-comment gate detail into the git-workflow skill and keeps a one-line pointer, which frees resident bytes for the long-document rule.
 - The generated `tm-capabilities` skill lists `tm whats-new` (#11003).
-- The skills, agents and instructions no longer carve out an MCP exception for the verbs with a released native command. `tm memory recall-deep|recall-all|list|prompt-context|task|kg` and `trusty-search health|index-status|list` replace the `mcp__trusty-memory__*` and `mcp__trusty-search__*` names, and `memory-manager` drops its stale `memory_forget`/`memory_list` examples. The search verbs no `trusty-search` release ships yet (`search_semantic`, `search_lexical`, `search_kg`, `search_similar`, `get_call_chain`, `grep`, `typeahead`, `list_indexes`) keep their MCP names (#11625).
+- The skills, agents and instructions no longer carve out an MCP exception for the verbs with a released native command. `tm memory recall-deep|recall-all|list|prompt-context|task|kg` and `trusty-search health|index-status|list` replace the `mcp__trusty-memory__*` and `mcp__trusty-search__*` names, and `memory-manager` drops its stale `memory_forget`/`memory_list` examples (#11625).
 - The generated `tm-capabilities` CLI reference lists the ten new `tm memory` verbs (#11625).
 - The generated `tm-capabilities` CLI reference lists the new PR watch verbs (#11673).
 - The `tm-capabilities` MCP reference lists every `session_send` `submit_state` that answers `sent: false`, `input_not_empty` and `not_echoed` included (#11796).

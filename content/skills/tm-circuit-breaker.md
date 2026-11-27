@@ -3,7 +3,7 @@ name: tm-circuit-breaker
 description: Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.0.2"
+  version: "1.0.3"
 category: pm-framework
 tags: [circuit-breaker, enforcement, pm-required, validation]
 effort: high
@@ -101,8 +101,8 @@ investigation intent (>2 patterns); investigation keywords ("check",
 "analyze", "find", "explore", "investigate").
 
 **Action**: BLOCK — delegate to the Research agent. Before Read/Grep, the PM
-must attempt `trusty-search search "<q>" --json` (or the MCP `search_semantic`
-/ `search_lexical`, see #11771) first (see CB#10 below and `tm-tool-usage-guide`).
+must attempt `trusty-search search "<q>" --json` (or `trusty-search semantic|lexical
+"<q>"`, #11625) first (see CB#10 below and `tm-tool-usage-guide`).
 
 **Allowed exception**: up to 3 small config/doc files (`Cargo.toml`,
 `package.json`, `.mcp.json`) read for delegation context only — never source
