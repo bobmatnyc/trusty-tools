@@ -38,7 +38,7 @@ test("a viewport screenshot is taken over the debugger with the metrics read aft
   const f = await codeFixture();
   const {grant} = await connectGrant(f);
   withView(f);
-  const r = await f.command("page_screenshot", {grant, tab:7, document:"doc-7", ref:null});
+  const r = await f.command("page_screenshot", {grant, tab:7, document:"doc-7"});
   assert.deepEqual(r.result, {document:"doc-7", data:"iVBORw0KGgo=", region:{x:0, y:0, width:800, height:600},
     metrics:{...M, zoom:1}});
   assert.deepEqual(cdpSteps(f), ["attach", "Page.captureScreenshot", "detach"]);
@@ -51,21 +51,24 @@ test("the first png over the budget is refused CaptureTooLarge with no retake", 
   const {grant} = await connectGrant(f);
   withView(f);
   f.png = "A".repeat(700004);
-  const big = await f.command("page_screenshot", {grant, tab:7, document:"doc-7", ref:null});
+  const big = await f.command("page_screenshot", {grant, tab:7, document:"doc-7"});
   assert.deepEqual(big, {id:big.id, ok:false, error:"CaptureTooLarge", tab:7});
   assert.equal(shots(f).length, 1);
   assert.equal(shots(f)[0].params.clip, undefined);
   assert.equal(f.cdp.at(-1).method, "detach");
 });
 
-test("an element screenshot clips its region in page pixels and a moved document is refused", async () => {
+// #11211: element capture is a non-goal; a screenshot naming a ref never reaches the debugger.
+test("a screenshot naming an element ref is refused and a moved document is refused", async () => {
   const f = await codeFixture();
   const {grant} = await connectGrant(f);
-  withView(f, 7, M, {x:10, y:20, width:100, height:50});
-  const el = await f.command("page_screenshot", {grant, tab:7, document:"doc-7", ref:"1.0"});
-  assert.deepEqual(el.result.region, {x:10, y:20, width:100, height:50});
-  assert.deepEqual(plain(f.cdp[1].params.clip), {x:10, y:60, width:100, height:50, scale:1});
-  const stale = await f.command("page_screenshot", {grant, tab:7, document:"doc-old", ref:null});
+  withView(f);
+  for (const ref of ["1.0", null]) {
+    const el = await f.command("page_screenshot", {grant, tab:7, document:"doc-7", ref});
+    assert.equal(el.error, "InvalidRequest", String(ref));
+  }
+  assert.equal(f.cdp.length, 0);
+  const stale = await f.command("page_screenshot", {grant, tab:7, document:"doc-old"});
   assert.equal(stale.error, "DocumentChanged");
 });
 
@@ -74,7 +77,7 @@ test("a screenshot whose attach fails on the same document answers DebuggerBusy"
   const {grant} = await connectGrant(f);
   withView(f);
   f.tabs.get(7).busy = true;
-  const r = await f.command("page_screenshot", {grant, tab:7, document:"doc-7", ref:null});
+  const r = await f.command("page_screenshot", {grant, tab:7, document:"doc-7"});
   assert.deepEqual(r, {id:r.id, ok:false, error:"DebuggerBusy", tab:7});
   assert.equal(shots(f).length, 0);
 });
@@ -85,7 +88,7 @@ test("a timed-out screenshot sends no capture after it returns", async () => {
   withView(f);
   f.png = "A".repeat(700004);
   f.tabs.get(7).hang = "Page.captureScreenshot";
-  const pending = f.native.onMessage.fire({id:"slow", op:"page_screenshot", email, grant, tab:7, document:"doc-7", ref:null});
+  const pending = f.native.onMessage.fire({id:"slow", op:"page_screenshot", email, grant, tab:7, document:"doc-7"});
   await settle();
   const [key, bound] = [...f.timers].findLast(([, t]) => t.ms === 6000);
   f.timers.delete(key);

@@ -376,7 +376,7 @@ fn capture_of(raw: &Json, claim_tab: i64) -> Result<Shot, Refusal> {
     Ok((bytes, r, metrics, [vw, vh]))
 }
 
-/// A PNG of the viewport or one element, with a `capture_id` (#11211).
+/// A PNG of the viewport, with a `capture_id` (#11211).
 async fn screenshot(
     core: &Arc<Core>,
     session: &mut Session,
@@ -385,12 +385,7 @@ async fn screenshot(
 ) -> Result<Ran, Stop> {
     let claim = leased(core, session, grant, request)?;
     let document = claim.document.clone().map_or(Json::Null, Json::from);
-    let field = request.get("ref").cloned().unwrap_or(Json::Null);
-    let args = vec![
-        ("tab", Json::Int(claim.tab)),
-        ("document", document),
-        ("ref", field),
-    ];
+    let args = vec![("tab", Json::Int(claim.tab)), ("document", document)];
     let raw = send(
         core,
         grant,

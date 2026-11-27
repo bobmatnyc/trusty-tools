@@ -616,7 +616,7 @@ async fn page_screenshot_refuses_a_tab_this_session_does_not_lease() {
     let mut b = conns.remove("b").expect("b");
     let mut a = conns.remove("a").expect("a");
     let mut worker = conns.remove("worker").expect("worker");
-    let shoot = |lease: &str| format!(r#"{{"op":"page_screenshot","lease":"{lease}","ref":null}}"#);
+    let shoot = |lease: &str| format!(r#"{{"op":"page_screenshot","lease":"{lease}"}}"#);
     for lease in [A_EARLY_LEASE, "not-a-lease-of-this-session"] {
         send_json(&mut b, &shoot(lease)).await;
         assert_eq!(
@@ -744,7 +744,7 @@ async fn a_capture_maps_clicks_and_goes_stale() {
     png.extend(1200u32.to_be_bytes());
     let data = base64::engine::general_purpose::STANDARD.encode(&png);
     let metrics = r#"{"css_width":800,"css_height":600,"device_pixel_ratio":2,"zoom":1,"scroll_x":0,"scroll_y":0}"#;
-    let shoot = format!(r#"{{"op":"page_screenshot","lease":"{lease}","ref":null}}"#);
+    let shoot = format!(r#"{{"op":"page_screenshot","lease":"{lease}"}}"#);
     send_json(&mut a, &shoot).await;
     let shot = format!(
         r#"{{"document":"d1","data":"{data}","region":{{"x":0,"y":0,"width":800,"height":600}},"metrics":{metrics}}}"#
@@ -828,7 +828,7 @@ async fn a_capture_whose_aspect_disagrees_with_its_region_is_stale() {
     let metrics = r#"{"css_width":800,"css_height":600,"device_pixel_ratio":2,"zoom":1,"scroll_x":0,"scroll_y":0}"#;
     send_json(
         &mut a,
-        &format!(r#"{{"op":"page_screenshot","lease":"{lease}","ref":null}}"#),
+        &format!(r#"{{"op":"page_screenshot","lease":"{lease}"}}"#),
     )
     .await;
     let shot = format!(

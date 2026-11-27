@@ -70,7 +70,8 @@ pub const OPS: &[(&str, &[&str])] = &[
     // #11208: tab lifecycle; #11211: screenshots and coordinate input.
     ("open_tab", &["op", "request_id", "url"]),
     ("close_tab", &["op", "request_id", "tab"]),
-    ("page_screenshot", &["op", "lease", "ref"]),
+    // #11211: viewport only; element capture is a non-goal.
+    ("page_screenshot", &["op", "lease"]),
     (
         "page_click_at",
         &["op", "lease", "request_id", "capture_id", "x", "y"],
@@ -350,7 +351,7 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
     controls(request)?;
     for name in ["lease", "request_id", "ref", "target"] {
         let nullable = op == "page_scroll"
-            || (matches!(op, "page_press" | "page_screenshot")
+            || (op == "page_press"
                 && matches!(request.get(name), None | Some(Json::Null)));
         if request.get(name).is_some() && !(name == "ref" && nullable) {
             request_string(request, name)?;

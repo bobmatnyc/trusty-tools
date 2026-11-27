@@ -219,13 +219,8 @@ pub const CONNECT: &[Tool] = &[
         "close_tab",
         &["tab", "request_id"],
     ),
-    // #11211: a PNG with a capture_id; coordinate input in that image's pixels.
-    tool(
-        "page_screenshot",
-        &[LEASE, field("ref", K::OptStr, D::Null)],
-        "page_screenshot",
-        &["lease", "ref"],
-    ),
+    // #11211: a viewport PNG with a capture_id; coordinate input in that image's pixels.
+    tool("page_screenshot", &[LEASE], "page_screenshot", &["lease"]),
     tool(
         "page_click_at",
         &[LEASE, CAPTURE, X, Y, RID],

@@ -137,8 +137,16 @@ fn coordinate_ops_validate_capture_id_and_pixels() {
         let frame = Json::parse(bad.as_bytes()).unwrap();
         assert!(crate::pages::validate(&frame).is_err(), "{bad}");
     }
-    let shot = Json::parse(br#"{"op":"page_screenshot","lease":"l","ref":null}"#).unwrap();
+    let shot = Json::parse(br#"{"op":"page_screenshot","lease":"l"}"#).unwrap();
     assert_eq!(crate::pages::validate(&shot), Ok("page_screenshot"));
+    // #11211: element capture is a non-goal; a screenshot naming a `ref` is refused.
+    for bad in [
+        r#"{"op":"page_screenshot","lease":"l","ref":null}"#,
+        r#"{"op":"page_screenshot","lease":"l","ref":"1.0"}"#,
+    ] {
+        let frame = Json::parse(bad.as_bytes()).unwrap();
+        assert!(crate::pages::validate(&frame).is_err(), "{bad}");
+    }
 }
 
 #[test]

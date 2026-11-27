@@ -44,30 +44,10 @@ globalThis.TrustyPages = (() => {
   }
 
   // Why: a screenshot must record which viewport it shows, and a coordinate action must see the same one (#11211).
-  // What: returns the top viewport's CSS size, devicePixelRatio and scroll; with a ref, also the element's box
-  //   (scrolled into view, instantly) in top-frame viewport CSS pixels, clipped to the viewport. A ref that does
-  //   not resolve answers StaleElement, a box with no visible part OutOfViewport. Self-contained for injection.
+  // What: returns the top viewport's CSS size, devicePixelRatio and scroll. Self-contained for injection.
   // Test: live check; the broker's mapping is `image_pixels_map_to_css_at_1x_2x_and_zoomed`.
-  function pageView(ref) {
-    let region = null;
-    if (ref !== null) {
-      const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
-      if (!el) return {error:"StaleElement"};
-      el.scrollIntoView({block:"center", inline:"center", behavior:"instant"});
-      const box = el.getBoundingClientRect();
-      let left = box.left, top = box.top;
-      for (let win = el.ownerDocument.defaultView; win?.frameElement; win = win.frameElement.ownerDocument.defaultView) {
-        const frame = win.frameElement, at = frame.getBoundingClientRect();
-        const css = frame.ownerDocument.defaultView.getComputedStyle(frame);
-        left += at.left + frame.clientLeft + parseFloat(css.paddingLeft);
-        top += at.top + frame.clientTop + parseFloat(css.paddingTop);
-      }
-      const x = Math.max(0, left), y = Math.max(0, top);
-      const width = Math.min(innerWidth, left + box.width) - x, height = Math.min(innerHeight, top + box.height) - y;
-      if (!(width >= 1 && height >= 1)) return {error:"OutOfViewport"};
-      region = {x, y, width, height};
-    }
-    return {ok:true, region, metrics:{css_width:innerWidth, css_height:innerHeight, device_pixel_ratio:devicePixelRatio,
+  function pageView() {
+    return {ok:true, metrics:{css_width:innerWidth, css_height:innerHeight, device_pixel_ratio:devicePixelRatio,
       scroll_x:scrollX, scroll_y:scrollY}};
   }
 
@@ -618,7 +598,8 @@ TrustyPages.commands = deps => {
     // #11208: tab lifecycle; #11211: screenshots and coordinate input (viewport CSS pixels from the broker).
     page_open_tab:{url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_close_tab:{tab},
-    page_screenshot:{tab, document:doc, ref:v => v === null || ref(v)},
+    // #11211: viewport only; element capture is a non-goal.
+    page_screenshot:{tab, document:doc},
     page_click_at:{tab, document:doc, x:coord, y:coord, metrics:view, dialog},
     page_type_at:{tab, document:doc, x:coord, y:coord, metrics:view, dialog,
       text:v => typeof v === "string" && v.length <= 8192},
@@ -991,37 +972,36 @@ TrustyPages.commands = deps => {
     }
   }
 
-  // #11211: the viewport metrics (with the tab's zoom) and an element region, read in the lease's document.
-  async function viewOf(req, ref) {
+  // #11211: the viewport metrics (with the tab's zoom), read in the lease's document.
+  async function viewOf(req) {
     let hit;
     try {
       [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]},
-        func:pageView, args:[ref]});
+        func:pageView});
     } catch {
       const now = await probe(req.tab);
       if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
-    const result = hit?.result, error = result?.error;
-    if (["StaleElement","OutOfViewport"].includes(error)) throw refuse(error, {tab:req.tab});
-    const m = result?.metrics;
+    const result = hit?.result, m = result?.metrics;
     if (result?.ok !== true || hit.documentId !== req.document || !m) throw refuse("OutcomeUnknown");
     const zoom = await chrome.tabs.getZoom(req.tab);
     const metrics = {css_width:m.css_width, css_height:m.css_height, device_pixel_ratio:m.device_pixel_ratio, zoom,
       scroll_x:m.scroll_x, scroll_y:m.scroll_y};
     if (!view(metrics)) throw refuse("OutcomeUnknown");
-    return {region:result.region, metrics};
+    return metrics;
   }
 
   // Why: an agent must see what it cannot read as elements (canvas, maps, drawn controls), and a later
   //   coordinate action must know which pixels the picture showed (#11211).
   // What: probes, attaches chrome.debugger only to an accessible tab still on the lease's document (the
   //   debugging bar resizes the viewport, so the metrics are read after the attach, as a coordinate action
-  //   reads them), then CDP Page.captureScreenshot as PNG of the viewport or the element's visible box. A PNG
+  //   reads them), then CDP Page.captureScreenshot as PNG of the viewport. A PNG
   //   over CAPTURE_BUDGET answers CaptureTooLarge; it is never retaken smaller (#11211 AC4).
   //   Bounded at 6 s; always detaches, and once it returns no leftover capture reaches a later attachment.
   //   Uses the existing debugger permission only.
   // Test: tests/js/pages.test.mjs `the first png over the budget is refused CaptureTooLarge with no retake`,
+  //   `a screenshot naming an element ref is refused and a moved document is refused`,
   //   `a screenshot whose attach fails on the same document answers DebuggerBusy`,
   //   `a timed-out screenshot sends no capture after it returns`; `png_size_reads_the_ihdr`.
   async function capture(req) {
@@ -1054,14 +1034,9 @@ TrustyPages.commands = deps => {
     }
 
     async function shoot() {
-      const {region: box, metrics} = await viewOf(req, req.ref);
-      const region = box || {x:0, y:0, width:metrics.css_width, height:metrics.css_height};
-      const params = {format:"png", captureBeyondViewport:false};
-      if (box) {
-        params.clip = {x:region.x + metrics.scroll_x, y:region.y + metrics.scroll_y, width:region.width,
-          height:region.height, scale:1};
-      }
-      const shot = await shotOf(params);
+      const metrics = await viewOf(req);
+      const region = {x:0, y:0, width:metrics.css_width, height:metrics.css_height};
+      const shot = await shotOf({format:"png", captureBeyondViewport:false});
       if (typeof shot?.data !== "string") throw new Error("capture");
       // #11211 AC4: the first capture over the budget is refused; no downscale retry.
       if (shot.data.length > CAPTURE_BUDGET) throw refuse("CaptureTooLarge", {tab:req.tab});
@@ -1072,7 +1047,7 @@ TrustyPages.commands = deps => {
   // #11211: the point of a coordinate action, refused StaleCapture when the viewport metrics (read after the
   //   attach, as the capture read them) differ from the capture's, OutOfViewport when it lies outside.
   const atPoint = req => async () => {
-    const {metrics} = await viewOf(req, null);
+    const metrics = await viewOf(req);
     if (!VIEW.every(k => metrics[k] === req.metrics[k])) throw refuse("StaleCapture", {tab:req.tab});
     if (!(req.x < metrics.css_width && req.y < metrics.css_height)) throw refuse("OutOfViewport", {tab:req.tab});
     return {ok:true, x:req.x, y:req.y};
