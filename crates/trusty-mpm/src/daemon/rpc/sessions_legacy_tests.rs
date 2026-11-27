@@ -255,8 +255,9 @@ async fn rpc_router_registers_every_documented_method() {
     );
     assert_eq!(
         METHODS.len(),
-        16,
-        "slice 3 owns sixteen names; a new one needs a row in sessions_legacy.rs's table too"
+        // #12049: `mpm.events.daemon_poll` is the seventeenth.
+        17,
+        "slice 3 owns seventeen names; a new one needs a row in sessions_legacy.rs's table too"
     );
 }
 
