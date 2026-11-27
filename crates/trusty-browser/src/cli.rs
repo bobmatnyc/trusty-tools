@@ -27,7 +27,8 @@ pub const RELOAD_NOTICE: &str =
 
 /// Install and run the per-user Trusty Browser service.
 #[derive(Parser)]
-#[command(name = "trusty-browser")]
+// #11802: `version` makes `--version` print the crate version and exit 0.
+#[command(name = "trusty-browser", version)]
 pub struct Cli {
     /// State directory (default ~/.trusty/browser).
     #[arg(long, global = true)]
