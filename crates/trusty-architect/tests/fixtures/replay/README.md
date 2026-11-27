@@ -207,3 +207,68 @@ $R record --out $D/aliases/list.json --env ALIASES_FILE=aliases.json --seed $S/a
 $R record --clock 1795784400 --out $D/brief-id/check-clean.json --seed $S/local=local -- $P/bi_driver.py check
 $R replay $D/brief-id/*.json -- <target>/debug/examples/replay_port brief-id
 ```
+
+## il_agent (#12028 P1f)
+
+Fifty-one runs of the frozen Python reference, the Architect's
+`il_agent.py`, recorded on 2026-11-27 and replayed in
+`tests/replay_il_agent.rs` against `examples/replay_port.rs il_agent`. Every
+recording is the recorder's capture of the reference's real output; none was
+written or edited by hand. Every input is a sample ledger (code `qx`) and a
+sample R library, built with sample names only. The script reads no time, so
+no recording needs `--clock`, and it writes nothing, so every `writes` is
+empty.
+
+`driver.py` is copied beside the frozen modules (`il_agent.py`, `ilio.py`,
+`datg.py`, `task_tag.py`, `ids36.py`, `il_remind.py`) as `ia_driver.py`.
+`dispatch` prints `python3 <HERE>/il_agent.py`, where `HERE` is the script's
+own directory, outside the sandbox; the driver imports the script, sets
+`HERE` to the working directory (the sandbox root) and runs its `main()`
+unchanged. Each run sets `ILIO_PROJECT=il` and `ILIO_DIR=ilio`, the script's
+own inputs.
+
+| Recording | Case |
+|---|---|
+| `brief-full`, `brief-bare-id`, `brief-other-goal` | A cited D item and R reply, owed rows matched by full and bare ids, the withheld-items line, long and non-ASCII titles, a padded token |
+| `brief-no-created`, `brief-goal-missing` | A task with no creation day; a goal the ledger lacks |
+| `brief-stale-stamp`, `brief-closed`, `brief-unknown`, `brief-badid`, `brief-field`, `brief-no-code` | Every task refusal |
+| `brief-rref-unknown`, `brief-rref-slots`, `brief-extra-field`, `brief-extra-unknown`, `brief-no-library` | Every extra refusal, an absent R library |
+| `brief-empty-ledger` | An empty ledger |
+| `brief-top-project`, `brief-sub-project`, `brief-datg-session`, `brief-legacy-dir`, `brief-state-dir` | `--project` on either parser, `$DATG_SESSION`, the legacy directory, `$DATG_STATE_DIR` |
+| `dispatch-full`, `dispatch-plain`, `dispatch-reject` | The `IL:` line with quoted extras and `--project`, an empty `--ask`, a refusal |
+| `handback-ok`, `handback-file-crlf`, `handback-last-block` | Expansion, pipes in the pulse, `--file` with CRLF, the last of two blocks |
+| `handback-no-block`, `handback-empty-stdin`, `handback-write-field`, `handback-check-reject`, `handback-mismatch`, `handback-bad-expect`, `handback-no-stamp`, `handback-closed` | Every handback refusal, empty input |
+| `handback-no-created`, `handback-pulse-fails` | No pulse: no creation day, a pulse the strict grammar refuses |
+| `state-missing`, `state-empty`, `state-bad-json`, `state-bad-shape` | Ledger errors (exit 2) |
+| `help*`, `bad-arg-*` | argparse paths |
+
+Not recorded: a run with no `$ILIO_PROJECT` or `$ILIO_DIR` reads beside the
+script, outside the sandbox; a missing `--file`, or a ledger row without a
+field the script indexes, ends in a traceback, which the port reduces to its
+last line; a tmux-resolved per-PM ledger needs `$TMUX_PANE`, which the
+recorder clears. `tests/il_agent_smoke.rs` covers the checkout defaults on
+the shipped binary and the tmux lookup through a `Tmux` fake. Without a
+checkout the binary exits 1 when it needs a default; the script has none to
+miss.
+
+Regenerate with the modules and the driver copied to a sandbox directory
+`P` and the sample trees in `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/il_agent
+$R record --out $D/brief-full.json --seed $S/std/il=il --seed $S/std/ilio=ilio \
+  --env ILIO_PROJECT=il --env ILIO_DIR=ilio -- $P/ia_driver.py brief qx-T01@1115 qx-D01 'R01-b sha=abc'
+$R replay $D/*.json -- <target>/debug/examples/replay_port il_agent
+```
+
+The last line ends:
+
+```
+ok   tests/fixtures/replay/il_agent/state-bad-shape.json
+ok   tests/fixtures/replay/il_agent/state-empty.json
+ok   tests/fixtures/replay/il_agent/state-missing.json
+```
+
+PASS: all fifty-one recordings replay clean against the port (exit 0), and
+`il_agent_recordings_replay_clean_against_the_port` reports
+`test result: ok. 1 passed; 0 failed`.

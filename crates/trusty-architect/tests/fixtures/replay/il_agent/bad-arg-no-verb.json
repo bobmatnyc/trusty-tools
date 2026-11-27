@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "argv": [],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: il_agent.py [-h] [--project PROJECT] {brief,dispatch,handback} ...\nil_agent.py: error: the following arguments are required: verb\n",
+  "exit": 2,
+  "writes": {}
+}

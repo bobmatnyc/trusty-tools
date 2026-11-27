@@ -11,7 +11,7 @@
 //! Test: the `bad-arg-*` and `help-*` recordings of `brief-id` and `aliases`
 //! in `tests/replay_writers.rs`.
 
-use crate::argparse::{self, Args, HELP, Nargs, Opt, Parsed, Pos};
+use crate::argparse::{self, Args, Nargs, Opt, Parsed, Pos};
 
 /// One subcommand's parser.
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +37,8 @@ pub(crate) struct Cli {
     pub(crate) usage: &'static str,
     /// The top `-h` text.
     pub(crate) help: &'static str,
+    /// The top parser's options, `-h` first (#12028 P1f: `il_agent.py --project`).
+    pub(crate) top: &'static [Opt],
     /// The subparsers action's dest.
     pub(crate) dest: &'static str,
     /// The command words, in `add_parser` order.
@@ -67,17 +69,38 @@ pub(crate) fn parse(
     args: &[String],
     check: &dyn Fn(usize, usize, &str) -> Result<(), String>,
 ) -> Cmd {
+    parse_top(cli, args, check).0
+}
+
+/// [`parse`], plus what the top parser's own options ([`Cli::top`]) set.
+pub(crate) fn parse_top(
+    cli: &Cli,
+    args: &[String],
+    check: &dyn Fn(usize, usize, &str) -> Result<(), String>,
+) -> (Cmd, Args) {
     let pos = [Pos {
         name: cli.dest,
         nargs: Nargs::Parser,
         choices: cli.names,
         required: cli.required,
     }];
-    let top = match argparse::parse_known(args, &[HELP], &pos, &|_, _| Ok(())) {
+    let top = match argparse::parse_known(args, cli.top, &pos, &|_, _| Ok(())) {
         Parsed::Run(a) => a,
-        Parsed::Help => return Cmd::Help(cli.help),
-        Parsed::Error(m) => return Cmd::Error(argparse::error(cli.usage, cli.prog, &m)),
+        Parsed::Help => return (Cmd::Help(cli.help), Args::default()),
+        Parsed::Error(m) => {
+            let e = Cmd::Error(argparse::error(cli.usage, cli.prog, &m));
+            return (e, Args::default());
+        }
     };
+    let cmd = parse_sub(cli, &top, check);
+    (cmd, top)
+}
+
+fn parse_sub(
+    cli: &Cli,
+    top: &Args,
+    check: &dyn Fn(usize, usize, &str) -> Result<(), String>,
+) -> Cmd {
     let unrecognized = |extras: &[String]| {
         let msg = format!("unrecognized arguments: {}", extras.join(" "));
         Cmd::Error(argparse::error(cli.usage, cli.prog, &msg))
@@ -105,7 +128,7 @@ pub(crate) fn parse(
             return Cmd::Error(argparse::error(sub.usage, &prog, &m));
         }
     };
-    let mut extras = top.extras;
+    let mut extras = top.extras.clone();
     extras.extend(sub_args.extras.iter().cloned());
     if extras.is_empty() {
         Cmd::Run(index, sub_args)

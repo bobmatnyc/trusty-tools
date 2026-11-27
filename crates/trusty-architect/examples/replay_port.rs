@@ -10,24 +10,26 @@
 //! `--root`, so the default root is the current directory. `technical_level`
 //! and `architect_config` are libraries: their entries mirror the recording
 //! drivers `tests/fixtures/replay/<script>/driver.py` line for line, as do
-//! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d), and
-//! `brief-id` (#12028 P1e).
+//! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d),
+//! `brief-id` (#12028 P1e) and `il_agent` (#12028 P1f).
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
 //! `technical_level_recordings_replay_clean_against_the_port`,
 //! `architect_config_recordings_replay_clean_against_the_port`,
 //! `stale_tasks_recordings_replay_clean_against_the_port`, the three
-//! other `tests/replay_tasks.rs` tests and the `tests/replay_writers.rs` tests.
+//! other `tests/replay_tasks.rs` tests, the `tests/replay_writers.rs` tests and
+//! `il_agent_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use trusty_architect::il_agent;
 use trusty_architect::replay::CLOCK_ENV;
 use trusty_architect::spec_drift::{self, Outcome};
 use trusty_architect::tasks::{stale, stalled, timeline::Timeline, wait_check};
 use trusty_architect::writers::{aliases, brief_ids, state_archive};
-use trusty_architect::{Clock, FakeClock, SystemClock};
+use trusty_architect::{Clock, FakeClock, ScriptedTmux, SystemClock};
 use trusty_architect::{architect_config as ac, level_lint, technical_level as tl};
 
 fn out(stdout: String, stderr: String, code: i32) -> Outcome {
@@ -275,13 +277,35 @@ fn main() -> ExitCode {
             let paths = brief_ids::Paths { repo: cwd.clone() };
             brief_ids::cli::run(&rest, &paths, &cwd, clock.as_ref())
         }
+        // See #12028 P1f: `driver.py` sets the script's HERE to the working
+        // directory, so `dispatch` names `<cwd>/il_agent.py`; the sandbox root
+        // stands for the checkout. The recorder clears `TMUX_PANE`, so the
+        // tmux fake is never asked.
+        "il_agent" => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let env = |k: &str| std::env::var(k).ok();
+            let tmux = ScriptedTmux::new();
+            let brief = cwd.join("il_agent.py").to_string_lossy().into_owned();
+            il_agent::cli::run(
+                &rest,
+                &mut il_agent::cli::Options {
+                    checkout: Some(cwd),
+                    ilio_project: env("ILIO_PROJECT"),
+                    ilio_dir: env("ILIO_DIR"),
+                    brief_cmd: vec!["python3".into(), brief],
+                    env: &env,
+                    tmux: &tmux,
+                    stdin: &mut std::io::stdin(),
+                },
+            )
+        }
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
             eprintln!(
                 "replay_port: no port named {other:?}; known: spec_drift_check, level_lint, \
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
-                 il_timeline, state-archive, aliases, brief-id"
+                 il_timeline, state-archive, aliases, brief-id, il_agent"
             );
             return ExitCode::from(2);
         }

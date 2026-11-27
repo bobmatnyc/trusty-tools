@@ -98,6 +98,7 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
 ",
+    top: &[HELP],
     dest: "cmd",
     names: &["next", "assign", "find", "list", "check"],
     required: true,

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "handback"
+  ],
+  "stdin": "",
+  "env": {
+    "ILIO_DIR": "ilio",
+    "ILIO_PROJECT": "il"
+  },
+  "files": {
+    "il/.trusty-mpm/datg/state.json": "{\"code\": \"qx\",",
+    "ilio/r-library.json": "{\n \"R01\": {\n  \"title\": \"Ack\",\n  \"options\": {\n   \"a\": \"Acknowledged.\",\n   \"b\": \"Merged {sha} into main.\"\n  }\n },\n \"R02\": {\n  \"title\": \"Wait\",\n  \"options\": {\n   \"a\": \"Waiting on {who} for {what}.\"\n  }\n }\n}\n"
+  },
+  "reads": [
+    "il/.trusty-mpm/datg/state.json"
+  ],
+  "stdout": "",
+  "stderr": "il_agent: state.json malformed (Expecting property name enclosed in double quotes: line 1 column 15 (char 14)); refusing to write\n",
+  "exit": 2,
+  "writes": {}
+}
