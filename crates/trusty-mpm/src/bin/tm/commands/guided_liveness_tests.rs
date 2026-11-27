@@ -338,7 +338,7 @@ fn unverified_lock_pid_is_evidence_not_absence() {
         let evidence = lock_evidence_for("http://127.0.0.1:47001", &lock, &identify)
             .expect("a live unverified pid is evidence");
         assert!(
-            evidence.contains("remove ~/.trusty-mpm/daemon.lock if no tm daemon is running"),
+            evidence.contains("remove ~/.trusty-mpm/daemon.lock if no tm daemon is running"), // path-literal: allow (display text)
             "the recovery must be named: {evidence}"
         );
     }

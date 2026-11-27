@@ -82,7 +82,7 @@ pub(crate) fn render_standard(
     let mut out = String::new();
 
     out.push_str(
-        "ticketing standard (agents.ticketing in ~/.trusty-tools/trusty-mpm/config.yaml)\n",
+        "ticketing standard (agents.ticketing in ~/.trusty-tools/trusty-mpm/config.yaml)\n", // path-literal: allow (display text)
     );
     out.push_str("\nfixed — configuration cannot change these:\n");
     let _ = writeln!(

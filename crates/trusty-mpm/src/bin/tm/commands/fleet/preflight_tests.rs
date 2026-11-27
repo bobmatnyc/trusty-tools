@@ -9,6 +9,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
+
 use super::super::tests::NO_TMUX;
 use super::super::{init, resolve_dir, user_config_path};
 use super::{DirRefusal, FLEET_SCAN_BUDGET, check, check_with};
@@ -183,7 +186,7 @@ fn a_repository_with_a_remote_is_refused() {
 #[test]
 fn the_projects_root_is_refused_populated_or_not() {
     let s = Scratch::new();
-    let root = s.home().join("trusty-mpm-projects");
+    let root = s.home().join(DEFAULT_WORKSPACE_DIR);
     assert_workspace_parent(s.refused(&root), &root, "projects root");
     s.repo(&root.join("bobmatnyc/trusty-tools"), true);
     assert_workspace_parent(s.refused(&root), &root, "projects root");
@@ -192,7 +195,7 @@ fn the_projects_root_is_refused_populated_or_not() {
 #[test]
 fn an_owner_directory_under_the_projects_root_is_refused() {
     let s = Scratch::new();
-    let owner = s.home().join("trusty-mpm-projects/bobmatnyc");
+    let owner = s.home().join(DEFAULT_WORKSPACE_DIR).join("bobmatnyc");
     s.repo(&owner.join("trusty-tools"), true);
     assert_workspace_parent(s.refused(&owner), &owner, "contains the repository");
 }
@@ -275,7 +278,7 @@ fn a_failing_remote_listing_refuses() {
 
 /// `<home>/.trusty-tools/trusty-mpm/config.yaml` holding `yaml`.
 fn write_tm_config(home: &Path, yaml: &str) -> PathBuf {
-    let config = home.join(".trusty-tools/trusty-mpm/config.yaml");
+    let config = home.join(TOOLS_DIR_NAME).join("trusty-mpm/config.yaml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, yaml).unwrap();
     config
@@ -339,7 +342,7 @@ fn a_broken_install_file_refuses() {
 #[test]
 fn the_tm_config_directory_is_refused() {
     let s = Scratch::new();
-    let config_dir = s.home().join(".trusty-mpm");
+    let config_dir = s.home().join(MPM_DIR_NAME);
     std::fs::create_dir_all(config_dir.join("sub")).unwrap();
     for dir in [
         config_dir.clone(),
@@ -364,7 +367,7 @@ fn a_directory_holding_a_symlinked_tm_config_directory_is_refused() {
     let dotfiles = s.outer().join("dotfiles");
     let real = dotfiles.join("trusty-mpm");
     std::fs::create_dir_all(&real).unwrap();
-    std::os::unix::fs::symlink(&real, s.home().join(".trusty-mpm")).unwrap();
+    std::os::unix::fs::symlink(&real, s.home().join(MPM_DIR_NAME)).unwrap();
     assert_eq!(
         s.refused(&dotfiles),
         DirRefusal::ConfigDir {
@@ -394,7 +397,9 @@ fn the_default_and_a_fresh_directory_pass() {
     let home = s.home();
     // A populated projects root does not block its `architect` child (ruling Q4).
     s.repo(
-        &home.join("trusty-mpm-projects/bobmatnyc/trusty-tools"),
+        &home
+            .join(DEFAULT_WORKSPACE_DIR)
+            .join("bobmatnyc/trusty-tools"),
         true,
     );
     let default = resolve_dir(None, &home).unwrap();
@@ -543,7 +548,7 @@ fn a_private_local_repository_changes_no_other_refusal() {
     s.repo(&home.join("local"), false);
     assert_eq!(s.refused(&home), DirRefusal::Home(home.clone()));
 
-    let config_dir = home.join(".trusty-mpm");
+    let config_dir = home.join(MPM_DIR_NAME);
     s.repo(&config_dir.join("local"), false);
     assert_eq!(
         s.refused(&config_dir),
