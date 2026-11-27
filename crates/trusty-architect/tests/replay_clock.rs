@@ -80,6 +80,25 @@ fn a_clocked_script_replays_clean_against_a_stand_in_that_reads_the_seam() {
 }
 
 #[test]
+fn clock_on_a_program_the_wrapper_cannot_freeze_is_refused() {
+    // A non-`.py` program runs without the wrapper, so a recording would
+    // claim an instant the run never saw.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("sh.json");
+    let o = out.to_str().unwrap();
+    let rec = run(&[
+        "record", "--clock", INSTANT, "--out", o, "--", "/bin/sh", "-c", "date",
+    ]);
+    assert_eq!(rec.status.code(), Some(2), "{}", text(&rec.stderr));
+    assert!(
+        text(&rec.stderr).contains("--clock"),
+        "{}",
+        text(&rec.stderr)
+    );
+    assert!(!out.exists(), "no fixture is written");
+}
+
+#[test]
 fn a_stand_in_that_ignores_the_clock_seam_reports_a_diff() {
     let dir = tempfile::tempdir().unwrap();
     let o = record_clocked(dir.path());

@@ -201,14 +201,16 @@ fn text(bytes: Vec<u8>, field: &str) -> Result<String, ReplayError> {
 ///
 /// Why: see the module doc; `parent_env` is a parameter so a test can prove
 /// a variable outside the allowlist never arrives.
-/// What: refuse an env rule for `HOME` or `PATH` (#12028), then seed, run,
+/// What: refuse an env rule for `HOME` or `PATH`, and a clock on a program
+/// that is not a `.py` script (#12028), then seed, run,
 /// diff the sandbox, scrub, [`check`]. With a clock, `TZ=UTC` joins the env
 /// unless a rule names `TZ`, and the program gets [`CLOCK_ENV`]. Returns the
 /// scrubbed recording; nothing is written.
 /// Test: `record_captures_argv_stdin_env_files_and_writes`,
 /// `record_keeps_env_outside_the_allowlist_out`,
 /// `a_recorded_path_env_cannot_displace_the_fake_stubs`,
-/// `a_clocked_script_replays_clean_against_a_stand_in_that_reads_the_seam`.
+/// `a_clocked_script_replays_clean_against_a_stand_in_that_reads_the_seam`,
+/// `clock_on_a_program_the_wrapper_cannot_freeze_is_refused`.
 pub fn record(
     spec: &RecordSpec,
     parent_env: &BTreeMap<String, String>,
@@ -225,6 +227,14 @@ pub fn record(
     {
         return Err(ReplayError::BadArg(format!(
             "--env {k}: the sandbox sets HOME and PATH itself"
+        )));
+    }
+    // See #12028: only the `.py` probe freezes the clock; a recording must
+    // not claim an instant the program never ran at.
+    if spec.clock.is_some() && spec.program.extension().and_then(|e| e.to_str()) != Some("py") {
+        return Err(ReplayError::BadArg(format!(
+            "--clock: {} is not a .py script, so its clock cannot be frozen",
+            spec.program.display()
         )));
     }
     // Inputs are scrubbed before the run, so the program sees exactly what is
