@@ -4,10 +4,6 @@ crates/trusty-channels/src/policy/fs.rs	2
 crates/trusty-channels/src/policy/tests/load.rs	1
 crates/trusty-channels/src/policy/tests/reload.rs	1
 crates/trusty-channels/src/policy/tests/repo.rs	1
-crates/trusty-code/src/fs_browse/mpm_registry.rs	13
-crates/trusty-code/src/fs_browse/roster.rs	13
-crates/trusty-code/src/mcp/mod.rs	1
-crates/trusty-code/src/mcp/trust.rs	1
 crates/trusty-common/src/catchup/mod.rs	1
 crates/trusty-common/src/catchup/state.rs	2
 crates/trusty-common/src/content/mod.rs	1
