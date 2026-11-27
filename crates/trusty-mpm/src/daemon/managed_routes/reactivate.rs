@@ -202,17 +202,17 @@ async fn finish_detached(
     let task_prior = prior.clone();
     tokio::spawn(async move {
         let (mgr, prior) = (task_mgr, task_prior);
-        let steps = tokio::time::timeout(budget, reactivate_project_and_index(&state, &mgr, &record))
-            .await
-            .unwrap_or_else(|_| {
-                Err(format!(
-                    "session {} ({}): its project and search index did not come back within \
-                     {}s (#12012)",
-                    record.id,
-                    record.tmux_name,
-                    budget.as_secs_f32()
-                ))
-            });
+        let work = reactivate_project_and_index(&state, &mgr, &record);
+        let steps = match tokio::time::timeout(budget, work).await {
+            Ok(steps) => steps,
+            Err(_) => Err(format!(
+                "session {} ({}): its project and search index did not come back within \
+                 {}s (#12012)",
+                record.id,
+                record.tmux_name,
+                budget.as_secs_f32()
+            )),
+        };
         let outcome = match steps {
             Ok(()) => RouteOutcome::ok(&record_to_summary(&record)),
             Err(why) => RouteOutcome::text(500, roll_back(&mgr, prior.as_ref(), why).await),

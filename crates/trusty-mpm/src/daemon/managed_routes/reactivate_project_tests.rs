@@ -331,7 +331,10 @@ async fn a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active(
         .set(search.socket().to_path_buf());
 
     let gave_up = tokio::time::timeout(Duration::from_secs(2), reactivate(&state, &id)).await;
-    assert!(gave_up.is_err(), "premise: the 2 s client budget expires first");
+    assert!(
+        gave_up.is_err(),
+        "premise: the 2 s client budget expires first"
+    );
 
     assert_eq!(
         state_after_settling(&state, &id, SLOW_UNPARK * 4).await,
