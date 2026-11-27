@@ -1003,6 +1003,38 @@ fn the_primary_reset_line_needs_remaining_zero_and_a_secondary_limit_is_never_pr
     }
 }
 
+/// 🔴 #11803: a `retry-after` gh printed (here on stdout, as `gh api -i`
+/// does) is stated on the secondary and unknown-kind lines; with none, the
+/// line names no retry-after.
+#[cfg(unix)]
+#[test]
+fn a_non_primary_refusal_states_the_retry_after_gh_printed() {
+    let headers = format!("printf 'HTTP/2.0 200 OK\\nRetry-After: 60\\n\\n'; {GRAPHQL_REFUSAL}");
+    for (name, lookup) in [
+        ("secondary", rate_limit_answer(4999, 1_795_744_694)),
+        ("unknown kind", "exit 1".to_string()),
+    ] {
+        let (_tmp, dir) = rate_limit_shim(&lookup, &headers);
+        let out = run_shim_args(&dir, &["api", "-i", "graphql", "-f", "query=x"]);
+        assert_eq!(out.status.code(), Some(1), "{name}: {out:?}");
+        assert!(out.stdout.is_empty(), "{name}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{name}: {stderr}");
+        assert!(
+            !stderr.contains("primary GraphQL rate limit"),
+            "{name}: {stderr}"
+        );
+        assert!(
+            stderr.contains("retry after 60 seconds (retry-after)"),
+            "{name}: {stderr}"
+        );
+    }
+    let (_tmp, dir) = rate_limit_shim(&rate_limit_answer(4999, 1_795_744_694), GRAPHQL_REFUSAL);
+    let out = run_shim_args(&dir, &["issue", "list"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("retry-after"), "{stderr}");
+}
+
 /// 🔴 #11233: the shim's own two lines, as the classifiers read them: quota
 /// left is a backoff with no reset, `remaining: 0` sleeps to the real reset.
 #[cfg(unix)]

@@ -335,7 +335,8 @@ pub const RATE_LIMIT_UNKNOWN_KIND_MARKER: &str =
 /// call. With `remaining > 0` it prints one line naming a short-window or
 /// secondary limit and the remaining count (#11233). When the lookup fails or
 /// `remaining` is unreadable it prints [`RATE_LIMIT_UNKNOWN_KIND_MARKER`] and
-/// no reset (#11803). Only `remaining` 0 prints the line naming the primary
+/// no reset (#11803). Both lines state a `retry-after` value gh printed on
+/// stdout or stderr (#11803). Only `remaining` 0 prints the line naming the primary
 /// GraphQL limit and the reset, or "unknown". Each line ends with gh's own first rate-limit
 /// stderr line, verbatim, and the shim exits 1 with no stdout. The call is
 /// never retried. Otherwise it replays stdout, then stderr, and the exit
@@ -352,6 +353,7 @@ pub const RATE_LIMIT_UNKNOWN_KIND_MARKER: &str =
 /// `a_failed_reset_lookup_still_names_the_limit_and_exits_1`,
 /// `a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary`,
 /// `the_primary_reset_line_needs_remaining_zero_and_a_secondary_limit_is_never_primary`,
+/// `a_non_primary_refusal_states_the_retry_after_gh_printed`,
 /// `a_call_with_no_rate_limit_passes_output_and_status_through_unchanged`,
 /// `a_non_rate_limit_graphql_error_passes_through_unchanged`,
 /// `a_large_buffered_output_passes_through_whole`,
@@ -362,7 +364,9 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
     // #11233: one REST lookup reads `remaining` and `reset`; quota left means
     // a short-window limit, not the primary one, and gh's own line is kept.
     // #11803: "primary … resets at" only when `remaining` reads 0; an unread
-    // `remaining` gets the unknown-kind line, never the primary one.
+    // `remaining` gets the unknown-kind line, never the primary one. A
+    // `retry-after` gh printed (`-i` headers, `GH_DEBUG`) is stated on both
+    // non-primary lines.
     format!(
         "[ -t 1 ] && exec \"$real\" \"$@\"\n\
          case \" $* \" in *' --watch '*|*' --watch='*) exec \"$real\" \"$@\" ;; esac\n\
@@ -380,6 +384,8 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          status=$?\n\
          if [ \"$status\" -eq 1 ] && grep -Eq 'API rate limit (already )?exceeded' \"$out/2\" && ! grep -Eq 'HTTP [0-9][0-9][0-9]' \"$out/2\"; then\n\
          \x20 said=$(grep -E -m 1 'API rate limit (already )?exceeded' \"$out/2\")\n\
+         \x20 after=$(grep -h -i -o -E 'retry-after:[[:space:]]*[0-9]+' \"$out/1\" \"$out/2\" | head -n 1 | tr -cd '0-9')\n\
+         \x20 retry=; [ -n \"$after\" ] && retry=\" GitHub asked to retry after $after seconds (retry-after).\"\n\
          \x20 looked=$(\n\
          \x20   \"$real\" api rate_limit --jq .resources.graphql.remaining,.resources.graphql.reset </dev/null 2>/dev/null &\n\
          \x20   pid=$!\n\
@@ -395,15 +401,15 @@ fn rate_limit_tail(login: &str, shown: &str, bound_secs: u64) -> String {
          \x20 if [ \"$#\" -eq 2 ]; then remaining=$1; reset=$2; fi\n\
          \x20 case \"$remaining\" in *[!0-9]*) remaining= ;; esac\n\
          \x20 if [ -n \"$remaining\" ] && [ \"$remaining\" -gt 0 ]; then\n\
-         \x20   printf '%s\\n' \"{RATE_LIMIT_SHORT_WINDOW_MARKER} (gh account '{login}' on {shown}); the hourly GraphQL quota still has $remaining points left, so this is not the primary limit. tm did not retry it. gh said: $said\" >&2\n\
+         \x20   printf '%s\\n' \"{RATE_LIMIT_SHORT_WINDOW_MARKER} (gh account '{login}' on {shown}); the hourly GraphQL quota still has $remaining points left, so this is not the primary limit.$retry tm did not retry it. gh said: $said\" >&2\n\
          \x20   exit 1\n\
          \x20 fi\n\
          \x20 if [ -z \"$remaining\" ]; then\n\
-         \x20   printf '%s\\n' \"{RATE_LIMIT_UNKNOWN_KIND_MARKER} (gh account '{login}' on {shown}); gh api rate_limit did not answer with the remaining quota, so tm cannot tell the primary limit from a secondary one. tm did not retry it. gh said: $said\" >&2\n\
+         \x20   printf '%s\\n' \"{RATE_LIMIT_UNKNOWN_KIND_MARKER} (gh account '{login}' on {shown}); gh api rate_limit did not answer with the remaining quota, so tm cannot tell the primary limit from a secondary one.$retry tm did not retry it. gh said: $said\" >&2\n\
          \x20   exit 1\n\
          \x20 fi\n\
          \x20 case \"$reset\" in\n\
-         \x20   ''|*[!0-9]*) when='the reset time is unknown (gh api rate_limit did not answer)' ;;\n\
+         \x20   ''|*[!0-9]*) when='the reset time is unknown (gh api rate_limit gave no reset)' ;;\n\
          \x20   *) utc=$(date -u -r \"$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u -d \"@$reset\" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)\n\
          \x20      when=\"it resets at ${{utc:-an unknown UTC time}} {RATE_LIMIT_RESET_EPOCH_OPEN}$reset)\" ;;\n\
          \x20 esac\n\
