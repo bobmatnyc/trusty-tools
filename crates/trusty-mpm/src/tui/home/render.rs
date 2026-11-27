@@ -158,17 +158,23 @@ pub fn service_lines(id: ServiceId, state: &HomeState) -> Vec<Line<'static>> {
 /// the output does not depend on `serde_json`'s map order. A plain object
 /// expands one indent deeper; a `by_*` object becomes a table (see
 /// [`breakdown_lines`]). Objects deeper than [`MAX_METRIC_DEPTH`] are
-/// summarised, and the whole list stops at [`MAX_METRIC_LINES`].
+/// summarised. A list longer than [`MAX_METRIC_LINES`] ends in a
+/// `… N more lines` row.
 /// Test: `by_breakdowns_render_as_nested_tables_snapshot`,
 /// `a_long_breakdown_keeps_the_top_entries_and_counts_the_rest`,
-/// `service_view_draws_breakdown_rows`.
+/// `service_view_draws_breakdown_rows`, `a_cut_metrics_list_says_how_much_it_hides`.
 pub fn metric_lines(metrics: &Value) -> Vec<String> {
     let Some(object) = metrics.as_object() else {
         return vec![format!("  {metrics}")];
     };
     let mut lines = Vec::new();
     field_lines(object.iter().collect(), 1, &mut lines);
-    lines.truncate(MAX_METRIC_LINES);
+    // #10908: a cut list says so, or a later breakdown vanishes unnoticed.
+    if lines.len() > MAX_METRIC_LINES {
+        let hidden = lines.len() - (MAX_METRIC_LINES - 1);
+        lines.truncate(MAX_METRIC_LINES - 1);
+        lines.push(format!("  … {hidden} more lines"));
+    }
     lines
 }
 

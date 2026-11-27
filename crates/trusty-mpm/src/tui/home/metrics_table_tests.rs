@@ -80,6 +80,18 @@ fn a_long_breakdown_keeps_the_top_entries_and_counts_the_rest() {
     assert_eq!(metric_lines(&metrics), expected);
 }
 
+/// Past the line cap the list ends in a row counting what it hid, so a later
+/// breakdown is never dropped without a trace.
+#[test]
+fn a_cut_metrics_list_says_how_much_it_hides() {
+    let fields: serde_json::Map<String, Value> =
+        (0..50).map(|i| (format!("f{i:02}"), json!(i))).collect();
+    let lines = metric_lines(&Value::Object(fields));
+    assert_eq!(lines.len(), 40, "{lines:?}");
+    assert_eq!(lines[38], "  f38: 38");
+    assert_eq!(lines[39], "  … 11 more lines");
+}
+
 /// The drawn service view carries the table rows, not the old summary.
 #[test]
 fn service_view_draws_breakdown_rows() {
