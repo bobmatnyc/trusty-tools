@@ -63,6 +63,20 @@ pub const ROOT_TOKEN: &str = "{ROOT}";
 /// The fixed `PATH` both sides run under; the parent's `PATH` is never recorded.
 pub const SANDBOX_PATH: &str = "/usr/bin:/bin";
 
+/// Whether a written file named `name` (a basename) is left out of a
+/// written-file comparison: the store lock `.lock` and the change logs
+/// (`changes*`).
+///
+/// Why: the frozen Python store writes no change log, and the Rust store
+/// writes one by design (LDG-2.8.3); `tests/dashboard_log.rs` covers the log
+/// (#12087, option A). One definition serves the golden test and replay.
+/// What: true for `.lock` and for a name starting with `changes`.
+/// Test: `dashboard_writer_matches_prototype_bytes`,
+/// `gh_session_track_recordings_replay_clean_against_the_port`.
+pub fn skip_written_file(name: &str) -> bool {
+    name == ".lock" || name.starts_with("changes")
+}
+
 /// One recorded script run. Every path is relative to [`ROOT_TOKEN`].
 ///
 /// Invariant: a recording read through [`load`] or written through [`save`]

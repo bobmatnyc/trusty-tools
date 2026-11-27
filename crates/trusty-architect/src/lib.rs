@@ -30,7 +30,8 @@
 //! #12028 P1e adds [`writers`], ports of the Architect's state writers
 //! (`state-archive.py`, `brief-id.py`, `aliases.py`) and their binaries.
 //! #12028 P1f adds [`il_agent`], the dispatched agents' read-only ledger
-//! access, and its binary.
+//! access, and its binary. #12087 adds [`gh_session_track`], the
+//! `gh-session-track.py` port and its binary.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
@@ -46,6 +47,7 @@ pub mod dashboard;
 mod decimal_table;
 mod error;
 mod fake;
+pub mod gh_session_track; // See #12087
 mod input;
 // #11821 P4-f2: the local install.toml reader, parity-tested against trusty-common.
 pub mod install_paths;

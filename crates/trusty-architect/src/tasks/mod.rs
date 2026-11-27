@@ -14,7 +14,7 @@
 
 pub mod stale;
 pub mod stalled;
-mod store_read;
+pub(crate) mod store_read; // #12087: gh-session-track reads the store the same way
 pub mod timeline;
 pub mod wait_check;
 

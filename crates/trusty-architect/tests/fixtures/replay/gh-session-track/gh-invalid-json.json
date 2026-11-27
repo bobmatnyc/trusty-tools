@@ -1,0 +1,122 @@
+{
+  "version": 3,
+  "argv": [
+    "--repo",
+    "example-org/example-repo",
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\"\n    }\n  }\n}\n",
+    "q/sessions/alpha.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"note\": \"kept\"\n  },\n  \"name\": \"alpha\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 1\n}\n",
+    "q/sessions/beta-01.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"name\": \"beta-01\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 1\n}\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "gh-session-track: gh issue list returned invalid JSON: Expecting value: line 1 column 1 (char 0)\n",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "open",
+            "-L",
+            "200",
+            "--json",
+            "number,title,url,isDraft,labels,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,updatedAt"
+          ],
+          "stdout": "[]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "issue",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "open",
+            "-L",
+            "1000",
+            "--json",
+            "number,title,url,labels"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "pr",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "merged",
+            "--search",
+            "merged:>=2026-11-20",
+            "-L",
+            "1000",
+            "--json",
+            "number,labels,mergedAt,title,headRefName,closingIssuesReferences"
+          ],
+          "stdout": "[]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues?state=closed&since=2026-11-20T13:00:00Z&per_page=100",
+            "--paginate",
+            "--slurp"
+          ],
+          "stdout": "[]\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "open",
+        "-L",
+        "200",
+        "--json",
+        "number,title,url,isDraft,labels,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,updatedAt"
+      ],
+      [
+        "gh",
+        "issue",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "open",
+        "-L",
+        "1000",
+        "--json",
+        "number,title,url,labels"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

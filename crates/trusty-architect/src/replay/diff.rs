@@ -11,7 +11,8 @@
 //! fakes replays with the same stubs first on `PATH`, and its call list is
 //! one more channel (#12028). A recording with a clock replays with its
 //! instant in [`super::CLOCK_ENV`], which a `.py` target's probe freezes on
-//! and a Rust replay entry point reads (#12028).
+//! and a Rust replay entry point reads (#12028). Written files that
+//! [`super::skip_written_file`] names are compared on neither side (#12087).
 //! Test: `replay_reports_a_one_byte_change_in_each_channel`,
 //! `replay_of_an_unchanged_program_is_clean`.
 
@@ -24,7 +25,7 @@ use super::fakes::{FakeDir, calls_diff};
 use super::record::{Python, run_scrubber};
 use super::sandbox::{Sandbox, changes};
 use super::scrub::leaks;
-use super::{CLOCK_ENV, Recording, ReplayError};
+use super::{CLOCK_ENV, Recording, ReplayError, skip_written_file};
 
 /// Longest excerpt, in bytes, of a differing line shown in a [`Mismatch`].
 const EXCERPT: usize = 100;
@@ -206,7 +207,14 @@ pub fn replay(
         .into_iter()
         .map(|(k, v)| (scrub.text(&k), v.map(as_text)))
         .collect();
-    let keys: BTreeSet<&String> = rec.writes.keys().chain(got_writes.keys()).collect();
+    // #12087: the store lock and change logs are compared on neither side.
+    let compared = |k: &&String| !skip_written_file(k.rsplit('/').next().unwrap_or(k));
+    let keys: BTreeSet<&String> = rec
+        .writes
+        .keys()
+        .chain(got_writes.keys())
+        .filter(compared)
+        .collect();
     for k in keys {
         let file = Channel::File(k.clone());
         match (rec.writes.get(k), got_writes.get(k)) {
