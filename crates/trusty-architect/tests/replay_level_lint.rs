@@ -35,6 +35,7 @@ fn level_lint_recordings_replay_clean_against_the_port() {
         names,
         [
             "abbrev-and-dashes.json",
+            "bad-arg-ambiguous.json",
             "bad-arg-explicit.json",
             "bad-arg-missing-value.json",
             "bad-arg-option-in-text.json",

@@ -9,9 +9,22 @@
 //! its position match. [`PyValue::Dict`] keeps first-insertion order with the
 //! last value of a repeated key, as `dict(pairs)` does.
 //! Known gap: a lone surrogate escape becomes U+FFFD (Rust strings cannot
-//! hold one); nesting past Python's recursion limit is not refused.
+//! hold one). Nesting deeper than [`MAX_DEPTH`] arrays and objects is an
+//! error (#12028: a recursive scan must not overflow the stack); Python 3.14
+//! decodes deeper and raises `RecursionError` near 200,000 levels.
 //! Test: `architect_config_recordings_replay_clean_against_the_port`
-//! (`bad-json-*` recordings), `loads_matches_python_errors`.
+//! (`bad-json-*` recordings), `loads_matches_python_errors`,
+//! `deep_nesting_is_a_config_error_not_a_crash`,
+//! `many_keys_load_in_linear_time_last_wins`.
+
+use std::collections::HashMap;
+
+/// The deepest nesting of arrays and objects [`loads`] decodes. Each level
+/// costs two stack frames, so 1,000 levels fit a 2 MiB thread stack in a
+/// debug build with room to spare; no instance config nests past a handful.
+pub(crate) const MAX_DEPTH: usize = 1000;
+
+const TOO_DEEP: &str = "Nesting deeper than 1000 arrays and objects";
 
 /// A Python integer from JSON text.
 #[derive(Debug, Clone, PartialEq)]
@@ -86,7 +99,7 @@ pub(crate) fn loads(text: &str) -> Result<PyValue, DecodeError> {
         }
         i
     };
-    let (value, end) = match scan(&s, skip(0)) {
+    let (value, end) = match scan(&s, skip(0), 0) {
         Ok(v) => v,
         Err(Fail::Stop(i)) => return Err(error(&s, "Expecting value", i)),
         Err(Fail::Msg(m, i)) => return Err(error(&s, m, i)),
@@ -104,7 +117,7 @@ fn word(s: &[char], i: usize, w: &str) -> bool {
 }
 
 /// `scan_once_unicode`: the value at `i` and the index after it.
-fn scan(s: &[char], i: usize) -> Result<(PyValue, usize), Fail> {
+fn scan(s: &[char], i: usize, depth: usize) -> Result<(PyValue, usize), Fail> {
     let Some(&c) = s.get(i) else {
         return Err(Fail::Stop(i));
     };
@@ -118,8 +131,10 @@ fn scan(s: &[char], i: usize) -> Result<(PyValue, usize), Fail> {
     ];
     match c {
         '"' => return string(s, i + 1).map(|(v, e)| (PyValue::Str(v), e)),
-        '{' => return object(s, i + 1),
-        '[' => return array(s, i + 1),
+        // #12028: bounded recursion; the error names the opening bracket.
+        '{' | '[' if depth >= MAX_DEPTH => return Err(Fail::Msg(TOO_DEEP, i)),
+        '{' => return object(s, i + 1, depth + 1),
+        '[' => return array(s, i + 1, depth + 1),
         _ => {}
     }
     for (w, first) in constant {
@@ -268,8 +283,10 @@ fn skip_ws(s: &[char], mut i: usize) -> usize {
 }
 
 /// `_parse_object_unicode` from just after `{`.
-fn object(s: &[char], i: usize) -> Result<(PyValue, usize), Fail> {
+fn object(s: &[char], i: usize, depth: usize) -> Result<(PyValue, usize), Fail> {
     let mut pairs: Vec<(String, PyValue)> = Vec::new();
+    // #12028: key to its slot in `pairs`, so a repeated key is O(1).
+    let mut slots: HashMap<String, usize> = HashMap::new();
     let mut i = skip_ws(s, i);
     if s.get(i) != Some(&'}') {
         loop {
@@ -285,10 +302,13 @@ fn object(s: &[char], i: usize) -> Result<(PyValue, usize), Fail> {
                 return Err(Fail::Msg("Expecting ':' delimiter", i));
             }
             i = skip_ws(s, i + 1);
-            let (val, next) = scan(s, i)?;
-            match pairs.iter_mut().find(|(k, _)| *k == key) {
-                Some(slot) => slot.1 = val,
-                None => pairs.push((key, val)),
+            let (val, next) = scan(s, i, depth)?;
+            match slots.get(&key) {
+                Some(&at) => pairs[at].1 = val,
+                None => {
+                    slots.insert(key.clone(), pairs.len());
+                    pairs.push((key, val));
+                }
             }
             i = skip_ws(s, next);
             if s.get(i) == Some(&'}') {
@@ -311,12 +331,12 @@ fn object(s: &[char], i: usize) -> Result<(PyValue, usize), Fail> {
 }
 
 /// `_parse_array_unicode` from just after `[`.
-fn array(s: &[char], i: usize) -> Result<(PyValue, usize), Fail> {
+fn array(s: &[char], i: usize, depth: usize) -> Result<(PyValue, usize), Fail> {
     let mut items = Vec::new();
     let mut i = skip_ws(s, i);
     if s.get(i) != Some(&']') {
         loop {
-            let (val, next) = scan(s, i)?;
+            let (val, next) = scan(s, i, depth)?;
             items.push(val);
             i = skip_ws(s, next);
             if s.get(i) == Some(&']') {

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "--strict",
+    "--=x",
+    "-h"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: level_lint.py [-h] [--level LEVEL] [--strict] [--file FILE] [text ...]\nlevel_lint.py: error: ambiguous option: --=x could match --help, --level, --strict, --file\n",
+  "exit": 2,
+  "writes": {}
+}

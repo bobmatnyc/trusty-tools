@@ -54,3 +54,19 @@ fn shipped_level_lint_command_warns_and_exits_like_the_script() {
         "{stderr}"
     );
 }
+
+// See #12028: a stdin read error must not read as empty text, which would
+// pass `--strict`.
+#[test]
+fn a_stdin_that_cannot_be_read_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(BIN)
+        .args(["--level", "pm", "--strict"])
+        .stdin(std::fs::File::open(dir.path()).unwrap())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(out.stdout.is_empty());
+    assert!(stderr.starts_with("IsADirectoryError: [Errno "), "{stderr}");
+}

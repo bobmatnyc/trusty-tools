@@ -141,19 +141,22 @@ fn done(stdout: String, stderr: String, code: i32) -> Outcome {
 }
 
 /// `open(path, encoding="utf-8").read()`: universal newlines.
+/// The last traceback line of the `OSError` Python raises for `e`.
+fn os_error(e: &std::io::Error) -> String {
+    let class = match e.kind() {
+        std::io::ErrorKind::NotFound => "FileNotFoundError",
+        std::io::ErrorKind::PermissionDenied => "PermissionError",
+        std::io::ErrorKind::IsADirectory => "IsADirectoryError",
+        _ => "OSError",
+    };
+    let errno = e.raw_os_error().unwrap_or(0);
+    let why = e.to_string();
+    let why = why.split(" (os error").next().unwrap_or(&why).to_owned();
+    format!("{class}: [Errno {errno}] {why}")
+}
+
 fn read_text(path: &str) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        let class = match e.kind() {
-            std::io::ErrorKind::NotFound => "FileNotFoundError",
-            std::io::ErrorKind::PermissionDenied => "PermissionError",
-            std::io::ErrorKind::IsADirectory => "IsADirectoryError",
-            _ => "OSError",
-        };
-        let errno = e.raw_os_error().unwrap_or(0);
-        let why = e.to_string();
-        let why = why.split(" (os error").next().unwrap_or(&why).to_owned();
-        format!("{class}: [Errno {errno}] {why}: {}", py_repr(path))
-    })?;
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", os_error(&e), py_repr(path)))?;
     let text = String::from_utf8(bytes).map_err(|_| "UnicodeDecodeError".to_owned())?;
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
@@ -163,8 +166,10 @@ fn read_text(path: &str) -> Result<String, String> {
 /// Why: the shipped binary and the replay entry share one body, so the
 /// replayed code is the shipped code (#12028 D6a).
 /// What: see the module doc. A file the script could not open ends the run
-/// with exit 1 and the exception's last traceback line on stderr.
-/// Test: `level_lint_recordings_replay_clean_against_the_port`.
+/// with exit 1 and the exception's last traceback line on stderr; so does
+/// a stdin that cannot be read.
+/// Test: `level_lint_recordings_replay_clean_against_the_port`,
+/// `a_stdin_that_cannot_be_read_fails_closed`.
 pub fn run(args: &[String], stdin: &mut dyn Read, opts: &Options) -> Outcome {
     let usage = argparse::usage(&opts.prog, USAGE_REST);
     let a = match argparse::parse(args, &OPTS, true) {
@@ -182,12 +187,13 @@ pub fn run(args: &[String], stdin: &mut dyn Read, opts: &Options) -> Outcome {
         },
         _ if !a.positionals.is_empty() => a.positionals.join(" "),
         _ => {
-            let mut s = String::new();
+            // #12028: a failed read is the script's OSError, never empty text
+            // (an empty text would pass `--strict`).
             let mut raw = Vec::new();
-            if stdin.read_to_end(&mut raw).is_ok() {
-                s = String::from_utf8_lossy(&raw).into_owned();
+            if let Err(e) = stdin.read_to_end(&mut raw) {
+                return done(String::new(), format!("{}\n", os_error(&e)), 1);
             }
-            s
+            String::from_utf8_lossy(&raw).into_owned()
         }
     };
     let level: String = match level {

@@ -208,8 +208,10 @@ struct State<'a> {
 }
 
 impl State<'_> {
+    /// An `O` in argparse's pattern; an ambiguous prefix is one too, so the
+    /// consume loop reaches it and raises its error (#12028).
     fn is_opt(&self, i: usize) -> bool {
-        matches!(self.kinds.get(i), Some(Kind::Opt(..)))
+        matches!(self.kinds.get(i), Some(Kind::Opt(..) | Kind::Ambiguous(_)))
     }
 
     /// The consume loop; `Ok(true)` when `-h` was taken.
@@ -353,4 +355,44 @@ pub(crate) fn usage(prog: &str, rest: &str) -> String {
 /// The stderr text of an argparse error.
 pub(crate) fn error(usage_line: &str, prog: &str, msg: &str) -> String {
     format!("{usage_line}{prog}: error: {msg}\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPEC_DRIFT: [Opt; 3] = [
+        HELP,
+        Opt {
+            long: "--root",
+            short: None,
+            value: true,
+        },
+        Opt {
+            long: "--no-log",
+            short: None,
+            value: false,
+        },
+    ];
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    // See #12028: the message the frozen `spec_drift_check.py` prints under
+    // Python 3.14.8 for `--=x` and `--no-log --=x -h` (exit 2 for both).
+    #[test]
+    fn an_ambiguous_prefix_is_an_error_before_a_later_help() {
+        let want =
+            Parsed::Error("ambiguous option: --=x could match --help, --root, --no-log".into());
+        assert_eq!(parse(&argv(&["--=x"]), &SPEC_DRIFT, false), want);
+        assert_eq!(
+            parse(&argv(&["--no-log", "--=x", "-h"]), &SPEC_DRIFT, false),
+            want
+        );
+        assert_eq!(
+            parse(&argv(&["-h", "--=x"]), &SPEC_DRIFT, false),
+            Parsed::Help
+        );
+    }
 }

@@ -7,12 +7,12 @@ a fixture holding a home path or a secret-shaped value fails the suite.
 
 ## level_lint
 
-Fifteen runs of the Architect's `level_lint.py`, replayed in
+Sixteen runs of the Architect's `level_lint.py`, replayed in
 `tests/replay_level_lint.rs` against `examples/replay_port.rs level_lint`
 (the port, `trusty_architect::level_lint`; #12028 P1c retired the #12026
 stand-in). The first three (`pm-strict-file`, `unknown-level-stdin`,
 `engineer-quiet`) are #12026's and still replay clean against the frozen
-Python reference; the other twelve were recorded from it on 2026-11-27. No recording
+Python reference; the other thirteen were recorded from it on 2026-11-27. No recording
 needs `--clock`: the script reads no time.
 
 | Recording | Case |
