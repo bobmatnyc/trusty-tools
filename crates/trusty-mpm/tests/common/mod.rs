@@ -398,11 +398,25 @@ pub fn stage_repo_content(home: &Path) {
     if cache.join(LOCK_FILE_NAME).exists() {
         return;
     }
+    let bytes = repo_content_bundle(TAG, |_, _| {});
+    std::fs::create_dir_all(&cache).expect("content cache");
+    let lock = ContentLock::new(TAG, Sha256Digest::of_bytes(&bytes)).expect("lock");
+    std::fs::write(cache.join(lock.bundle_file_name()), &bytes).expect("bundle");
+    lock.store(&cache.join(LOCK_FILE_NAME)).expect("store lock");
+}
+
+/// The checkout's `content/` tree as a `<tag>` bundle, the layout
+/// [`stage_repo_content`] stages.
+///
+/// What: every file under `content/{agents,skills,instructions}`, dot-files
+/// skipped, keyed by its bundle path; `edit` sees each path and its bytes
+/// before they are packed (#11700: a later release's changed text).
+pub fn repo_content_bundle(tag: &str, edit: impl Fn(&str, &mut Vec<u8>)) -> Vec<u8> {
     // #9298: the runtime checkout, never the compile-time build path.
     let repo = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let mut entries: Vec<(String, Vec<u8>)> = vec![(
         "bundle-manifest.toml".to_string(),
-        format!("tag = \"{TAG}\"\nschema_major = 1\n").into_bytes(),
+        format!("tag = \"{tag}\"\nschema_major = 1\n").into_bytes(),
     )];
     // #9012: every class, recursively; dot-files never reach a bundle.
     fn walk(dir: &Path, key: &str, out: &mut Vec<(String, Vec<u8>)>) {
@@ -424,19 +438,16 @@ pub fn stage_repo_content(home: &Path) {
     }
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut tar = tar::Builder::new(gz);
-    for (path, data) in &entries {
+    for (path, data) in &mut entries {
+        edit(path, data);
         let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(0o644);
         header.set_entry_type(tar::EntryType::Regular);
-        tar.append_data(&mut header, path, data.as_slice())
+        tar.append_data(&mut header, path.as_str(), data.as_slice())
             .expect("append");
     }
-    let bytes = tar.into_inner().expect("tar").finish().expect("gzip");
-    std::fs::create_dir_all(&cache).expect("content cache");
-    let lock = ContentLock::new(TAG, Sha256Digest::of_bytes(&bytes)).expect("lock");
-    std::fs::write(cache.join(lock.bundle_file_name()), &bytes).expect("bundle");
-    lock.store(&cache.join(LOCK_FILE_NAME)).expect("store lock");
+    tar.into_inner().expect("tar").finish().expect("gzip")
 }
 
 /// Pins the default layout every migrated test builds through the constants (#11821 P7).
