@@ -38,7 +38,7 @@ impl CodeIndexer {
         let ids = tokio::task::spawn_blocking(move || corpus.list_chunk_ids())
             .await
             .map_err(|e| anyhow!("the corpus chunk id read did not finish ({e})"))?
-            .context("read the corpus chunk ids a deferred-embed pass owes")?;
+            .context("the corpus chunk ids could not be read for the deferred-embed plan")?;
         Ok(ids.into_iter().collect())
     }
 
