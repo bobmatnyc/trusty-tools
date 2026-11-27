@@ -271,6 +271,108 @@ async fn a_failed_unpark_on_auto_resume_is_warned_and_the_launch_still_runs() {
         warned.is_some_and(|l| l.contains("WARN")),
         "the failed unpark must be logged at WARN, naming the index: {lines:#?}"
     );
+    // #11969 criterion 3: the warning names the project, not only the index.
+    assert!(
+        warned.is_some_and(|l| l.contains("project=widget")),
+        "the failed unpark's WARN must name the project: {lines:#?}"
+    );
+}
+
+/// #11969 criterion 1: auto-resume of a session a decommission stopped clears
+/// `decommissioned_at` and `archived_at` on the project the session binds to,
+/// by `spawn_managed`'s rule, and leaves an unbound project alone.
+/// Test: this function IS the test. Fails if `DaemonRelauncher::relaunch`
+/// does not run `ProjectRegistry::reactivate_for_session`.
+#[tokio::test]
+async fn an_auto_resume_after_a_decommission_reactivates_the_bound_project() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session(dir.path()).await;
+    let parked: Parked = Arc::default();
+    let rig = decommission(&state, &id, &parked).await;
+    let registry = state.project_registry().await;
+    registry
+        .mark_archived("widget", chrono::Utc::now())
+        .await
+        .expect("archive widget");
+    registry
+        .register(Project {
+            name: "gadget".into(),
+            repo_url: "https://github.com/acme/gadget".into(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: Some("acme/gadget".into()),
+            decommissioned_at: Some(chrono::Utc::now()),
+            archived_at: None,
+        })
+        .await
+        .expect("register gadget");
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(rig.search_socket());
+
+    // The refused launch line fails the relaunch; the reactivation ran first.
+    let _ = auto_resume_logged(&state, &id).await;
+
+    let widget = registry.get("widget").await.expect("widget row");
+    assert!(
+        !widget.is_decommissioned() && !widget.is_archived(),
+        "auto-resume left the bound project decommissioned/archived: {widget:?}"
+    );
+    assert!(
+        registry
+            .get("gadget")
+            .await
+            .expect("gadget row")
+            .is_decommissioned(),
+        "auto-resume reactivated a project the session does not bind to"
+    );
+}
+
+/// #11969 criterion 3 Fail-Open Check: a reactivation that fails on
+/// auto-resume is logged at WARN naming the project, and the launch still
+/// runs: the relaunch outcome is the launch's own.
+/// Test: this function IS the test. Fails if the relauncher skips the
+/// reactivation, drops its error silently, or aborts the launch on it.
+#[tokio::test]
+async fn a_failed_reactivation_on_auto_resume_is_warned_and_the_launch_still_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session(dir.path()).await;
+    let parked: Parked = Arc::default();
+    let rig = decommission(&state, &id, &parked).await;
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(rig.search_socket());
+    // An unreadable registry fails `reactivate_for_session`'s list.
+    let projects =
+        crate::project::registry_data_dir_under(state.framework_root()).join("projects.json");
+    std::fs::write(&projects, "{ not json").expect("corrupt the registry");
+
+    let (got, lines) = auto_resume_logged(&state, &id).await;
+
+    let err = got.expect_err("the refused launch line fails the relaunch");
+    assert!(
+        err.contains("spawn_resume failed"),
+        "the outcome must be the launch's own, so the launch ran: {err}"
+    );
+    let warned = lines
+        .iter()
+        .find(|l| l.contains("not be reactivated") && l.contains("project=widget"));
+    assert!(
+        warned.is_some_and(|l| l.contains("WARN")),
+        "the failed reactivation must be logged at WARN, naming the project: {lines:#?}"
+    );
 }
 
 /// #11230 criterion 4: auto-resume of a project that was never decommissioned

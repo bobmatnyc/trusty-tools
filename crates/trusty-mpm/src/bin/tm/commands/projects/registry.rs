@@ -131,13 +131,11 @@ pub(crate) async fn register(client: &DaemonClient, input: RegisterInput) -> any
         // configurator-only fields have no `register` flag either).
         worktree: None,
     };
-    let project = client.registry_register_project(&args).await?;
-    println!(
-        "registered project '{}' ({} @ {})",
-        project.name,
-        trusty_mpm::core::remote_url_redact::redact_stored_url(&project.repo_url),
-        project.default_branch
-    );
+    // #11969: keep the daemon's reason a decommissioned project stays inactive.
+    let registered = client.registry_register_project_with_reason(&args).await?;
+    for line in register_report_lines(&registered.project, registered.inactive_reason.as_deref()) {
+        println!("{line}");
+    }
     // #7166 review follow-up: a successful upsert that REPLACES a previously
     // pinned account is a fact worth a visible trail, not just a failure warning.
     if let Some(line) = account_change_log_line(
@@ -597,6 +595,27 @@ pub(crate) fn render_project_line(p: &Project) -> String {
     )
 }
 
+/// The lines `tm projects register` prints for one registered project.
+///
+/// Why: #11969 — registering a decommissioned project leaves it inactive, and
+/// the operator must see the daemon's reason, which says how to reactivate it.
+/// What: the `registered project '<name>' (<redacted url> @ <branch>)` line,
+/// then `  note: <reason>` when the daemon sent one.
+/// Test: `register_report_lines_print_the_inactive_reason`,
+/// `register_report_lines_for_an_active_project_print_no_reason`.
+fn register_report_lines(project: &Project, inactive_reason: Option<&str>) -> Vec<String> {
+    let mut lines = vec![format!(
+        "registered project '{}' ({} @ {})",
+        project.name,
+        redact_stored_url(&project.repo_url),
+        project.default_branch
+    )];
+    if let Some(reason) = inactive_reason {
+        lines.push(format!("  note: {reason}"));
+    }
+    lines
+}
+
 /// Render the status rollup as human lines.
 ///
 /// Why: `tm projects status` prints a small multi-line rollup; a pure function of
@@ -668,6 +687,30 @@ mod tests {
         assert!(line.contains("https://github.com/acme/widget"));
         assert!(line.contains("main"));
         assert!(!line.contains("decommissioned"), "{line}");
+    }
+
+    /// #11969: a register of a decommissioned project prints the success line
+    /// AND the daemon's reason, so the operator learns how to reactivate it.
+    #[test]
+    fn register_report_lines_print_the_inactive_reason() {
+        let reason = "project widget is decommissioned; start a session for it";
+        let lines = register_report_lines(&project(), Some(reason));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("registered project 'widget' ("),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains(reason), "{lines:?}");
+    }
+
+    /// #11969: an active project's register prints the success line only.
+    #[test]
+    fn register_report_lines_for_an_active_project_print_no_reason() {
+        let lines = register_report_lines(&project(), None);
+        assert_eq!(
+            lines,
+            vec!["registered project 'widget' (https://github.com/acme/widget @ main)".to_string()]
+        );
     }
 
     #[test]
