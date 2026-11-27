@@ -740,11 +740,13 @@ async fn server_doctor_reports_backends_and_paths_only() {
             ("vercel", false, String::new(), Some(cli)),
         ]
     );
-    assert!(
-        bare.backends
-            .iter()
-            .all(|b| b.available == b.detail.is_none())
-    );
+    // #11786: the available Keychain row's detail says no control item was
+    // read (nothing is indexed here); every other row keeps a detail only
+    // when unavailable.
+    let (keychain, others) = bare.backends.split_at(1);
+    let note = keychain[0].detail.as_deref().unwrap_or_default();
+    assert!(note.contains("no existing Keychain control item was read"));
+    assert!(others.iter().all(|b| b.available == b.detail.is_none()));
     assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
     let with_project: DoctorResponse = serde_json::from_value(ok(call(

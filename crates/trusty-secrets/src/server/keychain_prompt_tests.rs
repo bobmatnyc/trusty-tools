@@ -17,7 +17,7 @@ const LIMIT: Duration = Duration::from_millis(300);
 const VAULT: &str = "trusty/acme/web";
 
 /// A Keychain double whose control-item reads block until the sender
-/// [`HungControls::new`] returns is dropped, as a read of an item an older
+/// [`HungControls::limited`] returns is dropped, as a read of an item an older
 /// binary created does while its access prompt waits. Other calls answer
 /// from memory.
 #[derive(Debug)]
@@ -28,7 +28,7 @@ struct HungControls {
 
 impl HungControls {
     /// The double behind [`TimeLimited`] at [`LIMIT`], and its release.
-    fn new() -> (Arc<dyn SecretBackend>, std::sync::mpsc::Sender<()>) {
+    fn limited() -> (Arc<dyn SecretBackend>, std::sync::mpsc::Sender<()>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let hung = Arc::new(Self {
             inner: MemoryBackend::new(),
@@ -116,7 +116,7 @@ async fn keychain_row(fx: &Fixture) -> BackendStatus {
 async fn doctor_keychain_row_names_a_pending_authorization_when_the_control_read_hangs() {
     let fx = fixture();
     index_vault(&fx);
-    let (keychain, release) = HungControls::new();
+    let (keychain, release) = HungControls::limited();
     let server = start_with_keychain(&fx, keychain).await;
     let row = keychain_row(&fx).await;
     drop(release);
@@ -190,7 +190,7 @@ async fn doctor_keychain_row_says_when_no_control_item_exists() {
 async fn list_timeout_reply_names_the_hung_keychain_item_and_the_prompt() {
     let fx = fixture();
     index_vault(&fx);
-    let (keychain, release) = HungControls::new();
+    let (keychain, release) = HungControls::limited();
     let server = start_with_keychain(&fx, keychain).await;
     let params = json!({"project": fx.project(), "vault": VAULT});
     let reply = call(&fx.settings.socket, method::LIST, params).await;
