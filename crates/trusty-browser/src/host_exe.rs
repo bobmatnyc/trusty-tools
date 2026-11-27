@@ -59,9 +59,13 @@ impl ExeEnv {
 
 /// Why: a cargo target directory is rebuilt, cleaned and recycled, so a path
 /// in it is not a place to register (#11927).
-/// What: true when `path` sits under `target_dir` (raw or canonical), or
-/// when a `debug`/`release` segment follows a `target` segment or a segment
-/// containing `cargo-target-pool`.
+/// What: true when `path` sits under `target_dir` (raw or canonical) or
+/// under a `cargo-target-pool` segment, or when it is laid out as cargo
+/// output below a `target` segment, for any profile name:
+/// `<profile>/<bin>`, `<profile>/{deps,examples}/<bin>`,
+/// `<triple>/<profile>/<bin>`, `<triple>/<profile>/{deps,examples}/<bin>`,
+/// where a triple contains `-`. A `debug`/`release` segment elsewhere does
+/// not count.
 /// Test: `a_build_dir_exe_is_never_registered` in `tests/install.rs`.
 pub fn is_build_path(path: &Path, target_dir: Option<&Path>) -> bool {
     if let Some(dir) = target_dir {
@@ -70,18 +74,46 @@ pub fn is_build_path(path: &Path, target_dir: Option<&Path>) -> bool {
             return true;
         }
     }
-    let mut in_target = false;
-    for c in path.components() {
-        let Component::Normal(n) = c else { continue };
-        let n = n.to_string_lossy();
-        if in_target && (n == "debug" || n == "release") {
-            return true;
-        }
-        if n == "target" || n.contains("cargo-target-pool") {
-            in_target = true;
-        }
+    let names: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    // #11927 review: the pool holds build output only.
+    if names.iter().any(|n| n.contains("cargo-target-pool")) {
+        return true;
     }
-    false
+    let sub = |n: &str| n == "deps" || n == "examples";
+    let triple = |n: &str| n.contains('-');
+    // #11927 review: match cargo's layout below each `target` root, not any later segment.
+    names.iter().enumerate().any(|(i, n)| {
+        let rel: Vec<&str> = names[i + 1..].iter().map(String::as_str).collect();
+        n == "target"
+            && match rel.as_slice() {
+                [_profile, _bin] => true,
+                [a, b, _bin] => sub(b) || triple(a),
+                [t, _profile, s, _bin] => triple(t) && sub(s),
+                _ => false,
+            }
+    })
+}
+
+/// Why: `uninstall-service` records nothing, so it may match the registration
+/// against every binary it could have been installed from (#11927 review).
+/// What: `current` first, then the binary [`registered_exe`] substitutes, when
+/// it differs.
+/// Test: `uninstall_from_a_build_binary_matches_its_own_registration`,
+/// `uninstall_service_takes_over_a_registration_whose_binary_is_gone` in `tests/install.rs`.
+pub fn uninstall_exes(current: &Path, env: &ExeEnv) -> Vec<PathBuf> {
+    let mut out = vec![current.to_path_buf()];
+    if let Ok(exe) = registered_exe(current, env)
+        && exe != current
+    {
+        out.push(exe);
+    }
+    out
 }
 
 /// Why: every writer of a launcher, manifest or plist must record a binary

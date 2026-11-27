@@ -262,18 +262,28 @@ fn migrate_keychain(state: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn launchd_layout(state: &Path, install: bool) -> Result<crate::launchd::Layout, String> {
-    // #11927: install records a stable binary; uninstall may run from any build.
-    let exe = match install {
-        true => registered_exe()?,
-        false => registered_exe().or_else(|_| own_exe())?,
+/// The launchd layout, plus the other binaries uninstall may match.
+fn launchd_layout(
+    state: &Path,
+    install: bool,
+) -> Result<(crate::launchd::Layout, Vec<PathBuf>), String> {
+    // #11927: install records a stable binary; uninstall matches this binary
+    // and the substituted one, since it records nothing (#11927 review).
+    let (exe, also) = if install {
+        (registered_exe()?, Vec::new())
+    } else {
+        let env = crate::host_exe::ExeEnv::from_process(home()?);
+        let mut exes = crate::host_exe::uninstall_exes(&own_exe()?, &env).into_iter();
+        let first = exes.next().ok_or("no binary to match")?;
+        (first, exes.collect())
     };
-    Ok(crate::launchd::Layout {
+    let layout = crate::launchd::Layout {
         home: home()?,
         state: state.to_path_buf(),
         exe,
         uid: crate::private::uid(),
-    })
+    };
+    Ok((layout, also))
 }
 
 /// Refusal printed by a `test-seams` build asked to register itself.
@@ -330,12 +340,13 @@ fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
                 _ => crate::codesign::Signing::Skip,
             };
             let install = matches!(command, Command::InstallService(_));
-            let layout = launchd_layout(state, install)?;
+            let (layout, also) = launchd_layout(state, install)?;
             let signer = crate::codesign::Signer {
                 signing,
                 tool: &crate::codesign::SystemCodesign,
             };
-            crate::launchd::manage(&layout, install, &crate::launchd::SystemLaunchctl, &signer)
+            let ctl = crate::launchd::SystemLaunchctl;
+            crate::launchd::manage_with(&layout, install, &also, &ctl, &signer)
                 .map_err(|e| e.to_string())?;
             Ok(ExitCode::SUCCESS)
         }

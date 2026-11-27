@@ -6,7 +6,9 @@
 //! exec this binary exactly ([`crate::peer_darwin::host_argv_ok`]).
 //! What: [`registration_files`] lists the two launchers (0700) and the two
 //! manifests (0600) with Python's names, JSON layout and `shlex.join`
-//! quoting; only the `exec` line differs (`<exe> native-host --socket <sock>`).
+//! quoting. The launchers differ from Python's: [`host_launcher`] adds a guard
+//! line that answers a missing binary with a framed error (#11927), then
+//! `exec <exe> native-host --socket <sock> "$@"`.
 //! [`write_owned`] publishes a file once and refuses to change a different one.
 //! Test: `registration_files_match_python_layout`, `install_host_is_idempotent_and_refuses_a_foreign_file`
 //! in `tests/install.rs`.
@@ -70,7 +72,7 @@ pub const MISSING_REASON: &str = "host_binary_missing";
 /// Test: `retry_against_a_missing_host_binary_names_the_path` in `tests/install.rs`.
 pub fn missing_binary_reply(exe: &str) -> String {
     let message = format!(
-        "Trusty Browser cannot start: its binary {exe} is missing. {}",
+        "Trusty Browser cannot start: its binary {exe} is missing or not executable. {}",
         crate::host_exe::INSTALL_HINT
     );
     let body = Json::object([
@@ -129,6 +131,15 @@ pub fn first_word(line: &str) -> Option<String> {
     (quote.is_none() && !out.is_empty()).then_some(out)
 }
 
+/// Why: a permission error or an unmounted volume hides a binary that may
+/// still be another install's, so only a definite absence is "gone" (#11927 review).
+/// What: true only when `lstat(path)` fails with `NotFound`.
+/// Test: `a_launcher_whose_binary_is_unreadable_is_not_gone`,
+/// `install_service_refuses_our_plist_for_another_live_binary` in `tests/install.rs`.
+pub fn binary_gone(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+}
+
 /// The binary a launcher's `exec` line runs.
 fn launcher_exe(text: &str) -> Option<String> {
     first_word(text.lines().last()?.strip_prefix("exec ")?)
@@ -139,15 +150,15 @@ fn launcher_exe(text: &str) -> Option<String> {
 /// binary is gone, which is the broken registration Retry reports (#11927).
 /// What: true when `text` is exactly [`launcher`] or [`host_launcher`] for
 /// the binary it names and `sock`, and that binary is `exe` (pre-#11927
-/// form only) or no longer exists. A launcher naming another existing
-/// binary stays foreign.
+/// form only) or is [`binary_gone`]. A launcher naming another binary that
+/// exists, or cannot be checked, stays foreign.
 /// Test: `install_replaces_a_launcher_whose_binary_is_gone` in `tests/install.rs`.
 pub fn previous_launcher(text: &str, sock: &Path, exe: &Path) -> bool {
     let Some(old) = launcher_exe(text) else {
         return false;
     };
     let sock = sock.to_string_lossy();
-    let gone = fs::symlink_metadata(&old).is_err();
+    let gone = binary_gone(Path::new(&old));
     let v1 = text == launcher(&[&old, HOST_VERB, "--socket", &sock]);
     let v2 = text == host_launcher(&old, &sock);
     (v1 && (gone || Path::new(&old) == exe)) || (v2 && gone && Path::new(&old) != exe)
