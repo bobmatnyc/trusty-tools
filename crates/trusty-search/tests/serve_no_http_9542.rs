@@ -6,11 +6,12 @@
 //! silently ignored would leave an MCP client config pointing at an address
 //! nothing serves, so each one must fail closed and name the issue.
 //! What: runs the real binary's `serve` with each retired flag on a scratch
-//! data dir, polling the port it names while the process runs. Before #9542
-//! `serve --with-http --port <p>` bound `p` and served forever.
+//! data dir, naming a loopback port the test holds for the whole run. Before
+//! #9542 `serve --with-http --port <p>` bound `p` and served forever; against
+//! a held port that bind fails, so the run cannot exit 1 naming #9542.
 //! Test: `cargo test -p trusty-search --test integration serve_no_http_9542::`.
 
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpListener;
 use std::path::Path;
 use std::time::Duration;
 
@@ -19,19 +20,36 @@ use crate::test_daemon;
 /// How long one `serve` run may take before the test ends it.
 const RUN_BOUND: Duration = Duration::from_secs(15);
 
-/// A loopback port nothing is bound to right now.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    listener.local_addr().expect("local addr").port()
+/// A loopback port this test owns until the value is dropped.
+///
+/// Why (#11953): a port read off a dropped listener is free for any socket in
+/// the parallel test binary, so a probe of it can reach a listener another
+/// test opened and report it as serve's.
+/// What: keeps the `127.0.0.1:0` listener open; nothing else can bind or
+/// answer on [`ReservedPort::port`] while it lives.
+/// Test: `reserved_port_refuses_a_rival_bind_11953`.
+struct ReservedPort {
+    listener: TcpListener,
 }
 
-/// Run `serve <args>` hermetically on `data_dir`, polling `port` while it runs.
+impl ReservedPort {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        Self { listener }
+    }
+
+    fn port(&self) -> u16 {
+        self.listener.local_addr().expect("local addr").port()
+    }
+}
+
+/// Run `serve <args>` hermetically on `data_dir`.
 ///
 /// Why: `daemon.lock` names PID 1 and this test holds its flock (#11060), so
 /// the stdio path's `ensure_daemon_up` waits on a socket instead of
 /// auto-starting a daemon.
-/// What: returns `(exit code, combined output, whether port answered)`.
-fn run_serve(data_dir: &Path, args: &[&str], port: u16) -> (Option<i32>, String, bool) {
+/// What: returns `(exit code, combined output)`.
+fn run_serve(data_dir: &Path, args: &[&str]) -> (Option<i32>, String) {
     let home = data_dir.join("home");
     std::fs::create_dir_all(&home).expect("create the fake HOME");
     let _lock = test_daemon::hold_daemon_lock(data_dir);
@@ -44,22 +62,17 @@ fn run_serve(data_dir: &Path, args: &[&str], port: u16) -> (Option<i32>, String,
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &home)
         .env("TRUSTY_SKIP_RAM_CHECK", "1");
-    let run = std::thread::spawn(move || test_daemon::run_bounded(&mut cmd, RUN_BOUND));
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut answered = false;
-    while !run.is_finished() {
-        answered |= TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok();
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let out = run.join().expect("the serve run thread");
-    (out.code, out.combined, answered)
+    let out = test_daemon::run_bounded(&mut cmd, RUN_BOUND);
+    (out.code, out.combined)
 }
 
 /// Why (#9542): each retired flag must exit non-zero, name the issue, and
 /// never bind or advertise a TCP port.
 /// What: one run each for `--with-http --port <p>`, `--http 127.0.0.1:<p>`
-/// and `--port <p>`. Each must exit 1 with `#9542` in its output, `p` must
-/// never answer, and no `mcp_http_addr` discovery file may appear.
+/// and `--port <p>`, with `p` held by the test (#11953). Each must exit 1
+/// with `#9542` in its output and report no bind failure, and no
+/// `mcp_http_addr` discovery file may appear. A serve that tried to bind `p`
+/// would fail with "address in use" instead of the #9542 refusal.
 /// Test: this function.
 #[test]
 fn serve_binds_no_tcp_listener_9542() {
@@ -70,15 +83,18 @@ fn serve_binds_no_tcp_listener_9542() {
     ];
     for case in cases {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let port = free_port();
+        // #11953: hold the port until the iteration ends, so no other socket
+        // can take it while serve runs; a freed port was probed before.
+        let reserved = ReservedPort::new();
+        let port = reserved.port();
         let args = case(&port.to_string());
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        let (code, out, answered) = run_serve(tmp.path(), &argv, port);
+        let (code, out) = run_serve(tmp.path(), &argv);
         let addr_file = tmp.path().join("home/.trusty-search/mcp_http_addr");
 
         assert!(
-            !answered,
-            "#9542: `serve {argv:?}` bound 127.0.0.1:{port}; the MCP HTTP listener is retired"
+            !out.to_lowercase().contains("address already in use"),
+            "#9542: `serve {argv:?}` tried to bind 127.0.0.1:{port}; the MCP HTTP listener is retired:\n{out}"
         );
         assert!(
             !addr_file.exists(),
@@ -95,4 +111,20 @@ fn serve_binds_no_tcp_listener_9542() {
             "`serve {argv:?}` must name #9542:\n{out}"
         );
     }
+}
+
+/// Why (#11953): the serve test may only judge sockets it created; a rival
+/// socket that takes its port mid-run made it fail on another test's listener.
+/// What: while a [`ReservedPort`] lives, binding its port again is refused
+/// with `AddrInUse`.
+/// Test: this function.
+#[test]
+fn reserved_port_refuses_a_rival_bind_11953() {
+    let reserved = ReservedPort::new();
+    let port = reserved.port();
+    let rival = TcpListener::bind(("127.0.0.1", port));
+    assert!(
+        matches!(&rival, Err(e) if e.kind() == std::io::ErrorKind::AddrInUse),
+        "#11953: a rival bound reserved port {port}: {rival:?}"
+    );
 }
