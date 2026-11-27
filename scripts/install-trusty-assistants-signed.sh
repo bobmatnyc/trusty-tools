@@ -47,7 +47,8 @@
 #   stamp) is reused.
 #
 #   Signing (#11683): a cargo failure exits non-zero. Only `tctl sign`'s
-#   no-certificate exit (3) is a warning, and the run exits 0. Any other
+#   no-certificate exit (3) is a warning; the run then ends with the line
+#   `NOT SIGNED` (last line on stdout and on stderr) and exits 0. Any other
 #   non-zero sign exit (a codesign error, a locked keychain, a signature that
 #   reads back ad-hoc or with the wrong Team ID) prints an ERROR line and
 #   exits 1. A signer that cannot be built (no usable tctl on PATH and this
@@ -156,15 +157,20 @@ fingerprint() {
 # hard failure like every other sign exit (pending an owner decision).
 readonly TCTL_SIGN_NO_CERT_RC=3
 readonly NO_CERT_SOFT_PASS=1
+# #11683: set by the no-cert soft-pass; `main` then ends with `NOT SIGNED`.
+NOT_SIGNED=0
 
 resolve_tctl() {
-    local candidate
+    local candidate help values
     for candidate in tctl trusty-installer; do
         command -v "$candidate" >/dev/null 2>&1 || continue
-        if "$candidate" sign --help 2>&1 | grep -q -- "$CRATE"; then
-            echo "$candidate"
-            return 0
-        fi
+        # #11683: read CRATE only from clap's `[possible values: ...]` list for
+        # <TARGET> (`-h` prints it; `--help` prints a long form without it).
+        help="$("$candidate" sign -h 2>&1 || true)"
+        values="$(printf '%s\n' "$help" | sed -n 's/^.*<TARGET>.*\[possible values: \([^]]*\)\].*$/\1/p')"
+        case ", $values, " in
+            *", $CRATE, "*) echo "$candidate"; return 0 ;;
+        esac
         warn "$candidate on PATH does not accept 'sign $CRATE' (installed before #11632)"
     done
     return 1
@@ -328,6 +334,7 @@ run_sign_ta() {
         warn "ad-hoc signed and macOS will re-prompt for TCC-gated access after each rebuild."
         warn "Expected on a machine without a Developer ID Application cert:"
         warn "docs/reference/release-workflow.md."
+        NOT_SIGNED=1
         return 0
     fi
     if [ "$rc" -ne 0 ]; then
@@ -367,6 +374,12 @@ main() {
     fi
     info "$GUARDED_BIN guard: $guarded unchanged ($after)"
     info "Restart any running $BIN_NAME process to pick up the new binary."
+    # #11683 (Architect ruling on AC3): an unsigned run's last line, on stdout
+    # and on stderr, where the other final status lines go.
+    if [ "$NOT_SIGNED" = "1" ]; then
+        printf 'NOT SIGNED\n'
+        printf 'NOT SIGNED\n' >&2
+    fi
 }
 
 main "$@"

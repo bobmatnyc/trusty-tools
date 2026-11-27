@@ -23,10 +23,12 @@
 #                       script exit 1 before cargo runs, never "unchanged"
 #     path-cargo-home   `--from-source` into the cargo home exits 2 (ADR-0043)
 #     sign-fail-soft    a tctl exiting 3 (no certificate) leaves `ta` in
-#                       place and exits 0 (#11683)
+#                       place, exits 0, and the last line of stdout and of
+#                       stderr is exactly `NOT SIGNED` (#11683)
 #     sign-fail-hard    a tctl exiting 1 (any other sign failure) leaves `ta`
 #                       in place and exits 1 with an ERROR line (#11683)
-#     old-tctl          a tctl that does not accept `trusty-assistants` is
+#     old-tctl          a tctl that does not accept `trusty-assistants` (but
+#                       names it outside its possible-values list, #11683) is
 #                       never asked to sign; this checkout's trusty-installer
 #                       is built and signs the staging dir (only `ta`)
 #     signer-unbuildable  that fallback failing to build exits 1 (#11683)
@@ -123,12 +125,17 @@ STUB
 cat > "$STUBS/tctl" <<'STUB'
 #!/usr/bin/env bash
 set -eu
-if [ "${2:-}" = "--help" ]; then
-  # STUB_TCTL_OLD: a tctl from before #11632, which knows only trusty-agents.
+if [ "${2:-}" = "-h" ] || [ "${2:-}" = "--help" ]; then
+  # STUB_TCTL_OLD: a tctl from before #11632, which knows only trusty-agents;
+  # its prose still names trusty-assistants, so only the possible-values list
+  # may decide (#11683). The name comes last, so a reader that stops early
+  # (`grep -q`) cannot SIGPIPE this stub and hide the mismatch.
+  echo "      --scope <SCOPE>  Scope to act on [possible values: project, system, all]"
   if [ "${STUB_TCTL_OLD:-0}" = "1" ]; then
-    echo "[possible values: trusty-search, trusty-mpm, trusty-agents]"
+    echo "  <TARGET>  Which signable set to sign [possible values: trusty-search, trusty-mpm, trusty-agents]"
+    echo "Developer-ID codesign; trusty-assistants is signed by scripts/install-trusty-assistants-signed.sh"
   else
-    echo "[possible values: trusty-search, trusty-mpm, trusty-assistants]"
+    echo "  <TARGET>  Which signable set to sign [possible values: trusty-search, trusty-mpm, trusty-assistants]"
   fi
   exit 0
 fi
@@ -253,6 +260,15 @@ STUB_TCTL_FAIL=3 run sign-fail-soft --from-source --root "$root"
 [ "$(fp "$root/bin/tagent")" = "$before" ] || fail "sign-fail-soft: tagent changed"
 grep -q 'WARNING: signing ta failed (exit 3: no Developer ID certificate)' "$WORK/sign-fail-soft.out" \
   || fail "sign-fail-soft: no warning"
+[ "$(tail -n 1 "$WORK/sign-fail-soft.out")" = "NOT SIGNED" ] || fail "sign-fail-soft: last line is not 'NOT SIGNED'"
+# #11683: and the last line of each stream on its own.
+root="$(new_root_with_tagent sign-fail-soft-split)"
+mkdir -p "$WORK/sign-fail-soft-split"
+STUB_TCTL_FAIL=3 STUB_LOG="$WORK/sign-fail-soft-split" PATH="$STUBS:/usr/bin:/bin" CARGO_HOME="$WORK/cargo-home" \
+  "$SUT" --from-source --root "$root" > "$WORK/sign-fail-soft-split.stdout" 2> "$WORK/sign-fail-soft-split.stderr" \
+  || fail "sign-fail-soft: split-stream run exited non-zero"
+[ "$(tail -n 1 "$WORK/sign-fail-soft-split.stdout")" = "NOT SIGNED" ] || fail "sign-fail-soft: last stdout line is not 'NOT SIGNED'"
+[ "$(tail -n 1 "$WORK/sign-fail-soft-split.stderr")" = "NOT SIGNED" ] || fail "sign-fail-soft: last stderr line is not 'NOT SIGNED'"
 
 # --- sign-fail-hard (#11683) -----------------------------------------------
 root="$(new_root_with_tagent sign-fail-hard)"

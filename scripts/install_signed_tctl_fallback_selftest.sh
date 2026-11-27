@@ -24,7 +24,8 @@
 #     no-tctl             no tctl on PATH; the fallback signs with `--bin tctl`
 #   and per script:
 #     search sign-fails   a failing sign exits 1 with an ERROR line
-#     memory sign-soft    a sign exiting 3 (no certificate) warns, exits 0
+#     memory sign-soft    a sign exiting 3 (no certificate) warns, exits 0,
+#                         and the last output line is exactly `NOT SIGNED`
 #     memory sign-fails   a sign exiting 1 (any other failure) prints an
 #                         ERROR line and exits 1 (#11683)
 #     memory unbuildable  a fallback tctl that will not build exits 1
@@ -153,6 +154,8 @@ STUB_SIGN_RC=3 run install-trusty-memory-signed.sh memory-signsoft "$WITH_TCTL"
 [ "$RC" -eq 0 ] || fail "memory sign-soft: exit $RC, want 0"
 grep -q 'WARNING: Signing the trusty-memory set failed (exit 3: no Developer ID certificate)' \
   "$WORK/memory-signsoft.out" || fail "memory sign-soft: no warning"
+[ "$(tail -n 1 "$WORK/memory-signsoft.out")" = "NOT SIGNED" ] \
+  || fail "memory sign-soft: last line is not 'NOT SIGNED'"
 
 # --- memory sign-fails (#11683: any other sign exit) -----------------------
 STUB_SIGN_RC=1 run install-trusty-memory-signed.sh memory-signfail "$WITH_TCTL"

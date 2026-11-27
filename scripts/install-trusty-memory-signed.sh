@@ -62,7 +62,8 @@
 #   1. `cargo install --path crates/trusty-memory --locked` always runs and,
 #      if IT fails, that is a real build failure — the script exits non-zero.
 #   2. #11683: the signing step (`tctl sign trusty-memory`) soft-passes ONLY
-#      its no-certificate exit (3): a stderr warning, and the script exits 0.
+#      its no-certificate exit (3): a stderr warning, the run ends with the
+#      line `NOT SIGNED` as its last stdout line, and the script exits 0.
 #      Any other non-zero sign exit (a codesign error, a locked keychain, a
 #      signature that reads back ad-hoc or with the wrong Team ID, a failed
 #      record refresh) prints an ERROR line and exits 1. The soft-pass is
@@ -130,6 +131,8 @@ TRUSTY_CODESIGN_DRY_RUN="${TRUSTY_CODESIGN_DRY_RUN:-0}"
 # hard failure like every other sign exit (pending an owner decision).
 readonly TCTL_SIGN_NO_CERT_RC=3
 readonly NO_CERT_SOFT_PASS=1
+# #11683: set by the no-cert soft-pass; `main` then ends with `NOT SIGNED`.
+NOT_SIGNED=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -253,6 +256,7 @@ run_sign() {
         warn "macOS will re-prompt for any TCC-gated permission after the next rebuild — this"
         warn "is EXPECTED on CI or any machine without a Developer ID Application cert."
         warn "See docs/reference/release-workflow.md for one-time cert setup."
+        NOT_SIGNED=1
         return 0
     fi
     if [[ "$rc" -ne 0 ]]; then
@@ -331,6 +335,11 @@ main() {
     run_cargo_install
     run_sign
     print_next_steps
+    # #11683 (Architect ruling on AC3): an unsigned run's last line, on stdout
+    # with the other final status lines.
+    if [[ "$NOT_SIGNED" == "1" ]]; then
+        printf 'NOT SIGNED\n'
+    fi
 }
 
 main "$@"
