@@ -546,3 +546,8 @@ fn the_inspect_shape_plus_a_secret_read_refuses() {
     }
     assert!(leaked.is_empty(), "must deny: {leaked:#?}");
 }
+
+// #11800: the reviewed `op` shapes, refused by the unchanged guard.
+#[cfg(test)]
+#[path = "pm_guard_secret_script_op_11800_tests.rs"]
+mod op_11800_tests;
