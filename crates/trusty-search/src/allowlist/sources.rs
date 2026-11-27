@@ -170,9 +170,11 @@ pub(crate) fn mpm_root_from(
         Ok(paths) => paths.mpm_dir(),
         Err(e) => {
             tracing::warn!(error = %e, "install paths unresolved; reading the default tm registry");
+            // #11821: the default dir name comes from the shared reader.
+            let name = trusty_common::install_paths::MPM_DIR_NAME;
             match home {
-                Some(home) => home.join(".trusty-mpm"),
-                None => PathBuf::from(".trusty-mpm"),
+                Some(home) => home.join(name),
+                None => PathBuf::from(name),
             }
         }
     }

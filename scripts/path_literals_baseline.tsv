@@ -155,7 +155,6 @@ crates/trusty-mpm/tests/tm_hook_standing_rules_10960.rs	1
 crates/trusty-mpm/tests/tm_secrets_exec.rs	1
 crates/trusty-mpm/tests/worktree_disk_usage_gate.rs	1
 crates/trusty-review/tests/support/content.rs	1
-crates/trusty-search/src/allowlist/sources.rs	1
 crates/trusty-secrets/src/api/error.rs	4
 crates/trusty-secrets/src/server/errors.rs	7
 crates/trusty-secrets/src/server/onepassword_tests.rs	1
