@@ -1,5 +1,5 @@
 //! #11256: a read-only handler is cancelled when its client hangs up; a write
-//! handler is not.
+//! handler is not. #12019: neither is a cancel-on-hangup one.
 
 use super::*;
 
@@ -29,9 +29,16 @@ impl Drop for DropFlag {
     }
 }
 
-/// A router with one method `work` that runs for `runs_for`, optionally
-/// marked read-only.
-fn router(trace: &Arc<Trace>, runs_for: Duration, read_only: bool) -> Arc<RpcRouter> {
+/// Which hang-up marker, if any, the method under test carries.
+#[derive(Clone, Copy)]
+enum Mark {
+    Unmarked,
+    ReadOnly,
+    CancelOnHangup,
+}
+
+/// A router with one method `work` that runs for `runs_for`, carrying `mark`.
+fn router(trace: &Arc<Trace>, runs_for: Duration, mark: Mark) -> Arc<RpcRouter> {
     let trace = Arc::clone(trace);
     let router = RpcRouter::new().typed("work", move |_req: serde_json::Value| {
         let trace = Arc::clone(&trace);
@@ -43,10 +50,10 @@ fn router(trace: &Arc<Trace>, runs_for: Duration, read_only: bool) -> Arc<RpcRou
             Ok(json!("done"))
         }
     });
-    Arc::new(if read_only {
-        router.mark_read_only("work")
-    } else {
-        router
+    Arc::new(match mark {
+        Mark::Unmarked => router,
+        Mark::ReadOnly => router.mark_read_only("work"),
+        Mark::CancelOnHangup => router.mark_cancel_on_hangup("work"),
     })
 }
 
@@ -87,7 +94,11 @@ async fn serve_then_hang_up(
 #[tokio::test]
 async fn a_read_only_handler_is_cancelled_when_its_client_hangs_up_11256() {
     let trace = Arc::new(Trace::default());
-    let served = serve_then_hang_up(router(&trace, Duration::from_secs(60), true), &trace).await;
+    let served = serve_then_hang_up(
+        router(&trace, Duration::from_secs(60), Mark::ReadOnly),
+        &trace,
+    )
+    .await;
 
     // The cancel arm is an error, never `Answered`.
     assert!(
@@ -106,8 +117,11 @@ async fn a_read_only_handler_is_cancelled_when_its_client_hangs_up_11256() {
 #[tokio::test]
 async fn a_write_handler_runs_to_completion_after_its_client_hangs_up_11256() {
     let trace = Arc::new(Trace::default());
-    let served =
-        serve_then_hang_up(router(&trace, Duration::from_millis(300), false), &trace).await;
+    let served = serve_then_hang_up(
+        router(&trace, Duration::from_millis(300), Mark::Unmarked),
+        &trace,
+    )
+    .await;
 
     assert!(
         trace.completed.load(Ordering::SeqCst),
@@ -122,7 +136,7 @@ async fn a_write_handler_runs_to_completion_after_its_client_hangs_up_11256() {
 #[tokio::test]
 async fn a_half_closed_client_still_gets_its_read_only_answer_11256() {
     let trace = Arc::new(Trace::default());
-    let router = router(&trace, Duration::from_millis(300), true);
+    let router = router(&trace, Duration::from_millis(300), Mark::ReadOnly);
     let (server, mut client) = UnixStream::pair().expect("socket pair");
     let task = tokio::spawn(handle_connection(
         server,
@@ -189,9 +203,70 @@ fn read_only_method_names_only_marked_methods_11256() {
     let router = RpcRouter::new().mark_read_only("recall");
     let frame = |m: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}"}}"#);
     assert_eq!(
-        router.read_only_method(frame("recall").as_bytes()),
+        router.cancel_on_hangup_method(frame("recall").as_bytes()),
         Some("recall".to_string())
     );
-    assert_eq!(router.read_only_method(frame("remember").as_bytes()), None);
-    assert_eq!(router.read_only_method(b"not json"), None);
+    assert_eq!(
+        router.cancel_on_hangup_method(frame("remember").as_bytes()),
+        None
+    );
+    assert_eq!(router.cancel_on_hangup_method(b"not json"), None);
+}
+
+/// #12019: a method marked cancel-on-hangup is dropped when its client hangs
+/// up; the same method left unmarked runs to completion.
+/// Test: this function IS the test. Fails if `handle_connection` races only
+/// `mark_read_only` names against a hang-up.
+#[tokio::test]
+async fn a_cancel_on_hangup_handler_is_cancelled_and_an_unmarked_one_is_not_12019() {
+    let marked = Arc::new(Trace::default());
+    let served = serve_then_hang_up(
+        router(&marked, Duration::from_secs(60), Mark::CancelOnHangup),
+        &marked,
+    )
+    .await;
+    assert!(
+        matches!(&served, Err(RpcServerError::ClientGone { method }) if method == "work"),
+        "expected ClientGone, got {served:?}"
+    );
+    assert!(
+        marked.dropped.load(Ordering::SeqCst),
+        "handler future leaked"
+    );
+    assert!(!marked.completed.load(Ordering::SeqCst), "handler ran on");
+
+    let unmarked = Arc::new(Trace::default());
+    let served = serve_then_hang_up(
+        router(&unmarked, Duration::from_millis(300), Mark::Unmarked),
+        &unmarked,
+    )
+    .await;
+    assert!(
+        unmarked.completed.load(Ordering::SeqCst),
+        "an unmarked method was cancelled"
+    );
+    assert!(
+        !matches!(served, Err(RpcServerError::ClientGone { .. })),
+        "an unmarked method must not report a cancel, got {served:?}"
+    );
+}
+
+#[test]
+fn cancel_on_hangup_method_names_either_marker_12019() {
+    let router = RpcRouter::new()
+        .mark_read_only("recall")
+        .mark_cancel_on_hangup("reactivate");
+    let frame = |m: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}"}}"#);
+    assert_eq!(
+        router.cancel_on_hangup_method(frame("recall").as_bytes()),
+        Some("recall".to_string())
+    );
+    assert_eq!(
+        router.cancel_on_hangup_method(frame("reactivate").as_bytes()),
+        Some("reactivate".to_string())
+    );
+    assert_eq!(
+        router.cancel_on_hangup_method(frame("remember").as_bytes()),
+        None
+    );
 }
