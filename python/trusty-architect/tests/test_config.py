@@ -49,12 +49,12 @@ def test_project_slug_replaces_every_non_alphanumeric_character():
     assert sc.project_slug("/a/.claude/x_y") == "-a--claude-x-y"
 
 
-def test_self_ctx_default_dir_uses_documented_defaults_when_unset(monkeypatch):
+def test_self_ctx_default_dir_uses_documented_defaults_when_unset(tmp_path):
+    # #11821 P7: an explicit fixture home, so the operator's own install.toml is never read.
     sc = _load_self_ctx()
-    home = os.path.expanduser("~")
-    expected = os.path.join(home, ".trusty-tools/trusty-mpm/claude-config", "projects",
-                            sc.project_slug(os.path.join(home, "trusty-mpm-projects/architect")))
-    assert sc.default_dir({}) == expected
+    expected = tmp_path / ".trusty-tools" / "trusty-mpm" / "claude-config" / "projects"
+    expected = expected / sc.project_slug(str(tmp_path / "trusty-mpm-projects" / "architect"))
+    assert sc.default_dir({"HOME": str(tmp_path)}) == str(expected)
 
 
 def test_self_ctx_default_dir_follows_the_environment(tmp_path):

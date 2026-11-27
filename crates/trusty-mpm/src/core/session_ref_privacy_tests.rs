@@ -60,7 +60,7 @@ fn home_paths_are_redacted() {
     let text = "worktree /home/ada/src/x and /home/ada/.trusty-mpm/s.md";
     assert_eq!(
         redact_home(text, Some(Path::new("/home/ada/"))),
-        "worktree ~/src/x and ~/.trusty-mpm/s.md"
+        "worktree ~/src/x and ~/.trusty-mpm/s.md" // path-literal: allow (redaction output)
     );
     assert_eq!(redact_home(text, None), text);
     // #10614: a home is a whole path segment, never a prefix of another one.

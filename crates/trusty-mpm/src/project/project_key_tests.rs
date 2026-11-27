@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 use trusty_common::search_index::{IndexOptions, ensure_project_indexed_reporting_as};
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 fn project(name: &str, repo_url: &str) -> Project {
     Project {
@@ -95,12 +96,16 @@ fn a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604() {
     let home = TempDir::new().unwrap();
     let home = home.path().canonicalize().unwrap();
     let origin = "https://github.com/BobMatNYC/Trusty-Tools.git";
-    let projects = home.join("trusty-mpm-projects");
+    let projects = home.join(DEFAULT_WORKSPACE_DIR);
     checkout(&projects, "trusty-tools", origin);
     checkout(&home.join("code"), "Trusty-Tools", origin);
     let canonical = project_key_from_repo_url(origin);
     assert_eq!(canonical.as_deref(), Some("bobmatnyc/trusty-tools"));
-    for spelled in ["~/trusty-mpm-projects/trusty-tools", "~/code/Trusty-Tools"] {
+    let spellings = [
+        "~/trusty-mpm-projects/trusty-tools", // path-literal: allow (tilde input)
+        "~/code/Trusty-Tools",
+    ];
+    for spelled in spellings {
         assert_eq!(
             project_key_from_repo_url_in(spelled, Some(&home)),
             canonical,
@@ -109,7 +114,7 @@ fn a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604() {
     }
     // No home: no key (registration then refuses it), never a URL guess.
     assert_eq!(
-        project_key_from_repo_url_in("~/trusty-mpm-projects/trusty-tools", None),
+        project_key_from_repo_url_in("~/trusty-mpm-projects/trusty-tools", None), // path-literal: allow (tilde input)
         None
     );
 }

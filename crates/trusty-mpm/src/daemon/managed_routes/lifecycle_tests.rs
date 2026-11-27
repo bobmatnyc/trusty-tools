@@ -20,6 +20,7 @@ use super::*;
 use crate::core::content_source::test_support::rc;
 // #8545: moved here from `lifecycle.rs`, which imported them only for these tests.
 use super::super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
 /// identical pattern in `core::session_launch::tests::EnvVarGuard`,
@@ -62,7 +63,7 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
 /// the host disk is and whichever `$HOME` a neighbour test left behind.
 fn disk_threshold_home(pct: u8) -> tempfile::TempDir {
     let home = tempfile::TempDir::new().expect("tmp home");
-    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    let dir = home.path().join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&dir).expect("create config dir");
     std::fs::write(
         dir.join("config.yaml"),

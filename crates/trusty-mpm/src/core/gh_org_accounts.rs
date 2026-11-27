@@ -355,11 +355,12 @@ pub(crate) fn org_map_pin(
 /// Test: `an_org_map_refusal_names_the_table_not_the_registry`.
 pub(crate) fn org_map_refusal(who: &str, reason: &str) -> String {
     format!(
-        "the [accounts] table in ~/.trusty-mpm/config.toml maps this repository's org to gh \
+        "the [accounts] table in {cfg} maps this repository's org to gh \
          account '{who}', and no gh token is proven by `GET /user` to be its own ({reason}). \
          The session's gh is given a token that authenticates as nobody, so it fails instead \
          of acting as the machine's global account (#8510, #9091). Fix: `gh auth login` as \
-         '{who}', or edit the [accounts] table."
+         '{who}', or edit the [accounts] table.",
+        cfg = "~/.trusty-mpm/config.toml", // path-literal: allow (#11821: message text)
     )
 }
 

@@ -40,16 +40,32 @@ pub use dev::{DEV_CLASS_SOURCES, find_dev_checkout};
 pub use error::ContentError;
 pub use lock::{ContentLock, TAG_PREFIX, validate_tag};
 
+use crate::install_paths::{InstallPathsError, MPM_DIR_NAME, try_config_dir};
 use crate::integrity::Sha256Digest;
 
 /// The lock file's name inside the cache directory.
 pub const LOCK_FILE_NAME: &str = "content-lock.toml";
 
-/// The default cache directory, `~/.trusty-mpm/content` (ADR-0064 decision 5).
+/// The default cache directory, `<config dir>/.trusty-mpm/content` (ADR-0064
+/// decision 5).
 ///
-/// Returns `None` when the home directory cannot be determined.
+/// Why: the config dir is configurable per install (#11821); the cache must
+/// follow it.
+/// What: the shared reader's [`try_config_dir`] joined with `.trusty-mpm/content`,
+/// which is `~/.trusty-mpm/content` on an install with no `install.toml` and no
+/// `TRUSTY_MPM_CONFIG_DIR`. `None` when the home directory is unknown or the
+/// install file is broken (logged at `warn`), never a `$HOME` guess.
+/// Test: `default_cache_dir_follows_the_configured_config_dir`.
 pub fn default_cache_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".trusty-mpm").join("content"))
+    // #11821: resolved through the shared reader, failing closed to `None`.
+    match try_config_dir() {
+        Ok(dir) => Some(dir.join(MPM_DIR_NAME).join("content")),
+        Err(InstallPathsError::NoHome) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, "install paths unresolved; no content cache dir (fail closed)");
+            None
+        }
+    }
 }
 
 /// Whether, and how, a trusty-tools checkout overrides the installed bundle.

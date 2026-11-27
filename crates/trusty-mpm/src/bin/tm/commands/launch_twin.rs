@@ -93,11 +93,13 @@ pub(crate) fn precheck_under(home: &Path, project_dir: &Path) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("`--twin` refused: the config dir is unresolved: {e}"))?;
     let config = twin_arming::load_user_config_strict(&root)
         .map_err(|e| anyhow::anyhow!("`--twin` refused: the user config could not be read: {e}"))?;
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const CONFIG: &str = "~/.trusty-mpm/config.toml"; // path-literal: allow (display text)
     twin_identity::check_grant(project_dir, &config).map_err(|refusal| {
         anyhow::anyhow!(
             "`--twin` refused for {}: {refusal}. Twin mode needs the project in both \
              `[supervisor] projects` and `[supervisor.twin] projects` in \
-             ~/.trusty-mpm/config.toml, and `profile = \"supervisor\"` in its \
+             {CONFIG}, and `profile = \"supervisor\"` in its \
              .trusty-mpm.toml (#8878).",
             project_dir.display()
         )

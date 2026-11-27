@@ -602,18 +602,21 @@ pub(super) fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
 }
 
 /// The closing sentence every deny carries.
-const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
-     `~/.trusty-mpm/architect-launch/`, `~/.trusty-tools/trusty-mpm/config.yaml` and the managed \
-     `claude-config/settings.json` and `settings.local.json` (#8454), `~/.ssh/authorized_keys` \
-     and `~/.trusty-tools/trusty-common/config.yaml` (#11463), and, while any exist, \
-     `~/.trusty-mpm/twin/armed/*.json`. `~/.trusty-tools/install.toml` is an anchor, and with a \
-     configured config dir (`TRUSTY_MPM_CONFIG_DIR`, `install.toml` `config_dir`) the same \
+// #11821: concat! so the path-naming pieces can carry their waiver; bytes unchanged.
+const REMEDY: &str = concat!(
+    "Trust anchors are `~/.trusty-mpm/config.toml`, ", // path-literal: allow (display text)
+    "`~/.trusty-mpm/architect-launch/`, `~/.trusty-tools/trusty-mpm/config.yaml` and the managed ", // path-literal: allow (display text)
+    "`claude-config/settings.json` and `settings.local.json` (#8454), `~/.ssh/authorized_keys` ",
+    "and `~/.trusty-tools/trusty-common/config.yaml` (#11463), and, while any exist, ", // path-literal: allow (display text)
+    "`~/.trusty-mpm/twin/armed/*.json`. `~/.trusty-tools/install.toml` is an anchor, and with a ", // path-literal: allow (display text)
+    "configured config dir (`TRUSTY_MPM_CONFIG_DIR`, `install.toml` `config_dir`) the same \
      `.trusty-mpm` and `.trusty-tools` files under it are anchors too (#11821). Only the \
      Architect session's main thread may write them — no PM, agent or subagent — and \
-     `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` do not lift this rule. Ask the operator, or make the change from the Architect session. \
-     `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433), \
-     as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815), and \
-     `channels/inbound_claims.jsonl` and its `.lock`, `.torn` and `.prune` files (#9923).";
+     `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` do not lift this rule. Ask the operator, or make the change from the Architect session. ",
+    "`~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433), ", // path-literal: allow (display text)
+    "as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815), and \
+     `channels/inbound_claims.jsonl` and its `.lock`, `.torn` and `.prune` files (#9923).",
+);
 
 /// The deny for a write, link or rename that resolves to an anchor.
 fn anchor_reason(target: &str) -> String {

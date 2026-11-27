@@ -12,6 +12,7 @@ use super::*;
 use crate::core::content_source::test_support::rc;
 use crate::core::session_profile::{ARCHITECT_MODEL, SessionProfile};
 use tempfile::tempdir;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// Launch `project` with `home` as `$HOME`; return the profile, the settings
 /// and the stash.
@@ -46,7 +47,7 @@ fn launch_in(project: &Path, home: &Path) -> (SessionProfile, serde_json::Value,
 /// A scratch `$HOME` whose user config allow-lists `project`.
 fn home_allowing(project: &Path) -> tempfile::TempDir {
     let home = tempdir().unwrap();
-    let root = home.path().join(".trusty-mpm");
+    let root = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("config.toml"),

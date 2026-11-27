@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+use trusty_common::install_paths::MPM_DIR_NAME;
 use trusty_mpm::core::architect_session::{SESSION_EXT, record_launch};
 
 use super::super::launch::PaneState;
@@ -261,7 +262,7 @@ fn status_binding_needs_the_record_and_the_same_session() {
     };
 
     unbound(binding(None, LIVE_ME), "no Architect launch record");
-    let root = h.home().join(".trusty-mpm");
+    let root = h.home().join(MPM_DIR_NAME);
     record_launch(&root, std::process::id(), &h.dir(), "tm-architect").expect("record");
     let ok = binding(None, LIVE_ME);
     assert!(ok.ok, "{ok:?}");
@@ -321,7 +322,7 @@ fn status_is_complete_only_when_the_architect_is_bound() {
         "{text}"
     );
 
-    let root = h.home().join(".trusty-mpm");
+    let root = h.home().join(MPM_DIR_NAME);
     record_launch(&root, std::process::id(), &h.dir(), "tm-architect").expect("record");
     let report = h.status(None, STAMPED_HERE);
     let text = report.render();
@@ -354,7 +355,7 @@ fn status_warns_when_the_live_claude_has_no_launch_record_9092() {
     assert!(h.status(None, no_claude).unrecorded.is_none());
     assert!(h.status(None, NO_TMUX).unrecorded.is_none());
 
-    let root = h.home().join(".trusty-mpm");
+    let root = h.home().join(MPM_DIR_NAME);
     record_launch(&root, me, &h.dir(), "tm-architect").expect("record");
     let report = h.status(None, LIVE_ME);
     assert!(report.unrecorded.is_none(), "{}", report.render());
@@ -399,7 +400,7 @@ fn a_running_unbound_session_is_reported_by_init() {
         "no Architect launch record",
     );
 
-    let root = h.home().join(".trusty-mpm");
+    let root = h.home().join(MPM_DIR_NAME);
     record_launch(&root, std::process::id(), &h.dir(), "elsewhere").expect("record");
     unbound(
         h.init(None, LIVE_HERE).expect("init"),

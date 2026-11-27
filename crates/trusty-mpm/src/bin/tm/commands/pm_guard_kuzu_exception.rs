@@ -262,13 +262,16 @@ fn plain(component: &str) -> bool {
 
 /// The deny text for an import call outside the grammar (#9794).
 fn grammar_reason() -> String {
-    "kuzu-store-read: this `trusty-memory import kuzu` call is outside the one form the \
-     guard allows (#9794): a single line of plain words, an optional `env -u \
-     TRUSTY_MEMORY_PALACE`, then the import flags or `review record|status|finish` with \
-     theirs, and at most a `2>&1 | tee <path>` into `~/.trusty-tools/kuzu-review/` or the \
-     session scratchpad. No quote, `$`, `\\`, `;`, `&&`, redirection, second command or \
-     unknown flag."
-        .to_string()
+    // #11821: concat! so the path-naming piece can carry its waiver; bytes unchanged.
+    concat!(
+        "kuzu-store-read: this `trusty-memory import kuzu` call is outside the one form the \
+         guard allows (#9794): a single line of plain words, an optional `env -u \
+         TRUSTY_MEMORY_PALACE`, then the import flags or `review record|status|finish` with ",
+        "theirs, and at most a `2>&1 | tee <path>` into `~/.trusty-tools/kuzu-review/` or the ", // path-literal: allow (display text)
+        "session scratchpad. No quote, `$`, `\\`, `;`, `&&`, redirection, second command or \
+         unknown flag."
+    )
+    .to_string()
 }
 
 /// The deny text for an import call carrying `--python` (answer Q1).

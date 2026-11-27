@@ -153,7 +153,7 @@ fn tilde_expansion() {
     use trusty_common::workspace_layout::expand_tilde;
     let home = PathBuf::from("/home/bob");
     assert_eq!(
-        expand_tilde("~/trusty-mpm-projects", &home),
+        expand_tilde("~/trusty-mpm-projects", &home), // path-literal: allow (tilde input)
         PathBuf::from("/home/bob/trusty-mpm-projects")
     );
     assert_eq!(expand_tilde("~", &home), home);

@@ -108,9 +108,11 @@ pub(super) fn taint_verdict(
 
 /// The deny text for a write that could reach the taint directory.
 fn taint_reason(what: &str) -> String {
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const TAINT: &str = "`~/.trusty-tools/trusty-mpm/channels/taint/`"; // path-literal: allow (display text)
     format!(
         "Trust-anchor write denied (#8433): {what} could change \
-         `~/.trusty-tools/trusty-mpm/channels/taint/`, which records that a session received a \
+         {TAINT}, which records that a session received a \
          channel answer. No session may write, move or delete it — the Architect included, and \
          `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` do not lift this rule. A taint \
          ends only when its managed session is stopped or decommissioned."

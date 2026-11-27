@@ -17,6 +17,7 @@ use crate::commands::pm_guard_trust_anchor::tests::{
     spoof_env, table,
 };
 use crate::commands::pm_guard_trust_anchor::{TRUST_ANCHOR_RULE, evaluate};
+use trusty_common::install_paths::MPM_DIR_NAME;
 use trusty_mpm::core::channels_taint::{TaintMark, taint_dir, taint_managed_session};
 
 /// The fixed audit time every case writes.
@@ -244,7 +245,7 @@ fn unreadable_config_or_profile_stays_denied() {
     let fx = fixture();
     let log = log_of(&fx);
     let env = architect_env(&fx);
-    let root = fx.home.join(".trusty-mpm");
+    let root = fx.home.join(MPM_DIR_NAME);
     let config_file = root.join("config.toml");
     let load = || MpmConfig::load(&root);
     let grant = format!("[architect]\nprojects = [\"{}\"]\n", fx.project.display());

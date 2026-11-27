@@ -112,7 +112,7 @@ pub(crate) fn build_statusline_check(
             "the per-session statusline record store under the framework root \
              cannot be listed, so the segment has no denominator to price \
              against. Remediation: check the permissions on \
-             `~/.trusty-mpm/usage/`."
+             `~/.trusty-mpm/usage/`." // path-literal: allow
                 .to_string(),
         );
     }

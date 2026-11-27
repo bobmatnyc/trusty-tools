@@ -39,6 +39,7 @@ def test_defaults_without_an_install_file(tmp_path):
     assert ac.install_config_dir(env) == str(tmp_path)
     assert ac.install_projects_root(env) == str(tmp_path / "trusty-mpm-projects")
     assert ac.managed_claude_config_dir(env) == str(tmp_path / ".trusty-tools" / "trusty-mpm" / "claude-config")
+    assert ac.install_mpm_root(env) == str(tmp_path / ".trusty-mpm")  # #11821 P7
 
 
 def test_install_file_beats_default_and_env_beats_file(tmp_path):
@@ -97,6 +98,8 @@ def test_mpm_root_follows_the_config_dir_and_fails_closed(tmp_path):
     _install(tmp_path, 'config_dir = "/srv/cfg"\n')
     assert dp.mpm_root({"HOME": str(tmp_path)}) == "/srv/cfg/.trusty-mpm"
     _install(tmp_path, BROKEN)
+    with pytest.raises(ac.ConfigError):
+        ac.install_mpm_root({"HOME": str(tmp_path)})  # #11821 P7: the reader fails closed too
     with pytest.raises(dp.RegistryError):
         dp.mpm_root({"HOME": str(tmp_path)})
 
