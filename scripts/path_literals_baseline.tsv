@@ -51,9 +51,6 @@ crates/trusty-mpm/src/bin/tm/commands/pm_guard_trust_anchor_tests.rs	68
 crates/trusty-mpm/src/bin/tm/commands/session_delete_dir.rs	1
 crates/trusty-mpm/src/bin/tm/commands/spawn_disclaimed.rs	1
 crates/trusty-mpm/src/bin/tm/commands/watch/args.rs	1
-crates/trusty-mpm/src/bin/tm/formatters/banner/source.rs	7
-crates/trusty-mpm/src/bin/tm/generate/doctor.rs	17
-crates/trusty-mpm/src/bin/tm/generate/framework.rs	5
 crates/trusty-mpm/src/client/http_client/session_connect_10459_tests.rs	2
 crates/trusty-mpm/src/content/first_use_tests.rs	4
 crates/trusty-mpm/src/core/agent_cost.rs	1
