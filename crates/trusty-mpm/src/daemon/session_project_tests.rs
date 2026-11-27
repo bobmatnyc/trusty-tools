@@ -79,6 +79,50 @@ async fn a_registered_session_registers_its_checkout_as_a_project() {
     );
 }
 
+/// #11217: a session the daemon sees in a linked worktree writes the main
+/// checkout's row, which `tm secrets assign` resolves. Pre-fix, the outcome
+/// was `LinkedWorktree` and no row existed.
+#[tokio::test]
+async fn a_linked_worktree_session_registers_the_main_checkout_from_the_daemon_11217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("root");
+    let state = Arc::new(DaemonState::with_root(root.clone()));
+    let main = checkout(&tmp.path().join("widget"), "https://github.com/acme/widget");
+    let wt = tmp.path().join("widget-wt");
+    for args in [
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ][..],
+        &["worktree", "add", "-q", "-b", "wt", &wt.to_string_lossy()][..],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let _ = register_session(State(Arc::clone(&state)), Json(body_for(&wt)))
+        .await
+        .expect("registration succeeds");
+
+    let registry = registry_data_dir_under(&root);
+    assert_eq!(
+        registered_checkout(&registry, "acme/widget").expect("assign resolves the project"),
+        main
+    );
+}
+
 /// The error arm: a registry that cannot be written leaves the session
 /// registered, the call successful, and one warn line naming the cause.
 #[tokio::test]

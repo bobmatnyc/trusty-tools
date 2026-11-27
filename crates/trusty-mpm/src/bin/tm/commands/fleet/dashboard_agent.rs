@@ -424,6 +424,34 @@ pub(crate) fn render_plist(_dir: &Path, _port: u16) -> anyhow::Result<String> {
     anyhow::bail!("starting the dashboard at login needs macOS (launchd)")
 }
 
+/// Restart the loaded agent's dashboard, so it serves the scripts just deployed.
+///
+/// Why: #11368 Q4 — a changed dashboard script restarts the dashboard under
+/// its supervisor, launchd. What: `launchctl kickstart -k gui/<uid>/<label>`;
+/// a non-zero exit is an error naming launchctl's stderr. Off macOS no agent
+/// is ever loaded, so this is never reached there and refuses.
+/// Test: side-effecting `launchctl` call; the decision is in
+/// `a_changed_dashboard_script_kickstarts_a_loaded_agent_once_11368`.
+pub(crate) fn kickstart() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let target = format!("gui/{}/{}", trusty_common::launchd::current_uid(), label());
+        let out = std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &target])
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "launchctl kickstart -k {target} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!("restarting the dashboard agent needs macOS (launchd)")
+    }
+}
+
 #[path = "dashboard_agent_host.rs"]
 mod host;
 #[path = "dashboard_python.rs"]

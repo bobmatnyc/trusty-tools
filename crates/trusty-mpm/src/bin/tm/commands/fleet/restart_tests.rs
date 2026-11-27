@@ -24,6 +24,10 @@ fn now() -> f64 {
     NOW
 }
 fn no_sleep(_: Duration) {}
+/// #11368: a deploy that changes nothing.
+fn no_deploy() -> anyhow::Result<Vec<Step>> {
+    Ok(Vec::new())
+}
 
 /// Writes the Architect's ledger under `dir/local/il`; `fresh` controls the stamp.
 fn ledger(dir: &Path, state: &str, stamp: Option<f64>) {
@@ -67,6 +71,7 @@ fn run(dir: &Path, tmux: &ScriptedTmux, inside: bool) -> (RestartReport, usize) 
     let ops = Ops {
         tmux,
         relaunch: &relaunch,
+        deploy: &no_deploy,
         now,
         sleep: no_sleep,
     };
@@ -208,6 +213,7 @@ fn a_failed_stop_types_no_resume_line_and_reports_not_restarted() {
     let ops = Ops {
         tmux: &tmux,
         relaunch: &stop_failed,
+        deploy: &no_deploy,
         now,
         sleep: no_sleep,
     };
@@ -221,4 +227,80 @@ fn a_failed_stop_types_no_resume_line_and_reports_not_restarted() {
         "{:?}",
         r.lines
     );
+}
+
+/// Runs `restart` with `deploy`; returns the report and the call order.
+fn run_with_deploy(
+    dir: &Path,
+    tmux: &ScriptedTmux,
+    inner: fn() -> anyhow::Result<Vec<Step>>,
+) -> (RestartReport, Vec<&'static str>) {
+    let order = std::cell::RefCell::new(Vec::new());
+    let relaunch = || {
+        order.borrow_mut().push("relaunch");
+        relaunched()
+    };
+    let deploy = || {
+        order.borrow_mut().push("deploy");
+        inner()
+    };
+    let ops = Ops {
+        tmux,
+        relaunch: &relaunch,
+        deploy: &deploy,
+        now,
+        sleep: no_sleep,
+    };
+    let r = restart(dir, &names(), false, None, &ops);
+    (r, order.into_inner())
+}
+
+/// #11368: `restart` deploys the bundle before it stops and relaunches `claude`.
+#[test]
+fn restart_deploys_the_bundle_before_the_relaunch_11368() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    ledger(tmp.path(), READY, None);
+    let deployed = || Ok(vec![Step::Changed("updated scripts/fleet-poll.py".into())]);
+    let (r, order) = run_with_deploy(tmp.path(), &idle_tmux(), deployed);
+    assert_eq!(order, ["deploy", "relaunch"], "{:?}", r.lines);
+    assert!(
+        r.lines
+            .iter()
+            .any(|l| l.contains("updated scripts/fleet-poll.py")),
+        "{:?}",
+        r.lines
+    );
+}
+
+/// #11368 Q8: a failed deploy, or a deploy with a failed step, stops nothing,
+/// types nothing and exits 1.
+#[test]
+fn a_failed_restart_deploy_stops_nothing_11368() {
+    let failures: [fn() -> anyhow::Result<Vec<Step>>; 2] = [
+        || anyhow::bail!("cannot write scripts/fleet-poll.py"),
+        || Ok(vec![Step::Failed("poller restart: tmux died".into())]),
+    ];
+    for deploy in failures {
+        let tmp = tempfile::tempdir().expect("tmp");
+        ledger(tmp.path(), READY, None);
+        let tmux = idle_tmux();
+        let (r, order) = run_with_deploy(tmp.path(), &tmux, deploy);
+        assert_eq!(
+            (r.exit, order.as_slice()),
+            (1, ["deploy"].as_slice()),
+            "{:?}",
+            r.lines
+        );
+        assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
+        assert!(
+            r.lines.iter().any(|l| l.contains("claude was not stopped")),
+            "{:?}",
+            r.lines
+        );
+        assert!(
+            r.lines
+                .last()
+                .is_some_and(|l| l.starts_with("NOT restarted"))
+        );
+    }
 }

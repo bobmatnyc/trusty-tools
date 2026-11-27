@@ -573,3 +573,268 @@ fn a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969() {
         "the build must run in the `cd`'s directory, not where the shell stood: {lost_cd}"
     );
 }
+
+/// What the pm-guard hook did with a dispatched agent's Bash `command`.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict11886 {
+    /// Rewritten to run under `tm build-lease`.
+    Leased,
+    /// Refused by the build-lease rule for #11886.
+    Refused,
+    /// Anything else, including a pass-through with no output.
+    Other(String),
+}
+
+fn verdict_11886(command: &str) -> Verdict11886 {
+    let home = scratch_home();
+    verdict_11886_in(home.path(), command)
+}
+
+/// [`verdict_11886`] in an existing sandbox `home`.
+fn verdict_11886_in(home: &Path, command: &str) -> Verdict11886 {
+    let stdout = run_hook(home, &["--pm-guard"], &bash_payload(home, command, true));
+    if stdout.contains("\"deny\"") && stdout.contains("#11886") {
+        return Verdict11886::Refused;
+    }
+    let (rewritten, _) = match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(_) => updated_command(&stdout),
+        Err(_) => return Verdict11886::Other(stdout),
+    };
+    if rewritten.contains(" build-lease ") {
+        Verdict11886::Leased
+    } else {
+        Verdict11886::Other(stdout)
+    }
+}
+
+fn assert_all_11886(commands: &[&str], want: Verdict11886) {
+    let wrong: Vec<String> = commands
+        .iter()
+        .map(|c| (c, verdict_11886(c)))
+        .filter(|(_, got)| *got != want)
+        .map(|(c, got)| format!("{c:?} => {got:?}"))
+        .collect();
+    assert!(wrong.is_empty(), "want {want:?}:\n{}", wrong.join("\n"));
+}
+
+/// #11886: a shell wrapper behind a `{`, `do` or `then` — the shape the
+/// compression rewrite and every loop produce — ran its build unleased.
+#[test]
+fn a_shell_wrapper_behind_a_keyword_or_group_is_leased_11886() {
+    assert_all_11886(
+        &[
+            "bash --login -c 'cargo test'",
+            "for p in a b; do bash -c \"cargo test -p $p\"; done",
+            "if true; then sh -c 'cargo test'; fi",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886: a wrapper operand (`flock FILE`, `taskset MASK`) or a runner
+/// (`watch`, `parallel`, BSD `script FILE`, `coproc`) hid the build.
+#[test]
+fn a_build_behind_a_wrapper_operand_or_runner_is_leased_11886() {
+    assert_all_11886(
+        &[
+            "flock /tmp/l cargo test",
+            "taskset 0x3 cargo test",
+            "watch -n 5 cargo test",
+            "parallel cargo test -p ::: a b",
+            "script -q /dev/null cargo test",
+            "coproc cargo test",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886: a shell reading its commands from a here-document, a `<<<`
+/// string or a pipe runs a build the rewrite cannot reach, so it is refused.
+#[test]
+fn a_shell_reading_a_build_from_stdin_is_refused_11886() {
+    assert_all_11886(
+        &[
+            "bash <<'EOF'\ncargo test\nEOF",
+            "bash <<EOF\ncd x && cargo test -p x\nEOF",
+            "bash <<< 'cargo test'",
+            "echo 'cargo test' | bash",
+            "printf 'cargo test\\n' | sh -s",
+        ],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886: `eval` and Linux `script -c` run a string the lease cannot wrap.
+#[test]
+fn an_eval_or_script_string_build_is_refused_11886() {
+    assert_all_11886(
+        &[
+            "eval cargo test",
+            "eval 'cd x && cargo test'",
+            "script -q -c 'cargo test' /dev/null",
+        ],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886: a program or subcommand named by an expansion is a build the
+/// hook cannot classify; it is refused with the literal, leased form.
+#[test]
+fn a_build_named_by_an_expansion_is_refused_11886() {
+    assert_all_11886(
+        &[
+            "$CARGO test",
+            "${CARGO:-cargo} test",
+            "\"$(which cargo)\" test",
+            "`which cargo` test",
+            "x=test; cargo $x",
+            "cargo $(echo test)",
+            "for v in check test; do cargo $v; done",
+        ],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886 Fail-Open Check: a command whose quoting the hook cannot parse
+/// is refused when its words name a heavy build, never passed through.
+#[test]
+fn an_unparseable_build_is_refused_not_passed_through_11886() {
+    assert_all_11886(
+        &["bash -c 'cargo test -p x", "eval \"cargo test"],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886 critic round 1: tool paths under an expanded directory and a build
+/// after a `#` comment holding an apostrophe are not refused; the build leases.
+#[test]
+fn expanded_tool_paths_and_commented_builds_pass_11886() {
+    for command in [
+        "$CARGO_TARGET_DIR/debug/tm doctor",
+        "\"$CARGO_TARGET_DIR/debug/tm\" fleet status --tmux",
+        "$HOME/.cargo/bin/cargo fmt",
+        "\"$CARGO_HOME/bin/cargo\" metadata",
+        "$HOME/.cargo/bin/rustup show",
+        // Leased by the classifier (unit: `expansions_are_refused_only_in_a_heavy_position`);
+        // here the #8879 script guard refuses it, as the sandbox has no such file.
+        "$HOME/.cargo/bin/cargo test",
+    ] {
+        assert_ne!(verdict_11886(command), Verdict11886::Refused, "{command}");
+    }
+    assert_all_11886(
+        &[
+            "# run the crate's tests\ncargo test -p trusty-mpm --no-fail-fast",
+            "watch -n 5 'cargo check'",
+            "parallel 'cargo test -p {}' ::: a b",
+            "flock /tmp/l -c 'cargo test'",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886 critic round 2: a comment's apostrophe cannot hide a build.
+#[test]
+fn a_comments_apostrophe_cannot_hide_a_build_11886() {
+    assert_all_11886(
+        &[
+            "# it's\nbash -c 'cargo fmt; cargo test'",
+            "# don't cache\ncargo test -p x\n# it's done",
+        ],
+        Verdict11886::Leased,
+    );
+}
+
+/// #11886 critic round 2: an `_`-joined expansion naming cargo is refused.
+#[test]
+fn an_underscored_expansion_naming_cargo_is_refused_11886() {
+    assert_all_11886(
+        &["$CARGO_BIN test", "${CARGO_CMD} build"],
+        Verdict11886::Refused,
+    );
+}
+
+/// #11886 fail-closed rule: a heavy build the hook could not lease is
+/// refused; a leased build still leases; a `make`-driven build passes.
+#[test]
+fn an_unleased_heavy_build_is_refused_and_a_make_build_is_not_11886() {
+    assert_all_11886(
+        &["entr -c cargo test -p x", "cargo check && entr cargo test"],
+        Verdict11886::Refused,
+    );
+    assert_all_11886(&["cargo test -p x"], Verdict11886::Leased);
+    assert_ne!(verdict_11886("make test"), Verdict11886::Refused);
+}
+
+/// #11886 critic round 3: a runner word that is not the exact program word,
+/// and a lease inside a nested `$(…)`, no longer let a build run bare; a `-c`
+/// string the rule would refuse is leased whole.
+#[test]
+fn critic_round_3_shapes_are_leased_or_refused_11886() {
+    assert_all_11886(
+        &[
+            "GIT_X=/usr/bin/remote-runner-x entr cargo test",
+            "entr cargo test $(cargo check)",
+        ],
+        Verdict11886::Refused,
+    );
+    assert_all_11886(&["bash -c 'entr cargo test'"], Verdict11886::Leased);
+}
+
+/// Write `yaml` as the sandbox home's trusty-mpm settings file (#11886).
+fn write_settings(home: &Path, yaml: &str) {
+    let path = trusty_common::crate_config::crate_config_path_at(home, "trusty-mpm");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&path, yaml).expect("settings file");
+}
+
+/// [`verdict_11886`] for `command` in a fresh home whose settings file is
+/// `settings` (none when `None`).
+fn verdict_with_settings_11886(settings: Option<&str>, command: &str) -> Verdict11886 {
+    let home = scratch_home();
+    if let Some(yaml) = settings {
+        write_settings(home.path(), yaml);
+    }
+    verdict_11886_in(home.path(), command)
+}
+
+/// #11886: a runner listed in the settings file is not refused; one that is
+/// not listed is.
+#[test]
+fn a_runner_listed_in_the_settings_file_is_not_refused_11886() {
+    let settings = Some("build:\n  remote_runners:\n    - remote-runner-x\n");
+    let listed = "remote-runner-x cargo test -p x --no-fail-fast";
+    assert_ne!(
+        verdict_with_settings_11886(settings, listed),
+        Verdict11886::Refused,
+        "{listed}"
+    );
+    assert_eq!(
+        verdict_with_settings_11886(settings, "other-runner-y cargo test -p x"),
+        Verdict11886::Refused
+    );
+}
+
+/// #11886: no settings file, or a settings file without the field, lists no
+/// runner, so a runner-led build is refused.
+#[test]
+fn a_runner_led_build_is_refused_when_no_runner_is_listed_11886() {
+    let command = "remote-runner-x cargo test -p x";
+    for settings in [None, Some("build:\n  build_jobs: 2\n")] {
+        assert_eq!(
+            verdict_with_settings_11886(settings, command),
+            Verdict11886::Refused,
+            "{settings:?}"
+        );
+    }
+}
+
+/// #11886: a settings file that does not parse lists no runner, even when the
+/// broken file names one.
+#[test]
+fn a_broken_settings_file_lists_no_runner_11886() {
+    let broken = Some("build:\n  remote_runners: [remote-runner-x]\nprojects: {broken\n");
+    assert_eq!(
+        verdict_with_settings_11886(broken, "remote-runner-x cargo test -p x"),
+        Verdict11886::Refused
+    );
+}

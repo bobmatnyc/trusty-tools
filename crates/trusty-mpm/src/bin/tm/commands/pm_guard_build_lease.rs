@@ -140,7 +140,12 @@ pub(crate) fn decide_rewrite(
     // #8969: each lease carries the directory its build's `cd` meant.
     let base = Some(cwd).filter(|c| c.is_absolute());
     let prefix_at = |at| lease_prefix(&prefix, text, at, base);
-    (rewrite_for_lease_with(text, &heavy, &prefix_at), permission)
+    // #11886: remote runners come from the per-install settings file only.
+    let runners = trusty_mpm::core::trusty_tools_config::load_remote_runners();
+    (
+        rewrite_for_lease_with(text, &heavy, &runners, &prefix_at),
+        permission,
+    )
 }
 
 /// The permission decision a program-word rewrite of `command` carries.

@@ -68,7 +68,9 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// `PermissionRequested`/`PermissionResolved` -> the matching `ReplEvent`
 /// halves of the TUI's permission prompt (#3422), field for field;
 /// `SessionDone` -> a final `AssistantOutput{done: true}` (`is_error` iff
-/// `status == "failed"`); `SessionCancelled` -> a status message. Every
+/// `status == "failed"`, and then a non-empty error chunk, #11788); an
+/// error-level `Log` -> `StatusMessage("error: ..")` (#11788);
+/// `SessionCancelled` -> a status message. Every
 /// other event kind (progress/telemetry this client doesn't render) is
 /// silently ignored — forward-compatible with new `Event` variants (no
 /// `match` arm needed per new kind, thanks to the catch-all). #7940 pins
@@ -91,7 +93,9 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// `engine_tests::forward_agent_failed_closes_with_the_error`,
 /// `engine_tests::forward_permission_requested_opens_the_prompt`,
 /// `engine_tests::forward_permission_resolved_closes_the_prompt`,
-/// `engine_tests::every_agent_attributed_event_maps_or_is_explicitly_ignored`.
+/// `engine_tests::every_agent_attributed_event_maps_or_is_explicitly_ignored`,
+/// `session_events_forward_tests::a_run_that_fails_early_renders_its_reason_and_an_error_line`,
+/// `session_events_forward_tests::a_non_error_log_is_not_rendered`.
 pub(super) fn forward_session_event(
     envelope: SessionEventEnvelope,
     tx: &UnboundedSender<ReplEvent>,
@@ -289,11 +293,26 @@ pub(super) fn forward_session_event(
             });
             false
         }
+        // #11788: a run that fails before the model answers (e.g. `PM config
+        // error`) reports its reason ONLY as an error-level `Log`. The
+        // catch-all below dropped it, so the turn ended with no visible text.
+        Event::Log { level, message, .. } if level == "error" => {
+            let _ = tx.send(ReplEvent::StatusMessage(format!("error: {message}")));
+            false
+        }
         Event::SessionDone { status, .. } => {
+            // #11788: an empty chunk finalizes no visible entry, so a failed
+            // run used to clear `busy` in silence. A failure always says so.
+            let failed = status == "failed";
+            let chunk = if failed {
+                format!("error: the run ended with status `{status}`")
+            } else {
+                String::new()
+            };
             let _ = tx.send(ReplEvent::AssistantOutput {
-                chunk: String::new(),
+                chunk,
                 done: true,
-                is_error: status == "failed",
+                is_error: failed,
             });
             true
         }

@@ -277,3 +277,121 @@ fn new_session_cwd_enter_registers_then_creates_in_the_checkout() {
     );
     assert_eq!(request.repo, cwd_root());
 }
+
+/// Twelve registered projects under one owner: longer than the eight-row window.
+fn long_registry() -> Vec<Project> {
+    (0..12)
+        .map(|i| {
+            project(
+                &format!("p{i:02}"),
+                &format!("https://github.com/acme/p{i:02}"),
+            )
+        })
+        .collect()
+}
+
+/// Assert the highlighted row is the one labelled `label`.
+fn assert_at(state: &TuiState, label: &str) {
+    let row = highlighted(open_flow(state));
+    assert!(
+        row.starts_with(&format!("▸ {label}")),
+        "want {label}, got {row}"
+    );
+}
+
+/// AC (b): every Up/Down, sent through the decoder, moves the highlight exactly
+/// one row, across the eight-row window, and clamps at the first and last row.
+#[test]
+fn new_session_cwd_arrows_step_one_row_and_clamp_over_a_long_list() {
+    let mut state = TuiState::new(None, None);
+    let targets = new_session::targets_from_with(&long_registry(), &[], checkout_of);
+    state.open_new_session(NewSessionFlow::new(targets).preselected(None, None));
+    let order: Vec<String> = (0..12)
+        .map(|i| format!("acme/p{i:02}"))
+        .chain(std::iter::once("other".to_string()))
+        .collect();
+    assert_at(&state, &order[0]);
+    assert_eq!(press(&mut state, KeyCode::Up), Action::Ignore, "Up clamps");
+    assert_at(&state, &order[0]);
+    for label in &order[1..] {
+        assert_eq!(press(&mut state, KeyCode::Down), Action::Redraw, "{label}");
+        assert_at(&state, label);
+    }
+    assert_eq!(
+        press(&mut state, KeyCode::Down),
+        Action::Ignore,
+        "Down clamps"
+    );
+    assert_at(&state, "other");
+    for label in order[..order.len() - 1].iter().rev() {
+        assert_eq!(press(&mut state, KeyCode::Up), Action::Redraw, "{label}");
+        assert_at(&state, label);
+    }
+    assert_eq!(
+        press(&mut state, KeyCode::Up),
+        Action::Ignore,
+        "Up clamps again"
+    );
+}
+
+/// AC (b): with no rows at all, every list key is a no-op and nothing panics.
+#[test]
+fn new_session_cwd_list_keys_on_an_empty_list_change_nothing() {
+    let mut state = TuiState::new(None, None);
+    state.open_new_session(NewSessionFlow::new(Vec::new()).preselected(None, None));
+    let keys = [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Enter,
+    ];
+    for code in keys {
+        assert_eq!(press(&mut state, code), Action::Ignore, "{code:?}");
+        assert!(open_flow(&state).rows().is_empty(), "{code:?}");
+    }
+}
+
+/// AC (b) reads "j/k, where the dialog list accepts them". Since #7421 it does
+/// not: a printable key narrows the list, so `j`/`k` filter and never move.
+#[test]
+fn new_session_cwd_j_and_k_filter_the_list_rather_than_move() {
+    let mut state = TuiState::new(None, None);
+    let targets = new_session::targets_from_with(&registry(), &[], checkout_of);
+    state.open_new_session(NewSessionFlow::new(targets).preselected(Some(design_system()), None));
+    press(&mut state, KeyCode::Char('k'));
+    let flow = open_flow(&state);
+    assert_eq!(flow.filter(), "k");
+    assert!(highlighted(flow).contains("skills"), "{:?}", flow.rows());
+    press(&mut state, KeyCode::Backspace);
+    press(&mut state, KeyCode::Char('j'));
+    assert_eq!(open_flow(&state).filter(), "j");
+}
+
+/// AC (c), the reporter's case: the cursor session runs in a repo the registry
+/// does not hold. With or without a cwd repo, every row is the cwd repo, a
+/// registry row labelled `registered`, or the typed-path escape. The session's
+/// repo never becomes a row.
+#[test]
+fn new_session_cwd_a_cursor_session_outside_the_registry_adds_no_row() {
+    let stray = session("acme/history-only");
+    let registered: Vec<String> = registry()
+        .iter()
+        .map(|p| format!("acme/{} · registered", p.name))
+        .collect();
+    for cwd in [None, Some(design_system())] {
+        let sessions = [stray.clone()];
+        let targets = new_session::targets_from_with(&registry(), &sessions, checkout_of);
+        let flow = NewSessionFlow::new(targets).preselected(cwd.clone(), Some(&stray));
+        for row in flow.rows() {
+            let label = row[row.char_indices().nth(2).map_or(0, |(i, _)| i)..].to_string();
+            let allowed = registered.contains(&label)
+                || label.starts_with("other")
+                || (cwd.is_some() && label == "acme/design-system · cwd");
+            assert!(allowed, "cwd {cwd:?}: stray row {label:?}");
+            assert!(!label.contains("history-only"), "cwd {cwd:?}: {label:?}");
+        }
+    }
+}

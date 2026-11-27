@@ -117,6 +117,11 @@ fn ok_relaunch() -> anyhow::Result<RelaunchReport> {
 }
 
 /// Runs `restart_with`; returns the report and the relaunch count.
+/// #11368: a deploy that changes nothing.
+fn no_deploy() -> anyhow::Result<Vec<Step>> {
+    Ok(Vec::new())
+}
+
 fn run_gate(
     dir: &Path,
     tmux: &ScriptedTmux,
@@ -133,6 +138,7 @@ fn run_gate(
     let ops = Ops {
         tmux,
         relaunch: &counted,
+        deploy: &no_deploy,
         now,
         sleep,
     };

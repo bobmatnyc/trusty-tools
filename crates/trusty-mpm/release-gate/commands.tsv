@@ -143,6 +143,7 @@ architect dashboard ids	SAFE	$H	architect dashboard ids --root $H/dash P	-	0	-
 architect up	SKIP	-	-	-	-	-	brings up the Architect session: tmux + claude, then attaches
 architect attach	SKIP	-	-	-	-	-	attaches to the Architect tmux session; TTY
 architect drift	SAFE	$H	architect drift --dir $H/no-architect	-	0	summary:	read-only (#11773): an empty dir reads every managed path absent; exit 1 only on an edited file
+architect restore	SAFE	$H	architect restore --dir $H/no-architect	-	1	no kept copy	pinned 1: no launch deploy kept a copy there (#11368); read-only on that path
 architect restart	SKIP	-	-	-	-	-	restarts the Architect behind a checkpoint gate
 architect serve	SKIP	-	-	-	-	-	long-running poll loop (--once exits); polls tmux and may send Slack when configured (default-off); never run in the gate
 presence local	SKIP	-	-	-	-	-	Touch ID / login password prompt, owner present
@@ -246,6 +247,7 @@ meta run	SKIP	-	-	-	-	-	boots PM plus sub-agents against an LLM; `--demo` canned
 statusline	SAFE	$H	statusline	$FX/empty.json	0	-	stdin JSON
 commit-trailers	SAFE	$H	commit-trailers	-	0	-	reads local stores
 banner	SAFE	$H	banner	-	0	-	seeds $H/.trusty-mpm/banner.txt
+whats-new	SAFE	$H	whats-new	-	0	What's new in trusty-mpm	prints embedded text; writes nothing (#11003)
 mcp share	SAFE	$H	mcp share gate-m	-	0	-	retired (#7892), prints why
 mcp unshare	SAFE	$H	mcp unshare gate-m	-	0	-	retired
 mcp list	SAFE	$H	mcp list --json	-	0	-	
