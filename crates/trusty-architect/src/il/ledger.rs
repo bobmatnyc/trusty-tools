@@ -215,7 +215,8 @@ impl Ledger {
         let (mut evs, mut acts, mut state_ops) = (Vec::new(), String::new(), 0);
         for a in ops {
             if !matches!(a, Json::Obj(_)) {
-                return invalid("each op must be an object");
+                // See #11800
+                return invalid("each operation must be an object");
             }
             if a.get("op").and_then(Json::as_str) == Some("act") {
                 let rec = act_record(a, ctx.epoch(), &ctx.env_session)?;
