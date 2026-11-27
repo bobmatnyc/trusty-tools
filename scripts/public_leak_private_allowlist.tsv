@@ -17,4 +17,3 @@ crates/trusty-review/src/config/mod.rs	sha256:6584b4791a70726ba58f3d129fcc806302
 crates/trusty-review/src/config/config_tests.rs	sha256:6584b4791a70726ba58f3d129fcc806302616c4248b32607feeba25988bcb38a	3	tests the deprecated installation-id env var alias (#11524, #11535)
 content/CONTENT-CHANGELOG.md	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	1	release history documents the deprecated voice alias (#11515, #11535)
 crates/trusty-review/CHANGELOG.md	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	2	release history documents the deprecated voice alias (#11515, #11535)
-crates/trusty-review/changelog.d/11513-remove-org-specific-content.md	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	2	fragment documents the deprecated voice alias (#11513, #11535)
