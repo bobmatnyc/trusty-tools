@@ -68,6 +68,7 @@ use sort::sort_key;
 use stage::Staged;
 pub use stage::{Op, OpResult, normalize_timestamps};
 pub use validate::Validation;
+pub(crate) use validate::cross_refs; // See #12029
 
 /// How long a write waits for the store lock by default.
 pub const LOCK_WAIT: Duration = Duration::from_secs(10);

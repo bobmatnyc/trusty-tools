@@ -46,6 +46,15 @@ fn decode_error(bytes: &[u8], e: &std::str::Utf8Error) -> String {
 
 /// Loads the JSON document at `path` as `json.load` on a text-mode open does.
 pub(crate) fn load(path: &Path) -> Result<Json, LoadError> {
+    let text = read_text(path)?;
+    crate::pyjson_load::loads(&text).map_err(|e| LoadError::Other(e.py_str()))?;
+    Json::parse(&text).map_err(LoadError::Other)
+}
+
+/// The text a `open(path, encoding="utf-8").read()` returns (UTF-8,
+/// universal newlines), or Python's error text.
+// See #12029: `dashboard_schema.load_schema` reads its files the same way.
+pub(crate) fn read_text(path: &Path) -> Result<String, LoadError> {
     let shown = path.to_string_lossy();
     let bytes = std::fs::read(path).map_err(|e| {
         let text = crate::writers::errno_text(&e, &shown);
@@ -57,9 +66,7 @@ pub(crate) fn load(path: &Path) -> Result<Json, LoadError> {
     let text = std::str::from_utf8(&bytes)
         .map_err(|e| LoadError::Other(decode_error(&bytes, &e)))?
         .to_owned();
-    let text = crate::writers::universal_newlines(text);
-    crate::pyjson_load::loads(&text).map_err(|e| LoadError::Other(e.py_str()))?;
-    Json::parse(&text).map_err(LoadError::Other)
+    Ok(crate::writers::universal_newlines(text))
 }
 
 #[cfg(test)]

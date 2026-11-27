@@ -83,6 +83,11 @@ path = "src/bin/trusty-architect-gh-session-track.rs"
 name = "trusty-architect-ruling-pack"
 path = "src/bin/trusty-architect-ruling-pack.rs"
 
+# #12029 P2a: the ids36.py port (`next <two digits>`).
+[[bin]]
+name = "trusty-architect-ids36"
+path = "src/bin/trusty-architect-ids36.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

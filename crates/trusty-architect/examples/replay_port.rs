@@ -12,7 +12,8 @@
 //! drivers `tests/fixtures/replay/<script>/driver.py` line for line, as do
 //! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d),
 //! `brief-id` (#12028 P1e), `il_agent` (#12028 P1f) and `verify_claim`
-//! (#12028 P1g) and `ruling_pack` (#12028 P1i). `gh-session-track` (#12087)
+//! (#12028 P1g) and `ruling_pack` (#12028 P1i), `ids36` and
+//! `dashboard_schema` (#12029 P2a). `gh-session-track` (#12087)
 //! runs the script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
@@ -22,8 +23,10 @@
 //! other `tests/replay_tasks.rs` tests, the `tests/replay_writers.rs` tests and
 //! `il_agent_recordings_replay_clean_against_the_port`,
 //! `verify_claim_recordings_replay_clean_against_the_port`,
-//! `gh_session_track_recordings_replay_clean_against_the_port` and
-//! `ruling_pack_recordings_replay_clean_against_the_port`.
+//! `gh_session_track_recordings_replay_clean_against_the_port`,
+//! `ruling_pack_recordings_replay_clean_against_the_port`,
+//! `ids36_recordings_replay_clean_against_the_port` and
+//! `dashboard_schema_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,6 +34,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use trusty_architect::gh_session_track;
+use trusty_architect::ids36;
 use trusty_architect::il_agent;
 use trusty_architect::replay::CLOCK_ENV;
 use trusty_architect::ruling_pack;
@@ -49,7 +53,8 @@ fn out(stdout: String, stderr: String, code: i32) -> Outcome {
     }
 }
 
-/// Python's `repr()` of an ASCII-printable `str` (the recorded values).
+/// Python's `repr()` of a `str` whose characters are printable or C0
+/// controls (the recorded values).
 fn repr(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') {
         '"'
@@ -58,10 +63,15 @@ fn repr(s: &str) -> String {
     };
     let body: String = s
         .chars()
-        .flat_map(|c| match c {
-            '\\' => vec!['\\', '\\'],
-            c if c == q => vec!['\\', c],
-            c => vec![c],
+        .map(|c| match c {
+            '\\' => "\\\\".to_owned(),
+            // See #12029: an ids36 recording passes `0f\n`.
+            '\n' => "\\n".to_owned(),
+            '\r' => "\\r".to_owned(),
+            '\t' => "\\t".to_owned(),
+            c if c == q => format!("\\{c}"),
+            c if c < ' ' || c == '\u{7f}' => format!("\\x{:02x}", u32::from(c)),
+            c => c.to_string(),
         })
         .collect();
     format!("{q}{body}{q}")
@@ -196,6 +206,124 @@ fn il_timeline(args: &[String]) -> Outcome {
     for p in dirs.keys().map(String::as_str).chain(["-"]) {
         for e in &epochs {
             o += &format!("at {p} {} {}\n", frepr(*e), key(tl.at(p, *e)));
+        }
+    }
+    out(o, String::new(), 0)
+}
+
+/// `driver.py` of `tests/fixtures/replay/ids36/` (#12029 P2a).
+fn ids36_driver(args: &[String]) -> Outcome {
+    let usage = "usage: driver.py cli ARGS... | table | enc N... | dec S... | next S...\n";
+    let Some((cmd, rest)) = args.split_first() else {
+        return out(String::new(), usage.into(), 2);
+    };
+    let mut o = String::new();
+    match cmd.as_str() {
+        "cli" => return ids36::run(rest),
+        "table" if rest.is_empty() => {
+            o += &format!(
+                "DIGITS {}\nBASE {}\nSPACE {}\nDIGIT_RE {}\n",
+                ids36::DIGITS,
+                ids36::BASE,
+                ids36::SPACE,
+                ids36::DIGIT_RE
+            );
+        }
+        "enc" | "dec" | "next" if !rest.is_empty() => {
+            for a in rest {
+                let text = |e: ids36::Ids36Error| e.to_string();
+                let r = match cmd.as_str() {
+                    // `int(a)` of a plain decimal; the recordings pass no other.
+                    "enc" => a
+                        .parse::<i64>()
+                        .map_err(|_| format!("invalid literal for int() with base 10: {}", repr(a)))
+                        .and_then(|n| ids36::enc(n).map_err(text))
+                        .map(|d| repr(&d)),
+                    "dec" => ids36::dec(a).map(|n| n.to_string()).map_err(text),
+                    _ => ids36::next_digits(a).map(|d| repr(&d)).map_err(text),
+                };
+                o += &match r {
+                    Ok(v) => format!("{cmd} {} -> {v}\n", repr(a)),
+                    Err(e) => format!("{cmd} {} ValueError: {e}\n", repr(a)),
+                };
+            }
+        }
+        _ => return out(String::new(), usage.into(), 2),
+    }
+    out(o, String::new(), 0)
+}
+
+/// `driver.py` of `tests/fixtures/replay/dashboard_schema/` (#12029 P2a).
+fn dashboard_schema(args: &[String]) -> Outcome {
+    use serde_json::Value;
+    use trusty_architect::dashboard::schema_check::{SchemaMode, schema_name, script};
+    use trusty_architect::dashboard::{Doc, Snapshot};
+    let [cases] = args else {
+        return out(String::new(), "usage: driver.py CASES.json\n".into(), 2);
+    };
+    let parsed = std::fs::read_to_string(cases)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<Value>>(&t).ok());
+    let Some(cases) = parsed else {
+        return out(String::new(), "driver: cases unreadable\n".into(), 1);
+    };
+    let ok = |errs: Vec<String>| {
+        if errs.is_empty() {
+            vec!["ok".into()]
+        } else {
+            errs
+        }
+    };
+    let mut o = String::new();
+    for (i, case) in cases.iter().enumerate() {
+        let s = |k: &str| case.get(k).and_then(Value::as_str).unwrap_or_default();
+        let dir = Path::new(case.get("dir").and_then(Value::as_str).unwrap_or("schemas"));
+        o += &format!("case {i} {}\n", s("op"));
+        let lines = match s("op") {
+            "name" => Ok(vec![
+                schema_name(s("coll"), s("id")).unwrap_or_else(|| "None".into()),
+            ]),
+            "validate" => script::validate(dir, s("coll"), s("id"), &case["data"]).map(ok),
+            "store" => {
+                let mut snap = Snapshot::new();
+                for (coll, docs) in case["docs"].as_object().into_iter().flatten() {
+                    let list = docs.as_array().into_iter().flatten().map(|d| Doc {
+                        id: d["id"].as_str().unwrap_or_default().to_owned(),
+                        version: 1,
+                        data: d["data"].as_object().cloned().unwrap_or_default(),
+                    });
+                    snap.insert(coll.clone(), list.collect());
+                }
+                script::validate_store(dir, &snap).map(ok)
+            }
+            "mode" => {
+                let env = |k: &str| {
+                    case["env"]
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                };
+                script::mode(&env).map(|m| {
+                    let m = match m {
+                        None => "None",
+                        Some(SchemaMode::Off) => "off",
+                        Some(SchemaMode::Warn) => "warn",
+                        Some(SchemaMode::Enforce) => "enforce",
+                    };
+                    vec![m.to_owned()]
+                })
+            }
+            "missing" => {
+                let miss: Vec<String> = script::architect_do_missing(&case["data"])
+                    .iter()
+                    .map(|m| repr(m))
+                    .collect();
+                Ok(vec![format!("[{}]", miss.join(", "))])
+            }
+            other => return out(o, format!("KeyError: {}\n", repr(other)), 1),
+        };
+        for line in lines.unwrap_or_else(|e| vec![format!("SchemaError: {e}")]) {
+            o += &format!("  {line}\n");
         }
     }
     out(o, String::new(), 0)
@@ -343,6 +471,10 @@ fn main() -> ExitCode {
                 clock: clock.as_ref(),
             },
         ),
+        // See #12029 P2a: both are their `driver.py`; the schema cases name
+        // directories relative to the sandbox root.
+        "ids36" => ids36_driver(&rest),
+        "dashboard_schema" => dashboard_schema(&rest),
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
@@ -350,7 +482,7 @@ fn main() -> ExitCode {
                 "replay_port: no port named {other:?}; known: spec_drift_check, level_lint, \
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
                  il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
-                 gh-session-track, ruling_pack"
+                 gh-session-track, ruling_pack, ids36, dashboard_schema"
             );
             return ExitCode::from(2);
         }

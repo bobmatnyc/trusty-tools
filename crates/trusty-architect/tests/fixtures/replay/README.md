@@ -453,3 +453,47 @@ $R record --clock 1795784400 --out $D/hit-all.json --seed $S/keys.json=keys.json
   --fakes $S/fakes/hit-all.json -- $P/rp_driver.py sample-app "..." --keys '{ROOT}/keys.json' --no-write
 $R replay $D/*.json -- <target>/debug/examples/replay_port ruling_pack
 ```
+
+## ids36 and dashboard_schema (#12029 P2a)
+
+Thirty-three runs of the frozen Python reference (architect commit
+`0fbbc81eed`), recorded on 2026-11-27 with `--clock 1795784400` and replayed
+in `tests/replay_ids_schema.rs` against `examples/replay_port.rs`. Neither
+module reads the clock, writes a file or starts a process, so every `writes`
+is empty and no recording declares fakes. Every input is synthetic.
+
+- `ids36/`: `driver.py`, copied beside `ids36.py` as `i36_driver.py`,
+  twenty-seven recordings. `cli ...` runs the script's `__main__` block
+  unchanged: `next` across the `f->g`, `k->m` (no `l`), `n->p` (no `o`) and
+  `z->10` boundaries, `zz` wrapping to `01`, `00`, a hex-era `ff`, a value
+  with one final newline (accepted: Python's `$`), every refusal (uppercase,
+  `o`, `l`, short, long, empty, a quote, non-ASCII) and the usage paths.
+  `table`, `enc`, `dec` and `next` call the functions: `enc` at `0`, `1155`,
+  `1156`, `-1` and `2^63-1`; `dec` on every refusal shape.
+- `dashboard_schema/`: `driver.py CASES.json`, copied beside
+  `dashboard_schema.py` as `ds_driver.py`, six recordings. `keywords`
+  exercises every keyword's error text, the top-level type of each JSON
+  kind, nested `enum`/`const` equality, patterns (one final newline, a
+  60-character cut), the goal invariants, `meta` ids and `instructions`.
+  `load-errors` covers a missing file, a directory, three decode errors
+  (CRLF included), an unknown keyword at each nesting point, unsupported and
+  unresolved `$ref`s and an unknown `type`. `store` covers `validate_store`'s
+  cross references with and without `goals`/`items`. `helpers` covers
+  `schema_name`, `mode` and `architect_do_missing`.
+
+Not recorded: a value the script cannot hash or call `.get` on (a list
+`goal` in `goal_removals`, a non-dict store body) ends in a traceback; a
+`watch_changes` document (the frozen script does not list the collection,
+the Rust port keeps it for #10896); a schema pattern outside the Rust
+subset, which the port refuses at load by design. Regenerate with the
+modules and drivers copied to a sandbox directory `P` and each recording's
+`files` laid into `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/ids36/cli-next-0f.json -- $P/i36_driver.py cli next 0f
+$R record --clock 1795784400 --out $D/dashboard_schema/store.json --seed $S/schemas=schemas \
+  --seed $S/broken=broken --seed $S/cases.json=cases.json -- $P/ds_driver.py cases.json
+$R replay $D/ids36/*.json -- <target>/debug/examples/replay_port ids36
+$R replay $D/dashboard_schema/*.json -- <target>/debug/examples/replay_port dashboard_schema
+```

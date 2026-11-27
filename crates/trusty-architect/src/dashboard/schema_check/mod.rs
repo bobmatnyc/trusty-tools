@@ -10,13 +10,16 @@
 //! a directory, refuses any keyword or pattern the validator does not
 //! implement, and checks a document by collection (`meta` by doc id) plus
 //! the goal invariants JSON Schema cannot say. A document with no schema is
-//! an error, as in the prototype.
+//! an error, as in the prototype. [`script`] is the script's own surface,
+//! one file at a time (#12029 P2a).
 //! Test: `walk_reports_each_keyword_like_the_prototype`,
 //! `walk_refuses_unknown_keywords_and_refs`, `goal_invariants_are_checked`,
 //! `schema_enforce_refuses_and_warn_writes`, `prototype_schemas_load_and_fixtures_validate`,
-//! `media_is_a_known_collection`, `watch_changes_is_a_known_collection`.
+//! `media_is_a_known_collection`, `watch_changes_is_a_known_collection`,
+//! `dashboard_schema_recordings_replay_clean_against_the_port`.
 
 pub(crate) mod pattern;
+pub mod script; // See #12029
 mod walk;
 
 use std::collections::BTreeMap;
@@ -30,7 +33,7 @@ use super::error::DashError;
 use walk::Patterns;
 
 /// Collections with a schema of the same name.
-pub const COLLECTIONS: [&str; 13] = [
+pub const COLLECTIONS: [&str; 14] = [
     "items",
     "sessions",
     "goals",
@@ -44,6 +47,8 @@ pub const COLLECTIONS: [&str; 13] = [
     "questions",
     // #10063 df-G01: the prototype lists it and `dashboard_media.py` writes it.
     "media",
+    // See #12029: the frozen `dashboard_schema.py` lists it.
+    "instructions",
     // #10896: the owner's Watch / Unwatch requests (`watch-apply.py`).
     "watch_changes",
 ];
@@ -127,11 +132,8 @@ impl SchemaDir {
             else {
                 continue;
             };
-            let text = fs::read_to_string(&path).map_err(DashError::io(&path))?;
-            let schema: Value = serde_json::from_str(&text).map_err(|e| {
-                DashError::Schema(format!("cannot load schema {}: {e}", path.display()))
-            })?;
-            walk::check_keywords(&schema, &name, &mut patterns)?;
+            // See #12029: one loader, so the error text is the script's.
+            let schema = script::load_file(&path, &name, &mut patterns)?;
             schemas.insert(name, schema);
         }
         Ok(Self { schemas, patterns })

@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "argv": [
+    "enc",
+    "0",
+    "1",
+    "33",
+    "34",
+    "1155",
+    "1156",
+    "-1",
+    "9223372036854775807"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "enc '0' -> '00'\nenc '1' -> '01'\nenc '33' -> '0z'\nenc '34' -> '10'\nenc '1155' -> 'zz'\nenc '1156' ValueError: id number out of range: 1156\nenc '-1' ValueError: id number out of range: -1\nenc '9223372036854775807' ValueError: id number out of range: 9223372036854775807\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

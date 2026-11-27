@@ -54,6 +54,7 @@ pub mod install_paths;
 // #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
 pub mod il;
 // #12028 P1f: the `il_agent.py` port.
+pub mod ids36; // See #12029
 pub mod il_agent;
 pub mod ledger;
 pub mod level_lint;

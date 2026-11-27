@@ -142,6 +142,45 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
+/// `a == b and type(a) is type(b)`: the script's `enum` and `const` test.
+// See #12029: only the outer types must agree; inside a list or dict
+// Python's `==` holds `1 == 1.0 == True`.
+fn same(a: &Value, b: &Value) -> bool {
+    type_name(a) == type_name(b) && py_eq(a, b)
+}
+
+/// Python's `==` on two JSON values.
+fn py_eq(a: &Value, b: &Value) -> bool {
+    let int = |v: &Value| match v {
+        Value::Bool(b) => Some(i128::from(*b)),
+        Value::Number(n) => n
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from)),
+        _ => None,
+    };
+    let num = |v: &Value| match v {
+        Value::Bool(b) => Some(f64::from(u8::from(*b))),
+        Value::Number(n) => n.as_f64(),
+        _ => None,
+    };
+    match (a, b) {
+        (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
+            match (int(a), int(b)) {
+                (Some(x), Some(y)) => x == y,
+                _ => num(a) == num(b),
+            }
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| py_eq(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| py_eq(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
 /// Python's `str()` of a number.
 fn num_text(v: &Value) -> String {
     match v.as_f64() {
@@ -175,9 +214,14 @@ fn walk(
             Value::Array(list) => list.iter().filter_map(Value::as_str).collect(),
             other => other.as_str().into_iter().collect(),
         };
+        // See #12029: `any()` stops at the first match, so an unknown type
+        // after a matching one is never reached.
         let mut ok = false;
         for ty in &types {
-            ok |= type_ok(value, ty)?;
+            if type_ok(value, ty)? {
+                ok = true;
+                break;
+            }
         }
         if !ok {
             errs.push(format!(
@@ -191,7 +235,7 @@ fn walk(
     if let Some(list) = sch
         .get("enum")
         .and_then(Value::as_array)
-        .filter(|l| !l.contains(value))
+        .filter(|l| !l.iter().any(|e| same(value, e)))
     {
         let shown = head(&python_dumps_utf8(value), 60);
         errs.push(format!(
@@ -199,7 +243,7 @@ fn walk(
             python_dumps(&Value::Array(list.clone()), false)
         ));
     }
-    if let Some(c) = sch.get("const").filter(|c| *c != value) {
+    if let Some(c) = sch.get("const").filter(|c| !same(value, c)) {
         errs.push(format!("{at}: must be {}", python_dumps(c, false)));
     }
     if let Some(shapes) = sch.get("oneOf").and_then(Value::as_array) {

@@ -1,0 +1,35 @@
+{
+  "version": 3,
+  "argv": [
+    "cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "broken/items.schema.json": "{\"type\": \"object\", \"properties\": {\"title\": {\"type\": \"string\", \"pattern\": \"^x\", \"readOnly\": true}}}\n",
+    "cases.json": "[\n  {\"op\": \"store\", \"docs\": {}},\n  {\"op\": \"store\", \"docs\": {\n    \"sessions\": [{\"id\": \"S01\", \"data\": {\"name\": \"s\"}}, {\"id\": \"S00\", \"data\": {\"name\": 1, \"extra\": true}}],\n    \"items\": [\n      {\"id\": \"D02\", \"data\": {\"title\": \"dangling\", \"goal\": \"G09\"}},\n      {\"id\": \"D01\", \"data\": {\"title\": \"linked\", \"goal\": \"G01\"}},\n      {\"id\": \"D03\", \"data\": {\"title\": \"numeric goal\", \"goal\": 5}},\n      {\"id\": \"D04\", \"data\": {\"title\": \"no goal\"}},\n      {\"id\": \"D05\", \"data\": {\"goal\": null}}\n    ],\n    \"goals\": [{\"id\": \"G01\", \"data\": {\"lifecycle\": \"active\"}}, {\"id\": \"G02\", \"data\": {\"lifecycle\": \"parked\"}}],\n    \"goal_removals\": [\n      {\"id\": \"R01\", \"data\": {\"goal\": \"G01\"}},\n      {\"id\": \"R02\", \"data\": {\"goal\": \"G07\"}},\n      {\"id\": \"R03\", \"data\": {}},\n      {\"id\": \"R04\", \"data\": {\"goal\": 5}},\n      {\"id\": \"R05\", \"data\": {\"goal\": true}},\n      {\"id\": \"R06\", \"data\": {\"goal\": 1.5}},\n      {\"id\": \"R07\", \"data\": {\"goal\": null}}\n    ],\n    \"step_progress\": [\n      {\"id\": \"P01\", \"data\": {\"item\": \"D01\"}},\n      {\"id\": \"P02\", \"data\": {\"item\": \"D77\"}},\n      {\"id\": \"P03\", \"data\": {}},\n      {\"id\": \"P04\", \"data\": {\"item\": 3}}\n    ],\n    \"meta\": [{\"id\": \"settings\", \"data\": {\"beep\": \"yes\"}}, {\"id\": \"nope\", \"data\": {}}],\n    \"bogus\": [{\"id\": \"X01\", \"data\": {}}]\n  }},\n  {\"op\": \"store\", \"docs\": {\n    \"items\": [{\"id\": \"D01\", \"data\": {\"title\": \"t\", \"goal\": \"G09\"}}],\n    \"goal_removals\": [{\"id\": \"R01\", \"data\": {\"goal\": \"G09\"}}]\n  }},\n  {\"op\": \"store\", \"docs\": {\n    \"step_progress\": [{\"id\": \"P01\", \"data\": {\"item\": \"D99\"}}],\n    \"goals\": []\n  }},\n  {\"op\": \"store\", \"docs\": {\n    \"goals\": [],\n    \"items\": [],\n    \"goal_removals\": [{\"id\": \"R01\", \"data\": {\"goal\": \"G01\"}}],\n    \"step_progress\": [{\"id\": \"P01\", \"data\": {\"item\": \"D01\"}}]\n  }},\n  {\"op\": \"store\", \"docs\": {\n    \"goals\": [],\n    \"items\": [{\"id\": \"D01\", \"data\": {\"title\": \"t\", \"goal\": \"G01\"}}]\n  }},\n  {\"op\": \"store\", \"dir\": \"broken\", \"docs\": {\"items\": [{\"id\": \"D01\", \"data\": {\"title\": \"x\"}}]}},\n  {\"op\": \"store\", \"dir\": \"broken\", \"docs\": {\"goals\": []}}\n]\n",
+    "schemas/goal_removals.schema.json": "{\"type\": \"object\"}\n",
+    "schemas/goals.schema.json": "{\n  \"type\": \"object\",\n  \"properties\": {\"lifecycle\": {\"enum\": [\"active\", \"parked\"]}}\n}\n",
+    "schemas/items.schema.json": "{\n  \"type\": \"object\",\n  \"required\": [\"title\"],\n  \"properties\": {\"title\": {\"type\": \"string\"}, \"goal\": {\"type\": [\"string\", \"null\", \"integer\"]}}\n}\n",
+    "schemas/meta-settings.schema.json": "{\"type\": \"object\", \"properties\": {\"beep\": {\"type\": \"boolean\"}}}\n",
+    "schemas/sessions.schema.json": "{\"type\": \"object\", \"additionalProperties\": false, \"properties\": {\"name\": {\"type\": \"string\"}}}\n",
+    "schemas/step_progress.schema.json": "{\"type\": \"object\", \"required\": [\"item\"]}\n"
+  },
+  "reads": [
+    "broken/items.schema.json",
+    "cases.json",
+    "schemas/goal_removals.schema.json",
+    "schemas/goals.schema.json",
+    "schemas/items.schema.json",
+    "schemas/meta-settings.schema.json",
+    "schemas/sessions.schema.json",
+    "schemas/step_progress.schema.json"
+  ],
+  "stdout": "case 0 store\n  ok\ncase 1 store\n  bogus/X01: no schema for this collection\n  goals/G02: /lifecycle: 'parked' needs a parked object\n  items/D05: /title: required property is missing\n  meta/settings: /beep: expected boolean, got str\n  meta/nope: no schema for this collection or meta id\n  sessions/S00: /extra: property is not allowed\n  sessions/S00: /name: expected string, got int\n  step_progress/P03: /item: required property is missing\n  items/D02: /goal: G09 is not a goal id in the store\n  goal_removals/R02: /goal: G07 is not a goal id in the store\n  goal_removals/R03: /goal: None is not a goal id in the store\n  goal_removals/R04: /goal: 5 is not a goal id in the store\n  goal_removals/R05: /goal: True is not a goal id in the store\n  goal_removals/R06: /goal: 1.5 is not a goal id in the store\n  goal_removals/R07: /goal: None is not a goal id in the store\n  step_progress/P02: /item: D77 is not an item id in the store\n  step_progress/P03: /item: None is not an item id in the store\n  step_progress/P04: /item: 3 is not an item id in the store\ncase 2 store\n  ok\ncase 3 store\n  ok\ncase 4 store\n  goal_removals/R01: /goal: G01 is not a goal id in the store\n  step_progress/P01: /item: D01 is not an item id in the store\ncase 5 store\n  items/D01: /goal: G01 is not a goal id in the store\ncase 6 store\n  SchemaError: items/properties/title: unsupported keyword 'readOnly'\ncase 7 store\n  ok\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

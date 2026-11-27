@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [
+    "cli",
+    "next",
+    "é1"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "ids36: not two base-34 digits: 'é1'\n",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

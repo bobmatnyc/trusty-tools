@@ -14,10 +14,10 @@ use super::json::Json;
 use crate::pystr::py_repr;
 use std::collections::HashSet;
 
-/// The base-34 digits: `0-9` and `a-z` without `l` and `o`.
-pub const DIGITS: &str = "0123456789abcdefghijkmnpqrstuvwxyz";
+// See #12029: the digit table and the decode are `crate::ids36`'s.
+pub use crate::ids36::DIGITS;
 /// Values per kind (`34 * 34`); `00` is never issued.
-pub const SPACE: i64 = 1156;
+pub const SPACE: i64 = crate::ids36::SPACE as i64;
 
 /// Two base-34 digits for `0 <= n < SPACE`.
 pub fn enc(n: i64) -> String {
@@ -26,14 +26,14 @@ pub fn enc(n: i64) -> String {
     format!("{}{}", char::from(d[hi]), char::from(d[lo]))
 }
 
-/// The value of two lowercase base-34 digits; `None` for anything else.
+/// The value of exactly two lowercase base-34 digits; `None` for anything
+/// else. Stricter than [`crate::ids36::dec`], which also takes one final
+/// newline as the script's `$` does: the ledger's callers port full matches.
 pub fn dec(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() != 2 {
-        return None;
-    }
-    let v = |c: u8| DIGITS.bytes().position(|d| d == c).map(|p| p as i64);
-    Some(v(b[0])? * 34 + v(b[1])?)
+    (s.len() == 2)
+        .then(|| crate::ids36::dec(s).ok())
+        .flatten()
+        .map(|n| n as i64)
 }
 
 /// `^[a-z][a-z0-9]{1,7}$`.

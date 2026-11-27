@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [
+    "cli",
+    "prev",
+    "0f"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: ids36.py next <two digits>   (0-9 and a-z without o and l; e.g. 0f -> 0g, 0z -> 10)\n",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -22,7 +22,7 @@ use serde_json::Value;
 use super::super::error::DashError;
 use super::super::ids::py_str;
 use super::super::schema_check::SchemaSet;
-use super::{Doc, Store, fsck::require_root};
+use super::{Doc, Snapshot, Store, fsck::require_root};
 
 /// The result of [`Store::validate`], in the prototype's JSON shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -51,51 +51,62 @@ impl Store {
                 errors.extend(schemas.validate(coll, &d.id, &d.data)?);
             }
         }
-        let ids = |coll: &str| -> BTreeSet<&str> {
-            snap.get(coll)
-                .into_iter()
-                .flatten()
-                .map(|d| d.id.as_str())
-                .collect()
-        };
-        let docs = |coll: &str| snap.get(coll).into_iter().flatten();
-        let (goals, items) = (ids("goals"), ids("items"));
-        let missing = |d: &Doc, key: &str, set: &BTreeSet<&str>| {
-            let v = d.data.get(key);
-            let found = v.and_then(Value::as_str).is_some_and(|s| set.contains(s));
-            (!found).then(|| v.map_or_else(|| "None".to_owned(), py_str))
-        };
-        if snap.contains_key("goals") {
-            for d in docs("items") {
-                if let Some(Value::String(g)) = d.data.get("goal")
-                    && !goals.contains(g.as_str())
-                {
-                    errors.push(format!(
-                        "items/{}: /goal: {g} is not a goal id in the store",
-                        d.id
-                    ));
-                }
-            }
-            for d in docs("goal_removals") {
-                if let Some(g) = missing(d, "goal", &goals) {
-                    errors.push(format!(
-                        "goal_removals/{}: /goal: {g} is not a goal id in the store",
-                        d.id
-                    ));
-                }
-            }
-        }
-        if snap.contains_key("items") {
-            for d in docs("step_progress") {
-                if let Some(i) = missing(d, "item", &items) {
-                    errors.push(format!(
-                        "step_progress/{}: /item: {i} is not an item id in the store",
-                        d.id
-                    ));
-                }
-            }
-        }
+        errors.extend(cross_refs(&snap));
         let documents = snap.values().map(Vec::len).sum();
         Ok(Validation { documents, errors })
     }
+}
+
+/// `validate_store`'s cross references: an item whose string `goal` is not
+/// a goal id and a `goal_removals` doc whose `goal` is not one (when `snap`
+/// has goals), a `step_progress` doc whose `item` is not an item id (when it
+/// has items).
+// See #12029: shared with `schema_check::script::validate_store`.
+pub(crate) fn cross_refs(snap: &Snapshot) -> Vec<String> {
+    let mut errors = Vec::new();
+    let ids = |coll: &str| -> BTreeSet<&str> {
+        snap.get(coll)
+            .into_iter()
+            .flatten()
+            .map(|d| d.id.as_str())
+            .collect()
+    };
+    let docs = |coll: &str| snap.get(coll).into_iter().flatten();
+    let (goals, items) = (ids("goals"), ids("items"));
+    let missing = |d: &Doc, key: &str, set: &BTreeSet<&str>| {
+        let v = d.data.get(key);
+        let found = v.and_then(Value::as_str).is_some_and(|s| set.contains(s));
+        (!found).then(|| v.map_or_else(|| "None".to_owned(), py_str))
+    };
+    if snap.contains_key("goals") {
+        for d in docs("items") {
+            if let Some(Value::String(g)) = d.data.get("goal")
+                && !goals.contains(g.as_str())
+            {
+                errors.push(format!(
+                    "items/{}: /goal: {g} is not a goal id in the store",
+                    d.id
+                ));
+            }
+        }
+        for d in docs("goal_removals") {
+            if let Some(g) = missing(d, "goal", &goals) {
+                errors.push(format!(
+                    "goal_removals/{}: /goal: {g} is not a goal id in the store",
+                    d.id
+                ));
+            }
+        }
+    }
+    if snap.contains_key("items") {
+        for d in docs("step_progress") {
+            if let Some(i) = missing(d, "item", &items) {
+                errors.push(format!(
+                    "step_progress/{}: /item: {i} is not an item id in the store",
+                    d.id
+                ));
+            }
+        }
+    }
+    errors
 }
