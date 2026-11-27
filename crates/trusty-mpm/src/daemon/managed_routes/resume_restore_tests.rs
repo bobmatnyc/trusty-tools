@@ -126,9 +126,13 @@ async fn bound_session(dir: &std::path::Path) -> (Arc<DaemonState>, ManagedSessi
 async fn decommission(state: &Arc<DaemonState>, id: &ManagedSessionId, parked: &Parked) -> Rig {
     let mgr = state.session_manager().await;
     let rig = rig(stateful_search(parked), healthy_memory()).await;
-    mgr.decommission_project_with(&*state.project_registry().await, "widget", Ok(rig.capability()))
-        .await
-        .expect("decommission");
+    mgr.decommission_project_with(
+        &*state.project_registry().await,
+        "widget",
+        Ok(rig.capability()),
+    )
+    .await
+    .expect("decommission");
     assert_eq!(
         parked.lock().expect("parked").len(),
         1,
