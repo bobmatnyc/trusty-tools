@@ -154,7 +154,15 @@ fn declared_sets() -> Vec<&'static str> {
 fn every_declared_set_is_a_named_constant() {
     assert_eq!(
         declared_sets(),
-        vec![SEARCH_SET, MPM_SET, ASSISTANTS_SET, MEMORY_SET, ANALYZE_SET]
+        vec![
+            SEARCH_SET,
+            MPM_SET,
+            ASSISTANTS_SET,
+            MEMORY_SET,
+            ANALYZE_SET,
+            // #11587
+            SECRETS_SET,
+        ]
     );
 }
 
@@ -302,6 +310,216 @@ fn hardened_runtime_policy() {
     assert!(use_hardened_runtime(ASSISTANTS_SET, false));
     assert!(!use_hardened_runtime(MEMORY_SET, false));
     assert!(!use_hardened_runtime(ANALYZE_SET, false));
+    // #11587: explicit-only, like SEARCH_SET — Hardened Runtime is unverified.
+    assert!(use_hardened_runtime(SECRETS_SET, true));
+    assert!(!use_hardened_runtime(SECRETS_SET, false));
+}
+
+/// Why (#11587): `tctl sign trusty-secrets` must resolve to the one binary a
+/// registry install places, with a fixed identifier, so the Keychain items'
+/// designated requirement survives an upgrade. The literal name, not the
+/// constant, keeps this test compiling against the pre-#11587 table, where it
+/// fails on the assertion.
+/// What: asserts the `trusty-secrets` set is exactly `["trusty-secrets"]` and
+/// its identifier is `com.trusty.trusty-secrets`.
+/// Test: This is the test.
+#[test]
+fn binaries_for_set_covers_secrets() {
+    assert_eq!(binaries_for_set("trusty-secrets"), vec!["trusty-secrets"]);
+    assert_eq!(
+        codesign_identifier("trusty-secrets"),
+        "com.trusty.trusty-secrets"
+    );
+}
+
+/// `codesign -dvv` stderr for a Developer ID signature with Team ID `team`.
+fn developer_id_display(team: &str) -> String {
+    format!(
+        "Executable=/x/trusty-secrets\nIdentifier=com.trusty.trusty-secrets\n\
+         CodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+2 location=embedded\n\
+         Authority=Developer ID Application: Test Owner ({team})\n\
+         Authority=Developer ID Certification Authority\nAuthority=Apple Root CA\n\
+         TeamIdentifier={team}\n"
+    )
+}
+
+/// `codesign -dvv` stderr for an ad-hoc, linker-signed binary (real shape).
+const ADHOC_DISPLAY: &str = "Executable=/x/trusty-secrets\n\
+    Identifier=trusty_secrets-bfc09c7c0fda3530\n\
+    CodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded\n\
+    Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\n";
+
+/// The identity name every attestation test asks for.
+const TEST_IDENTITY: &str = "Developer ID Application: Test Owner (ABCDE12345)";
+
+/// Why (#11587): the Team ID the attestation demands comes from the identity
+/// name; a malformed suffix must yield no expectation, not a wrong one.
+/// What: a well-formed `(10 uppercase/digits)` suffix is returned; a short,
+/// lowercase, absent or SHA-1-only identity returns `None`.
+/// Test: This is the test.
+#[test]
+fn expected_team_id_reads_only_a_well_formed_suffix() {
+    assert_eq!(strict::expected_team_id(TEST_IDENTITY), Some("ABCDE12345"));
+    for identity in [
+        "Test Developer ID: Foo Bar (TEAM123)",
+        "Developer ID Application: x (abcde12345)",
+        "Developer ID Application: no team",
+        "F03283D9A1B2C3D4E5F60718293A4B5C6D7FB362",
+    ] {
+        assert_eq!(strict::expected_team_id(identity), None, "{identity}");
+    }
+}
+
+/// Why (#11587): accepting the right signature is half the contract; a check
+/// that rejects everything would pass every rejection test.
+/// What: a Developer ID display with the expected team passes, with and
+/// without an expectation.
+/// Test: This is the test.
+#[test]
+fn attest_developer_id_accepts_the_expected_team() {
+    let display = developer_id_display("ABCDE12345");
+    assert_eq!(
+        strict::attest_developer_id(&display, Some("ABCDE12345")),
+        Ok(())
+    );
+    assert_eq!(strict::attest_developer_id(&display, None), Ok(()));
+}
+
+/// Why (#11587): fail-open guard. Each of these shapes leaves a designated
+/// requirement that does not survive an upgrade, and each must be refused.
+/// What: ad-hoc, self-signed (no team), Apple Development leaf, no authority,
+/// and a wrong Team ID each return `Err` naming the cause.
+/// Test: This is the test.
+#[test]
+fn attest_developer_id_rejects_every_non_developer_id_shape() {
+    let self_signed = "Authority=Trusty Local Signing\nTeamIdentifier=not set\n";
+    let apple_dev = "Authority=Apple Development: x (ABCDE12345)\nTeamIdentifier=ABCDE12345\n";
+    let no_authority = "Identifier=x\nTeamIdentifier=ABCDE12345\n";
+    let wrong_team = developer_id_display("ZZZZZ99999");
+    let cases: [(&str, &str); 5] = [
+        (ADHOC_DISPLAY, "ad-hoc"),
+        (self_signed, "not a Developer ID"),
+        (apple_dev, "not a Developer ID"),
+        (no_authority, "no signing certificate"),
+        (&wrong_team, "ZZZZZ99999"),
+    ];
+    for (display, cause) in cases {
+        let err = strict::attest_developer_id(display, Some("ABCDE12345"))
+            .expect_err(&format!("must refuse: {display}"));
+        assert!(err.contains(cause), "`{err}` must name `{cause}`");
+    }
+}
+
+/// Exit codes a [`fake_codesign`] returns for each of its three call shapes.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct FakeExits {
+    /// The sign call (`--force … --sign`).
+    sign: i32,
+    /// `--verify --deep --strict`.
+    verify: i32,
+    /// `-dvv` (after printing the display fixture to stderr).
+    display: i32,
+}
+
+/// Every call succeeds.
+#[cfg(unix)]
+const ALL_OK: FakeExits = FakeExits {
+    sign: 0,
+    verify: 0,
+    display: 0,
+};
+
+/// Write a fake `codesign` into `dir`: each call shape exits with its code in
+/// `exits`, writing a failure note to stderr, and `-dvv` prints `display`.
+#[cfg(unix)]
+fn fake_codesign(dir: &std::path::Path, exits: FakeExits, display: &str) -> std::path::PathBuf {
+    let display_file = dir.join("display.txt");
+    std::fs::write(&display_file, display).expect("write display fixture");
+    let script = dir.join("codesign");
+    // #11587: per-call exits so the verify and display error arms are reachable.
+    crate::commands::test_support::write_exec_script(
+        &script,
+        &format!(
+            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    \
+             -dvv) cat '{file}' >&2; exit {display} ;;\n    \
+             --verify) echo 'invalid signature' >&2; exit {verify} ;;\n  esac\ndone\n\
+             echo 'errSecInternalComponent' >&2\nexit {sign}\n",
+            file = display_file.display(),
+            display = exits.display,
+            verify = exits.verify,
+            sign = exits.sign,
+        ),
+    );
+    script
+}
+
+/// A bin dir holding a placeholder `trusty-secrets` for the fake to "sign".
+#[cfg(unix)]
+fn secrets_bin_dir() -> tempfile::TempDir {
+    let bin = tempfile::tempdir().expect("tempdir");
+    std::fs::write(bin.path().join("trusty-secrets"), b"placeholder").expect("write bin");
+    bin
+}
+
+/// Why (#11587): THE fail-open regression. `codesign --verify --strict`
+/// accepts an ad-hoc signature, so the pre-#11587 pipeline reported success
+/// for a binary with no Team ID. Every bad outcome must now be an error.
+/// What: drives `sign_set_with` for `trusty-secrets` against a fake codesign
+/// that (a) fails the sign call, (b) fails `--verify`, (c) fails `-dvv`,
+/// (d) prints an empty `-dvv` summary, (e) leaves an ad-hoc signature,
+/// (f) leaves a wrong Team ID; asserts each is `SignSetError::Sign` naming
+/// the cause.
+/// Test: This is the test.
+#[cfg(unix)]
+#[test]
+fn sign_set_with_fails_closed_on_every_bad_signature() {
+    let wrong_team = developer_id_display("ZZZZZ99999");
+    let good = developer_id_display("ABCDE12345");
+    let exits = |sign, verify, display| FakeExits {
+        sign,
+        verify,
+        display,
+    };
+    let cases: [(FakeExits, &str, &str); 6] = [
+        (exits(1, 0, 0), ADHOC_DISPLAY, "codesign failed"),
+        // #11587 fix round: the verify and display error arms.
+        (exits(0, 1, 0), &good, "post-sign verification failed"),
+        (exits(0, 0, 1), &good, "could not read the signature"),
+        (ALL_OK, "", "could not read the signature"),
+        (ALL_OK, ADHOC_DISPLAY, "ad-hoc"),
+        (ALL_OK, &wrong_team, "ZZZZZ99999"),
+    ];
+    for (fake_exits, display, cause) in cases {
+        let tools = tempfile::tempdir().expect("tempdir");
+        let codesign = fake_codesign(tools.path(), fake_exits, display);
+        let bin = secrets_bin_dir();
+        let result =
+            strict::sign_set_with(codesign.as_os_str(), bin.path(), SECRETS_SET, TEST_IDENTITY);
+        match result {
+            Err(SignSetError::Sign(e)) => {
+                let msg = e.to_string();
+                assert!(msg.contains(cause), "`{msg}` must name `{cause}`");
+            }
+            other => panic!("expected a Sign error naming `{cause}`, got {other:?}"),
+        }
+    }
+}
+
+/// Why (#11587): the fail-closed check must not refuse a correct signature.
+/// What: a fake codesign that leaves a Developer ID signature with the
+/// identity's Team ID yields `Ok` with the one signed path.
+/// Test: This is the test.
+#[cfg(unix)]
+#[test]
+fn sign_set_with_accepts_a_matching_developer_id_signature() {
+    let tools = tempfile::tempdir().expect("tempdir");
+    let codesign = fake_codesign(tools.path(), ALL_OK, &developer_id_display("ABCDE12345"));
+    let bin = secrets_bin_dir();
+    let signed =
+        strict::sign_set_with(codesign.as_os_str(), bin.path(), SECRETS_SET, TEST_IDENTITY)
+            .expect("a matching Developer ID signature is success");
+    assert_eq!(signed, vec![bin.path().join("trusty-secrets")]);
 }
 
 /// Why (owner ruling 2026-08-06): `trusty-analyze` produces exactly ONE
