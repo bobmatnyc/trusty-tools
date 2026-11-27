@@ -1,0 +1,2 @@
+Fixed
+- A deferred-embed pass now plans its owed chunks from the redb corpus, the same source the coverage check reads, and loads an owed chunk the in-memory chunk map lacks from redb, one wave at a time. A corpus row the map had lost was owed by the check but never planned, so every retry embedded nothing and the semantic stage stayed `failed`, serving BM25 only until a restart. One retry now embeds it and the stage leaves `failed`; a failed row read fails the pass instead of settling `ready` (#12064).

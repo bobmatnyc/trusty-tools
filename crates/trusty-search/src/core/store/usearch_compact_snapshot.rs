@@ -15,7 +15,8 @@
 //! churn count are unchanged, so a write during the build is never lost.
 //! The copy lives in fixed-size pieces ([`PIECE_BYTES`]), not one buffer.
 //! Test: `super::compact_9450_tests::a_write_during_a_compaction_waits_only_for_the_copy`,
-//! `compaction_rss_stays_flat_across_rounds` (`tests/hnsw_compact_9450.rs`).
+//! `compaction_rss_stays_flat_across_rounds` (`tests/hnsw_compact_9450.rs`),
+//! `tests::a_copy_piece_always_exceeds_the_glibc_mmap_threshold_cap_12007`.
 
 use anyhow::{anyhow, Result};
 use usearch::{Index, ScalarKind};
@@ -23,7 +24,7 @@ use usearch::{Index, ScalarKind};
 use super::usearch_requant::{add_parallel, new_rebuild_index, rebuild_threads, RebuildFault};
 use super::usearch_store::UsearchStore;
 
-/// Size of one piece of the vector copy: 16 MiB, rounded down to whole rows.
+/// Size of one piece of the vector copy: 64 MiB, rounded down to whole rows.
 ///
 /// Why (#9450): one `keys x dim` buffer is ~230 MB at 150K x 384, and its
 /// size changes whenever the key count does. The macOS allocator kept each
@@ -32,7 +33,18 @@ use super::usearch_store::UsearchStore;
 /// of one fixed size are reused by the next copy instead, and the size never
 /// depends on the key count. Chosen over an anonymous mmap because that needs
 /// `unsafe` and a new dependency for the same effect.
-const PIECE_BYTES: usize = 16 << 20;
+/// #12007: a piece must also exceed glibc's 32 MiB `DEFAULT_MMAP_THRESHOLD_MAX`.
+/// glibc raises its mmap threshold to the size of each freed mmap block, up
+/// to that cap. With 16 MiB pieces, the first compaction's freed pieces
+/// raised it past 16 MiB, so every later copy came from the heap arenas and
+/// stayed resident: RSS after a compaction stepped up ~235 MB at round 1 on
+/// Linux (236 -> 471 MB, release).
+const PIECE_BYTES: usize = 64 << 20;
+
+/// glibc's `DEFAULT_MMAP_THRESHOLD_MAX` on 64-bit (32 MiB); an allocation
+/// above it is always served by `mmap` and returned to the OS on free.
+#[cfg(test)]
+const GLIBC_MMAP_THRESHOLD_MAX: usize = 32 << 20;
 
 /// Rows of `dim` f32 values that fit in one piece; at least one.
 fn rows_per_piece(dim: usize) -> usize {
@@ -178,4 +190,25 @@ pub(super) async fn build_from_snapshot(
     })
     .await
     .map_err(|e| anyhow!("usearch compaction build task panicked: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rows_per_piece, GLIBC_MMAP_THRESHOLD_MAX};
+
+    /// #12007: every piece of the copy, at any embedding width, is larger
+    /// than glibc's mmap threshold cap, so a freed piece goes back to the OS
+    /// and the next compaction's copy cannot land in a retained heap arena.
+    /// Red at the old 16 MiB piece size.
+    #[test]
+    fn a_copy_piece_always_exceeds_the_glibc_mmap_threshold_cap_12007() {
+        for dim in [1, 3, 128, 384, 768, 1024, 1536, 3072, 4096] {
+            let bytes = rows_per_piece(dim) * dim * size_of::<f32>();
+            assert!(
+                bytes > GLIBC_MMAP_THRESHOLD_MAX,
+                "dim {dim}: piece of {bytes} bytes is within glibc's mmap threshold cap \
+                 ({GLIBC_MMAP_THRESHOLD_MAX} bytes), so a later copy reuses retained heap (#12007)"
+            );
+        }
+    }
 }

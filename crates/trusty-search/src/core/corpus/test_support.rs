@@ -192,3 +192,22 @@ pub(crate) fn break_chunks_table(store: &CorpusStore) -> Result<()> {
     txn.commit().context("commit chunks break txn")?;
     Ok(())
 }
+
+/// Plant a `chunks` row under `id` whose value is not a chunk (#12064).
+///
+/// Why: a deferred-embed pass plans every corpus key, so a row it can name
+/// but not load is the one way left to leave an owed chunk unembedded.
+/// What: inserts `id` with a non-JSON value; `list_chunk_ids` reports it and
+/// `get_chunks` skips it.
+/// Test: `a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready`.
+pub(crate) fn write_unloadable_chunk_row(store: &CorpusStore, id: &str) -> Result<()> {
+    let txn = store.db.begin_write().context("begin unloadable row txn")?;
+    {
+        let mut table = txn.open_table(CHUNKS_TABLE).context("open chunks")?;
+        table
+            .insert(id, b"not a chunk".as_slice())
+            .context("insert unloadable row")?;
+    }
+    txn.commit().context("commit unloadable row txn")?;
+    Ok(())
+}

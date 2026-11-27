@@ -141,7 +141,7 @@ async fn has_vector(idx: &CodeIndexer, id: &str) -> bool {
 
 /// One wave holding every owed chunk — these fixtures stage a handful.
 async fn plan_all(idx: &CodeIndexer) -> DeferredEmbedPlan {
-    let mut pass = idx.plan_deferred_pass().await;
+    let mut pass = idx.plan_deferred_pass().await.expect("plan the pass");
     idx.plan_deferred_group(&mut pass, usize::MAX)
         .await
         .expect("load the owed chunks")
