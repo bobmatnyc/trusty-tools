@@ -604,6 +604,36 @@ async fn a_refused_frame_action_is_audited_with_the_frame_origin() {
     broker.close().await;
 }
 
+/// #11211 AC2: `page_screenshot` on a tab this session does not lease (another
+/// session's live lease, or no lease) is refused `StaleLease` by `leased` and
+/// sends the worker no capture; the holder's own lease does reach the worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_screenshot_refuses_a_tab_this_session_does_not_lease() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut b = conns.remove("b").expect("b");
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let shoot = |lease: &str| format!(r#"{{"op":"page_screenshot","lease":"{lease}","ref":null}}"#);
+    for lease in [A_EARLY_LEASE, "not-a-lease-of-this-session"] {
+        send_json(&mut b, &shoot(lease)).await;
+        assert_eq!(
+            wire(&recv_json(&mut b).await),
+            r#"{"ok":false,"error":"StaleLease"}"#,
+            "{lease}"
+        );
+    }
+    let quiet = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(quiet.is_err(), "a refused screenshot reached the worker");
+    send_json(&mut a, &shoot(A_EARLY_LEASE)).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_screenshot")));
+    assert_eq!(cmd.get("tab"), Some(&Json::Int(7)));
+    broker.close().await;
+}
+
 /// #11208: `close_tab` closes only a tab this session leases; any other tab
 /// answers `TabNotLeased` and reaches no worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
