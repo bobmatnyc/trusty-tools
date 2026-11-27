@@ -71,7 +71,10 @@ async fn an_inplace_reactivate_reactivates_the_bound_project_and_unparks_its_ind
     let got = reactivate(&state, &id).await;
 
     assert_eq!(got.status, 200, "{got:?}");
-    assert_eq!(session_state(&state, &id).await, ManagedSessionState::Active);
+    assert_eq!(
+        session_state(&state, &id).await,
+        ManagedSessionState::Active
+    );
     assert!(
         !retired(&state, "widget").await,
         "the bound project still reads decommissioned"
@@ -116,7 +119,10 @@ async fn an_inplace_reactivate_leaves_an_unbound_decommissioned_project_alone() 
         .await
         .expect("register gadget");
     let gadget_rig = rig_for_unbound(&state).await;
-    assert!(retired(&state, "gadget").await, "premise: gadget decommissioned");
+    assert!(
+        retired(&state, "gadget").await,
+        "premise: gadget decommissioned"
+    );
     let _ = state
         .session_manager()
         .await
@@ -179,7 +185,10 @@ async fn a_failed_unpark_rolls_the_reactivate_back_to_stopped() {
 
     assert_eq!(got.status, 500, "{got:?}");
     let body = format!("{:?}", got.body);
-    assert!(body.contains("widget-idx") && body.contains("still parked"), "{body}");
+    assert!(
+        body.contains("widget-idx") && body.contains("still parked"),
+        "{body}"
+    );
     assert!(body.contains("rolled back to stopped"), "{body}");
     assert_eq!(
         session_state(&state, &id).await,
@@ -212,7 +221,10 @@ async fn a_failed_project_reactivation_rolls_the_reactivate_back() {
     assert_eq!(got.status, 500, "{got:?}");
     let body = format!("{:?}", got.body);
     assert!(body.contains("could not be reactivated"), "{body}");
-    assert_eq!(session_state(&state, &id).await, ManagedSessionState::Stopped);
+    assert_eq!(
+        session_state(&state, &id).await,
+        ManagedSessionState::Stopped
+    );
     assert!(
         !rig.methods().contains(&format!("search:{METHOD_UNPARK}")),
         "the index step ran after the project step failed"
@@ -239,9 +251,19 @@ async fn a_refused_inplace_reactivate_leaves_the_project_and_index_alone() {
     let got = reactivate(&state, &id).await;
 
     assert_eq!(got.status, 409, "{got:?}");
-    assert!(retired(&state, "widget").await, "a refusal reactivated the project");
-    assert_eq!(parked.lock().expect("parked").len(), 1, "a refusal unparked the index");
-    assert_eq!(session_state(&state, &id).await, ManagedSessionState::Stopped);
+    assert!(
+        retired(&state, "widget").await,
+        "a refusal reactivated the project"
+    );
+    assert_eq!(
+        parked.lock().expect("parked").len(),
+        1,
+        "a refusal unparked the index"
+    );
+    assert_eq!(
+        session_state(&state, &id).await,
+        ManagedSessionState::Stopped
+    );
 
     let unknown = reactivate(&state, &ManagedSessionId::new()).await;
     assert_eq!(unknown.status, 404, "{unknown:?}");

@@ -201,7 +201,10 @@ async fn roll_back(mgr: &SessionManager, prior: Option<&SessionRecord>, why: Str
         return format!("{why}; the session record could not be rolled back (no prior record)");
     };
     match mgr.revert_reactivation(prior).await {
-        Ok(record) => format!("{why}; the session record was rolled back to {}", record.state),
+        Ok(record) => format!(
+            "{why}; the session record was rolled back to {}",
+            record.state
+        ),
         Err(e) => {
             tracing::error!(id = %prior.id, "in-place reactivate rollback failed: {e}");
             format!("{why}; rolling the session record back also failed: {e}")

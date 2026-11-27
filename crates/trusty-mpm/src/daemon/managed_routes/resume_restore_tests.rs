@@ -123,7 +123,11 @@ pub(super) async fn bound_session(dir: &std::path::Path) -> (Arc<DaemonState>, M
 
 /// Decommission `widget` against a stateful search that parks into `parked`.
 /// Returns the rig, which must outlive the test's restore.
-pub(super) async fn decommission(state: &Arc<DaemonState>, id: &ManagedSessionId, parked: &Parked) -> Rig {
+pub(super) async fn decommission(
+    state: &Arc<DaemonState>,
+    id: &ManagedSessionId,
+    parked: &Parked,
+) -> Rig {
     let mgr = state.session_manager().await;
     let rig = rig(stateful_search(parked), healthy_memory()).await;
     mgr.decommission_project_with(
