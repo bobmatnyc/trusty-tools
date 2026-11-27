@@ -1,0 +1,4 @@
+crate   trusty-console
+version 0.14.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  struct_missing struct trusty_console::detect::AgentsConnector

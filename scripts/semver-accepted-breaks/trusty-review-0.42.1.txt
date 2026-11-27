@@ -1,0 +1,12 @@
+crate   trusty-review
+version 0.42.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field CallerContext.author_intent
+accept  constructible_struct_adds_field field FileModels.authorized
+accept  constructible_struct_adds_field field ReviewRequest.author_intent
+accept  constructible_struct_adds_field field RoleEnv.authorized_models
+accept  constructible_struct_adds_field field RoleModels.authorized_models
+accept  constructible_struct_adds_field field RoleModels.authorized_models_error
+accept  constructible_struct_adds_field field RoleModels.verifier_from_builtin_default
+accept  constructible_struct_adds_field field VoiceConfig.repo_skills
+accept  trait_method_parameter_count_changed SearchClient::list_parked_index_ids now takes 1 instead of 0 parameters
