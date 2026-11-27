@@ -165,10 +165,42 @@ if [ "$(field "$out" count)" = 1 ] && [ "$(field "$out" crates)" = "trusty-mpm" 
   pass "live: ci-free-disk-space.sh -> canary trusty-mpm leg + trusty-common lanes"
 else fail "live ci-free-disk-space.sh: $out"; fi
 # #7777 ruling (c): a script no crate names plans zero crates, same as docs.
-out="$(plan -- --files scripts/check_sld.sh)"
+out="$(plan -- --files scripts/bump-version.sh)"
 if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" matrix)" = '{"include":[]}' ]; then
   pass "live: unreferenced script -> count=0, empty matrix"
 else fail "live unreferenced script: $out"; fi
+# #12023: a scripts-only diff that a trusty-mpm test reads through a computed
+# path (`the_repo_gate_scripts_allow_8879` joins the bare gate name) selects
+# trusty-mpm. The literal scan cannot see it; SCRIPT_READERS declares it.
+out="$(plan -- --files scripts/lib/run_or_cargo.sh)"
+if [ "$(field "$out" count)" = 1 ] && [ "$(field "$out" crates)" = "trusty-mpm" ]; then
+  pass "live: scripts/lib/run_or_cargo.sh (scripts-only diff) -> trusty-mpm"
+else fail "live scripts-only run_or_cargo.sh: $out"; fi
+# Bounded: a script no test reads still selects nothing (no ALL fallback).
+out="$(plan -- --files scripts/lib/vite-stamp-bundle.mjs)"
+if [ "$(field "$out" count)" = 0 ]; then
+  pass "live: unread lib script -> count=0 (over-selection bounded)"
+else fail "live unread lib script: $out"; fi
+# Drift guard (#12023): every gate the trusty-mpm test names, and every
+# scripts/lib file those gates source, is covered by the declared map.
+MPM_TEST="${REPO}/crates/trusty-mpm/src/bin/tm/commands/pm_guard_secret_script_tests.rs"
+gates="$(awk '/fn the_repo_gate_scripts_allow_8879/ { on = 1 } on && /^}/ { exit } on' "$MPM_TEST" |
+  grep -oE '\("[A-Za-z0-9_.-]+\.sh", "' | sed -E 's/^\("//; s/", "$//')"
+libs=""
+for g in $gates; do
+  libs="${libs} $(grep -v '^[[:space:]]*#' "${REPO}/scripts/${g}" |
+    grep -oE 'lib/[A-Za-z0-9_.-]+\.(sh|py)' | sort -u)"
+done
+drift=""
+checked=0
+for p in $(for g in $gates; do echo "scripts/$g"; done; for l in $libs; do echo "scripts/$l"; done); do
+  checked=$((checked + 1))
+  out="$(plan -- --files "$p")"
+  case " $(field "$out" crates) " in *" trusty-mpm "*) ;; *) drift="${drift} ${p}" ;; esac
+done
+if [ "$checked" -ge 5 ] && [ -z "$drift" ]; then
+  pass "drift guard: ${checked} script(s) the trusty-mpm gate test reads are all mapped"
+else fail "drift guard: checked ${checked}, unmapped:${drift}"; fi
 out="$(plan -- --files crates/trusty-common/src/lib.rs)"
 crates=" $(field "$out" crates) "
 case "$crates" in
