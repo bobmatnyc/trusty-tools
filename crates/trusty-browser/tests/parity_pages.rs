@@ -634,8 +634,8 @@ async fn page_screenshot_refuses_a_tab_this_session_does_not_lease() {
     broker.close().await;
 }
 
-/// #11208: `close_tab` closes only a tab this session leases; any other tab
-/// answers `TabNotLeased` and reaches no worker.
+/// #11208: `close_tab` on a tab this session does not lease answers
+/// `TabNotLeased` and reaches no worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_tab_refuses_a_tab_this_session_does_not_lease() {
     let dir = state_dir();
@@ -643,7 +643,6 @@ async fn close_tab_refuses_a_tab_this_session_does_not_lease() {
     let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
     let mut conns = replay(state, Some("attach-b-ack")).await;
     let mut b = conns.remove("b").expect("b");
-    let mut a = conns.remove("a").expect("a");
     let mut worker = conns.remove("worker").expect("worker");
     for tab in [7, 99] {
         let close = format!(r#"{{"op":"close_tab","request_id":"c{tab}","tab":{tab}}}"#);
@@ -653,20 +652,68 @@ async fn close_tab_refuses_a_tab_this_session_does_not_lease() {
             format!(r#"{{"ok":false,"error":"TabNotLeased","tab":{tab}}}"#)
         );
     }
-    send_json(&mut a, r#"{"op":"close_tab","request_id":"c1","tab":7}"#).await;
-    let cmd = answer(&mut worker, r#"{"closed":true}"#).await;
-    assert_eq!(cmd.get("op"), Some(&Json::from("page_close_tab")));
+    let quiet = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(quiet.is_err(), "a refused close reached the worker");
+    broker.close().await;
+}
+
+/// #11208 AC3: a user tab this session leased with `browser_select` but did not
+/// open is refused `TabNotOpened`, stays open and keeps its lease; a tab the
+/// session opened with `open_tab` closes, and its lease ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_tab_refuses_a_selected_user_tab_and_closes_an_opened_one() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    send_json(&mut a, r#"{"op":"close_tab","request_id":"c7","tab":7}"#).await;
     assert_eq!(
         wire(&recv_json(&mut a).await),
-        r#"{"ok":true,"tab":7,"closed":true}"#
+        r#"{"ok":false,"error":"TabNotOpened","tab":7}"#
     );
-    let read = r#"{"op":"page_read","lease":"YtbbXmIbar4-E6OcqOQZedqh522fyHj2"}"#;
-    send_json(&mut a, read).await;
+    let quiet = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(quiet.is_err(), "the user tab's close reached the worker");
+    let read = format!(r#"{{"op":"page_read","lease":"{A_EARLY_LEASE}"}}"#);
+    send_json(&mut a, &read).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_read")), "lease kept");
+    refuse_next_cmd(&mut worker, &cmd, "OutcomeUnknown").await;
+    recv_json(&mut a).await;
+    let open = r#"{"op":"open_tab","request_id":"o1","url":"https://example.test/"}"#;
+    send_json(&mut a, open).await;
+    let opened = r#"{"tab":12,"window":1,"access":true,"document":"d12","origin":"https://example.test","title":"New"}"#;
+    answer(&mut worker, opened).await;
+    let reply = recv_json(&mut a).await;
+    assert_eq!(reply.get("tab"), Some(&Json::Int(12)), "{}", wire(&reply));
+    let lease = reply.get("lease").and_then(Json::as_str).expect("lease");
+    let lease = lease.to_owned();
+    send_json(&mut a, r#"{"op":"close_tab","request_id":"c12","tab":12}"#).await;
+    let cmd = answer(&mut worker, r#"{"closed":true}"#).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_close_tab")));
+    assert_eq!(cmd.get("tab"), Some(&Json::Int(12)));
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":true,"tab":12,"closed":true}"#
+    );
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_read","lease":"{lease}"}}"#),
+    )
+    .await;
     assert_eq!(
         wire(&recv_json(&mut a).await),
         r#"{"ok":false,"error":"StaleLease"}"#
     );
     broker.close().await;
+}
+
+/// Refuse the already-received worker command `cmd` with `error`.
+async fn refuse_next_cmd(worker: &mut UnixStream, cmd: &Json, error: &str) {
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    let reply = format!(r#"{{"id":"{id}","ok":false,"error":"{error}"}}"#);
+    send_json(worker, &reply).await;
 }
 
 /// #11211: a screenshot hands out a `capture_id`; a coordinate action maps its

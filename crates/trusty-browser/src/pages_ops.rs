@@ -37,6 +37,8 @@ pub struct Session {
     pub journal: Journal,
     /// Screenshots a coordinate action may name, oldest first (#11211).
     pub captures: Vec<Capture>,
+    /// Tabs this session opened with `open_tab`, by worker generation; only these close (#11208).
+    pub opened: Vec<(String, i64)>,
 }
 
 /// A reply, the operated tab and the result host.

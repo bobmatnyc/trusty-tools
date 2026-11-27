@@ -23,7 +23,7 @@ use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 const PY_SIGNATURE: &str = "d2544c740b32cff7d25f3594ccfa88643eda6b5d56cfa22aef97ba3fbdb3cf69";
 /// #11211: pins the embedded Rust tree (tabs, screenshots and coordinate input in pages.js);
 /// update it with every extension change.
-const EMBEDDED_SIGNATURE: &str = "bc1f620454aaf5c6b4eebe764a2e06de728fc8e0d8e4df9a96081627efe119a5";
+const EMBEDDED_SIGNATURE: &str = "c4b212260a403fa1e50bf9670313f6d1b9feff9501c341effa90cfaa91e986e9";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";

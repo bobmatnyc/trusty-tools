@@ -1165,7 +1165,7 @@ TrustyPages.commands = deps => {
         throw error;
       }
     },
-    // #11208: the broker sends this only for a tab the session leases; a tab grant never closes its tab.
+    // #11208: the broker sends this only for a tab the session opened; a tab grant never closes its tab.
     async page_close_tab(req, row) {
       if (row.scope === "tab") throw refuse("OutOfScope", {tab:req.tab});
       try { await chrome.tabs.remove(req.tab); } catch { throw refuse("TabNotFound", {tab:req.tab}); }

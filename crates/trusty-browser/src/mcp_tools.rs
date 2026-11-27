@@ -206,7 +206,7 @@ pub const CONNECT: &[Tool] = &[
         "page_emulate",
         &["lease", "javascript", "color_scheme", "width", "height"],
     ),
-    // #11208: open a tab already leased to this session; close only a leased one.
+    // #11208: open a tab already leased to this session; close only one it opened.
     tool(
         "browser_open_tab",
         &[field("url", K::Str, D::Required), RID],

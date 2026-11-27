@@ -3,7 +3,7 @@
 //! Why: an agent that can only act on element refs cannot reach canvas,
 //! map or custom-drawn controls, and cannot open or close the tabs a task
 //! needs. It still never writes a selector: a coordinate comes from a
-//! screenshot this broker took, and a tab it closes is one it leased.
+//! screenshot this broker took, and a tab it closes is one it opened.
 //! What: [`route`] runs `open_tab`, `close_tab`, `page_screenshot`,
 //! `page_click_at` and `page_type_at`. A screenshot is stored as a
 //! [`Capture`] on the session; a coordinate action names its `capture_id`,
@@ -15,6 +15,7 @@
 //! `points_outside_the_viewport_are_refused`, `png_size_reads_the_ihdr`,
 //! `aspect_allows_rounding_and_refuses_a_resize` below;
 //! `close_tab_refuses_a_tab_this_session_does_not_lease`,
+//! `close_tab_refuses_a_selected_user_tab_and_closes_an_opened_one`,
 //! `a_capture_whose_aspect_disagrees_with_its_region_is_stale`,
 //! `an_unknown_open_tab_is_journaled_and_never_opens_a_second_tab` in
 //! `tests/parity_pages.rs`; the extension side in `tests/js/pages.test.mjs`.
@@ -222,7 +223,11 @@ async fn open_tab(
         Err(exc) => return Err(exc.into()),
     };
     let (reply, tab, origin) = match leased {
-        Ok(done) => done,
+        Ok(done) => {
+            // #11208: record the tab so close_tab may close it; no other tab closes.
+            session.opened.push((peer.generation.clone(), done.1));
+            done
+        }
         Err(exc) => {
             journal(session, request, &exc.response())?;
             return Err(exc.into());
@@ -278,7 +283,7 @@ fn lease_opened(
     Ok((reply, tab, origin))
 }
 
-/// Close a tab only when this session holds its lease (#11208).
+/// Close a tab only when this session opened it and still holds its lease (#11208).
 async fn close_tab(
     core: &Arc<Core>,
     session: &mut Session,
@@ -299,6 +304,11 @@ async fn close_tab(
             _ => return Err(Refusal::new("TabNotLeased").with("tab", tab).into()),
         }
     };
+    let mine = (peer.generation.clone(), tab);
+    // #11208: a leased tab this session did not open (a user tab taken with browser_select) never closes.
+    if !session.opened.contains(&mine) {
+        return Err(Refusal::new("TabNotOpened").with("tab", tab).into());
+    }
     if session.journal.len() >= JOURNAL_LIMIT {
         return Err(Refusal::new("SessionFull").into());
     }
@@ -317,6 +327,7 @@ async fn close_tab(
     pages::shaped(&raw, pages::CLOSED)?;
     core.lock().drop_claim(&token);
     session.captures.retain(|c| c.tab != tab);
+    session.opened.retain(|o| *o != mine);
     let mut reply = Json::object(ok_tab(tab));
     reply.insert("closed", Json::Bool(true));
     journal(session, request, &reply)?;

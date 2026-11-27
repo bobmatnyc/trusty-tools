@@ -79,6 +79,7 @@ pub async fn agent(core: Arc<Core>, stream: UnixStream) {
                     grant,
                     journal,
                     captures: Vec::new(),
+                    opened: Vec::new(),
                 },
                 kill,
                 ack,
