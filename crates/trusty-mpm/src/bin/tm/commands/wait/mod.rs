@@ -21,8 +21,9 @@
 //!
 //! 75 is `EX_TEMPFAIL` from `sysexits`, chosen so "not done yet" can never be
 //! confused with either success or the hard timeout. The `--timeout` budget
-//! SPANS re-runs — it is recorded in a state file keyed by the condition — so
-//! re-issuing the command does not reset the agent's own deadline. The status
+//! SPANS re-runs — it is recorded in a state file keyed by the condition and,
+//! for `--for check`, the PR head SHA (#10668) — so re-issuing the command does
+//! not reset the agent's own deadline, and a push starts a new one. The status
 //! line carries `remaining=<secs>` and, when pending, the exact `rerun=` command.
 //!
 //! Test: the sibling `tests.rs`; `cli_parses_wait_*` in `tests_behavior_a_tests.rs`.
@@ -266,7 +267,12 @@ pub(crate) struct Outcome {
 /// The next nap waits for the reset (or backs off exponentially) and is still
 /// clamped to the slice and the deadline; the fifth refusal in a row is an
 /// error. `Met` comes only from an `Ok` poll.
+///
+/// #10668: after every `Ok` poll the head SHA it read goes to
+/// [`Budget::observe_head`], so a poll that sees a new head restarts the budget
+/// before the expiry check runs.
 /// Test: `loop_returns_met_on_first_poll`, `loop_returns_pending_at_slice_end`,
+/// `rerun_on_a_new_head_starts_a_fresh_budget`,
 /// `loop_returns_timeout_when_budget_exhausted`,
 /// `loop_gives_up_after_repeated_probe_errors`,
 /// `loop_recovers_from_a_transient_probe_error`,
@@ -306,7 +312,12 @@ pub(crate) fn poll_until<C: Condition + ?Sized, K: Clock>(
                 .max(1),
         );
         let mut rate_limited = None;
-        match cond.poll(poll_budget) {
+        let polled = cond.poll(poll_budget);
+        if polled.is_ok() {
+            // #10668: a new head is a new CI run; it gets a fresh budget.
+            budget.observe_head(cond.head().as_deref(), started);
+        }
+        match polled {
             Ok(Poll::Met(d)) => {
                 budget.rate_limited_streak = 0;
                 return Ok(Outcome {
@@ -539,6 +550,7 @@ pub(crate) fn run(args: WaitArgs) -> ! {
                 polls: 0,
                 timeout_s: 0,
                 rate_limited_streak: 0,
+                head: None,
             };
             println!(
                 "{}",

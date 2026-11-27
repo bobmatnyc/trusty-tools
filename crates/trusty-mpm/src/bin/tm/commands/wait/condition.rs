@@ -59,6 +59,15 @@ pub(crate) enum Poll {
 pub(crate) trait Condition {
     /// Inspect the world once, returning within `budget`.
     fn poll(&self, budget: std::time::Duration) -> anyhow::Result<Poll>;
+
+    /// The head SHA the most recent successful [`poll`](Self::poll) read.
+    ///
+    /// Why: #10668 — the budget is keyed to the spec plus this head, so a push
+    /// starts a fresh deadline. What: `None` for verbs without a head.
+    /// Test: `rerun_on_a_new_head_starts_a_fresh_budget`.
+    fn head(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Wait for a process to exit.
@@ -201,8 +210,8 @@ impl Condition for FileCondition {
 /// What: one method returning the raw `gh pr view --json …` stdout.
 /// Test: `FakeProbe` in `tests.rs`.
 pub(crate) trait ChecksProbe {
-    /// Return `gh pr view <pr> --json state,statusCheckRollup` stdout,
-    /// answering within `budget` (#7956).
+    /// Return `gh pr view <pr> --json state,statusCheckRollup,headRefOid`
+    /// stdout, answering within `budget` (#7956).
     fn pr_view_json(
         &self,
         pr: u64,
@@ -217,8 +226,10 @@ pub(crate) trait ChecksProbe {
 /// carries the per-project identity binding and never goes through a shell.
 /// Spawning `gh` here directly would be a second implementation of that
 /// capability.
-/// What: runs `gh pr view <pr> --json state,statusCheckRollup`, requiring a
-/// zero exit and non-blank stdout.
+/// What: runs `gh pr view <pr> --json state,statusCheckRollup,headRefOid`,
+/// requiring a zero exit and non-blank stdout. #10668: `headRefOid` rides on
+/// the read the wait already makes, so keying the budget to the head adds no
+/// network call.
 ///
 /// #7956: through [`run_within`], not `nonempty_stdout_blocking`. That helper
 /// waits forever, so one stalled `gh` call held the whole invocation past its
@@ -243,7 +254,8 @@ impl ChecksProbe for GhChecksProbe {
             "view",
             &pr.to_string(),
             "--json",
-            "state,statusCheckRollup",
+            // #10668: the head SHA keys the budget; same call, one more field.
+            "state,statusCheckRollup,headRefOid",
         ])
         .repo(repo)
         .to_std_command();
@@ -312,6 +324,8 @@ pub(crate) struct CheckCondition<P: ChecksProbe> {
     allow_empty: bool,
     /// #11673: `--required-only` judges only these contexts.
     required: Option<Vec<String>>,
+    /// #10668: `headRefOid` from the last parsed view, for [`Condition::head`].
+    head: std::cell::RefCell<Option<String>>,
 }
 
 impl<P: ChecksProbe> CheckCondition<P> {
@@ -323,6 +337,7 @@ impl<P: ChecksProbe> CheckCondition<P> {
             repo,
             allow_empty,
             required: None,
+            head: std::cell::RefCell::new(None),
         }
     }
 
@@ -341,7 +356,13 @@ impl<P: ChecksProbe> Condition for CheckCondition<P> {
             .pr_view_json(self.pr, self.repo.as_deref(), budget)?;
         let view: PrView = serde_json::from_str(&json)
             .with_context(|| format!("cannot parse `gh pr view {}` JSON", self.pr))?;
+        // #10668: a blank SHA is no head, so it can never restart a budget.
+        *self.head.borrow_mut() = view.head_ref_oid.clone().filter(|h| !h.trim().is_empty());
         Ok(settle(&view, self.allow_empty, self.required.as_deref()))
+    }
+
+    fn head(&self) -> Option<String> {
+        self.head.borrow().clone()
     }
 }
 
@@ -354,6 +375,9 @@ pub(crate) struct PrView {
     /// The check rollup; `None` when GitHub has not reported one yet.
     #[serde(default, rename = "statusCheckRollup")]
     status_check_rollup: Option<Vec<RollupEntry>>,
+    /// #10668: the PR head SHA, half of the budget key.
+    #[serde(default, rename = "headRefOid")]
+    head_ref_oid: Option<String>,
 }
 
 /// Decide whether a parsed PR view counts as settled.
