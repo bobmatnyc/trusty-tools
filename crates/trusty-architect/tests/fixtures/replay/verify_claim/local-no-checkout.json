@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-two/second\", \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\"}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED local checkout: no local checkout for repo 'example-two/second'\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

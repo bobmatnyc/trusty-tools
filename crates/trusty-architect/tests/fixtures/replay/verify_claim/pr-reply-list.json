@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"status\", \"repo\": \"example-org/example-repo\", \"pr\": 17, \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\"}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "",
+  "stderr": "AttributeError: 'list' object has no attribute 'get'\n",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "17",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "headRefOid"
+          ],
+          "stdout": "[1]",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "17",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "headRefOid"
+      ]
+    ]
+  }
+}

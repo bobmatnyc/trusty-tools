@@ -1,0 +1,77 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"pr\": 12, \"head\": \"1111111111aa\", \"base\": \"3333333333cccccccccc4444444444dddddddddd\", \"crate\": \"sample-crate\", \"version\": \"0.3.1\", \"claims\": {\"files\": 3, \"commits\": 2, \"checks\": {\"pass\": 2, \"pending\": 0}}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MATCH pr 12 head 1111111111aa\nMATCH pr 12 base 3333333333cccccccccc4444444444dddddddddd\nMATCH pr 12 files 3\nMATCH pr 12 commits 2\nMATCH pr 12 checks pass 2\nMATCH pr 12 checks pending 0\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "12",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "headRefOid,baseRefOid,changedFiles,commits"
+          ],
+          "stdout": "{\"headRefOid\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"baseRefOid\": \"3333333333cccccccccc4444444444dddddddddd\", \"changedFiles\": 3, \"commits\": [{\"oid\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\"}, {\"oid\": \"3333333333cccccccccc4444444444dddddddddd\"}]}",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "pr",
+            "checks",
+            "12",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "bucket"
+          ],
+          "stdout": "[{\"bucket\": \"pass\"}, {\"bucket\": \"pass\"}, {\"bucket\": \"skipping\"}]",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "12",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "headRefOid,baseRefOid,changedFiles,commits"
+      ],
+      [
+        "gh",
+        "pr",
+        "checks",
+        "12",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "bucket"
+      ]
+    ]
+  }
+}

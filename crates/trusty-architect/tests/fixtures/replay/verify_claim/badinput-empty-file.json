@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json"
+  ],
+  "stdout": "",
+  "stderr": "BADINPUT invalid JSON: Expecting value: line 1 column 1 (char 0)\n",
+  "exit": 2,
+  "writes": {}
+}

@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"pr\": 15, \"head\": \"abc123\", \"base\": \"not-a-sha\", \"merge_sha\": \"5555\"}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED pr 15 head abc123: claimed sha has under 10 hex characters\nUNCHECKED pr 15 base not-a-sha: not a hex sha\nUNCHECKED pr 15 merge_sha 5555: claimed sha has under 10 hex characters\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "15",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "headRefOid,baseRefOid,mergeCommit"
+          ],
+          "stdout": "{\"headRefOid\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"baseRefOid\": \"3333333333cccccccccc4444444444dddddddddd\", \"mergeCommit\": {\"oid\": \"5555555555eeeeeeeeee6666666666ffffffffff\"}}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "15",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "headRefOid,baseRefOid,mergeCommit"
+      ]
+    ]
+  }
+}

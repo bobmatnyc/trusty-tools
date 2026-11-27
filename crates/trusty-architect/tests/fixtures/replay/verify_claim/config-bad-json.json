@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"status\", \"repo\": \"example-org/example-repo\", \"pr\": 40, \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\"}\n",
+    "local/architect.json": "{\"repos\": {\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED pr 40: repo 'example-org/example-repo' has no mapped gh account\n",
+  "stderr": "CONFIG {ROOT}/local/architect.json: not valid JSON (Expecting property name enclosed in double quotes at line 2 column 1); gh claims are UNCHECKED\n",
+  "exit": 0,
+  "writes": {}
+}

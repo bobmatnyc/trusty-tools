@@ -1,0 +1,91 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"pr\": 22, \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"claims\": {\"checks\": {\"pass\": 1}}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED pr 22 head: gh pr view failed: GraphQL: API rate limit exceeded for user ID 1.; REST fallback failed: API rate limit exceeded for user ID 1.\nUNCHECKED pr 22 checks pass: gh pr checks failed: GraphQL: API rate limit exceeded for user ID 1.; REST fallback failed: API rate limit exceeded for user ID 1.\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "22",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "headRefOid"
+          ],
+          "stdout": "",
+          "stderr": "GraphQL: API rate limit exceeded for user ID 1.\n",
+          "exit": 1
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/pulls/22"
+          ],
+          "stdout": "{\"message\": \"API rate limit exceeded for user ID 1.\"}",
+          "stderr": "gh: API rate limit exceeded for user ID 1. (HTTP 403)\n",
+          "exit": 1
+        },
+        {
+          "argv": [
+            "pr",
+            "checks",
+            "22",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "bucket"
+          ],
+          "stdout": "",
+          "stderr": "GraphQL: API rate limit exceeded for user ID 1.\n",
+          "exit": 1
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "22",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "headRefOid"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/pulls/22"
+      ],
+      [
+        "gh",
+        "pr",
+        "checks",
+        "22",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "bucket"
+      ]
+    ]
+  }
+}

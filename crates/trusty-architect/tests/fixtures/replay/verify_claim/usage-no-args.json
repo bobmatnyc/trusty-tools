@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: verify-claim.py EVENT   (file path, '-' for stdin, or literal JSON)\n",
+  "exit": 2,
+  "writes": {}
+}

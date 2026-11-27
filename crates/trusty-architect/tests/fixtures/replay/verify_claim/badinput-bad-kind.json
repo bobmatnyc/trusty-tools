@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"merge\"}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json"
+  ],
+  "stdout": "",
+  "stderr": "BADINPUT kind must be one of clearance_request, merged, published, paused, status, improvement, question, fyi; got 'merge'\n",
+  "exit": 2,
+  "writes": {}
+}
