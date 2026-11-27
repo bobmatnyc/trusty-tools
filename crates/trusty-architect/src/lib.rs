@@ -29,6 +29,8 @@
 //! the Architect's level and config readers.
 //! #12028 P1e adds [`writers`], ports of the Architect's state writers
 //! (`state-archive.py`, `brief-id.py`, `aliases.py`) and their binaries.
+//! #12028 P1f adds [`il_agent`], the dispatched agents' read-only ledger
+//! access, and its binary.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
@@ -49,12 +51,15 @@ mod input;
 pub mod install_paths;
 // #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
 pub mod il;
+// #12028 P1f: the `il_agent.py` port.
+pub mod il_agent;
 pub mod ledger;
 pub mod level_lint;
 mod pointer;
 pub mod poller;
 mod process;
 mod pyjson;
+mod pyjson_file; // See #12028 P1f
 mod pyjson_load;
 mod pystr;
 mod pystrptime; // See #12028

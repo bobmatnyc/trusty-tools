@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "argv": [
+    "brief",
+    "qx-T01"
+  ],
+  "stdin": "",
+  "env": {
+    "ILIO_DIR": "ilio",
+    "ILIO_PROJECT": "il"
+  },
+  "files": {
+    "il/.trusty-mpm/datg/state.json": "",
+    "ilio/r-library.json": "{\n \"R01\": {\n  \"title\": \"Ack\",\n  \"options\": {\n   \"a\": \"Acknowledged.\",\n   \"b\": \"Merged {sha} into main.\"\n  }\n },\n \"R02\": {\n  \"title\": \"Wait\",\n  \"options\": {\n   \"a\": \"Waiting on {who} for {what}.\"\n  }\n }\n}\n"
+  },
+  "reads": [
+    "il/.trusty-mpm/datg/state.json"
+  ],
+  "stdout": "",
+  "stderr": "il_agent: state.json malformed (Expecting value: line 1 column 1 (char 0)); refusing to write\n",
+  "exit": 2,
+  "writes": {}
+}

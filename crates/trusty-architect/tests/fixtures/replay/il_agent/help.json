@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "-h"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: il_agent.py [-h] [--project PROJECT] {brief,dispatch,handback} ...\n\nil_agent.py: read-only Intent Ledger access for agents a PM dispatches (IL-\ntalk prototype, stdlib only).\n\npositional arguments:\n  {brief,dispatch,handback}\n\noptions:\n  -h, --help            show this help message and exit\n  --project PROJECT     ledger dir (default: ILIO_PROJECT or <repo>/local/il)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

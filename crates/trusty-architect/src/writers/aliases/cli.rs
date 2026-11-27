@@ -175,6 +175,7 @@ const CLI: Cli = Cli {
     prog: PROG,
     usage: TOP_USAGE,
     help: TOP_HELP,
+    top: &[HELP],
     dest: "cmd",
     names: &["resolve", "list", "check", "add"],
     required: false,

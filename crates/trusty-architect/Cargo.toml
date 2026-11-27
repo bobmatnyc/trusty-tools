@@ -63,6 +63,11 @@ path = "src/bin/trusty-architect-brief-id.rs"
 name = "trusty-architect-aliases"
 path = "src/bin/trusty-architect-aliases.rs"
 
+# #12028 P1f: the il_agent.py port.
+[[bin]]
+name = "trusty-architect-il-agent"
+path = "src/bin/trusty-architect-il-agent.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

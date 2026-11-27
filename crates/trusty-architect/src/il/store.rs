@@ -108,6 +108,20 @@ fn session_from(cmd: Command, timeout: Duration) -> Option<String> {
 /// # Errors
 /// `Invalid` for a `--session` that is not a plain name.
 pub fn per_pm_session(w: &Where) -> IlResult<Option<String>> {
+    per_pm_session_with(w, &tmux_session)
+}
+
+/// [`per_pm_session`] with the tmux pane lookup given (#12028 P1f: a trait
+/// fake in tests, never a real tmux).
+///
+/// Test: `il_agent_asks_tmux_through_the_trait_for_the_pane_session`.
+///
+/// # Errors
+/// `Invalid` for a `--session` that is not a plain name.
+pub fn per_pm_session_with(
+    w: &Where,
+    pane_session: &dyn Fn(&str) -> Option<String>,
+) -> IlResult<Option<String>> {
     let base = w.project.join(".trusty-mpm").join("datg");
     let has_state = |name: &str| base.join(name).join("state.json").is_file();
     if let Some(s) = &w.session {
@@ -131,7 +145,7 @@ pub fn per_pm_session(w: &Where) -> IlResult<Option<String>> {
         .any(|e| e.path().is_dir() && e.path().join("state.json").is_file());
     if has_subs
         && let Some(pane) = &w.tmux_pane
-        && let Some(t) = tmux_session(pane).filter(|t| session_ok(t) && has_state(t))
+        && let Some(t) = pane_session(pane).filter(|t| session_ok(t) && has_state(t))
     {
         return Ok(Some(t));
     }
@@ -143,11 +157,19 @@ pub fn per_pm_session(w: &Where) -> IlResult<Option<String>> {
 /// # Errors
 /// `Invalid` for a bad session name.
 pub fn resolve(w: &Where) -> IlResult<Paths> {
+    resolve_with(w, &tmux_session)
+}
+
+/// [`resolve`] with the tmux pane lookup given, as [`per_pm_session_with`].
+///
+/// # Errors
+/// `Invalid` for a bad session name.
+pub fn resolve_with(w: &Where, pane_session: &dyn Fn(&str) -> Option<String>) -> IlResult<Paths> {
     if let Some(d) = w.state_dir.as_ref().filter(|d| !d.as_os_str().is_empty()) {
         return Ok(Paths::at(d.clone()));
     }
     let base = w.project.join(".trusty-mpm").join("datg");
-    Ok(Paths::at(match per_pm_session(w)? {
+    Ok(Paths::at(match per_pm_session_with(w, pane_session)? {
         Some(s) => base.join(s),
         None => base,
     }))
@@ -288,7 +310,16 @@ pub fn load_state(paths: &Paths) -> IlResult<Json> {
         |why: &str| IlError::Corrupt(format!("state.json malformed ({why}); refusing to write"));
     let text = String::from_utf8(bytes).map_err(|e| corrupt(&e.to_string()))?;
     let st = Json::parse(&text).map_err(|e| corrupt(&e))?;
-    let ok = matches!(&st, Json::Obj(_))
+    if !shape_ok(&st) {
+        return Err(corrupt("bad shape"));
+    }
+    Ok(st)
+}
+
+/// `load_state`'s shape test: a ledger code, an integer `v`, a `next` object,
+/// `goals`/`items`/`tasks` lists and a `session` object when present.
+pub fn shape_ok(st: &Json) -> bool {
+    matches!(st, Json::Obj(_))
         && super::ids::is_code(st.s("code"))
         && st.get("v").and_then(Json::as_i64).is_some()
         && matches!(st.get("next"), Some(Json::Obj(_)))
@@ -298,11 +329,7 @@ pub fn load_state(paths: &Paths) -> IlResult<Json> {
         && matches!(
             st.get("session").unwrap_or(&Json::Obj(Vec::new())),
             Json::Obj(_)
-        );
-    if !ok {
-        return Err(corrupt("bad shape"));
-    }
-    Ok(st)
+        )
 }
 
 #[cfg(test)]

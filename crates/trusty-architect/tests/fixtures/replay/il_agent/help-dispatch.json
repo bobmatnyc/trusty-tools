@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "dispatch",
+    "--help"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: il_agent.py dispatch [-h] [--ask ASK] task [extras ...]\n\npositional arguments:\n  task\n  extras\n\noptions:\n  -h, --help  show this help message and exit\n  --ask ASK\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

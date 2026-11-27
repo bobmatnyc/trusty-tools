@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "dispatch",
+    "qx-T01",
+    "--ask"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: il_agent.py dispatch [-h] [--ask ASK] task [extras ...]\nil_agent.py dispatch: error: argument --ask: expected one argument\n",
+  "exit": 2,
+  "writes": {}
+}

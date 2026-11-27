@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "argv": [
+    "brief",
+    "qx-T01",
+    "qx-D99"
+  ],
+  "stdin": "",
+  "env": {
+    "ILIO_DIR": "ilio",
+    "ILIO_PROJECT": "il"
+  },
+  "files": {
+    "il/.trusty-mpm/datg/state.json": "{\n \"code\": \"qx\",\n \"v\": 3,\n \"next\": {\n  \"G\": 3,\n  \"D\": 9,\n  \"A\": 3,\n  \"T\": 9\n },\n \"goals\": [\n  {\n   \"id\": \"qx-G01\",\n   \"rank\": 1,\n   \"status\": \"open\",\n   \"title\": \"Ship the sample reader éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\",\n   \"finish\": \"All sample readers replay clean yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"\n  },\n  {\n   \"id\": \"qx-G02\",\n   \"rank\": 2,\n   \"status\": \"parked\",\n   \"title\": \"Second goal\"\n  }\n ],\n \"tasks\": [\n  {\n   \"id\": \"qx-T01\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Port the sample widget reader with a very long title xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\n   \"created\": \"2026-11-15T10:00Z\",\n   \"to\": \"engineer\"\n  },\n  {\n   \"id\": \"qx-T02\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"No creation day\"\n  },\n  {\n   \"id\": \"qx-T03\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"done\",\n   \"title\": \"Closed task\",\n   \"created\": \"2026-11-15T10:00Z\"\n  },\n  {\n   \"id\": \"qx-T04\",\n   \"goal\": \"qx-G09\",\n   \"status\": \"open\",\n   \"title\": \"Goal not in the ledger\",\n   \"created\": \"2026-12-01\"\n  },\n  {\n   \"id\": \"qx-T05\",\n   \"goal\": \"qx-G02\",\n   \"status\": \"wip\",\n   \"title\": \"Sample task 05\",\n   \"created\": \"2026-11-20T08:00Z\",\n   \"to\": \"\"\n  }\n ],\n \"items\": [\n  {\n   \"id\": \"qx-D01\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Pick a format zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\",\n   \"opts\": [\n    {\n     \"l\": \"jsonl wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\",\n     \"rec\": true\n    },\n    {\n     \"l\": \"dir\"\n    }\n   ],\n   \"answer\": \"\"\n  },\n  {\n   \"id\": \"qx-D02\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"answered\",\n   \"title\": \"Answered one\",\n   \"answer\": \"use dir aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n  },\n  {\n   \"id\": \"qx-A01\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Grant access\"\n  },\n  {\n   \"id\": \"qx-D03\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Third\"\n  },\n  {\n   \"id\": \"qx-D04\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Fourth\"\n  },\n  {\n   \"id\": \"qx-D05\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Fifth\"\n  },\n  {\n   \"id\": \"qx-D06\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"open\",\n   \"title\": \"Sixth\"\n  },\n  {\n   \"id\": \"qx-D07\",\n   \"goal\": \"qx-G01\",\n   \"status\": \"done\",\n   \"title\": \"Done one\"\n  },\n  {\n   \"id\": \"qx-A02\",\n   \"goal\": \"qx-G02\",\n   \"status\": \"open\",\n   \"title\": \"Other goal\"\n  }\n ],\n \"session\": {\n  \"owed\": [\n   {\n    \"check\": \"qx-T01 replay\",\n    \"expect\": \"clean\",\n    \"ref\": \"PR 1\"\n   },\n   {\n    \"check\": \"T01 smoke\",\n    \"expect\": \"ok\"\n   },\n   {\n    \"check\": \"D01 answer\",\n    \"expect\": \"recorded\",\n    \"ref\": null\n   },\n   {\n    \"check\": \"xT01 nope\",\n    \"expect\": \"skip\",\n    \"ref\": \"T011\"\n   },\n   {\n    \"check\": \"other\",\n    \"expect\": \"qx-T05\",\n    \"ref\": \"\"\n   }\n  ]\n }\n}\n",
+    "ilio/r-library.json": "{\n \"R01\": {\n  \"title\": \"Ack\",\n  \"options\": {\n   \"a\": \"Acknowledged.\",\n   \"b\": \"Merged {sha} into main.\"\n  }\n },\n \"R02\": {\n  \"title\": \"Wait\",\n  \"options\": {\n   \"a\": \"Waiting on {who} for {what}.\"\n  }\n }\n}\n"
+  },
+  "reads": [
+    "il/.trusty-mpm/datg/state.json",
+    "ilio/r-library.json"
+  ],
+  "stdout": "IL-REJECT UNKNOWN-ID ref: qx-D99 is not in the ledger\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {}
+}
