@@ -758,6 +758,15 @@ fn with_real_stdout_redirected_to<T>(tmp: &std::fs::File, f: impl FnOnce() -> T)
     f()
 }
 
+/// Set only by [`run_isolated_inner_test`] on its re-exec child (#11981).
+///
+/// Why: `--include-ignored` runs the `#[ignore]`d inner test in-process beside
+/// its siblings, whose `test ... ok` lines then land in the hijacked fd 1.
+/// What: the inner test runs its body only when this variable is set, so the
+/// leak assertion only ever runs alone in the re-exec child.
+/// Test: `run_captured_never_leaks_to_parent_stdio`.
+const ISOLATED_FD_TEST_ENV: &str = "TRUSTY_INSTALLER_ISOLATED_FD_TEST";
+
 /// Re-exec this test binary, running ONLY `inner_test_name` (an
 /// `#[ignore]`d test) alone with `--test-threads=1`, and assert it
 /// exits 0.
@@ -766,23 +775,44 @@ fn with_real_stdout_redirected_to<T>(tmp: &std::fs::File, f: impl FnOnce() -> T)
 /// hijacks the process's real stdout fd must run with zero sibling test
 /// threads.
 /// What: `Command::new(current_exe())` with
-/// `[name, "--exact", "--ignored", "--test-threads=1"]`; panics with the
-/// child's captured stdout/stderr on a non-zero exit.
+/// `[name, "--exact", "--ignored", "--test-threads=1", "--nocapture"]`;
+/// panics with the child's stdout/stderr on a non-zero exit, or when the
+/// child did not report `1 passed` plus [`ISOLATED_FD_TEST_DONE`].
 /// Test: exercised by `run_captured_never_leaks_to_parent_stdio` below.
 fn run_isolated_inner_test(inner_test_name: &str) {
     let exe = std::env::current_exe().expect("resolve current test binary");
     let output = std::process::Command::new(&exe)
-        .args([inner_test_name, "--exact", "--ignored", "--test-threads=1"])
+        // #11981: --nocapture lets the inner's completion marker reach stderr.
+        .args([
+            inner_test_name,
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        // #11981: only this re-exec arms the inner body; see ISOLATED_FD_TEST_ENV.
+        .env(ISOLATED_FD_TEST_ENV, "1")
         .output()
         .expect("re-exec test binary for isolated fd test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "isolated test `{inner_test_name}` failed ({}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        "isolated test `{inner_test_name}` failed ({}):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
         output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+    );
+    // #11981: libtest exits 0 when --exact matches nothing, and a guard-skipped
+    // inner passes too; require one test run AND its body to have completed.
+    assert!(
+        stdout.contains("1 passed") && stderr.contains(ISOLATED_FD_TEST_DONE),
+        "isolated test `{inner_test_name}` did not run its body (filter matched \
+         nothing, or {ISOLATED_FD_TEST_ENV} did not reach it):\n--- stdout ---\n\
+         {stdout}\n--- stderr ---\n{stderr}",
     );
 }
+
+/// Printed to stderr by the inner test after its last assertion (#11981).
+const ISOLATED_FD_TEST_DONE: &str = "ISOLATED_FD_TEST_BODY_COMPLETED";
 
 /// The #3830 regression proof: `run_captured` must NEVER let a child's
 /// output reach the parent's real (inherited) stdout, no matter how
@@ -802,6 +832,15 @@ fn run_isolated_inner_test(inner_test_name: &str) {
 #[ignore = "re-entry helper: run alone in a child by run_captured_never_leaks_to_parent_stdio"]
 fn run_captured_never_leaks_to_parent_stdio_inner() {
     use std::io::Read;
+
+    // #11981: outside the re-exec child, siblings share fd 1; the outer test runs this alone.
+    if std::env::var_os(ISOLATED_FD_TEST_ENV).is_none() {
+        eprintln!(
+            "skipping in-process run: {ISOLATED_FD_TEST_ENV} unset; \
+             run_captured_never_leaks_to_parent_stdio runs this body in isolation"
+        );
+        return;
+    }
 
     let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
     let mut cmd = std::process::Command::new("sh");
@@ -824,6 +863,7 @@ fn run_captured_never_leaks_to_parent_stdio_inner() {
         contents.is_empty(),
         "run_captured leaked to the parent's real stdout fd: {contents:?}"
     );
+    eprintln!("{ISOLATED_FD_TEST_DONE}");
 }
 
 /// `#[test]` entry point for the isolated inner test above — see
