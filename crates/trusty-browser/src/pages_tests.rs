@@ -46,10 +46,15 @@ fn validation_refuses_what_python_refuses() {
             format!(r#"{{"op":"page_find",{l},"text":"{x200}"}}"#),
             "page_find",
         ),
-        (format!(r#"{{"op":"page_find",{l},"text":"{x201}"}}"#), BARE),
+        // #11860: page_find refusals name the field; the rest are in
+        // `page_find_takes_role_or_name_alone_and_names_a_bad_argument`.
+        (
+            format!(r#"{{"op":"page_find",{l},"text":"{x201}"}}"#),
+            r#"{"ok":false,"error":"InvalidRequest","field":"text"}"#,
+        ),
         (
             format!(r#"{{"op":"page_find",{l},"role":"b","limit":0}}"#),
-            BARE,
+            r#"{"ok":false,"error":"InvalidRequest","field":"limit"}"#,
         ),
         (
             format!(r#"{{"op":"page_click",{l},"request_id":"r","ref":"e","dialog":"maybe"}}"#),
@@ -153,6 +158,55 @@ fn validation_refuses_what_python_refuses() {
     ];
     for (frame, want) in &cases {
         assert_eq!(outcome(frame), *want, "{}", &frame[..frame.len().min(120)]);
+    }
+}
+
+// #11860: the MCP server sends every page_find control, so an unused term
+// arrives as an explicit null and must not refuse the frame.
+#[test]
+fn page_find_takes_role_or_name_alone_and_names_a_bad_argument() {
+    let full = |role: &str, name: &str, text: &str, limit: &str| {
+        format!(
+            r#"{{"op":"page_find","lease":"L","role":{role},"name":{name},"text":{text},"within_ref":null,"limit":{limit}}}"#
+        )
+    };
+    let named =
+        |field: &str| format!(r#"{{"ok":false,"error":"InvalidRequest","field":"{field}"}}"#);
+    let x201 = format!(r#""{}""#, "x".repeat(201));
+    let cases: Vec<(String, String)> = vec![
+        (
+            full(r#""textbox""#, "null", "null", "10"),
+            "page_find".into(),
+        ),
+        (full("null", r#""ask""#, "null", "10"), "page_find".into()),
+        (
+            full(r#""button""#, r#""Chat""#, "null", "5"),
+            "page_find".into(),
+        ),
+        (full("null", "null", r#""Chat""#, "5"), "page_find".into()),
+        (
+            r#"{"op":"page_find","lease":"L","role":"textbox"}"#.into(),
+            "page_find".into(),
+        ),
+        (
+            r#"{"op":"page_find","lease":"L","name":"Chat","text":null}"#.into(),
+            "page_find".into(),
+        ),
+        (
+            full("null", "null", "null", "10"),
+            named("role, name or text"),
+        ),
+        (full(r#""""#, "null", "null", "10"), named("role")),
+        (full("null", "5", "null", "10"), named("name")),
+        (full("null", "null", &x201, "10"), named("text")),
+        (full(r#""b""#, "null", "null", "0"), named("limit")),
+        (
+            r#"{"op":"page_find","lease":"L","role":"b","within_ref":""}"#.into(),
+            named("within_ref"),
+        ),
+    ];
+    for (frame, want) in &cases {
+        assert_eq!(outcome(frame), *want, "{frame}");
     }
 }
 

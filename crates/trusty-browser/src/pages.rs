@@ -131,8 +131,9 @@ fn get<'a>(fields: &'a [(&str, Json)], name: &str) -> Option<&'a Json> {
 ///
 /// Why: the worker refuses a malformed control, so the broker refuses it first
 /// and sends nothing. What: fills defaults, then checks each control's type and
-/// range as the worker's SPECS do.
-/// Test: `validation_refuses_what_python_refuses`.
+/// range as the worker's SPECS do. A page_find refusal carries `field`.
+/// Test: `validation_refuses_what_python_refuses`,
+/// `page_find_takes_role_or_name_alone_and_names_a_bad_argument`.
 pub fn controls(request: &Json) -> Result<Vec<(&'static str, Json)>, Refusal> {
     let op = request.get("op").and_then(Json::as_str).unwrap_or("");
     let mut fields = defaults(op);
@@ -141,12 +142,17 @@ pub fn controls(request: &Json) -> Result<Vec<(&'static str, Json)>, Refusal> {
             *v = given.clone();
         }
     }
+    // #11860: a page_find refusal names the argument it refuses.
+    let named = |field: &'static str| match op {
+        "page_find" => invalid().with("field", field),
+        _ => invalid(),
+    };
     for name in ["scope_ref", "within_ref"] {
         if let Some(r) = get(&fields, name)
             && *r != Json::Null
             && !str_within(r, MAX_STRING)
         {
-            return Err(invalid());
+            return Err(named(name));
         }
     }
     let terms = ["role", "name", "text"];
@@ -155,15 +161,15 @@ pub fn controls(request: &Json) -> Result<Vec<(&'static str, Json)>, Refusal> {
             && *t != Json::Null
             && !str_within(t, 200)
         {
-            return Err(invalid());
+            return Err(named(name));
         }
     }
     if let Some(limit) = get(&fields, "limit") {
         if !matches!(limit, Json::Int(n) if (1..=50).contains(n)) {
-            return Err(invalid());
+            return Err(named("limit"));
         }
         if terms.iter().all(|t| get(&fields, t) == Some(&Json::Null)) {
-            return Err(invalid());
+            return Err(named("role, name or text"));
         }
     }
     if let Some(size) = get(&fields, "max_chars")
@@ -351,6 +357,10 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
         return Err(invalid());
     }
     for name in ["text", "value"] {
+        // #11860: page_find's `text` is an optional term; `controls` checks it.
+        if op == "page_find" && name == "text" {
+            continue;
+        }
         if let Some(item) = request.get(name)
             && item.as_str().is_none_or(|s| s.chars().count() > MAX_STRING)
         {
