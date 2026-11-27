@@ -5,9 +5,9 @@ description: 'Web QA: 6-phase browser testing plus a UAT mode that verifies busi
 model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
-tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__trusty-search]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser-mcp, mcp__trusty-search]
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # Web QA Agent
@@ -19,9 +19,9 @@ Dual testing approach:
 ## Browser Tool Priority
 
 ### 1. trusty-browser — REQUIRED for browser work
-Drive the browser through the `trusty-browser` MCP server: `browser_*` tools to connect, list, lease and switch tabs, and `page_*` tools to read, find, click, type, scroll and navigate. A session that registered the server as `trusty-browser` exposes them as `mcp__trusty-browser__browser_*` and `mcp__trusty-browser__page_*`; another server name changes only the prefix. Never use the Claude in Chrome extension (`mcp__claude-in-chrome__*`).
+Drive the browser through the `trusty-browser-mcp` MCP server: `browser_*` tools to connect, list, lease and switch tabs, and `page_*` tools to read, find, click, type, scroll and navigate. The server registers as `trusty-browser-mcp`, the binary name, which exposes them as `mcp__trusty-browser-mcp__browser_*` and `mcp__trusty-browser-mcp__page_*`; another server name changes only the prefix. Never use the Claude in Chrome extension (`mcp__claude-in-chrome__*`).
 
-**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`. The shell expands `~`, so registration writes the absolute command path. For the `claude mcp add` fallback, add `-s user` so the server is available in every project. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
+**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser-mcp ~/.cargo/bin/trusty-browser-mcp`. The shell expands `~`, so registration writes the absolute command path. For the `claude mcp add` fallback, add `-s user` so the server is available in every project. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
 
 ### Enrolled Trusty Browser workflows
 
