@@ -35,6 +35,7 @@ Restart the trusty daemons with this upgrade. A still-running 1.14.14 daemon ref
 - pm-guard test now pins `release-gate.sh` alongside the `--staged` gate scripts in `the_repo_gate_scripts_allow_8879`, so the static `install_paths.py` path in `scripts/lib/run_or_cargo.sh` stays covered (Refs [#12021](https://github.com/bobmatnyc/trusty-tools/issues/12021))
 - Sandboxed sessions can reach GitHub, crates.io and npm again. tm now writes `sandbox.network.allowedDomains` into its user-level settings next to `strictAllowlist`, because Claude Code ignores project-tier `allowedDomains` while `strictAllowlist` is on. Before this fix, every host was denied. The next launch repairs a user settings file that 1.14.14 left with `strictAllowlist` and no hosts, and keeps the operator's other keys. Verify now refuses a launch when the user tier has no hosts, an empty list, or a host outside tm's list (#12042).
 - After upgrading, restart the tm daemon. A 1.14.14 daemon or CLI still running refuses the repaired user settings file, because it rejects any user-tier `allowedDomains`. A downgrade to 1.14.14 needs `sandbox.network.allowedDomains` removed from the user settings by hand (#12042).
+- An in-place reactivate whose client gave up before the answer now rolls the session record back off `Active` at every log level. The rollback ran inside a `tracing::warn!` argument, so with WARN disabled it never ran and the record stayed `Active` (#12046).
 
 ### Changed
 
