@@ -5,7 +5,9 @@
 //! `archived_at` set, so a running session's project still read decommissioned.
 //! What: decommissions a project against a stateful trusty-search stand-in,
 //! drives the real `resume_managed` over a driver that accepts the launch line,
-//! and asserts on the registry record, the park, and the route's result.
+//! and asserts on the registry record, the park, and the route's result. Each
+//! test plants a fake `claude` first on `PATH` and runs `#[serial]`: the route
+//! resolves the binary before the launch line (#7862).
 //! Test: this file.
 
 use std::sync::Arc;
@@ -185,8 +187,11 @@ async fn resume(
 /// `archived_at` on the bound project and still unparks its index.
 /// Test: this function IS the test. Fails if `resume_managed` does not run
 /// `ProjectRegistry::reactivate_for_session`, or stops unparking.
+#[cfg(unix)]
+#[serial_test::serial]
 #[tokio::test]
 async fn an_operator_resume_reactivates_the_bound_decommissioned_project() {
+    let _claude = crate::test_support::fake_claude_on_path(); // #7862
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, id) = bound_session(dir.path()).await;
     let parked: Parked = Arc::default();
@@ -221,8 +226,11 @@ async fn an_operator_resume_reactivates_the_bound_decommissioned_project() {
 /// bind to stays decommissioned.
 /// Test: this function IS the test. Fails if the resume reactivates projects
 /// other than the one `resolve_session_project` binds the record to.
+#[cfg(unix)]
+#[serial_test::serial]
 #[tokio::test]
 async fn an_operator_resume_leaves_an_unbound_decommissioned_project_decommissioned() {
+    let _claude = crate::test_support::fake_claude_on_path(); // #7862
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, id) = bound_session(dir.path()).await;
     let parked: Parked = Arc::default();
@@ -258,8 +266,11 @@ async fn an_operator_resume_leaves_an_unbound_decommissioned_project_decommissio
 /// resume is the route's error, and the project record does not advance.
 /// Test: this function IS the test. Fails if `resume_managed` drops the
 /// reactivation failure, reports another error in its place, or answers `Ok`.
+#[cfg(unix)]
+#[serial_test::serial]
 #[tokio::test]
 async fn a_failed_reactivation_on_operator_resume_is_the_route_error() {
+    let _claude = crate::test_support::fake_claude_on_path(); // #7862
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, id) = bound_session(dir.path()).await;
     let parked: Parked = Arc::default();
@@ -303,8 +314,11 @@ async fn a_failed_reactivation_on_operator_resume_is_the_route_error() {
 /// the project decommissioned, and the route error is the launch's own.
 /// Test: this function IS the test. Fails if `resume_managed` reactivates the
 /// project before the launch gates pass.
+#[cfg(unix)]
+#[serial_test::serial]
 #[tokio::test]
 async fn a_failed_launch_on_operator_resume_leaves_the_project_decommissioned() {
+    let _claude = crate::test_support::fake_claude_on_path(); // #7862
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, id) = bound_session_over(dir.path(), true).await;
     let parked: Parked = Arc::default();
@@ -315,9 +329,11 @@ async fn a_failed_launch_on_operator_resume_leaves_the_project_decommissioned() 
     let msg = got
         .expect_err("the refused launch line must fail the resume")
         .to_string();
+    // A missing `claude` binary also reads "resume spawn failed", so pin the
+    // driver's own refusal.
     assert!(
-        msg.contains("resume spawn failed"),
-        "the route error must be the launch failure: {msg}"
+        msg.contains("resume spawn failed") && msg.contains("launch refused"),
+        "the route error must be the refused launch line: {msg}"
     );
     let widget = state
         .project_registry()
