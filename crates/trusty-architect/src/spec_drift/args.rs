@@ -1,7 +1,8 @@
 //! argparse's behaviour for the script's three options (`-h`, `--root ROOT`,
 //! `--no-log`): unique-prefix abbreviations, `--opt=value`, the error lines
 //! and the help text, as Python 3.14 prints them without a terminal.
-//! Test: the `bad-arg-*` and `help` recordings in `tests/replay_spec_drift_check.rs`.
+//! Test: the `bad-arg-*` recordings in `tests/replay_spec_drift_check.rs`;
+//! `help_drops_the_instance_id_from_the_description` for the help text.
 
 /// The parse result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,9 +154,10 @@ fn usage(prog: &str) -> String {
 }
 
 /// The `-h` text.
+// #12028: the script's description names an instance id; the port drops it.
 pub(super) fn help(prog: &str) -> String {
     format!(
-        "{}\nAnti-drift check for SPEC-ARCHITECT-COMPONENTS (ar-T6w).\n\noptions:\n  \
+        "{}\nAnti-drift check for SPEC-ARCHITECT-COMPONENTS.\n\noptions:\n  \
          -h, --help   show this help message and exit\n  --root ROOT\n  \
          --no-log     do not append to the soak log\n",
         usage(prog)
@@ -165,4 +167,24 @@ pub(super) fn help(prog: &str) -> String {
 /// The stderr text of an argparse error.
 pub(super) fn error(prog: &str, msg: &str) -> String {
     format!("{}{prog}: error: {msg}\n", usage(prog))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::help;
+
+    // #12028: the one divergence from the script; its help description ends in an instance id the public port omits.
+    #[test]
+    fn help_drops_the_instance_id_from_the_description() {
+        let text = help("spec_drift_check.py");
+        assert_eq!(
+            text,
+            "usage: spec_drift_check.py [-h] [--root ROOT] [--no-log]\n\n\
+             Anti-drift check for SPEC-ARCHITECT-COMPONENTS.\n\noptions:\n  \
+             -h, --help   show this help message and exit\n  --root ROOT\n  \
+             --no-log     do not append to the soak log\n"
+        );
+        let description = text.lines().nth(2).unwrap();
+        assert!(!description.contains('('), "{description}");
+    }
 }
