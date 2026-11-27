@@ -5,7 +5,7 @@
     "host",
     "mail",
     "--role",
-    "x@y.io"
+    "x@example.com"
   ],
   "stdin": "",
   "env": {

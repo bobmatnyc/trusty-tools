@@ -164,12 +164,12 @@ mod tests {
     #[test]
     fn email_search_matches_python() {
         // Expected values from Python 3.14 `_EMAIL.search(...) is not None`.
-        assert!(has_email("{\"x\": \"a@b.co\"}"));
-        assert!(has_email("x@y.z.COM"));
+        assert!(has_email("{\"x\": \"a@example.com\"}"));
+        assert!(has_email("x@y.example.COM"));
         assert!(!has_email("@b.co"));
         assert!(!has_email("a@.co"));
         assert!(!has_email("a@b.c"));
-        assert!(has_email("a@b@c.de"));
+        assert!(has_email("a@b@example.com"));
         assert!(!has_email("a @b.co"));
     }
 }
