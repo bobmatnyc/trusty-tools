@@ -377,3 +377,89 @@ async fn an_unpark_slower_than_the_daemon_budget_fails_and_rolls_back() {
         ManagedSessionState::Stopped
     );
 }
+
+/// #12019 AC1+AC2: a `tm` client that hangs up on the daemon SOCKET during a
+/// slow unpark leaves the record rolled back off `Active` by the route itself,
+/// with its prior stop cause kept (no runtime death recorded).
+/// Test: this function IS the test. Drives the real `managed::register` router
+/// through `handle_connection`; fails if `mpm.managed.reactivate` is not marked
+/// `mark_cancel_on_hangup`, where the route runs on and answers 200 into the
+/// dead socket.
+#[tokio::test]
+async fn a_socket_hangup_during_a_slow_unpark_rolls_the_reactivate_back_12019() {
+    use tokio::io::AsyncWriteExt as _;
+    use trusty_common::uds::server::{
+        RpcRouter, RpcServeOptions, RpcServerError, handle_connection,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session(dir.path()).await;
+    let parked: Parked = Arc::default();
+    let _decommission_rig = decommission(&state, &id, &parked).await;
+    let search = slow_unpark_search().await;
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(search.socket().to_path_buf());
+    let before = state
+        .session_manager()
+        .await
+        .get(&id)
+        .await
+        .expect("record");
+    assert_eq!(before.state, ManagedSessionState::Stopped, "premise");
+
+    let router = Arc::new(crate::daemon::rpc::managed::register(
+        RpcRouter::new(),
+        &state,
+    ));
+    let (server, mut client) = tokio::net::UnixStream::pair().expect("socket pair");
+    let served = tokio::spawn(handle_connection(
+        server,
+        router,
+        RpcServeOptions::default(),
+    ));
+    let mut frame = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "mpm.managed.reactivate",
+        "params": { "id": id.to_string() }
+    }))
+    .expect("serialize frame");
+    frame.push(b'\n');
+    client.write_all(&frame).await.expect("write frame");
+    client.shutdown().await.expect("half-close");
+
+    // Hang up once the record is marked Active, while the unpark still waits.
+    let deadline = tokio::time::Instant::now() + SLOW_UNPARK;
+    while session_state(&state, &id).await != ManagedSessionState::Active {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never marked Active"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(client);
+
+    let after = state_after_settling(&state, &id, SLOW_UNPARK * 4).await;
+    assert_eq!(
+        after,
+        ManagedSessionState::Stopped,
+        "a socket hang-up left the session record Active"
+    );
+    let record = state
+        .session_manager()
+        .await
+        .get(&id)
+        .await
+        .expect("record");
+    assert_eq!(record.stop_cause, before.stop_cause, "a death was recorded");
+    let served = tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .expect("handle_connection returned")
+        .expect("connection task did not panic");
+    assert!(
+        matches!(&served, Err(RpcServerError::ClientGone { method })
+            if method == "mpm.managed.reactivate"),
+        "expected ClientGone, got {served:?}"
+    );
+}

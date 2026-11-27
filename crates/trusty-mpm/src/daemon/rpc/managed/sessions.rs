@@ -448,6 +448,9 @@ fn register_per_session(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRoute
                 outcome.into_rpc()
             }
         })
+        // #12019: a socket hang-up drops the route, which rolls the record back
+        // off Active; `reactivate_core` is cancel-safe at every await.
+        .mark_cancel_on_hangup("mpm.managed.reactivate")
         .typed(
             "mpm.managed.decommission",
             move |req: DecommissionParams| {

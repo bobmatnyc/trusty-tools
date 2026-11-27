@@ -1444,3 +1444,16 @@ fn an_architect_inplace_exec_drops_the_chat_tokens() {
         assert!(env.contains(&((*name).to_owned(), None)), "{name}: {env:?}");
     }
 }
+
+/// #12019 AC3: the line printed before a reactivate that may wait is one line,
+/// names the session, and says it is waiting on the index.
+#[test]
+fn reactivate_wait_notice_is_one_line_naming_the_session_12019() {
+    let line = reactivate_wait_notice(TEST_ID);
+    assert!(!line.contains('\n'), "{line}");
+    assert!(line.contains(TEST_ID), "{line}");
+    assert!(
+        line.contains("waiting for the daemon to restore the project index"),
+        "{line}"
+    );
+}
