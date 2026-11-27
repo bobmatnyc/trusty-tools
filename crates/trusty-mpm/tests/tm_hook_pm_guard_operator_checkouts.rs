@@ -10,6 +10,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_operator_checkouts::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,7 +79,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let repo = dir.path().join("repo");
     let home = dir.path().join("home");
     std::fs::create_dir_all(&repo).expect("mkdir repo");
-    std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir home");
+    std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir home");
     git(&repo, &["init", "-q", "-b", "main", "."]);
     std::fs::write(repo.join("config.yaml"), "a: 1\n").expect("write");
     git(&repo, &["add", "config.yaml"]);
@@ -89,7 +90,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
 /// List `repo` under `key` in `home`'s operator config.
 fn list(home: &Path, key: &str, repo: &Path) {
     let body = format!("[pm_guard]\n{key} = [{:?}]\n", repo.display().to_string());
-    std::fs::write(home.join(".trusty-mpm/config.toml"), body).expect("config");
+    std::fs::write(home.join(MPM_DIR_NAME).join("config.toml"), body).expect("config");
 }
 
 /// 🔴 REGRESSION (#8524): `git reset --keep <rev>` in a listed cron-host
@@ -172,7 +173,7 @@ fn pm_guard_documents_repo_commits_and_writes_a_script() {
         "[pm_guard]\ndocuments_repos = {:?}\n",
         repo.display().to_string()
     );
-    std::fs::write(home.join(".trusty-mpm/config.toml"), mistyped).expect("config");
+    std::fs::write(home.join(MPM_DIR_NAME).join("config.toml"), mistyped).expect("config");
     assert!(
         denied(&home, &repo, write.clone()),
         "mistyped list grants nothing"
@@ -187,7 +188,7 @@ fn pm_guard_documents_repo_commits_and_writes_a_script() {
 #[test]
 fn pm_guard_refuses_an_agent_write_to_the_documents_list() {
     let (_dir, repo, home) = fixture();
-    let config = home.join(".trusty-mpm/config.toml");
+    let config = home.join(MPM_DIR_NAME).join("config.toml");
     let write = serde_json::json!({
         "agent_id": "agent-7905",
         "agent_type": "engineer",

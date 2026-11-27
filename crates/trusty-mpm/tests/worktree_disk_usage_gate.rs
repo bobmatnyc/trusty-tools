@@ -16,6 +16,7 @@
 
 use serial_test::serial;
 use tempfile::TempDir;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 use trusty_mpm::core::disk_usage_guard::{self, MeasuredMount};
 use trusty_mpm::daemon::managed_routes::inproject::{
@@ -111,7 +112,7 @@ fn base_repo() -> TempDir {
 
 /// Write `disk.max_usage_pct` into `<home>/.trusty-tools/trusty-mpm/config.yaml`.
 fn write_threshold(home: &std::path::Path, max_usage_pct: u8) {
-    let dir = home.join(".trusty-tools").join("trusty-mpm");
+    let dir = home.join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&dir).expect("create config dir");
     std::fs::write(
         dir.join("config.yaml"),

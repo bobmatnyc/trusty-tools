@@ -11,6 +11,7 @@
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1615,7 +1616,7 @@ fn cli_prune_idle_unreachable_exit_code() {
     // points at the same dead port with our PID (alive) so the staleness check
     // in `read_lock_file_url` passes and the file is not silently discarded.
     let fake_home = tempfile::tempdir().expect("create temp home");
-    let lock_dir = fake_home.path().join(".trusty-mpm");
+    let lock_dir = fake_home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&lock_dir).expect("create .trusty-mpm under fake HOME");
     // #1731: the record must carry the trusty-mpm product magic, or the reader
     // rejects it as another product's same-named file.
@@ -2591,7 +2592,7 @@ async fn isolated_managed_state_guard_panics_on_production_root() {
              store — SKIP: no home directory detected on this system"
         ),
     };
-    let prod_root = home.join(".trusty-mpm");
+    let prod_root = home.join(MPM_DIR_NAME);
     // This MUST panic with the production-root guard message.
     let _ = DaemonState::with_root_isolated_managed(prod_root).await;
 }

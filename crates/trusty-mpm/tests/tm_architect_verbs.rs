@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 use crate::common;
 
@@ -272,7 +273,11 @@ fn quiet_from(env: &VerbEnv, cwd: &Path) -> Output {
 #[test]
 fn quiet_reads_the_architect_list_from_any_cwd() {
     let env = VerbEnv::new();
-    let local = env.home.path().join("trusty-mpm-projects/architect/local");
+    let local = env
+        .home
+        .path()
+        .join(DEFAULT_WORKSPACE_DIR)
+        .join("architect/local");
     std::fs::create_dir_all(&local).expect("local");
     std::fs::write(local.join("quiet-sessions.txt"), "tm-b\ntm-a\n").expect("list");
     let (one, two) = (

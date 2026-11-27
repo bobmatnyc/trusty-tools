@@ -18,6 +18,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use crate::common::tm_command_in;
 
@@ -164,9 +165,9 @@ fn scratch(project_rel: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let root = guard.path().canonicalize().expect("canonical");
     let project = root.join(project_rel);
     let home = root.join("home");
-    std::fs::create_dir_all(home.join(".trusty-mpm")).expect("home");
+    std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("home");
     std::fs::write(
-        home.join(".trusty-mpm/config.toml"),
+        home.join(MPM_DIR_NAME).join("config.toml"),
         format!(
             "[architect]\nprojects = [{:?}]\n",
             project.display().to_string()

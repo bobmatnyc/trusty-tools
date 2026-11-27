@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
 use trusty_mpm::session_manager::{ManagedError, ManagedTmuxDriver};
@@ -219,7 +220,7 @@ fn a_worst_case_managed_spawn_never_types_a_line_the_tty_can_truncate() {
     let tmux = Arc::new(Recorder::default());
     // #8233: the framework root is an argument now; naming the same temp home
     // the `EnvGuard` installs keeps the worst-case path lengths honest.
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &home.path().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &home.path().join(MPM_DIR_NAME));
 
     adapter
         .spawn(
@@ -260,7 +261,7 @@ fn a_worst_case_managed_resume_never_types_a_line_the_tty_can_truncate() {
     let cwd = deep_worktree(home.path());
     let tmux = Arc::new(Recorder::default());
     // #8233: same named root as the spawn case above.
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &home.path().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &home.path().join(MPM_DIR_NAME));
 
     adapter
         .spawn_resume(

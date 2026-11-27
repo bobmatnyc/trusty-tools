@@ -13,6 +13,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_seed_scripts_10599::`.
 
 use crate::common;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -61,7 +62,7 @@ fn seed(custom: bool) -> Arch {
     let dir = if custom {
         outer.path().join("ops/arch-x")
     } else {
-        home.path().join("trusty-mpm-projects/architect")
+        home.path().join(DEFAULT_WORKSPACE_DIR).join("architect")
     };
     assert!(dir.join("scripts/self-clear.sh").is_file(), "seeded");
     Arch {

@@ -13,6 +13,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use crate::common;
 
@@ -251,7 +252,7 @@ impl FleetEnv {
 
     /// The PIDs of the `<pid>.architect` launch records, sorted.
     fn recorded_pids(&self) -> Vec<u32> {
-        let dir = self.home.path().join(".trusty-mpm/architect-launch");
+        let dir = self.home.path().join(MPM_DIR_NAME).join("architect-launch");
         let mut pids: Vec<u32> = std::fs::read_dir(dir)
             .map(|entries| {
                 entries
@@ -433,7 +434,7 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         "{}",
         text(&out)
     );
-    let root = env.home.path().join(".trusty-mpm");
+    let root = env.home.path().join(MPM_DIR_NAME);
     let records: Vec<_> = std::fs::read_dir(root.join("architect-launch"))
         .expect("the launch record directory")
         .map(|entry| entry.expect("entry").path())
@@ -897,7 +898,7 @@ fn fleet_init_with_a_session_override_names_every_session() {
     assert!(has("tm-sup-x") && has("tm-sup-x-poll"));
     assert!(!has("tm-architect") && !has("tm-architect-poll"));
 
-    let root = env.home.path().join(".trusty-mpm");
+    let root = env.home.path().join(MPM_DIR_NAME);
     let pid: u32 = std::fs::read_dir(root.join("architect-launch"))
         .expect("record dir")
         .filter_map(|e| {
@@ -952,7 +953,13 @@ fn fleet_init_refuses_an_invalid_session_name_before_writing() {
             text(&out)
         );
         assert!(!env.dir().exists(), "{bad:?}: {}", text(&out));
-        assert!(!env.home.path().join(".trusty-mpm/config.toml").exists());
+        assert!(
+            !env.home
+                .path()
+                .join(MPM_DIR_NAME)
+                .join("config.toml")
+                .exists()
+        );
     }
 }
 
@@ -1074,7 +1081,7 @@ impl Drop for ReadOnlyRecords {
 fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() {
     let env = FleetEnv::new();
     let dir = env.dir();
-    let root = env.home.path().join(".trusty-mpm");
+    let root = env.home.path().join(MPM_DIR_NAME);
     let _records = ReadOnlyRecords::new(&root);
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
@@ -1119,7 +1126,7 @@ fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() 
 fn fleet_init_fails_and_stops_the_architect_when_its_grant_cannot_be_written_11270() {
     let env = FleetEnv::new();
     let dir = env.dir();
-    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    let records = env.home.path().join(MPM_DIR_NAME).join("architect-launch");
     std::fs::create_dir_all(&records).unwrap();
     std::fs::write(records.join("launch-grants"), "not a directory\n").unwrap();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
@@ -1158,7 +1165,7 @@ fn fleet_init_refuses_the_home_directory_before_writing() {
         text(&out)
     );
     assert!(
-        !home.join(".trusty-mpm/config.toml").exists(),
+        !home.join(MPM_DIR_NAME).join("config.toml").exists(),
         "the grant was written: {}",
         text(&out)
     );
@@ -1375,7 +1382,7 @@ fn fleet_relaunch_binds_when_no_prior_record_exists() {
     let dir = env.dir();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
-    std::fs::remove_dir_all(env.home.path().join(".trusty-mpm/architect-launch")).unwrap();
+    std::fs::remove_dir_all(env.home.path().join(MPM_DIR_NAME).join("architect-launch")).unwrap();
     assert_eq!(env.status_json()["binding"]["ok"], false);
 
     let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
@@ -1509,9 +1516,9 @@ fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
     let dir = env.dir();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
-    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    let records = env.home.path().join(MPM_DIR_NAME).join("architect-launch");
     std::fs::remove_dir_all(&records).unwrap();
-    let _records = ReadOnlyRecords::new(&env.home.path().join(".trusty-mpm"));
+    let _records = ReadOnlyRecords::new(&env.home.path().join(MPM_DIR_NAME));
 
     let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));

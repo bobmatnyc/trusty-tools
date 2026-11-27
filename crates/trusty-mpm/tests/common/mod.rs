@@ -33,6 +33,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
 
 // #6288: daemon-socket fixtures for tests that spawn `tm`.
 pub mod socket;
@@ -307,7 +308,7 @@ pub fn alias_command() -> Command {
 /// What: creates `<home>/.trusty-tools/trusty-mpm/config.yaml` holding only the
 /// `disk:` section.
 pub fn write_disk_threshold(home: &Path, pct: u8) {
-    let dir = home.join(".trusty-tools").join("trusty-mpm");
+    let dir = home.join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&dir).expect("create config dir");
     std::fs::write(
         dir.join("config.yaml"),
@@ -393,7 +394,7 @@ pub fn stage_repo_content(home: &Path) {
 
     // #11470: at the minimum, so the launch resolver serves it.
     const TAG: &str = trusty_mpm::content::min_content::MIN_CONTENT_TAG;
-    let cache = home.join(".trusty-mpm").join("content");
+    let cache = home.join(MPM_DIR_NAME).join("content");
     if cache.join(LOCK_FILE_NAME).exists() {
         return;
     }
@@ -436,4 +437,19 @@ pub fn stage_repo_content(home: &Path) {
     let lock = ContentLock::new(TAG, Sha256Digest::of_bytes(&bytes)).expect("lock");
     std::fs::write(cache.join(lock.bundle_file_name()), &bytes).expect("bundle");
     lock.store(&cache.join(LOCK_FILE_NAME)).expect("store lock");
+}
+
+/// Pins the default layout every migrated test builds through the constants (#11821 P7).
+///
+/// Why: the integration tests name `<home>/.trusty-mpm`, `<home>/.trusty-tools`
+/// and `<home>/trusty-mpm-projects` through trusty-common's constants, so a
+/// changed constant would move every fixture with it and no test would notice.
+/// What: one literal assertion per default directory name.
+/// Test: this function.
+#[test]
+fn default_layout_names_are_pinned() {
+    use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
+    assert_eq!(MPM_DIR_NAME, ".trusty-mpm");
+    assert_eq!(TOOLS_DIR_NAME, ".trusty-tools");
+    assert_eq!(DEFAULT_WORKSPACE_DIR, "trusty-mpm-projects");
 }
