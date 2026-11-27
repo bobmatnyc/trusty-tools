@@ -1,6 +1,6 @@
 [package]
 name = "trusty-publish-guard"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -33,6 +33,8 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 clap = { workspace = true }
 flate2 = { workspace = true }
+# #12092: the same gitignore matcher cargo uses for `exclude`/`include`.
+ignore = { workspace = true }
 tar = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }

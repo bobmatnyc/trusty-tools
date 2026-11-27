@@ -189,10 +189,12 @@ fn mpm_no_spawn_hint() -> String {
     // they come from the same constant. This hint's whole purpose is naming a
     // real unit — #2827 was this string shape with the wrong plist in it.
     let label = trusty_common::launchd_labels::MPM;
+    // #11809: a loaded-but-stopped job takes a plain `kickstart`; `-k` would
+    // SIGKILL a running daemon and skip request draining.
     format!(
         "trusty-mpm daemon is launchd-managed on this machine — start it with \
          `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/{label}.plist` \
-         (or kickstart: `launchctl kickstart -k gui/$UID/{label}`); this \
+         (or, when it is loaded but stopped, `launchctl kickstart gui/$UID/{label}`); this \
          bridge will not auto-spawn to avoid the #2486 restart race."
     )
 }
@@ -644,9 +646,13 @@ mod tests {
             "hint must name the real plist; got: {hint}"
         );
         assert!(
-            hint.contains("launchctl bootstrap") || hint.contains("launchctl kickstart"),
+            hint.contains(
+                "launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.trusty.mpm.plist"
+            ),
             "hint must give a working launchctl recipe; got: {hint}"
         );
+        // #11809: never the SIGKILL form.
+        assert!(!hint.contains("kickstart -k"), "got: {hint}");
         assert!(
             !hint.contains("trusty-mpm setup"),
             "hint must NOT reference the nonexistent `trusty-mpm setup` subcommand; got: {hint}"

@@ -379,12 +379,14 @@ async fn parity_projects_register_agrees_across_transports() {
         result.as_object().map(|m| m.keys().collect::<Vec<_>>()),
         "both transports must answer the same ProjectInfo shape"
     );
+    // #11253: register keys the map on the canonical path.
+    let canonical = |p: &std::path::Path| p.canonicalize().expect("canonical repo");
     assert!(
-        state.project(&over_http).is_some(),
+        state.project(&canonical(&over_http)).is_some(),
         "the HTTP register must have persisted"
     );
     assert!(
-        state.project(&over_rpc).is_some(),
+        state.project(&canonical(&over_rpc)).is_some(),
         "the RPC register must have persisted the same way"
     );
 }
@@ -472,6 +474,101 @@ async fn project_init_then_registry_list_shows_the_project_10586() {
         names,
         vec![init["name"].as_str().unwrap_or_default().to_string()]
     );
+}
+
+/// Why (#11253): one checkout reached by a symlink, a trailing slash or, on a
+/// case-insensitive file system, another case must give one in-memory project,
+/// one registry record and one name — the checkout's real directory name.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_spellings_of_one_checkout_yield_one_record_11253() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let Some(repo) = git_repo(
+        &dir,
+        "gizmo",
+        Some("https://example.invalid/acme/gizmo.git"),
+    ) else {
+        return; // no git on this runner
+    };
+    let canonical = repo.canonicalize().expect("canonical checkout");
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&repo, &alias).expect("symlink");
+    // The symlink goes first: before the fix it named the record `alias`.
+    let mut spellings = vec![
+        alias.display().to_string(),
+        format!("{}/", repo.display()),
+        repo.display().to_string(),
+    ];
+    let upper = dir.path().join("GIZMO");
+    if upper.exists() {
+        spellings.push(upper.display().to_string()); // case-insensitive FS only
+    }
+    for spelled in &spellings {
+        let (status, body) = http(
+            &state,
+            "POST",
+            "/projects",
+            Some(json!({ "path": spelled })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{spelled}: {body}");
+        assert_eq!(body["name"], "gizmo", "{spelled}: {body}");
+        assert_eq!(body["path"], json!(canonical), "{spelled}: {body}");
+    }
+    let listed = state.list_projects();
+    assert_eq!(listed.len(), 1, "one checkout, one project: {listed:?}");
+    let (status, list) = http(&state, "GET", "/api/v1/projects", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&Value> = list["projects"]
+        .as_array()
+        .expect("projects array")
+        .iter()
+        .map(|p| &p["name"])
+        .collect();
+    assert_eq!(names, vec!["gizmo"], "{list}");
+}
+
+/// Why (#11253): a path that cannot be resolved is refused with the cause,
+/// never registered under its raw spelling.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn project_init_unresolvable_path_is_refused_11253() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let missing = dir.path().join("never-created");
+    let (status, body) = http(
+        &state,
+        "POST",
+        "/projects",
+        Some(json!({ "path": missing })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("could not resolve"), "{body}");
+    assert!(state.list_projects().is_empty());
+}
+
+/// Why (#11253): `project info` through a symlink answers the project `init`
+/// registered, under init's canonical path, over both transports.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial]
+async fn projects_current_answers_init_spelling_for_an_alias_path_11253() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    let real = dir.path().join("beta");
+    std::fs::create_dir_all(&real).expect("mkdir");
+    let canonical = real.canonicalize().expect("canonical");
+    state.register_project(canonical.clone());
+    let alias = dir.path().join("beta-link");
+    std::os::unix::fs::symlink(&real, &alias).expect("symlink");
+
+    let (status, body, rpc) = current_both(&state, &alias).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["path"], json!(canonical), "{body}");
+    assert_eq!(rpc.expect("rpc ok")["path"], json!(canonical));
 }
 
 /// Init with no `origin` remote is refused and writes nothing (#10586, owner
