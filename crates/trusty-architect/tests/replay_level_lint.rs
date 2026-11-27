@@ -2,7 +2,7 @@
 //!
 //! The recordings in `tests/fixtures/replay/level_lint/` were made from the
 //! Architect's `level_lint.py` (the first three by #12026, the rest from the
-//! frozen script at `60d8a97750`) and replay clean against it (see the
+//! frozen Python reference on 2026-11-27) and replay clean against it (see the
 //! fixture README); this test replays them against `examples/replay_port.rs`,
 //! which runs `trusty_architect::level_lint::run`.
 

@@ -12,7 +12,7 @@ Fifteen runs of the Architect's `level_lint.py`, replayed in
 (the port, `trusty_architect::level_lint`; #12028 P1c retired the #12026
 stand-in). The first three (`pm-strict-file`, `unknown-level-stdin`,
 `engineer-quiet`) are #12026's and still replay clean against the frozen
-script at `60d8a97750`; the other twelve were recorded from it. No recording
+Python reference; the other twelve were recorded from it on 2026-11-27. No recording
 needs `--clock`: the script reads no time.
 
 | Recording | Case |
@@ -43,7 +43,8 @@ $R replay $D/*.json -- <target>/debug/examples/replay_port level_lint
 ## technical_level and architect_config
 
 Both are libraries. Each directory holds `driver.py`, copied beside the
-frozen module (and the modules it imports) at record time, that calls the
+frozen Python reference module (and the modules it imports) at record time
+(2026-11-27), that calls the
 library and prints its answers; `examples/replay_port.rs` mirrors each driver
 line for line. `tests/replay_readers.rs` replays them.
 
