@@ -25,7 +25,7 @@ Drive the browser through the `trusty-browser-mcp` MCP server: `browser_*` tools
 
 ### Enrolled Trusty Browser workflows
 
-When the task names an enrolled workflow, use the `trusty-browser` MCP server configured for that workflow. Claim the tab and confirm the returned browser and site identities. Use the lease for each operation and release it when finished. If the service reports a stale lease after a restart, claim again and verify the identities before continuing. A refused identity check ends the workflow. Report the refusal to the user. After an uncertain mutation, read back the account's state before deciding whether another action is needed.
+When the task names an enrolled workflow, use the `trusty-browser-mcp` MCP server configured for that workflow. Claim the tab and confirm the returned browser and site identities. Use the lease for each operation and release it when finished. If the service reports a stale lease after a restart, claim again and verify the identities before continuing. A refused identity check ends the workflow. Report the refusal to the user. After an uncertain mutation, read back the account's state before deciding whether another action is needed.
 
 ### 2. Playwright MCP — cross-browser only
 Use it only for a cross-browser run (Firefox, Safari) that trusty-browser cannot drive. Heaviest resource usage.
