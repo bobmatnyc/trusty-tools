@@ -7,7 +7,7 @@ What: build() returns {generated_at, since, tokens, projects, ctx_hours, il_clos
              UTC hour and goal key, for the last `days` days.
   projects   [{name, dir, goal, sessions, basis, out}]: how each Claude project directory was mapped to a goal.
              INFERRED, not recorded: directory -> project (allowlist roots, then the tm registry, then the path under
-             ~/trusty-mpm-projects/<owner>/<repo>; scratchpad dirs follow their parent project; OS temp dirs are named
+             <projects_root>/<owner>/<repo>; scratchpad dirs follow their parent project; OS temp dirs are named
              "temp: ...") -> sessions -> the session's goal. name is never empty (the owner 2026-10-27: no unnamed rows).
   ctx_hours  [{hour, dir, turns, ctx, out}]: per UTC hour and Claude project directory (worktrees folded in), for the
              Treemap view: out = out_tokens (the Graph's measure, exact), and ctx = sum over rows of turns * ctx_p50. The file stores per-turn context (input +
@@ -256,7 +256,7 @@ def _temp(d, real):
 
 def resolve_dir(d, registry, sessions, goals, projects_root=None, _top=True):
     """{name, goal, sessions, basis} for a Claude project directory not in the allowlist. name is never "".
-    Order: scratchpad -> its parent project "(scratch)"; the tm registry by path; ~/trusty-mpm-projects/<owner>/<repo>
+    Order: scratchpad -> its parent project "(scratch)"; the tm registry by path; <projects_root>/<owner>/<repo>
     ("path, not registered"); OS temp dirs ("temp: ..."); else the directory text, flagged unresolved.
     #11821 P6b: projects_root None (the install paths did not resolve) skips the two projects-root rules."""
     m = SCRATCH.match(d) if _top else None

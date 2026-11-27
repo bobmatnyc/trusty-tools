@@ -11404,7 +11404,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-browser"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -11807,7 +11807,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12024,7 +12024,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.42.1"
+version = "0.42.2"
 dependencies = [
  "anyhow",
  "async-trait",

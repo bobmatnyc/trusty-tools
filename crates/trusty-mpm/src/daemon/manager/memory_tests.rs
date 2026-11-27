@@ -161,7 +161,7 @@ fn portfolio_palace_under_a_fenced_home_is_refused() {
     let root = crate::core::home_write_fence::armed_roots()
         .iter()
         .find(|r| r.ends_with(".trusty-mpm"))
-        .expect("the lib binary fences ~/.trusty-mpm");
+        .expect("the lib binary fences ~/.trusty-mpm"); // path-literal: allow
     let _ = PortfolioPalace::provision(&root.join("tm-8545-fence-probe"), PalaceAccess::Writer);
 }
 

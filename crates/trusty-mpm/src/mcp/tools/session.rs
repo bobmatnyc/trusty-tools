@@ -219,10 +219,12 @@ pub(super) fn session_tools() -> Vec<Value> {
         // #10991: owner ruling D8b.
         tool(
             "session_archive",
-            "Move a managed session's project directory (its workspace, else \
-             its start directory) to the owner-only archive \
-             `~/.trusty-tools/archive` (mode 0700), with a manifest recording \
-             the origin path so it can be restored. A same-filesystem move is a \
+            // #11821: the archive path is description text only; bytes unchanged.
+            concat!(
+                "Move a managed session's project directory (its workspace, else \
+                 its start directory) to the owner-only archive \
+                 `~/.trusty-tools/archive` (mode 0700), with a manifest recording ", // path-literal: allow
+                "the origin path so it can be restored. A same-filesystem move is a \
              rename; across filesystems the copy must verify before the source \
              is removed. FAIL-CLOSED: a session still running in the directory \
              is REFUSED unless `force` is true, which stops it first; an \
@@ -230,6 +232,7 @@ pub(super) fn session_tools() -> Vec<Value> {
              and returns the plan without changing anything. Session records \
              are kept; the project is marked archived until a new session runs. \
              Returns `{ dry_run, plan, stopped, manifest }`.",
+            ),
             json!({
                 "type": "object",
                 "properties": {

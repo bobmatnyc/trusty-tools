@@ -12,7 +12,7 @@
 //! Run: `cargo build --release -p trusty-architect --bin trusty-architect-il`, then
 //! `TRUSTY_IL_BIN=<target>/release/trusty-architect-il cargo test -p trusty-architect
 //! --test il_latency --release -- --include-ignored --nocapture`.
-//! Test: `latency_report`.
+//! Test: `latency_report`, `latency_report_skips_when_inputs_absent`.
 
 mod il_support;
 
@@ -140,18 +140,61 @@ fn first_live_task(src: &Path) -> (String, Option<i64>) {
     (t.s("id").to_owned(), t.i("pct"))
 }
 
+/// An env lookup: the value of a variable, `None` when unset.
+type Var<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The skip line for the first live input that is unset, empty or names no path.
+fn missing_input(var: Var) -> Option<String> {
+    for k in ["ARCHITECT_IL_LIVE", "DOGFOOD_DATG", "ARCHITECT_SCRIPTS"] {
+        match var(k).filter(|v| !v.is_empty()) {
+            None => return Some(format!("skip: {k} unset")),
+            Some(v) if !Path::new(&v).exists() => {
+                return Some(format!("skip: {k}={v} does not exist"));
+            }
+            Some(_) => {}
+        }
+    }
+    None
+}
+
 #[test]
 #[ignore = "needs python3, the live ledgers and a release binary; run with --include-ignored --nocapture"]
 fn latency_report() {
+    let _ = latency_report_with(&|k| std::env::var(k).ok());
+}
+
+/// `latency_report_with` returns the skip line, without panicking, when an input is absent.
+#[test]
+fn latency_report_skips_when_inputs_absent() {
+    assert_eq!(
+        latency_report_with(&|_| None).as_deref(),
+        Some("skip: ARCHITECT_IL_LIVE unset")
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let here = tmp.path().to_str().unwrap().to_owned();
+    let gone = tmp.path().join("gone").to_str().unwrap().to_owned();
+    let partial = |k: &str| match k {
+        "ARCHITECT_IL_LIVE" => Some(here.clone()),
+        "DOGFOOD_DATG" => Some(gone.clone()),
+        _ => None,
+    };
+    assert_eq!(
+        latency_report_with(&partial),
+        Some(format!("skip: DOGFOOD_DATG={gone} does not exist"))
+    );
+}
+
+/// The report body; returns the skip line when a live input is absent, else `None`.
+fn latency_report_with(var: Var) -> Option<String> {
+    // #11968: skip with a named reason instead of panicking in `copy_files` on a host
+    // without the live ledgers.
+    if let Some(reason) = missing_input(var) {
+        println!("{reason}");
+        return Some(reason);
+    }
     let ledgers = [
-        (
-            "Architect",
-            std::env::var("ARCHITECT_IL_LIVE").unwrap_or_default(),
-        ),
-        (
-            "tm-dogfood",
-            std::env::var("DOGFOOD_DATG").unwrap_or_default(),
-        ),
+        ("Architect", var("ARCHITECT_IL_LIVE").unwrap_or_default()),
+        ("tm-dogfood", var("DOGFOOD_DATG").unwrap_or_default()),
     ];
     println!("binary: {}", bin());
     let mut table: Vec<(String, f64, f64)> = Vec::new();
@@ -238,4 +281,5 @@ fn latency_report() {
     for (label, py, rs) in &table {
         println!("{label:<44} {py:>12.1} {rs:>12.1} {:>7.1}x", py / rs);
     }
+    None
 }

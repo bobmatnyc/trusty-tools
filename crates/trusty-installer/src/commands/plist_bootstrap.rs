@@ -289,9 +289,9 @@ pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <true/>
 
     <key>StandardOutPath</key>
-    <string>__HOME__/.trusty-mpm/logs/supervisor.out.log</string>
+    <string>__LOG_DIR__/supervisor.out.log</string>
     <key>StandardErrorPath</key>
-    <string>__HOME__/.trusty-mpm/logs/supervisor.err.log</string>
+    <string>__LOG_DIR__/supervisor.err.log</string>
 
     <key>ProcessType</key>
     <string>Interactive</string>
@@ -309,6 +309,19 @@ pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 ///
 /// Test: `tests::fill_template_replaces_all_tokens`.
 pub fn fill_template(home: &str, tm_path: &str) -> String {
+    let log_dir = Path::new(home)
+        .join(trusty_common::install_paths::MPM_DIR_NAME)
+        .join("logs");
+    fill_template_with_log_dir(home, tm_path, &log_dir.to_string_lossy())
+}
+
+/// [`fill_template`] with the log directory given, not derived from `home`.
+///
+/// Why: #11821 — the supervisor's logs live under the configured config dir,
+/// so the plist must name the directory the installer creates.
+/// What: also replaces `__LOG_DIR__` with `log_dir`.
+/// Test: `tests::install_mpm_supervisor_for_logs_under_the_configured_config_dir`.
+pub fn fill_template_with_log_dir(home: &str, tm_path: &str, log_dir: &str) -> String {
     // #4868: the template used to carry the label as its own literal beside
     // PLIST_LABEL. Two copies of a label are two things that can disagree, and
     // a plist whose `Label` key differs from the label the installer boots out
@@ -316,9 +329,11 @@ pub fn fill_template(home: &str, tm_path: &str) -> String {
     let filled = PLIST_TEMPLATE
         .replace("__HOME__", home)
         .replace("__TM_BINARY_PATH__", tm_path)
+        .replace("__LOG_DIR__", log_dir)
         .replace("__PLIST_LABEL__", PLIST_LABEL);
     debug_assert!(
         !filled.contains("__HOME__")
+            && !filled.contains("__LOG_DIR__")
             && !filled.contains("__TM_BINARY_PATH__")
             && !filled.contains("__PLIST_LABEL__"),
         "unfilled placeholder tokens remain after fill_template"
@@ -662,7 +677,9 @@ pub fn extract_program_path(plist_xml: &str) -> Option<String> {
 /// WHETHER to call this at all) stays macOS-gated, matching real launchd's
 /// actual platform restriction.
 ///
-/// What: fills the template, creates the log directory, applies the
+/// What: fills the template, creates the log directory
+/// (`<config_dir>/.trusty-mpm/logs`; a broken `install.toml` is an error,
+/// #11821), applies the
 /// [`decide_downgrade`] guard against a previously-registered plist, writes
 /// the plist under `target.home`, then calls `target.launchctl.bootout` /
 /// `.bootstrap` against `target.domain` — idempotent bootout first (errors
@@ -672,7 +689,9 @@ pub fn extract_program_path(plist_xml: &str) -> Option<String> {
 /// `tests::install_mpm_supervisor_for_proceeds_when_existing_binary_unprobeable`,
 /// `tests::install_mpm_supervisor_for_candidate_version_ignores_path_shadow`,
 /// `tests::install_mpm_supervisor_for_refuses_downgrade_without_force`,
-/// `tests::install_mpm_supervisor_for_surfaces_bootstrap_failure`.
+/// `tests::install_mpm_supervisor_for_surfaces_bootstrap_failure`,
+/// `tests::install_mpm_supervisor_for_logs_under_the_configured_config_dir`,
+/// `tests::install_mpm_supervisor_for_fails_closed_on_a_broken_install_file`.
 pub fn install_mpm_supervisor_for(
     target: &SupervisorTarget<'_>,
     force: bool,
@@ -690,15 +709,24 @@ pub fn install_mpm_supervisor_for(
     // `install_mpm_supervisor` doc for why that was the #3554 bug).
     let tm_path_str = tm_path.to_str().unwrap_or("tm");
 
+    // #11821: the log dir follows the configured config dir; a broken
+    // `install.toml` fails closed here, before anything is written.
+    let log_dir = trusty_common::install_paths::try_config_dir_under(home)
+        .context("resolving the config dir for the supervisor log directory")?
+        .join(trusty_common::install_paths::MPM_DIR_NAME)
+        .join("logs");
+    let log_dir_str = log_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("log directory path is not valid UTF-8"))?;
+
     // Fill the plist template.
-    let plist_content = fill_template(home_str, tm_path_str);
+    let plist_content = fill_template_with_log_dir(home_str, tm_path_str, log_dir_str);
 
     // #4470: the two `create_dir_all` calls that used to sit here now run AFTER
     // the port guard below, so a refusal leaves no empty directories behind.
     // Only the PATHS are computed here — the downgrade guard needs `plist_path`
     // to read any existing plist, and reading a file in a non-existent
     // directory is a plain `Err` it already tolerates.
-    let log_dir = home.join(".trusty-mpm").join("logs");
     let agents_dir = home.join("Library").join("LaunchAgents");
     let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
 
@@ -709,7 +737,8 @@ pub fn install_mpm_supervisor_for(
         if let Some(old_binary) = extract_program_path(&existing) {
             let current_version = super::update_engine::installed_version(&old_binary);
             let candidate_version = super::update_engine::installed_version(tm_path_str);
-            let registered_template = fill_template(home_str, &old_binary);
+            let registered_template =
+                fill_template_with_log_dir(home_str, &old_binary, log_dir_str);
             if decide_supervisor_rewrite(&RewriteInputs {
                 existing: &existing,
                 registered_template: &registered_template,

@@ -10,6 +10,7 @@
 use tempfile::TempDir;
 
 use super::*;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// A resolved environment pointing at `dir`.
 fn env_for(dir: &std::path::Path, sccache: bool) -> ResolvedBuildEnv {
@@ -221,7 +222,7 @@ fn rust_build_env_reports_sccache_without_warning_when_not_requested() {
 fn rust_build_env_is_unknown_when_the_identity_cannot_be_derived() {
     let check = build_check(&BuildEnvFacts::Undetermined(
         "no `build.cargo_target_dir` is configured and the project has no parseable `origin` \
-         remote. Set `build.cargo_target_dir` in `~/.trusty-tools/trusty-mpm/config.yaml`"
+         remote. Set `build.cargo_target_dir` in `~/.trusty-tools/trusty-mpm/config.yaml`" // path-literal: allow
             .to_string(),
     ));
     assert_eq!(check.status, CheckStatus::Unknown, "{}", check.message);
@@ -326,7 +327,7 @@ fn a_rust_project_resolves_against_the_supplied_home() {
     )
     .expect("marker");
 
-    let config_dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    let config_dir = home.path().join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&config_dir).expect("config dir");
     let target = home.path().join("shared-target");
     std::fs::create_dir_all(&target).expect("target dir");

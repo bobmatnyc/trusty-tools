@@ -60,7 +60,7 @@ pub const PROJECT_DIR_ENV: &str = "CLAUDE_PROJECT_DIR";
 
 /// Why a project that asks for the supervisor profile did not get it.
 pub const NOT_ALLOW_LISTED: &str = "project requests the supervisor profile but is not \
-     allow-listed in ~/.trusty-mpm/config.toml (`[supervisor] projects`); running the PM profile";
+     allow-listed in ~/.trusty-mpm/config.toml (`[supervisor] projects`); running the PM profile"; // path-literal: allow
 
 /// Model a supervisor session launches on: the Opus tier alias.
 ///

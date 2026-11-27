@@ -155,7 +155,8 @@ pub fn for_rule(rule: &str) -> &'static GuardPolicy {
 ///
 /// Test: `policy_doc_matches_table`.
 pub fn render_markdown() -> String {
-    let mut out = String::from(
+    // #11821: the config path is message text only; the bytes are unchanged.
+    let mut out = String::from(concat!(
         "# Guard policies\n\n\
          Generated from `crates/trusty-mpm/src/core/guard_policy_entries.rs` by the \
          `policy_doc_matches_table` test (#10641). Do not edit by hand; run \
@@ -170,10 +171,10 @@ pub fn render_markdown() -> String {
          missing or cannot start, no guard code runs and Claude Code's `onFailure: \"block\"` \
          refuses every tool: from a terminal outside the session, reinstall with \
          `cargo install trusty-mpm --version <v> --locked`, or set `[pm_guard] enabled = false` \
-         in `~/.trusty-mpm/config.toml` and relaunch the session.\n\n\
-         | Id | Rule | Binds | Absolute | Architect core limit | Source | Summary |\n\
+         in `~/.trusty-mpm/config.toml` and relaunch the session.\n\n", // path-literal: allow
+        "| Id | Rule | Binds | Absolute | Architect core limit | Source | Summary |\n\
          |---|---|---|---|---|---|---|\n",
-    );
+    ));
     for p in POLICIES {
         let roles: Vec<&str> = p.applies.iter().map(|r| r.label()).collect();
         out.push_str(&format!(

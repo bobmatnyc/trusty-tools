@@ -19,6 +19,7 @@ use trusty_common::credentials::KeyStoreError;
 
 use super::test_env::EnvVarGuard;
 use super::*;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// Collected ERROR/WARN/INFO lines from one `with_default` scope.
 #[derive(Default)]
@@ -539,7 +540,7 @@ fn slack_refs_resolve_the_store_before_the_environment_9936() {
             wrong.push(format!("{key}: the store value did not win over env"));
         }
     }
-    let file = sandbox.home().join(".trusty-tools/credentials.toml");
+    let file = sandbox.home().join(TOOLS_DIR_NAME).join("credentials.toml");
     std::fs::write(&file, "not = [valid").expect("corrupt the sandbox store");
     for (key, _, resolve) in refs {
         match resolve(key) {

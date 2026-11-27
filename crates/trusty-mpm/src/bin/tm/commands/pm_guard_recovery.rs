@@ -29,13 +29,16 @@ use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 pub(crate) const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead"];
 
 /// The text every failure-arm refusal carries (#10641).
-pub(crate) const RECOVERY_NOTE: &str = "While the guard is failing, only read-only tools (Read, \
+// #11821: concat! so the path-naming piece can carry its waiver; bytes unchanged.
+pub(crate) const RECOVERY_NOTE: &str = concat!(
+    "While the guard is failing, only read-only tools (Read, \
      Grep, Glob, LS, NotebookRead, never on a secret file) and exactly `tm doctor`, `tm install \
      ...` and `cargo install trusty-mpm --version <v> --locked` run, each as one plain command \
      with no `;`, `&&`, `|`, `$(`, redirect, env prefix or wrapper. To clear a stuck session \
      from outside it, run `tm doctor` in a terminal, reinstall with `cargo install trusty-mpm \
-     --version <v> --locked`, or set `[pm_guard] enabled = false` in \
-     `~/.trusty-mpm/config.toml` and relaunch the session.";
+     --version <v> --locked`, or set `[pm_guard] enabled = false` in ",
+    "`~/.trusty-mpm/config.toml` and relaunch the session.", // path-literal: allow (display text)
+);
 
 /// Whether `c` may appear in a recovery command.
 ///

@@ -1,6 +1,7 @@
 //! Tests for `tm fleet init`'s #8942 registration and sidecar prune. No
 //! daemon, no tmux: answers are built by hand, tmux is the stub probe.
 
+use trusty_common::install_paths::MPM_DIR_NAME;
 use trusty_mpm::client::http_client::architect::RegisterCallError;
 use trusty_mpm::session_manager::{RegisteredSession, RegistrationReport, SessionKind};
 
@@ -86,7 +87,7 @@ fn a_registration_answer_maps_to_its_step() {
 #[test]
 fn fleet_init_prunes_only_a_proven_stale_sidecar() {
     let home = tempfile::tempdir().expect("scratch home");
-    let dir = home.path().join(".trusty-mpm").join("architect-launch");
+    let dir = home.path().join(MPM_DIR_NAME).join("architect-launch");
     std::fs::create_dir_all(&dir).expect("sidecar dir");
     let mut child = std::process::Command::new("true").spawn().expect("spawn");
     let dead = child.id();

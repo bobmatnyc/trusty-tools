@@ -114,9 +114,11 @@ const MAX_FREE_MEMORY_FLOOR_MB: u64 = 1024 * 1024;
 #[non_exhaustive]
 pub enum BuildersConfigError {
     /// A key's value is outside the range this harness accepts.
+    // #11821: the config path is message text only; the bytes are unchanged.
     #[error(
-        "builders.{key} = {value} in ~/.trusty-mpm/config.toml is out of range ({allowed}); \
-         the harness will not act on it"
+        "builders.{key} = {value} in {cfg} is out of range ({allowed}); \
+         the harness will not act on it",
+        cfg = "~/.trusty-mpm/config.toml" // path-literal: allow
     )]
     OutOfRange {
         /// The offending key, without the `builders.` prefix.
@@ -261,10 +263,11 @@ impl BuildersConfig {
         self.free_memory_floor_mb
             .map(|mb| {
                 format!(
-                    "builders.free_memory_floor_mb = {mb} in ~/.trusty-mpm/config.toml is ignored \
+                    "builders.free_memory_floor_mb = {mb} in {cfg} is ignored \
                      since #8261: build leases read memory pressure. Use \
                      builders.memory_pressure_max (normal|warn|critical) and \
-                     builders.min_available_pct instead."
+                     builders.min_available_pct instead.",
+                    cfg = "~/.trusty-mpm/config.toml", // path-literal: allow
                 )
             })
             .into_iter()
@@ -601,7 +604,7 @@ mod tests {
             .collect();
         assert!(
             code.contains("MpmConfig::load_default()"),
-            "the cap must be read from ~/.trusty-mpm/config.toml"
+            "the cap must be read from ~/.trusty-mpm/config.toml" // path-literal: allow
         );
         for forbidden in ["load_effective(", "load_effective_default("] {
             assert!(
