@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.15] — 2026-11-27
+
+Restart the trusty daemons with this upgrade. A still-running 1.14.14 daemon refuses launches once 1.14.15 writes the user-tier sandbox settings (#12042).
+
+### Breaking
+
+- trusty-mpm 1.14.14 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.14.txt` (Refs #8699).
+
+### Fixed
+
+- A Claude `SessionStart` in an Architect's directory now links to the Architect instead of logging an ERROR that two managed sessions share the cwd: the Architect's `-poll` and `-collector` helpers run no `claude` and no longer count toward that collision. Two `claude` sessions in one cwd still skip attribution and log the ERROR (#10751).
+- `tm project decommission` no longer unloads another project's memory palace. When another active project derives the same palace id (for example `/a/code/app` and `/b/code/app` both derive `code-app`), or its own palace id cannot be resolved, the palace unload is skipped and the report names the other project. The decommission still completes.
+- The seeded Architect scripts `datg_ops.py`, `il_remind.py` and `token_watch.py` now pass the unchanged pm-guard as installed. Their docstrings, comments and three `datg` error texts were reworded; `datg` now prints `unknown operation`, `each operation must be an object` and `the refs key must match` in place of `unknown op`, `each op must be an object` and `refs.key must match` (#11800).
+- `token-watch-state.json` and `token-thresholds.json` read as token tallies, not token files, so the pm-guard no longer refuses a command or script that names them; `token.json`, `token-credentials.json` and `token-watch.pem.json` still refuse (#11800).
+- The pinned gh shim names the primary GraphQL rate limit, with its "resets at" time, only when its `gh api rate_limit` lookup reads `remaining` as 0. When the lookup fails or `remaining` is unreadable, the refusal line names a GraphQL limit of unknown kind and gives no reset, so a secondary limit is no longer reported as the primary one with the hourly window's reset. `tm wait` and the daemon's PR watch back off briefly on that line (#11803).
+- When gh printed a `retry-after` value (on stdout, as `gh api -i` headers do, or on stderr), the shim's secondary and unknown-kind refusal lines state it: "GitHub asked to retry after N seconds (retry-after)". The primary line with no readable reset now says "gh api rate_limit gave no reset" (#11803).
+- `tm wait --for check --required-only` now names only the required contexts that keep it pending, and marks one that has not registered yet, e.g. `1 of 8 required unsettled: CI gate (not registered)`. It used to list every required context, which read as "all pending" while `gh pr checks --required` showed most passed (#11948).
+- `tm architect up` and `tm architect restart` no longer read or kickstart the login user's `architect-dashboard` launchd job when `HOME` is not that user's home folder (a test, a sandbox, a scratch HOME). An unset or empty `HOME` counts as foreign too. The skipped dashboard restart is reported as a step that names the `launchctl kickstart -k gui/<uid>/<label>` command to run from the login shell. With the real home the dashboard still restarts as before (#11961).
+- A failed bundle deploy now names the failed step in its verdict line, for example `the bundle deploy failed (dashboard restart: ...), so nothing was launched`, and a failed `launchctl kickstart` names its exit status when launchd prints no stderr (#11961).
+- An auto-resume of a decommissioned project's session now clears the project's `decommissioned_at` and `archived_at` by the same bound-project rule a new session uses. A reactivation or index-unpark failure is logged at WARN naming the project, and the session keeps running (#11969).
+- Registering a decommissioned or archived project (MCP `project_register`, `POST /api/v1/projects`, `mpm.projects.registry.register`) still leaves it inactive, and the response now carries `inactive_reason`, which says to start a session to reactivate it. The key is absent for an active project (#11969).
+- `tm projects register` on a decommissioned or archived project now prints a `note:` line after the success line, with the daemon's reason and the way to reactivate the project: start a session (#11969).
+- An operator resume (`tm session resume`) of a decommissioned project's session now clears the project's decommissioned and archived state, as a new session does, and returns a reactivation failure as the resume's error (#11983).
+- Bare `tm` relaunching a stopped session in place (`POST /api/v1/sessions/managed/{id}/reactivate`) now reactivates the decommissioned project the session binds to and unparks its search index, as spawn and resume do. A failure of either step is the route's error, and the session record is rolled back off `active` so the client does not exec (refs [#12012](https://github.com/bobmatnyc/trusty-tools/issues/12012))
+- The in-place reactivate request now waits up to 60 s for the daemon's answer instead of 2 s, and the daemon bounds the project and index steps at 45 s, rolling the session record back off `active` when they fail or overrun (refs [#12012](https://github.com/bobmatnyc/trusty-tools/issues/12012))
+- pm-guard test now pins `release-gate.sh` alongside the `--staged` gate scripts in `the_repo_gate_scripts_allow_8879`, so the static `install_paths.py` path in `scripts/lib/run_or_cargo.sh` stays covered (Refs [#12021](https://github.com/bobmatnyc/trusty-tools/issues/12021))
+- Sandboxed sessions can reach GitHub, crates.io and npm again. tm now writes `sandbox.network.allowedDomains` into its user-level settings next to `strictAllowlist`, because Claude Code ignores project-tier `allowedDomains` while `strictAllowlist` is on. Before this fix, every host was denied. The next launch repairs a user settings file that 1.14.14 left with `strictAllowlist` and no hosts, and keeps the operator's other keys. Verify now refuses a launch when the user tier has no hosts, an empty list, or a host outside tm's list (#12042).
+- After upgrading, restart the tm daemon. A 1.14.14 daemon or CLI still running refuses the repaired user settings file, because it rejects any user-tier `allowedDomains`. A downgrade to 1.14.14 needs `sandbox.network.allowedDomains` removed from the user settings by hand (#12042).
+- An in-place reactivate whose client gave up before the answer now rolls the session record back off `Active` at every log level. The rollback ran inside a `tracing::warn!` argument, so with WARN disabled it never ran and the record stayed `Active` (#12046).
+
+### Changed
+
+- The `tm tui` service view now shows each `by_*` breakdown in `console_metrics` as a nested table of its top five entries, largest first, with a `… N more` row, instead of `{N fields}`. Plain object fields expand in place, and a list cut at the 40-line limit ends in a `… N more lines` row (#10908).
+- Tests now cover tm's settings-backup excusal on both decommission routes (`--force` in-project worktree and owned workspace): unedited tm backups are removed, while edited, foreign, unrecorded or corrupt-ledger backups keep the tree and are named; no behaviour change (#11267).
+- The seeded Architect scripts name the default projects-root and tm-root directories in one place, the shared install-path reader `architect_config.py` (new `install_mpm_root()`); resolved paths are unchanged for an install with no install.toml (#11821).
+- The pm-guard trust-anchor check names the `.trusty-mpm` and `.trusty-tools` dirs through the shared `install_paths` constants, and the guard deny text that names a home path for the reader carries a `path-literal: allow` waiver; the anchor set and every deny message are byte-identical (#11821).
+- The `tm fleet`, `tm doctor` build-lease, guided-start, `tm launch --twin`, `tm watch` and `tm issue` messages that name a home path for the reader carry a `path-literal: allow` waiver, and their tests name the `.trusty-mpm`, `.trusty-tools` and `trusty-mpm-projects` dirs through the shared trusty-common constants; every message is byte-identical (#11821).
+- The banner tests name the `.trusty-mpm` dir through the shared `MPM_DIR_NAME` constant, and the `tm generate capabilities` doctor and framework text that names a home path for the reader carries a `path-literal: allow` waiver; the generated text is byte-identical (#11821).
+- The trusty-mpm library modules (`core`, `daemon`, `runtime`, `project`, `mcp`, `client`, `content`, `session_manager`) and their tests name `.trusty-mpm`, `.trusty-tools` and `trusty-mpm-projects` through the shared trusty-common constants; doctor, MCP-description and error text that names a home path carries a `path-literal: allow` waiver, and every message is byte-identical (#11821).
+
+### Documentation
+
+- The `nested_dirt_vouched` doc comment now lists its real callers (project-dir delete, `decommission --force`, owned-workspace decommission); no behaviour change (#11267).
+
 ## [1.14.14] — 2026-11-27
 
 ### Added
