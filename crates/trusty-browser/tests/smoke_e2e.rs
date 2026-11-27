@@ -4,8 +4,9 @@
 //! in-memory key store, open enrollment check), `native-host` driven by a
 //! fake Chrome on its stdio for pairing, connect and the worker, then
 //! `trusty-browser-mcp` in connect mode for `tools/list`, `browser_connect`,
-//! `browser_select` and one `page_read`, and a clean shutdown that leaves no
-//! child process and no socket behind.
+//! `browser_select` and one `page_read`, then `browser_tabs`, `page_screenshot`,
+//! `browser_open_tab` and `browser_close_tab` (#11208, #11211 AC5), and a clean
+//! shutdown that leaves no child process and no socket behind.
 //!
 //! macOS only: pairing runs through popup enrollment, whose native-host side
 //! (`peer_darwin::verify_enrollment_service`, Darwin `LOCAL_PEERPID`/libproc)
@@ -141,6 +142,17 @@ fn fake_worker(mut stdin: ChildStdin, rx: Receiver<Value>) -> JoinHandle<Vec<Str
                     "url": "https://example.test/a", "title": "Example", "text": "",
                     "elements": [{"ref": "e1", "role": "button", "name": "Go"}],
                     "truncated": false}),
+                // #11208, #11211: the tab and capture verbs.
+                "page_tabs" => json!({"tabs": [{"tab": 7, "window": 1, "index": 0,
+                    "active": true, "access": true, "origin": "https://example.test",
+                    "title": "Example"}]}),
+                "page_screenshot" => json!({"document": "doc-1", "data": png_800x600(),
+                    "region": {"x": 0, "y": 0, "width": 800, "height": 600},
+                    "metrics": {"css_width": 800, "css_height": 600,
+                        "device_pixel_ratio": 1, "zoom": 1, "scroll_x": 0, "scroll_y": 0}}),
+                "page_open_tab" => json!({"tab": 12, "window": 1, "access": true,
+                    "document": "doc-2", "origin": "https://example.test", "title": "New"}),
+                "page_close_tab" => json!({"closed": true}),
                 _ => json!({"document": "doc-1"}),
             };
             let reply = json!({"id": cmd["id"], "ok": true, "email": cmd["email"],
@@ -150,6 +162,15 @@ fn fake_worker(mut stdin: ChildStdin, rx: Receiver<Value>) -> JoinHandle<Vec<Str
         }
         ops
     })
+}
+
+/// A base64 PNG header whose IHDR names an 800x600 image.
+fn png_800x600() -> String {
+    use base64::Engine as _;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(800u32.to_be_bytes());
+    png.extend(600u32.to_be_bytes());
+    base64::engine::general_purpose::STANDARD.encode(&png)
 }
 
 struct Mcp {
@@ -321,6 +342,34 @@ fn smoke_serve_pair_connect_page_op_shutdown() {
     let read = mcp.tool("page_read", json!({"lease": lease["lease"]}));
     assert!(read.contains("https://example.test/a"), "{read}");
 
+    // #11208 AC5, #11211 AC5: the tab tools and the screenshot through the binaries.
+    let tabs: Value = serde_json::from_str(&mcp.tool("browser_tabs", json!({}))).expect("tabs");
+    assert_eq!(tabs["tabs"][0]["tab"], json!(7), "{tabs}");
+    let shot = mcp.call(
+        "tools/call",
+        json!({"name": "page_screenshot", "arguments": {"lease": lease["lease"]}}),
+    );
+    let content = &shot["result"]["content"];
+    assert_eq!(content[1]["type"], json!("image"), "{shot}");
+    assert_eq!(content[1]["mimeType"], json!("image/png"), "{shot}");
+    let meta: Value =
+        serde_json::from_str(content[0]["text"].as_str().expect("text")).expect("screenshot json");
+    assert_eq!(
+        (meta["width"].clone(), meta["height"].clone()),
+        (json!(800), json!(600))
+    );
+    assert!(meta["capture_id"].is_string(), "{meta}");
+    let opened = mcp.tool(
+        "browser_open_tab",
+        json!({"url": "https://example.test/new", "request_id": "o1"}),
+    );
+    let opened: Value = serde_json::from_str(&opened).expect("open json");
+    assert_eq!(opened["tab"], json!(12), "{opened}");
+    assert!(opened["lease"].is_string(), "{opened}");
+    let closed = mcp.tool("browser_close_tab", json!({"tab": 12, "request_id": "c1"}));
+    let closed: Value = serde_json::from_str(&closed).expect("close json");
+    assert_eq!(closed["closed"], json!(true), "{closed}");
+
     // 6. clean shutdown: MCP on EOF, broker on SIGTERM, worker host on broker loss.
     let Mcp {
         mut child, stdin, ..
@@ -337,7 +386,17 @@ fn smoke_serve_pair_connect_page_op_shutdown() {
     let status = wait_exit(&mut kids.0[1], "worker native-host");
     assert!(status.success(), "worker native-host exited {status}");
     let ops = worker.join().expect("worker thread");
-    assert_eq!(ops, ["page_tab", "page_read"]);
+    assert_eq!(
+        ops,
+        [
+            "page_tab",
+            "page_read",
+            "page_tabs",
+            "page_screenshot",
+            "page_open_tab",
+            "page_close_tab"
+        ]
+    );
 
     assert_eq!(sockets(&state), Vec::<String>::new(), "leaked sockets");
     for c in &mut kids.0 {
