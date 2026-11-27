@@ -307,6 +307,9 @@ mod hash_withhold_tests;
 // #10738: a force reindex raises the index generation.
 #[cfg(test)]
 mod identity_10738_tests;
+// #12064: writes and deletes in the carryover window survive the promotion.
+#[cfg(test)]
+mod carryover_window_12064_tests;
 
 // #6524: the embedding pause, end to end.
 #[cfg(test)]

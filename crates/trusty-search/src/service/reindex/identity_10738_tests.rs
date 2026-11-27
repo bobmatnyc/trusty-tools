@@ -73,8 +73,8 @@ async fn generation_changes_when_a_force_reindex_resets_the_index() {
     );
 }
 
-const PUSHED: &str = "src/pushed_10738.rs";
-const PUSHED_BODY: &str = "pub fn pushed_10738(x: u32) -> u32 {\n    x + 1\n}\n";
+pub(super) const PUSHED: &str = "src/pushed_10738.rs";
+pub(super) const PUSHED_BODY: &str = "pub fn pushed_10738(x: u32) -> u32 {\n    x + 1\n}\n";
 
 /// A colocated index whose live corpus holds one file, under a fresh identity,
 /// and the put surface mounted on it.
@@ -82,7 +82,7 @@ const PUSHED_BODY: &str = "pub fn pushed_10738(x: u32) -> u32 {\n    x + 1\n}\n"
 /// Why: the corpus swap resolves its staging and live paths from the storage
 /// layout, so the fixture builds the real `<root>/.trusty-search/` layout.
 /// Test: used by the discarded-write cases below.
-async fn staged_index(
+pub(super) async fn staged_index(
     id: &str,
 ) -> (
     tempfile::TempDir,
@@ -122,7 +122,7 @@ async fn staged_index(
 }
 
 /// Begin a staged run the way `run_reindex` does, returning the staging path.
-async fn begin(handle: &Arc<IndexHandle>, force: bool) -> std::path::PathBuf {
+pub(super) async fn begin(handle: &Arc<IndexHandle>, force: bool) -> std::path::PathBuf {
     super::corpus_swap::begin_staged_corpus_swap(
         handle,
         &handle.id,
@@ -137,7 +137,7 @@ async fn begin(handle: &Arc<IndexHandle>, force: bool) -> std::path::PathBuf {
 }
 
 /// Settle the staged run the way `finish_reindex` does.
-async fn resolve(
+pub(super) async fn resolve(
     handle: &Arc<IndexHandle>,
     tmp: &std::path::Path,
     resolution: &super::staging::StagingResolution,
@@ -251,7 +251,7 @@ async fn a_deferred_promotion_raises_the_generation() {
 /// What: hold a read guard on the indexer so the swap queues behind it after
 /// the copy, write through the shared write core while it waits (the core the
 /// watcher, reconcile and put all use), release, promote, and assert the put
-/// is absent from the promoted corpus and the generation rose. Deterministic:
+/// is in the promoted corpus (#12064 re-applies it) and the generation rose. Deterministic:
 /// the write starts only once the swap is observed queued (`try_read` fails).
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -297,13 +297,14 @@ async fn a_write_in_the_carryover_window_raises_the_generation() {
         .await
         .corpus_store()
         .expect("promoted");
+    // #12064: the window's write is re-applied to staging before the swap.
     assert!(
-        !corpus
+        corpus
             .list_indexed_files()
             .expect("list")
             .iter()
             .any(|f| f == PUSHED),
-        "the write in the window is missing from the promoted corpus"
+        "the write in the window must reach the promoted corpus"
     );
     let after = identity(id);
     assert!(
