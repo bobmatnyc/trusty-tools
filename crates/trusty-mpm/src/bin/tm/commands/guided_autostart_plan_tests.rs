@@ -211,7 +211,7 @@ fn prepare_never_deletes_an_unverified_lock() {
         let fake = FakeLaunchctl::new(vec![Some("not running")], true);
         let plan = prepare(&fake, true, &lock, identity);
         assert!(
-            matches!(plan, AutostartPlan::Blocked(ref e) if e.contains("remove ~/.trusty-mpm/daemon.lock")),
+            matches!(plan, AutostartPlan::Blocked(ref e) if e.contains("remove ~/.trusty-mpm/daemon.lock")), // path-literal: allow (display text)
             "{identity:?}: an unverified live lock pid must block: {plan:?}"
         );
         assert!(

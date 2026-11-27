@@ -113,10 +113,12 @@ fn resolve_project(project: &str, config: &WatchConfig) -> anyhow::Result<String
         );
         return Ok(repo.to_string());
     }
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const CONFIG: &str = "~/.trusty-tools/trusty-mpm/config.yaml"; // path-literal: allow (display text)
     anyhow::bail!(
         "could not resolve project `{project}` — pass an `owner/repo` (e.g. \
          `bobmatnyc/trusty-tools`) or set `watch.repo` in \
-         ~/.trusty-tools/trusty-mpm/config.yaml"
+         {CONFIG}"
     )
 }
 

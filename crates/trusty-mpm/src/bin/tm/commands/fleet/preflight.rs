@@ -75,8 +75,11 @@ pub(crate) enum DirRefusal {
 
 impl fmt::Display for DirRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const FIX: &str = "omit --dir to use ~/trusty-mpm-projects/architect, or pass a new, \
-                           empty directory";
+        // #11821: concat! so the path-naming piece can carry its waiver; bytes unchanged.
+        const FIX: &str = concat!(
+            "omit --dir to use ~/trusty-mpm-projects/architect, ", // path-literal: allow (display text)
+            "or pass a new, empty directory",
+        );
         match self {
             Self::Unresolvable { path, reason } => write!(
                 f,
