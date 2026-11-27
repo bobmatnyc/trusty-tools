@@ -1,7 +1,7 @@
 """datg_ops.py: validate and apply datg write ops (add, update, session, pulse, close).
 
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
-What: id and option checks, apply_add/update/session/pulse/op, collect_closed and write_ops_ev
+What: id and option checks, apply_add, apply_update, apply_session, apply_pulse and apply_op, collect_closed and write_ops_ev
 (one locked, all-or-nothing commit). #11101: `add T` stamps `created` and runs the WIP cap check
 (datg_task). datg.py re-exports every name.
 Test: tests/test_datg.py
@@ -193,8 +193,8 @@ def supersede(st, new, old_id):
 
     Why: an authentic quote of an owner turn the owner has since reversed still passed the relay check.
     What: sets `superseded_by` = new id on the old item. Both must be D/A items whose answer is sourced to the
-    owner, the new one unsuperseded; the old one may not already name another successor (the same one is a
-    no-op), so links never fork or cycle. Later turns never supersede by inference.
+    owner, the new one unsuperseded; the old one may not already name another successor (naming the same
+    one again changes nothing), so links never fork or cycle. Later turns never supersede by inference.
     Test: tests/test_relay_supersession.py TestLinkCase
     """
     if (new.get("source") or {}).get("by") != "owner":
@@ -296,7 +296,7 @@ def _merge_refs(old, new):
     for r in _rows({"refs": new}, "refs", REFS_MAX, "refs"):
         key = r.get("key")
         if not isinstance(key, str) or not REF_KEY.match(key):
-            raise DatgError(f"refs.key must match {REF_KEY.pattern}")
+            raise DatgError(f"the refs key must match {REF_KEY.pattern}")
         if r.get("value") is None:
             refs.pop(key, None)
             continue
@@ -307,7 +307,7 @@ def _merge_refs(old, new):
 
 
 def apply_session(st, a):
-    """Validate and merge a session-record op into st["session"]; raise DatgError on any violation."""
+    """Validate and merge a session-record entry into st["session"]; raise DatgError on any violation."""
     ses = dict(st.get("session") or {})
     if a.get("task") is not None:
         ses["task"] = _lim(a["task"], "task", 160, True)
@@ -393,11 +393,11 @@ def apply_op(st, a):
             raise DatgError("close needs --outcome")
         return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done",
                                  "state": a.get("state")})   # #10960 G-5: the claimed delivery state
-    raise DatgError(f"unknown op {verb!r}")
+    raise DatgError(f"unknown operation {verb!r}")
 
 
 def collect_closed(st, evs):
-    """Remove items/tasks that a `done` event closed in this call; return [(kind, obj)] to archive."""
+    """Remove items/tasks that a "done" event closed in this call; return [(kind, obj)] to archive."""
     ids = {e["id"] for e in evs if e["ev"] == "done"}
     out = []
     for field, kind in (("items", "item"), ("tasks", "task")):
@@ -411,7 +411,7 @@ def write_ops_ev(project, ops):
 
     #10800 G2: a task closed with no evidence in its outcome is refused under guard_mode enforce; in shadow
     the write lands, and stderr and <datg>/guards.jsonl record it (never log.jsonl: the Rust writer parity).
-    #10960 G-5: delivery_gaps sets a closed task's recorded `delivery`; its FLAG lines go to the same two places
+    #10960 G-5: delivery_gaps sets a closed task's recorded "delivery"; its FLAG lines go to the same two places
     in every guard_mode and never refuse.
     Test: tests/test_datg_guards.py EvidenceCase, tests/test_datg_delivery.py DeliveryCase
     """
@@ -420,7 +420,7 @@ def write_ops_ev(project, ops):
         evs = []
         for a in ops:
             if not isinstance(a, dict):
-                raise DatgError("each op must be an object")
+                raise DatgError("each operation must be an object")
             evs.extend(apply_op(st, a))
         closed = collect_closed(st, evs)
         gaps = datg_guards.evidence_gaps(closed)
