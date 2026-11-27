@@ -10,6 +10,8 @@ use trusty_common::content::ContentSource;
 
 use super::*;
 use crate::content::first_use::resolve_or_fetch_in;
+use trusty_common::install_paths::MPM_DIR_NAME;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 /// A [`ReleaseSource`] that counts the listings and asset reads it serves.
 struct Counting<'a> {
@@ -371,7 +373,7 @@ fn a_fetch_inside_a_runtime_leaves_the_worker_free() {
 /// holding `.git`; a `trusty-tools` repo also gets a stale checkout's layout
 /// (every class directory, a `[workspace]` manifest, no `BASE-AGENT.md`).
 fn managed_workspace(home: &Path, owner: &str, repo: &str) -> std::path::PathBuf {
-    let root = home.join("trusty-mpm-projects").join(owner).join(repo);
+    let root = home.join(DEFAULT_WORKSPACE_DIR).join(owner).join(repo);
     std::fs::create_dir_all(root.join(".git")).expect(".git");
     if repo == "trusty-tools" {
         for (_, rel) in trusty_common::content::DEV_CLASS_SOURCES {
@@ -398,7 +400,7 @@ fn a_managed_workspace_resolves_the_cache_once_a_bundle_lands() {
     use trusty_agents_common::agent_content::{AgentRoster, REMEDY};
 
     let home = tempfile::tempdir().unwrap();
-    let cache = home.path().join(".trusty-mpm/content");
+    let cache = home.path().join(MPM_DIR_NAME).join("content");
     std::fs::create_dir_all(&cache).unwrap();
     let project = managed_workspace(home.path(), "acme", "widget");
     let stale = managed_workspace(home.path(), "bobmatnyc", "trusty-tools");
@@ -448,7 +450,7 @@ fn a_session_outside_any_checkout_uses_the_installed_content() {
         "precondition: the test cwd is inside a checkout"
     );
     let home = tempfile::tempdir().unwrap();
-    let cache = home.path().join(".trusty-mpm/content");
+    let cache = home.path().join(MPM_DIR_NAME).join("content");
     std::fs::create_dir_all(&cache).unwrap();
     let session = managed_workspace(home.path(), "acme", "widget");
     let src = tempfile::tempdir().unwrap();
@@ -474,7 +476,7 @@ fn a_session_with_nothing_installed_uses_the_cwd_checkout_before_a_fetch() {
     let cwd = std::env::current_dir().expect("cwd");
     let root = trusty_common::content::find_dev_checkout(&cwd).expect("cwd is in a checkout");
     let home = tempfile::tempdir().unwrap();
-    let cache = home.path().join(".trusty-mpm/content");
+    let cache = home.path().join(MPM_DIR_NAME).join("content");
     std::fs::create_dir_all(&cache).unwrap();
     let session = managed_workspace(home.path(), "acme", "widget");
 

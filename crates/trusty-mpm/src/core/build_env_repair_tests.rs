@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::core::build_env::BuildConfig;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// A resolved environment rooted in `home`.
 fn env_at(home: &Path) -> ResolvedBuildEnv {
@@ -29,7 +30,7 @@ fn env_at(home: &Path) -> ResolvedBuildEnv {
 
 /// `<home>/.trusty-tools/trusty-mpm/config.yaml`.
 fn config_path_at(home: &Path) -> std::path::PathBuf {
-    home.join(".trusty-tools")
+    home.join(TOOLS_DIR_NAME)
         .join("trusty-mpm")
         .join("config.yaml")
 }

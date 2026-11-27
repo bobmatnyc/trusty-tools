@@ -1717,14 +1717,30 @@ async fn run_review_git_range_is_dry_run_and_not_posted() {
     assert!(!result.posted, "git-range must not be marked posted");
 }
 
+/// Set only on the re-exec child of `run_review_stdin_is_dry_run_and_not_posted` (#12040).
+const STDIN_CHILD_ENV: &str = "TRUSTY_REVIEW_STDIN_TEST_CHILD";
+
+/// Printed to stderr by the stdin child after its last assertion (#12040).
+const STDIN_CHILD_DONE: &str = "STDIN_TEST_CHILD_BODY_COMPLETED";
+
+/// The `Stdin` source never posts, end to end through `run_review` (#2993).
+///
+/// Why: `DiffSource::Stdin` reads the process's real fd 0 to EOF. Run
+/// in-process, the test read whatever stdin `cargo test` inherited; an open
+/// pipe that never reaches EOF (a remote `ssh -T` job) blocked it forever and
+/// hung the crate-wide run (#12040).
+/// What: the parent re-execs this test binary for this one test, with
+/// [`STDIN_CHILD_ENV`] set and a piped stdin it fills with a diff and closes,
+/// then waits at most 120 s. The child runs `run_review` over that stdin and
+/// asserts dry-run and not posted. The parent requires `1 passed` and
+/// [`STDIN_CHILD_DONE`], so a filter that matches nothing cannot pass.
+/// Test: this test; run with an open, never-closed stdin to check the bound.
 #[tokio::test]
 async fn run_review_stdin_is_dry_run_and_not_posted() {
-    // Same guarantee, for the `Stdin` source (#2993). `run_review` never
-    // reads real stdin in this test — `Stdin` loading is exercised via
-    // `read_diff_from_reader` unit tests in `diff.rs`; here we only need to
-    // confirm the source-selection dry-run/no-post wiring, so an empty stdin
-    // (nothing piped into `cargo test`) reading to "" is fine — the pipeline
-    // still runs through the fail-safe/gate path and must stay dry-run.
+    if std::env::var_os(STDIN_CHILD_ENV).is_none() {
+        run_stdin_test_in_child();
+        return;
+    }
     let mut config = default_config();
     config.dry_run = false; // service-live default
     let input = ReviewInput {
@@ -1746,6 +1762,54 @@ async fn run_review_stdin_is_dry_run_and_not_posted() {
         "stdin source must never post — always dry-run"
     );
     assert!(!result.posted, "stdin must not be marked posted");
+    eprintln!("{STDIN_CHILD_DONE}");
+}
+
+/// Re-exec this test binary for the stdin test alone, over a closed pipe (#12040).
+fn run_stdin_test_in_child() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let name = format!("{module}::run_review_stdin_is_dry_run_and_not_posted");
+    let stdout = tempfile::NamedTempFile::new().expect("child stdout file");
+    let stderr = tempfile::NamedTempFile::new().expect("child stderr file");
+    let exe = std::env::current_exe().expect("resolve current test binary");
+    let mut child = Command::new(&exe)
+        .args([name.as_str(), "--exact", "--test-threads=1", "--nocapture"])
+        .env(STDIN_CHILD_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(stdout.reopen().expect("reopen child stdout"))
+        .stderr(stderr.reopen().expect("reopen child stderr"))
+        .spawn()
+        .expect("re-exec test binary for the stdin test");
+    {
+        let mut pipe = child.stdin.take().expect("child stdin pipe");
+        pipe.write_all(b"+fn x() {}\n")
+            .expect("write diff to child stdin");
+    } // dropping the pipe closes it, so the child's read reaches EOF
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll stdin test child") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("stdin test child did not finish within 120 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let out = std::fs::read_to_string(stdout.path()).unwrap_or_default();
+    let err = std::fs::read_to_string(stderr.path()).unwrap_or_default();
+    assert!(
+        status.success() && out.contains("1 passed") && err.contains(STDIN_CHILD_DONE),
+        "stdin test child `{name}` failed or ran no body ({status}):\n\
+         --- stdout ---\n{out}\n--- stderr ---\n{err}",
+    );
 }
 
 #[tokio::test]

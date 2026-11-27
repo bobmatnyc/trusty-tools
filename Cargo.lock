@@ -11339,7 +11339,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "libc",
  "serde",
@@ -11459,7 +11459,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11529,7 +11529,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.9"
+version = "0.70.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11650,7 +11650,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -11807,7 +11807,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11852,7 +11852,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12024,7 +12024,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.42.1"
+version = "0.42.2"
 dependencies = [
  "anyhow",
  "async-trait",

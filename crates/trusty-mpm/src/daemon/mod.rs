@@ -1232,7 +1232,7 @@ mod shutdown_reaper_tests {
         );
         assert_ne!(
             dir.path(),
-            home.join(".trusty-mpm"),
+            home.join(trusty_common::install_paths::MPM_DIR_NAME),
             "the scratch root must not BE the home root, or the test proves nothing"
         );
 

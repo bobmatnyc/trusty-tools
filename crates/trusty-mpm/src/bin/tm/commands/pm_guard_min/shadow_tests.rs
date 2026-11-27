@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use super::*;
 
@@ -128,7 +129,7 @@ fn guarded_judge(raw: &[u8], home: &Path) -> Option<Value> {
 #[test]
 fn an_unwritable_log_is_dropped() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join(".trusty-mpm"), "a file, not a dir").unwrap();
+    std::fs::write(home.path().join(MPM_DIR_NAME), "a file, not a dir").unwrap();
     append_log(home.path(), &json!({ "rule": "R2" }));
     assert!(!home.path().join(LOG_PATH).exists());
 }

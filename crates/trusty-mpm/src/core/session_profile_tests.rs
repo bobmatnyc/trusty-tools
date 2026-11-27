@@ -151,7 +151,7 @@ fn the_doctor_reason_names_the_missing_allowlist_entry() {
         refusal(tmp.path(), &MpmConfig::default()),
         Some(NOT_ALLOW_LISTED)
     );
-    assert!(NOT_ALLOW_LISTED.contains("not allow-listed in ~/.trusty-mpm/config.toml"));
+    assert!(NOT_ALLOW_LISTED.contains("not allow-listed in ~/.trusty-mpm/config.toml")); // path-literal: allow
     assert_eq!(refusal(tmp.path(), &allowing(&[tmp.path()])), None);
     let pm = TempDir::new().expect("tempdir");
     assert_eq!(refusal(pm.path(), &MpmConfig::default()), None);

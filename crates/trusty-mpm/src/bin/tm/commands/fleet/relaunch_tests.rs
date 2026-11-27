@@ -332,7 +332,7 @@ fn relaunch_never_starts_a_poller_unless_the_architect_is_bound() {
     let fx = Fixture::new(live(), &[PaneClaude::Absent]);
     POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
     let mut ops = STUB;
-    ops.architect = |_, _| anyhow::bail!("cannot read ~/.trusty-mpm/config.toml");
+    ops.architect = |_, _| anyhow::bail!("cannot read ~/.trusty-mpm/config.toml"); // path-literal: allow (display text)
     let err = fx.relaunch(ops).expect_err("an unreadable config refuses");
     assert!(format!("{err:#}").contains("cannot read"), "{err:#}");
     assert!(calls().is_empty(), "{:?}", calls());

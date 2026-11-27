@@ -7,7 +7,7 @@ Spec: local/briefs/2026-10-07-token-watch-spec.md.
 What: reads Claude Code transcripts incrementally (main and subagent files of
 every project directory), de-duplicates turns by message.id, applies the rules
 in DEFAULTS, returns alert dicts for fleet-poll.py and appends an hourly
-rollup to local/usage/token-hourly.jsonl. Never reads or stores message text:
+rollup to local/usage/token-hourly.jsonl and never reads or stores message text:
 only usage numbers, model, timestamps, ids and the Bash command shape of
 polling turns. State: inbox/token-watch-state.json (offsets, counters, fired
 fingerprints). Alert dedup here: an exact fingerprint fires once per 24 h, and
@@ -185,7 +185,7 @@ def session_names(sessions_dir=None):
     return names
 
 
-# --- engine (the rules live in token_watch_rules.ScanRules) -------------------
+# --- engine (the rules live in ScanRules, from token_watch_rules) -------------
 
 class Scan(ScanRules):
     """One scan cycle: ScanRules plus the incremental transcript reads."""

@@ -32,6 +32,7 @@ trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/a
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_stamps_omit_claude_md	reads repo_roster (content/agents) (#7684)
 trusty-agents-common	lib	harness_doc::tests	reads HarnessDoc::load over the checkout content (#9011)
+trusty-architect	test:replay_tool	skill_names_match_the_repo_skill_list	reads literal '../../content/skills': SKILL_NAMES must equal the repo's tm- skill list (#12026)
 trusty-code	lib	agents::deploy::deploy_tests	runtime: stages load_tm_agent_sources (content/agents via the cwd checkout) and composes the roster
 trusty-code	lib	agents::md_loader::tests::embedded_agent_skill_pointers_open_with_read_file	runtime: composes rust-engineer from trusty-agents-common .md, asserts its skill pointers
 trusty-code	lib	agents::md_loader::tests::deployed_roster_copy_recovers_the_cards_permissions	runtime: recovers the stock pm card's permissions from content/agents/trusty-code/pm.md via resolve_for_process (#9013)

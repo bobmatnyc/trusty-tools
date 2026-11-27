@@ -90,7 +90,10 @@
 //! `commands::install` calls after each member lands; `sign_set_strict` is the
 //! hard-failing primitive the standalone `tctl sign <target>` command
 //! (`commands::sign`) uses, which `scripts/install-trusty-search-signed.sh` now
-//! shells out to instead of duplicating codesign flags in bash.
+//! shells out to instead of duplicating codesign flags in bash. #11587:
+//! `trusty-secrets` joins as [`SECRETS_SET`], and `sign_set_strict` now reads
+//! each signature back and fails closed on an ad-hoc or wrong-team result
+//! (`strict`).
 //!
 //! Test: `tests` covers `binaries_for_set`, `codesign_identifier`,
 //! `use_hardened_runtime`, `identifier_migration_notice`,
@@ -169,6 +172,23 @@ pub const MEMORY_SET: &str = "trusty-memory";
 /// executable.
 pub const ANALYZE_SET: &str = "trusty-analyze";
 
+/// The `trusty-secrets` signable set: the single `trusty-secrets` binary,
+/// installed from the registry (`cargo install trusty-secrets --version <v>
+/// --locked`, ADR-0043).
+///
+/// Why (#11587, #11786 AC 6): a file-based Keychain item trusts its creator by
+/// designated requirement. An ad-hoc binary's requirement is its cdhash, so
+/// every upgrade is a new app and every item prompts again. A Developer ID
+/// signature with a fixed `--identifier` keeps the requirement stable across
+/// upgrades. The signature must be re-applied after every install: an unsigned
+/// upgrade silently reverts to ad-hoc.
+///
+/// Hardened Runtime: `trusty-secrets` links no ONNX runtime and loads no dylib
+/// (its Keychain access goes through `keyring`'s `apple-native` backend over
+/// `security-framework`). It is still untested under Hardened Runtime, so it
+/// takes the explicit-only policy, and no automatic `tctl install` hook signs it.
+pub const SECRETS_SET: &str = "trusty-secrets";
+
 /// The master table: every signable binary → (its set, its codesign identifier).
 ///
 /// Why: PR #2657 review (MEDIUM) — `binaries_for_set` and `codesign_identifier`
@@ -230,6 +250,8 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // only other target is a library. See [`ANALYZE_SET`] for why it
     // qualifies and how its exposure differs from trusty-memory's.
     ("trusty-analyze", ANALYZE_SET, "com.trusty.trusty-analyze"),
+    // #11587: one binary; see [`SECRETS_SET`] for why a stable identity matters.
+    ("trusty-secrets", SECRETS_SET, "com.trusty.trusty-secrets"),
 ];
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
@@ -309,7 +331,9 @@ pub fn codesign_identifier(binary: &str) -> &'static str {
 /// ONNX-dylib-under-library-validation exposure that keeps [`SEARCH_SET`] off
 /// automatic Hardened Runtime. Neither takes a special case: falling through
 /// to plain `explicit` already gives exactly [`SEARCH_SET`]'s policy, which is
-/// what `tests::hardened_runtime_policy` pins for each.
+/// what `tests::hardened_runtime_policy` pins for each. #11587: [`SECRETS_SET`]
+/// falls through to that policy too: it loads no dylib, but Hardened Runtime
+/// on it is unverified.
 ///
 /// What: `explicit` (the operator directly ran `tctl sign <target>`, or the
 /// wrapper script which shells out to it) → always `true`. Automatic
@@ -535,29 +559,8 @@ fn warn_on_identifier_change(path: &std::path::Path, binary: &str) {
 /// `use_hardened_runtime`.
 #[cfg(target_os = "macos")]
 pub fn sign_binary(path: &std::path::Path, identity: &str, hardened: bool) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let binary_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-    let identifier = codesign_identifier(binary_name);
-
-    let mut args: Vec<&str> = vec!["--force"];
-    if hardened {
-        args.extend(["--options", "runtime", "--timestamp"]);
-    }
-    args.extend(["--identifier", identifier, "--sign", identity]);
-
-    let out = std::process::Command::new("codesign")
-        .args(&args)
-        .arg(path)
-        .output()
-        .with_context(|| format!("running codesign on {}", path.display()))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("codesign failed for {}: {stderr}", path.display());
-    }
-    Ok(())
+    // #11587: the body moved to `strict` so tests can inject a fake codesign.
+    strict::codesign_sign(std::ffi::OsStr::new("codesign"), path, identity, hardened)
 }
 
 /// Verify a binary's signature immediately after signing.
@@ -573,20 +576,8 @@ pub fn sign_binary(path: &std::path::Path, identity: &str, hardened: bool) -> an
 /// Test: Not invoked in tests (side-effecting, requires a real signed binary).
 #[cfg(target_os = "macos")]
 pub fn verify_signature(path: &std::path::Path) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let out = std::process::Command::new("codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(path)
-        .output()
-        .with_context(|| format!("running codesign --verify on {}", path.display()))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!(
-            "post-sign verification failed for {}: {stderr}",
-            path.display()
-        );
-    }
-    Ok(())
+    // #11587: the body moved to `strict`, beside the attestation step.
+    strict::codesign_verify(std::ffi::OsStr::new("codesign"), path)
 }
 
 /// Typed error for `sign_set_strict`.
@@ -626,7 +617,8 @@ impl std::fmt::Display for SignSetError {
         match self {
             SignSetError::UnknownSet(set) => write!(
                 f,
-                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-assistants')"
+                // #11587: trusty-secrets is a signable set.
+                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', 'trusty-assistants', or 'trusty-secrets')"
             ),
             SignSetError::NoCertificate => {
                 write!(f, "no Developer ID Application certificate found")
@@ -663,14 +655,18 @@ impl std::error::Error for SignSetError {
 /// binary in `binaries_for_set(set)` that exists under `install_dir`, signs it
 /// (always with Hardened Runtime — `explicit = true` per
 /// [`use_hardened_runtime`]) and verifies the signature — bailing out on the
-/// first failure. Returns the paths that were signed. Errors on an unknown
-/// set name or when no binary in the set was found on disk. `verbose` (#2939)
-/// is forwarded to [`has_developer_id_cert_verbose`] so `tctl sign --verbose`
-/// can show the raw identity-probe output and which identity was selected.
+/// first failure. #11587: each signature is then read back and must name a
+/// Developer ID Application leaf and the identity's Team ID
+/// ([`strict::attest_developer_id`]). An ad-hoc or wrong-team result is a
+/// [`SignSetError::Sign`], never success. Returns the paths that were signed.
+/// Errors on an unknown set name or when no binary in the set was found on
+/// disk. `verbose` (#2939) is forwarded to [`has_developer_id_cert_verbose`]
+/// so `tctl sign --verbose` can show the raw identity-probe output and which
+/// identity was selected.
 ///
-/// Test: Not invoked in tests (side-effecting); the set/identifier resolution
-/// it composes is tested independently via `binaries_for_set` /
-/// `codesign_identifier` / `use_hardened_runtime`.
+/// Test: this real-`codesign` wrapper is not invoked in tests
+/// (side-effecting); the pipeline it delegates to runs against a fake codesign
+/// in `tests::sign_set_with_fails_closed_on_every_bad_signature`.
 #[cfg(target_os = "macos")]
 pub fn sign_set_strict(
     install_dir: &std::path::Path,
@@ -682,26 +678,19 @@ pub fn sign_set_strict(
         return Err(SignSetError::UnknownSet(set.to_owned()));
     }
     let identity = has_developer_id_cert_verbose(verbose).ok_or(SignSetError::NoCertificate)?;
-    let hardened = use_hardened_runtime(set, true);
-
-    let mut signed = Vec::new();
     for name in binaries {
         let path = install_dir.join(name);
-        if !path.exists() {
-            continue;
+        if path.exists() {
+            warn_on_identifier_change(&path, name);
         }
-        warn_on_identifier_change(&path, name);
-        sign_binary(&path, &identity, hardened).map_err(SignSetError::Sign)?;
-        verify_signature(&path).map_err(SignSetError::Sign)?;
-        signed.push(path);
     }
-    if signed.is_empty() {
-        return Err(SignSetError::NoBinariesFound {
-            set: set.to_owned(),
-            dir: install_dir.display().to_string(),
-        });
-    }
-    Ok(signed)
+    // #11587: sign, verify, then attest the Developer ID result; fail closed.
+    strict::sign_set_with(
+        std::ffi::OsStr::new("codesign"),
+        install_dir,
+        set,
+        &identity,
+    )
 }
 
 /// The Developer ID certificate setup guidance (no cert found, strict path).
@@ -827,8 +816,9 @@ pub fn app_data_guidance(binary_path: &str, existed_before: bool) -> String {
 /// Test: `tests::signing_persistence_tip_mentions_sign_identity_and_tctl_sign`,
 /// `tests::signing_persistence_tip_names_every_signable_set`.
 pub fn signing_persistence_tip() -> &'static str {
+    // #11587: trusty-secrets joins the advertised targets.
     "Tip: install a Developer ID Application certificate (or set TRUSTY_SIGN_IDENTITY) \
-     and run `tctl sign <trusty-search|trusty-mpm|trusty-memory|trusty-analyze|trusty-assistants>` to make \
+     and run `tctl sign <trusty-search|trusty-mpm|trusty-memory|trusty-analyze|trusty-assistants|trusty-secrets>` to make \
      these grants persist across every future reinstall."
 }
 
@@ -994,6 +984,9 @@ pub fn post_install_mpm(
         None
     }
 }
+
+// #11587: the strict sign -> verify -> attest pipeline.
+mod strict;
 
 #[cfg(test)]
 mod tests;

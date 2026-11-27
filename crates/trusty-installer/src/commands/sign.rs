@@ -30,7 +30,8 @@ use super::macos_signing;
 
 /// Handle `tctl sign <target>` (target: `trusty-search`, `trusty-mpm`,
 /// `trusty-memory` / `trusty-analyze` — owner ruling 2026-08-06 — or
-/// `trusty-assistants` — #4277, renamed in #11632).
+/// `trusty-assistants` — #4277, renamed in #11632 — or `trusty-secrets` —
+/// #11587).
 ///
 /// Why: The CLI-facing entry point for standalone Developer-ID signing,
 /// separate from the fail-soft hooks `commands::install` runs automatically.
@@ -41,14 +42,16 @@ use super::macos_signing;
 /// path, printing the raw identity-probe output and selected identity to
 /// stderr — a diagnostic aid for "no identity found" failures despite a valid
 /// keychain cert. Returns the process exit code: `0` on success, `1` on a
-/// signing/verification/no-cert failure, `2` for an unknown target. On
+/// signing/verification/no-cert failure (#11587: including a signature that
+/// reads back ad-hoc or with the wrong Team ID), `2` for an unknown target. On
 /// non-macOS this is always a `0` no-op.
 ///
 /// Test: `tests::run_unknown_target_is_error`.
 pub fn run(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     if macos_signing::binaries_for_set(target).is_empty() {
         eprintln!(
-            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-assistants')"
+            // #11587: trusty-secrets is a signable target.
+            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', 'trusty-assistants', or 'trusty-secrets')"
         );
         return 2;
     }

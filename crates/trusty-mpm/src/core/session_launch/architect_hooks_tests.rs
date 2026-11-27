@@ -25,6 +25,7 @@ use super::super::settings::{
 use super::super::tests::EnvVarGuard;
 use super::*;
 use crate::core::standalone::hooks::hook_entry_command_line;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// The installed-looking binary every test pins.
 const EXE: &str = "/usr/local/bin/tm";
@@ -333,7 +334,7 @@ fn the_pm_hook_block_matches_its_literal_golden() {
 fn an_old_claude_code_refuses_the_architect_prep_before_any_write() {
     let project = tempdir().unwrap();
     let home = tempdir().unwrap();
-    let root = home.path().join(".trusty-mpm");
+    let root = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("config.toml"),
@@ -505,7 +506,7 @@ fn the_launch_writes_the_architect_hooks_by_profile() {
     for direct_commands in [false, true] {
         let project = tempdir().unwrap();
         let home = tempdir().unwrap();
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(MPM_DIR_NAME);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("config.toml"),
@@ -621,7 +622,7 @@ fn a_refused_re_merge_never_leaves_the_architect_hooks_stripped() {
 /// project, whose `.claude/settings.json` is a DIRECTORY so the hook write
 /// fails (#10612).
 fn unwritable_hooks_project(home: &Path, project: &Path, profile: &str) {
-    let root = home.join(".trusty-mpm");
+    let root = home.join(MPM_DIR_NAME);
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("config.toml"),

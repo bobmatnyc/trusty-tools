@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "wizard"
+  ],
+  "stdin": "Ship it with --force; tmux keeps the pane.\n",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "level_lint [pm]: flag `--force` (line 1)\nlevel_lint [pm]: tool `tmux` (line 1)\n",
+  "stderr": "level_lint: unknown level 'wizard'; using pm\n",
+  "exit": 0,
+  "writes": {}
+}

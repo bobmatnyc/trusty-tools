@@ -921,6 +921,51 @@ no `$HOME` walk and reads no other application's files — grepping it for
 returns only Bedrock model-name strings. There is no grant for a stable
 identity to preserve, so adding it would be signing for its own sake.
 
+### Signed Install: trusty-secrets (#11587)
+
+A file-based Keychain item trusts the binary that created it by designated
+requirement. An ad-hoc `trusty-secrets` has its cdhash as that requirement, so
+every upgrade is a new app and every item prompts again (#11786 AC 6). A
+Developer ID signature with a fixed identifier keeps the requirement stable
+across upgrades.
+
+| Binary | Identifier |
+|---|---|
+| `trusty-secrets` | `com.trusty.trusty-secrets` |
+
+Install from the registry, then sign (ADR-0043: never `--path`):
+
+```bash
+scripts/install-trusty-secrets-signed.sh --version <v>
+# equivalent to, with ROOT = $CARGO_INSTALL_ROOT, else $CARGO_HOME:
+cargo install trusty-secrets --version <v> --locked --root "$ROOT"
+tctl sign trusty-secrets --dir "$ROOT/bin"
+```
+
+The script passes `--root` so it signs the file cargo just wrote, even when
+`install.root` points elsewhere. It fails when `trusty-secrets` on `PATH` is a
+different file.
+
+🔴 **Re-run after every install.** An upgrade that skips the sign step reverts
+the binary to ad-hoc with no warning, and the per-item prompts return.
+
+🔴 **Fail-closed.** `tctl sign` reads every signature back with `codesign -dvv`
+and exits 1 when it is ad-hoc, has no Team ID, has a non-Developer-ID leaf, or
+has a Team ID other than the one in the identity name. This check applies to
+every `tctl sign` target, not only trusty-secrets. The script exits non-zero on
+any of these, and also when no certificate is found.
+
+🟡 **Hardened Runtime is untested on trusty-secrets.** Explicit signing applies
+`--options runtime --timestamp`, as for every target. trusty-secrets loads no
+dylib. Its Keychain access goes through `keyring`'s `apple-native` backend over
+`security-framework`, the file-based login keychain, which takes no
+entitlement. No entitlements are applied, and no signed binary has been run.
+`tctl install` has no automatic hook for it.
+
+🟡 **One re-grant after the first signed install.** Items created under the
+old ad-hoc cdhash still trust that cdhash, so each prompts once. Checking a
+Keychain item's ACL after signing waits on an owner-approved Keychain run.
+
 ### TRUSTY_SIGN_IDENTITY Override
 
 If you have multiple Developer ID Application certificates (e.g. personal and
