@@ -7,8 +7,6 @@ crates/trusty-channels/src/policy/tests/repo.rs	1
 crates/trusty-common/src/catchup/mod.rs	1
 crates/trusty-common/src/catchup/state.rs	2
 crates/trusty-common/src/content/mod.rs	1
-crates/trusty-installer/src/commands/bootstrap_sites_tests.rs	1
-crates/trusty-installer/src/commands/plist_bootstrap.rs	1
 crates/trusty-mpm/src/assets/architect/scripts/architect_config.py	1
 crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py	1
 crates/trusty-mpm/src/assets/architect/scripts/dashboard_viz.py	2
