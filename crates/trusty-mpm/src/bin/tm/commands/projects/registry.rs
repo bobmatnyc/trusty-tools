@@ -670,6 +670,30 @@ mod tests {
         assert!(!line.contains("decommissioned"), "{line}");
     }
 
+    /// #11969: a register of a decommissioned project prints the success line
+    /// AND the daemon's reason, so the operator learns how to reactivate it.
+    #[test]
+    fn register_report_lines_print_the_inactive_reason() {
+        let reason = "project widget is decommissioned; start a session for it";
+        let lines = register_report_lines(&project(), Some(reason));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("registered project 'widget' ("),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains(reason), "{lines:?}");
+    }
+
+    /// #11969: an active project's register prints the success line only.
+    #[test]
+    fn register_report_lines_for_an_active_project_print_no_reason() {
+        let lines = register_report_lines(&project(), None);
+        assert_eq!(
+            lines,
+            vec!["registered project 'widget' (https://github.com/acme/widget @ main)".to_string()]
+        );
+    }
+
     #[test]
     fn render_project_line_marks_a_decommissioned_project() {
         let mut p = project();
