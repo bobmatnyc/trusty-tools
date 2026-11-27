@@ -201,7 +201,7 @@ fn an_edit_tool_write_to_the_anchor_is_denied() {
     std::fs::hard_link(&fx.anchor, &hard).expect("hard link");
     assert!(pm_verdict(&fx, "Write", write_input(&hard)).is_some());
     // `~` in an edit tool's path names the home too.
-    let tilde = json!({ "file_path": "~/.trusty-mpm/config.toml", "content": "x" });
+    let tilde = json!({ "file_path": "~/.trusty-mpm/config.toml", "content": "x" }); // path-literal: allow (guard input)
     assert!(pm_verdict(&fx, "Write", tilde).is_some());
 }
 
@@ -209,23 +209,23 @@ fn an_edit_tool_write_to_the_anchor_is_denied() {
 fn bash_write_shapes_onto_the_anchor_are_denied() {
     let fx = fixture();
     for command in [
-        "echo x > ~/.trusty-mpm/config.toml",
-        "echo x >> \"$HOME/.trusty-mpm/config.toml\"",
-        "echo x | tee -a ~/.trusty-mpm/config.toml",
-        "cp a.txt ~/.trusty-mpm/config.toml",
-        "cp config.toml ~/.trusty-mpm/",
-        "cp -t ~/.trusty-mpm config.toml",
-        "cp -R src/ ~/.trusty-mpm",
-        "sudo cp a.txt ${HOME}/.trusty-mpm/config.toml",
-        "mv a.txt ~/.trusty-mpm/config.toml",
-        "ln -s /tmp/evil ~/.trusty-mpm/config.toml",
-        "ln -sf a.txt ~/.trusty-mpm/config.toml",
-        "install -m 600 a.txt ~/.trusty-mpm/config.toml",
-        "sed -i '' 's/a/b/' ~/.trusty-mpm/config.toml",
-        "sed -i.bak -e 's/a/b/' ~/.trusty-mpm/config.toml",
-        "sed --in-place 's/a/b/' ~/.trusty-mpm/config.toml",
-        "cd ~/.trusty-mpm && echo x > config.toml",
-        "cp a.txt ~/.trusty-mpm/*.toml",
+        "echo x > ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "echo x >> \"$HOME/.trusty-mpm/config.toml\"", // path-literal: allow (guard input)
+        "echo x | tee -a ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "cp config.toml ~/.trusty-mpm/",      // path-literal: allow (guard input)
+        "cp -t ~/.trusty-mpm config.toml",    // path-literal: allow (guard input)
+        "cp -R src/ ~/.trusty-mpm",           // path-literal: allow (guard input)
+        "sudo cp a.txt ${HOME}/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "mv a.txt ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "ln -s /tmp/evil ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "ln -sf a.txt ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "install -m 600 a.txt ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "sed -i '' 's/a/b/' ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "sed -i.bak -e 's/a/b/' ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "sed --in-place 's/a/b/' ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "cd ~/.trusty-mpm && echo x > config.toml", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-mpm/*.toml",      // path-literal: allow (guard input)
         "cp a.txt $DIR/config.toml",
         "echo x > $OUT",
         // The documented limit: after a `cd`, `.` could be `~/.trusty-mpm`.
@@ -253,9 +253,9 @@ fn a_relative_path_resolves_against_the_hook_cwd() {
 fn anchor_verbs_reach_a_nested_body() {
     let fx = fixture();
     for command in [
-        "bash -c 'cp a.txt ~/.trusty-mpm/config.toml'",
-        "(mv a.txt ~/.trusty-mpm/config.toml)",
-        "echo $(install a.txt ~/.trusty-mpm/config.toml)",
+        "bash -c 'cp a.txt ~/.trusty-mpm/config.toml'", // path-literal: allow (guard input)
+        "(mv a.txt ~/.trusty-mpm/config.toml)",         // path-literal: allow (guard input)
+        "echo $(install a.txt ~/.trusty-mpm/config.toml)", // path-literal: allow (guard input)
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
@@ -265,16 +265,16 @@ fn anchor_verbs_reach_a_nested_body() {
 fn reads_and_other_writes_stay_allowed() {
     let fx = fixture();
     for command in [
-        "cat ~/.trusty-mpm/config.toml",
-        "grep supervisor ~/.trusty-mpm/config.toml",
-        "sed -n 1p ~/.trusty-mpm/config.toml",
-        "ls ~/.trusty-mpm",
-        "cp ~/.trusty-mpm/config.toml backup.toml",
-        "cp a.txt ~/.trusty-mpm/notes.md",
-        "cp a.txt ~/.trusty-mpm/",
-        "mv ~/.trusty-mpm/sessions/s.json /tmp/s.json",
-        "ln -s ~/.trusty-mpm/logs latest",
-        "echo x > ~/.trusty-mpm/logs/tm.log",
+        "cat ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "grep supervisor ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "sed -n 1p ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "ls ~/.trusty-mpm",              // path-literal: allow (guard input)
+        "cp ~/.trusty-mpm/config.toml backup.toml", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-mpm/notes.md", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-mpm/",       // path-literal: allow (guard input)
+        "mv ~/.trusty-mpm/sessions/s.json /tmp/s.json", // path-literal: allow (guard input)
+        "ln -s ~/.trusty-mpm/logs latest", // path-literal: allow (guard input)
+        "echo x > ~/.trusty-mpm/logs/tm.log", // path-literal: allow (guard input)
         "echo x > notes.md",
         "sed -i 's/a.*/b/' a.txt",
         "sed -i '' -e 's/[0-9]/x/' a.txt",
@@ -295,7 +295,7 @@ fn the_architect_main_thread_may_write_the_anchor() {
     let cp = payload(
         &fx,
         "Bash",
-        json!({ "command": "cp a.txt ~/.trusty-mpm/config.toml" }),
+        json!({ "command": "cp a.txt ~/.trusty-mpm/config.toml" }), // path-literal: allow (guard input)
     );
     assert_eq!(evaluate(&cp, &env, || allowlist(&fx)), None);
 }
@@ -420,7 +420,7 @@ fn a_live_armed_record_is_an_anchor() {
     std::fs::write(armed.join("1.json"), "{}").expect("write record");
     assert!(pm_verdict(&fx, "Write", write_input(&armed.join("1.json"))).is_some());
     assert!(pm_verdict(&fx, "Write", write_input(&armed.join("2.json"))).is_some());
-    assert!(pm_bash(&fx, "cp a.txt ~/.trusty-mpm/twin/armed/").is_none());
+    assert!(pm_bash(&fx, "cp a.txt ~/.trusty-mpm/twin/armed/").is_none()); // path-literal: allow (guard input)
 }
 
 #[test]
@@ -449,16 +449,16 @@ fn arm(fx: &Fixture) -> PathBuf {
 fn a_link_or_rename_source_on_an_anchor_is_denied() {
     let fx = fixture();
     for command in [
-        "ln -s ~/.trusty-mpm/config.toml ~/s; cat e >> ~/s",
-        "mv ~/.trusty-mpm ~/o && printf x > ~/o/config.toml && mv ~/o ~/.trusty-mpm",
-        "ln -s ~/.trusty-mpm/config.toml link.toml",
-        "ln ~/.trusty-mpm/config.toml hard.toml",
-        "ln -t . ~/.trusty-mpm/config.toml",
-        "mv ~/.trusty-mpm/config.toml old.toml",
-        "mv -t /tmp ~/.trusty-mpm",
-        "cp -l ~/.trusty-mpm/config.toml hard.toml",
-        "cp -s ~/.trusty-mpm/config.toml soft.toml",
-        "cp --symbolic-link ~/.trusty-mpm/config.toml soft.toml",
+        "ln -s ~/.trusty-mpm/config.toml ~/s; cat e >> ~/s", // path-literal: allow (guard input)
+        "mv ~/.trusty-mpm ~/o && printf x > ~/o/config.toml && mv ~/o ~/.trusty-mpm", // path-literal: allow (guard input)
+        "ln -s ~/.trusty-mpm/config.toml link.toml", // path-literal: allow (guard input)
+        "ln ~/.trusty-mpm/config.toml hard.toml",    // path-literal: allow (guard input)
+        "ln -t . ~/.trusty-mpm/config.toml",         // path-literal: allow (guard input)
+        "mv ~/.trusty-mpm/config.toml old.toml",     // path-literal: allow (guard input)
+        "mv -t /tmp ~/.trusty-mpm",                  // path-literal: allow (guard input)
+        "cp -l ~/.trusty-mpm/config.toml hard.toml", // path-literal: allow (guard input)
+        "cp -s ~/.trusty-mpm/config.toml soft.toml", // path-literal: allow (guard input)
+        "cp --symbolic-link ~/.trusty-mpm/config.toml soft.toml", // path-literal: allow (guard input)
         // A symlink's text is read from the link's own directory.
         "ln -s .trusty-mpm/config.toml ../home/s",
         "cd /tmp && mv .trusty-mpm o",
@@ -472,10 +472,10 @@ fn a_link_or_rename_source_on_an_anchor_is_denied() {
 fn bsd_install_s_and_sed_l_keep_their_operands() {
     let fx = fixture();
     for command in [
-        "install -S a.txt ~/.trusty-mpm/config.toml",
-        "install -SC a.txt ~/.trusty-mpm/config.toml",
-        "sed -l -i '' s/a/b/ ~/.trusty-mpm/config.toml",
-        "sed -li '' s/a/b/ ~/.trusty-mpm/config.toml",
+        "install -S a.txt ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "install -SC a.txt ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "sed -l -i '' s/a/b/ ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
+        "sed -li '' s/a/b/ ~/.trusty-mpm/config.toml", // path-literal: allow (guard input)
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
@@ -513,13 +513,13 @@ fn anchor_names_match_without_case() {
 fn a_q2_verb_through_xargs_is_denied() {
     let fx = fixture();
     for command in [
-        "echo ~/.trusty-mpm/config.toml | xargs cp a.txt",
-        "echo config.toml | xargs cp -t ~/.trusty-mpm",
-        "echo config.toml | xargs install -t ~/.trusty-mpm",
-        "echo ~/.trusty-mpm/config.toml | xargs sed -i s/a/b/",
-        "echo ~/.trusty-mpm | xargs -I% mv % ~/o",
-        "echo ~/.trusty-mpm/config.toml | xargs -I{} ln -s {} ~/s",
-        "echo ~/.trusty-mpm | xargs mv -t /tmp",
+        "echo ~/.trusty-mpm/config.toml | xargs cp a.txt", // path-literal: allow (guard input)
+        "echo config.toml | xargs cp -t ~/.trusty-mpm",    // path-literal: allow (guard input)
+        "echo config.toml | xargs install -t ~/.trusty-mpm", // path-literal: allow (guard input)
+        "echo ~/.trusty-mpm/config.toml | xargs sed -i s/a/b/", // path-literal: allow (guard input)
+        "echo ~/.trusty-mpm | xargs -I% mv % ~/o",         // path-literal: allow (guard input)
+        "echo ~/.trusty-mpm/config.toml | xargs -I{} ln -s {} ~/s", // path-literal: allow (guard input)
+        "echo ~/.trusty-mpm | xargs mv -t /tmp", // path-literal: allow (guard input)
         "ls | xargs -J % cp a.txt %",
     ] {
         let reason = pm_bash(&fx, command).unwrap_or_else(|| panic!("allowed: {command}"));
@@ -543,19 +543,19 @@ fn a_blocked_arming_dir_fences_only_the_twin_tree() {
     let fx = fixture();
     // The blocking write, and writes of the arming directory itself.
     for command in [
-        "echo x > ~/.trusty-mpm/twin",
-        "install -d ~/.trusty-mpm/twin/armed",
-        "mv a.txt ~/.trusty-mpm/twin",
+        "echo x > ~/.trusty-mpm/twin", // path-literal: allow (guard input)
+        "install -d ~/.trusty-mpm/twin/armed", // path-literal: allow (guard input)
+        "mv a.txt ~/.trusty-mpm/twin", // path-literal: allow (guard input)
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
     // Written anyway (outside the hook): only the twin tree stays fenced.
     std::fs::write(fx.home.join(ANCHOR_ROOT).join("twin"), "x").expect("block");
     assert_eq!(pm_bash(&fx, "echo x > notes.md"), None);
-    assert_eq!(pm_bash(&fx, "echo x > ~/.trusty-mpm/logs.txt"), None);
+    assert_eq!(pm_bash(&fx, "echo x > ~/.trusty-mpm/logs.txt"), None); // path-literal: allow (guard input)
     for command in [
-        "echo x > ~/.trusty-mpm/twin/armed/1.json",
-        "echo x > ~/.trusty-mpm/twin",
+        "echo x > ~/.trusty-mpm/twin/armed/1.json", // path-literal: allow (guard input)
+        "echo x > ~/.trusty-mpm/twin",              // path-literal: allow (guard input)
         "cd /tmp && echo x > r.json",
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
@@ -706,22 +706,22 @@ fn the_launch_record_dir_is_an_anchor() {
     let dir = fx.home.join(ANCHOR_ROOT).join(ARCHITECT_DIR);
     // Absent directory: creating it or a record in it is a write to it.
     for command in [
-        "echo x > ~/.trusty-mpm/architect-launch/100.architect",
-        "cp a.txt ~/.trusty-mpm/architect-launch",
+        "echo x > ~/.trusty-mpm/architect-launch/100.architect", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-mpm/architect-launch", // path-literal: allow (guard input)
         "cd /tmp && echo x > 100.architect",
         "cd /tmp && echo x > 100.ARCHITECT",
         // #8878 R1 critic HIGH: the session-name sidecar, placed or not.
-        "echo x > ~/.trusty-mpm/architect-launch/100.architect-session",
+        "echo x > ~/.trusty-mpm/architect-launch/100.architect-session", // path-literal: allow (guard input)
         "cd /tmp && echo x > 100.architect-session",
         "echo x > $D/100.architect-session",
         "cd /tmp && echo x > 100.Architect-SESSION",
         // #8939 delta critic HIGH 2: a forged `tm env` grant, unplaceable.
         "cat x > $D/1.grant",
-        "cd ~/.trusty-mpm/architect-launch/envfile-grants && cat x > 1.grant",
+        "cd ~/.trusty-mpm/architect-launch/envfile-grants && cat x > 1.grant", // path-literal: allow (guard input)
         "cd /tmp && echo x > 1.GRANT",
         "cd /tmp && cp g.txt envfile-grants",
         // #8981: the Architect's conversation record, placed or not.
-        "echo x > ~/.trusty-mpm/architect-launch/last.architect-conversation",
+        "echo x > ~/.trusty-mpm/architect-launch/last.architect-conversation", // path-literal: allow (guard input)
         "echo x > $D/last.architect-conversation",
         "cd /tmp && echo x > last.Architect-Conversation",
     ] {
@@ -731,9 +731,9 @@ fn the_launch_record_dir_is_an_anchor() {
     assert!(pm_verdict(&fx, "Write", write_input(&dir.join("60.architect"))).is_some());
     assert!(pm_verdict(&fx, "Write", write_input(&dir.join("notes.md"))).is_some());
     for command in [
-        "mv ~/.trusty-mpm/architect-launch/60.architect ~/.trusty-mpm/architect-launch/100.architect",
-        "ln -s ~/.trusty-mpm/architect-launch/60.architect a.architect",
-        "cp a.txt ~/.trusty-mpm/architect-launch/",
+        "mv ~/.trusty-mpm/architect-launch/60.architect ~/.trusty-mpm/architect-launch/100.architect", // path-literal: allow (guard input)
+        "ln -s ~/.trusty-mpm/architect-launch/60.architect a.architect", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-mpm/architect-launch/", // path-literal: allow (guard input)
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }

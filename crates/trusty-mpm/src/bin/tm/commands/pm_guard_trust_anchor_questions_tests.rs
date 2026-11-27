@@ -5,11 +5,12 @@ use super::super::tests::{Fixture, allowlist, architect_env, fixture, payload, p
 use super::super::{AnchorWrite, HookEnv, evaluate};
 use super::questions_verdict;
 use serde_json::{Value, json};
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 use trusty_mpm::channels::question_table::{lock_path, questions_path};
 
-const LOG: &str = "~/.trusty-tools/trusty-mpm/channels/questions.jsonl";
-const LOCK: &str = "~/.trusty-tools/trusty-mpm/channels/questions.jsonl.lock";
-const TORN: &str = "~/.trusty-tools/trusty-mpm/channels/questions.jsonl.torn";
+const LOG: &str = "~/.trusty-tools/trusty-mpm/channels/questions.jsonl"; // path-literal: allow (guard input)
+const LOCK: &str = "~/.trusty-tools/trusty-mpm/channels/questions.jsonl.lock"; // path-literal: allow (guard input)
+const TORN: &str = "~/.trusty-tools/trusty-mpm/channels/questions.jsonl.torn"; // path-literal: allow (guard input)
 
 /// [`fixture`] holding the table as the daemon leaves it: the log and lock.
 fn with_table() -> Fixture {
@@ -53,9 +54,9 @@ fn anchor_denies_append_rm_mv_and_truncate_of_the_questions_log() {
             format!("mv /tmp/forged.jsonl {LOG}"),
             format!("cp /tmp/forged.jsonl {LOG}"),
             format!("ln -sf /tmp/forged.jsonl {LOG}"),
-            "cd ~/.trusty-tools/trusty-mpm/channels && echo x >> questions.jsonl".to_owned(),
-            "rm -rf ~/.trusty-tools/trusty-mpm/channels".to_owned(),
-            "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away".to_owned(),
+            "cd ~/.trusty-tools/trusty-mpm/channels && echo x >> questions.jsonl".to_owned(), // path-literal: allow (guard input)
+            "rm -rf ~/.trusty-tools/trusty-mpm/channels".to_owned(), // path-literal: allow (guard input)
+            "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away".to_owned(), // path-literal: allow (guard input)
         ] {
             denied(&fx, &env, &command);
         }
@@ -104,7 +105,7 @@ fn anchor_denies_a_link_planted_at_the_torn_file() {
 #[test]
 fn anchor_denies_writes_to_the_inbound_claim_log() {
     let fx = with_table();
-    let claims = "~/.trusty-tools/trusty-mpm/channels/inbound_claims.jsonl";
+    let claims = "~/.trusty-tools/trusty-mpm/channels/inbound_claims.jsonl"; // path-literal: allow (guard input)
     let log = fx
         .home
         .join(".trusty-tools/trusty-mpm/channels/inbound_claims.jsonl");
@@ -271,7 +272,7 @@ fn a_linked_table_directory_is_matched_by_its_resolved_name() {
     let fx = fixture();
     let real = fx.home.join("real-tools");
     std::fs::create_dir_all(real.join("trusty-mpm").join("channels")).expect("mkdir");
-    std::os::unix::fs::symlink(&real, fx.home.join(".trusty-tools")).expect("link");
+    std::os::unix::fs::symlink(&real, fx.home.join(TOOLS_DIR_NAME)).expect("link");
     let log = questions_path(&fx.home);
     std::fs::write(&log, "").expect("log");
     std::fs::write(lock_path(&log), "").expect("lock");

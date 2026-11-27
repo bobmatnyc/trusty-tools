@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "pm",
+    "--strict",
+    "--file",
+    "note.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "note.md": "Ran cargo test on src/lib.rs:12 with --no-fail-fast.\nSet RUST_LOG first, then see `poll_once`.\n"
+  },
+  "reads": [
+    "note.md"
+  ],
+  "stdout": "level_lint [pm]: tool `cargo` (line 1)\nlevel_lint [pm]: path `src/lib.rs:12` (line 1)\nlevel_lint [pm]: flag `--no-fail-fast` (line 1)\nlevel_lint [pm]: envvar `RUST_LOG` (line 2)\nlevel_lint [pm]: identifier ``poll_once`` (line 2)\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {}
+}

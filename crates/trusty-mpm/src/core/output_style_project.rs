@@ -364,8 +364,9 @@ pub fn select_style(
         let warning = format!(
             "output style '{style_id}' is for the supervisor profile only (set \
              `profile = \"supervisor\"` in .trusty-mpm.toml and allow-list the project under \
-             `[supervisor] projects` in ~/.trusty-mpm/config.toml); using \
-             `{DEFAULT_OUTPUT_STYLE_ID}` instead"
+             `[supervisor] projects` in {cfg}); using \
+             `{DEFAULT_OUTPUT_STYLE_ID}` instead",
+            cfg = "~/.trusty-mpm/config.toml", // path-literal: allow (#11821: message text)
         );
         tracing::warn!("{warning}");
         let (style, _) = resolve_or_default(project_dir, None);

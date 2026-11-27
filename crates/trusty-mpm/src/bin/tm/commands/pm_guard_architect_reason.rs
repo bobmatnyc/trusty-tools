@@ -65,8 +65,11 @@ impl std::fmt::Display for NotArchitect {
                  \"supervisor\"`"
             }
             Self::NotAllowListed => {
-                "the launch directory is not in `[supervisor] projects` of \
-                 ~/.trusty-mpm/config.toml"
+                // #11821: concat! so the path-naming piece can carry its waiver.
+                concat!(
+                    "the launch directory is not in `[supervisor] projects` of ",
+                    "~/.trusty-mpm/config.toml", // path-literal: allow (display text)
+                )
             }
             Self::UnknownHome => "the home directory is unknown",
             Self::Launch(refusal) => return refusal.fmt(f),

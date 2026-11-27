@@ -10,6 +10,7 @@ use super::config::{Edit, enable_notification_hook};
 use super::launch::PaneState;
 use super::notify_hook::{status_check, step};
 use super::{InitReport, Probe, Step, init, resolve_dir, user_config_path};
+use trusty_common::install_paths::MPM_DIR_NAME;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at;
 
@@ -22,7 +23,7 @@ const NO_TMUX: Probe = Probe {
 
 /// The fix line the Skipped rows print.
 const FIX: &str =
-    "edit ~/.trusty-mpm/config.toml, then tm doctor --fix --only notification_hook --yes";
+    "edit ~/.trusty-mpm/config.toml, then tm doctor --fix --only notification_hook --yes"; // path-literal: allow (display text)
 
 /// A scratch home and the default Architect directory under it.
 struct Home(tempfile::TempDir);
@@ -118,7 +119,7 @@ fn a_first_run_enables_the_hook_and_applies_it() {
     );
     let after = home.config();
     assert!(after.starts_with(original), "{after}");
-    let cfg = MpmConfig::load(&home.path().join(".trusty-mpm"));
+    let cfg = MpmConfig::load(&home.path().join(MPM_DIR_NAME));
     let inbox = std::fs::canonicalize(home.dir()).unwrap().join("inbox");
     assert!(cfg.notification_hook.enabled);
     assert_eq!(
@@ -248,7 +249,7 @@ fn an_inbox_set_elsewhere_is_skipped_and_the_config_keeps_it() {
         "{}",
         report.render()
     );
-    let cfg = MpmConfig::load(&home.path().join(".trusty-mpm"));
+    let cfg = MpmConfig::load(&home.path().join(MPM_DIR_NAME));
     assert_eq!(
         cfg.notification_hook.inbox.as_deref(),
         Some(Path::new("/srv/other/inbox"))
@@ -286,7 +287,7 @@ fn a_config_write_failure_fails_the_step() {
     let home = Home::new();
     home.write_config("# mine\n");
     let dir = arch_dir(&home);
-    let root = home.path().join(".trusty-mpm");
+    let root = home.path().join(MPM_DIR_NAME);
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
     let got = step(&dir, home.path(), Some(Path::new(EXE)));
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();

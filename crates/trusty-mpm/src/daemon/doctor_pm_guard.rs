@@ -41,10 +41,13 @@ pub(super) fn check_pm_guard(home: &Path) -> DoctorCheck {
     DoctorCheck::new(
         NAME,
         CheckStatus::Warn,
-        "pm-guard disabled by [pm_guard] enabled = false in ~/.trusty-mpm/config.toml — \
-         launches omit the `hook --pm-guard` entry and strip an existing one. A running \
-         Claude Code session keeps the hooks it loaded at startup; the change applies at \
-         its next launch.",
+        // #11821: message text only; the bytes are unchanged.
+        concat!(
+            "pm-guard disabled by [pm_guard] enabled = false in ~/.trusty-mpm/config.toml — ", // path-literal: allow
+            "launches omit the `hook --pm-guard` entry and strip an existing one. A running \
+             Claude Code session keeps the hooks it loaded at startup; the change applies at \
+             its next launch.",
+        ),
     )
 }
 
@@ -55,7 +58,7 @@ mod tests {
     /// A scratch home whose `.trusty-mpm/config.toml` holds `body`.
     fn home_with(body: &str) -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(trusty_common::install_paths::MPM_DIR_NAME);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.toml"), body).unwrap();
         home

@@ -420,7 +420,7 @@ def mpm_root(env=None, home=None):
         return env["TRUSTY_MPM_ROOT"]
     import architect_config
     try:
-        return os.path.join(architect_config.install_config_dir(env, home), ".trusty-mpm")
+        return architect_config.install_mpm_root(env, home)  # #11821 P7: the reader owns the name
     except architect_config.ConfigError as err:
         raise RegistryError(f"The install paths could not be resolved, so the Projects view is empty. {err}") from None
 

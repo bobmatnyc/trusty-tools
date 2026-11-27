@@ -215,10 +215,19 @@ fn registration_files_match_python_layout() {
             &sock,
         ]);
         assert_eq!(py, fixture(&format!("python.chrome-native-host{suffix}")));
+        // #11927: a guard line before the exec answers a missing binary with a frame.
         assert_eq!(
             files[idx].content,
-            format!("#!/bin/sh\nexec /opt/bin/trusty-browser native-host --socket {sock} \"$@\"\n")
+            install_host::host_launcher("/opt/bin/trusty-browser", &sock)
         );
+        assert!(
+            files[idx]
+                .content
+                .starts_with("#!/bin/sh\n[ -x /opt/bin/trusty-browser ] || { printf '\\")
+        );
+        assert!(files[idx].content.ends_with(&format!(
+            "; exit 1; }}\nexec /opt/bin/trusty-browser native-host --socket {sock} \"$@\"\n"
+        )));
     }
     assert_eq!(install_host::shquote("a b'c"), "'a b'\"'\"'c'");
     assert_eq!(install_host::shquote(""), "''");
@@ -263,6 +272,195 @@ fn install_host_is_idempotent_and_refuses_a_foreign_file() {
         err.to_string(),
         format!("existing file differs: {}", launcher.display())
     );
+}
+
+/// #11927: a build-directory binary is refused, or replaced by an installed one.
+#[test]
+fn a_build_dir_exe_is_never_registered() {
+    use trusty_browser::host_exe::{ExeEnv, is_build_path, registered_exe};
+    let dir = common::state_dir();
+    let root = fs::canonicalize(dir.path()).expect("canon");
+    let build = root.join("cargo-target-pool/o/r/slot-0/debug/trusty-browser");
+    fs::create_dir_all(build.parent().expect("p")).expect("mkdir");
+    fs::write(&build, b"exe").expect("exe");
+    let env = ExeEnv {
+        home: root.join("home"),
+        ..ExeEnv::default()
+    };
+    // No installed binary: refuse, naming the rejected path and the install step.
+    let err = registered_exe(&build, &env).expect_err("refused");
+    assert!(err.contains(&build.display().to_string()), "{err}");
+    assert!(err.contains("cargo install"), "{err}");
+    // An installed binary is registered instead, and no file names the build path.
+    let stable = root.join("home/.cargo/bin/trusty-browser");
+    fs::create_dir_all(stable.parent().expect("p")).expect("mkdir");
+    fs::write(&stable, b"exe").expect("exe");
+    let exe = registered_exe(&build, &env).expect("stable");
+    assert_eq!(exe, stable);
+    for r in install_host::registration_files(&root.join("state"), &root.join("m"), &exe) {
+        assert!(!r.content.contains("cargo-target-pool"), "{}", r.content);
+    }
+    let plist = launchd::launch_configuration(&exe, &root.join("state")).expect("plist");
+    assert!(!plist.contains("cargo-target-pool"), "{plist}");
+    // A stable current binary is kept; each build layout is recognised.
+    assert_eq!(registered_exe(&stable, &env).expect("kept"), stable);
+    for (path, build) in [
+        ("/w/target/debug/trusty-browser", true),
+        (
+            "/w/target/aarch64-apple-darwin/release/trusty-browser",
+            true,
+        ),
+        ("/p/cargo-target-pool/o/r/slot-3/debug/trusty-browser", true),
+        ("/u/.cargo/bin/trusty-browser", false),
+        ("/opt/debug/trusty-browser", false),
+        // Review round: any profile directory, a triple, deps; no later-segment match.
+        ("/w/target/ci-smoke/trusty-browser", true),
+        (
+            "/w/target/x86_64-unknown-linux-gnu/ci-smoke/trusty-browser",
+            true,
+        ),
+        ("/w/target/debug/deps/trusty-browser-0a1b", true),
+        ("/x/target/apps/release/trusty-browser", false),
+        ("/x/target/apps/bin/sub/trusty-browser", false),
+    ] {
+        assert_eq!(is_build_path(Path::new(path), None), build, "{path}");
+    }
+    let custom = Some(Path::new("/b/out"));
+    assert!(is_build_path(Path::new("/b/out/x/trusty-browser"), custom));
+}
+
+/// #11927: Retry against a launcher whose binary is gone gets a frame naming it.
+#[test]
+fn retry_against_a_missing_host_binary_names_the_path() {
+    let dir = common::state_dir();
+    let root = fs::canonicalize(dir.path()).expect("canon");
+    let (state, manifests) = (root.join("state"), root.join("hosts"));
+    let gone = root.join("gone dir/trusty-browser");
+    install_host::install(&state, &manifests, &gone).expect("install");
+    // Chrome runs the launcher the enrollment manifest names (popup Retry -> `status`).
+    let manifest =
+        fs::read_to_string(manifests.join("com.trusty.browser.enroll.json")).expect("manifest");
+    let launcher = state.join("chrome-native-host.enroll");
+    assert!(manifest.contains(&format!("\"path\": \"{}\"", launcher.display())));
+    let run = |launcher: &Path| {
+        std::process::Command::new(launcher)
+            .arg(trusty_browser::peer_darwin::ORIGIN)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run launcher")
+    };
+    let out = run(&launcher);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.len() > 4, "no frame: {:?}", out);
+    let (len, body) = out.stdout.split_at(4);
+    let len = u32::from_le_bytes(len.try_into().expect("4 bytes")) as usize;
+    assert_eq!(len, body.len());
+    let body = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(body.starts_with("{\"ok\":false,\"error\":"), "{body}");
+    assert!(body.contains(&gone.display().to_string()), "{body}");
+    assert!(body.contains("install-service"), "{body}");
+    assert!(
+        body.contains("\"reason\":\"host_binary_missing\""),
+        "{body}"
+    );
+    // A present binary is still exec'd with Chrome's argv.
+    let real = root.join("bin/trusty-browser");
+    fs::create_dir_all(real.parent().expect("p")).expect("mkdir");
+    fs::write(&real, "#!/bin/sh\necho ran \"$@\"\n").expect("exe");
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).expect("chmod");
+    install_host::install(&state, &manifests, &real).expect("reinstall");
+    let out = run(&launcher);
+    let sock = state.join("enrollment.sock");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!(
+            "ran native-host --socket {} {}\n",
+            sock.display(),
+            trusty_browser::peer_darwin::ORIGIN
+        )
+    );
+}
+
+/// #11927: an earlier launcher of ours is replaced; one for another live binary is not.
+#[test]
+fn install_replaces_a_launcher_whose_binary_is_gone() {
+    let dir = common::state_dir();
+    let root = fs::canonicalize(dir.path()).expect("canon");
+    let (state, manifests) = (root.join("state"), root.join("hosts"));
+    let (exe, _) = bin_pair(&root);
+    let launcher = state.join("chrome-native-host");
+    let sock = state.join("service.sock");
+    let old_form = |exe: &Path| {
+        install_host::launcher(&[
+            &exe.to_string_lossy(),
+            "native-host",
+            "--socket",
+            &sock.to_string_lossy(),
+        ])
+    };
+    let gone = root.join("cargo-target-pool/slot-0/debug/trusty-browser");
+    let other = root.join("other/trusty-browser");
+    fs::create_dir_all(other.parent().expect("p")).expect("mkdir");
+    fs::write(&other, b"exe").expect("exe");
+    let cases = [
+        (old_form(&exe), true),
+        (old_form(&gone), true),
+        (
+            install_host::host_launcher(&gone.to_string_lossy(), &sock.to_string_lossy()),
+            true,
+        ),
+        (old_form(&other), false),
+    ];
+    for (text, replaced) in cases {
+        let _ = fs::remove_file(&launcher);
+        fs::create_dir_all(&state).expect("mkdir");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod");
+        install_host::write_owned(&launcher, &text, 0o700).expect("seed");
+        let result = install_host::install(&state, &manifests, &exe);
+        assert_eq!(result.is_ok(), replaced, "{text}: {result:?}");
+        let now = fs::read_to_string(&launcher).expect("read");
+        assert_eq!(now != text, replaced, "{now}");
+    }
+}
+
+/// A directory nobody may search, so `lstat` under it fails with `PermissionDenied`.
+///
+/// `None` when running as root, where the mode does not deny anything.
+fn unsearchable(root: &Path) -> Option<PathBuf> {
+    let locked = root.join("locked");
+    fs::create_dir_all(&locked).expect("mkdir");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let probe = fs::symlink_metadata(locked.join("trusty-browser"));
+    if probe.as_ref().err().map(io::Error::kind) == Some(io::ErrorKind::PermissionDenied) {
+        Some(locked)
+    } else {
+        eprintln!("skipping the unreadable-binary case: lstat under 0o000 gave {probe:?}");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("chmod");
+        None
+    }
+}
+
+/// Review round of #11927: only `NotFound` makes a binary gone; an unreadable one is not.
+#[test]
+fn a_launcher_whose_binary_is_unreadable_is_not_gone() {
+    let dir = common::state_dir();
+    let root = fs::canonicalize(dir.path()).expect("canon");
+    let (state, manifests) = (root.join("state"), root.join("hosts"));
+    let (exe, _) = bin_pair(&root);
+    let Some(locked) = unsearchable(&root) else {
+        return;
+    };
+    let hidden = locked.join("trusty-browser");
+    let sock = state.join("service.sock");
+    let text = install_host::host_launcher(&hidden.to_string_lossy(), &sock.to_string_lossy());
+    let launcher = state.join("chrome-native-host");
+    fs::create_dir_all(&state).expect("mkdir");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod");
+    install_host::write_owned(&launcher, &text, 0o700).expect("seed");
+    let result = install_host::install(&state, &manifests, &exe);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlock");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(fs::read_to_string(&launcher).expect("read"), text);
 }
 
 #[cfg(target_os = "macos")]
@@ -479,6 +677,143 @@ fn uninstall_service_replaces_a_python_registration() {
         fs::read_to_string(&plist).expect("plist"),
         launchd::launch_configuration(&l.exe, &l.state).expect("render")
     );
+}
+
+/// #11927: install-service from a stable binary replaces what a removed build binary left.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_replaces_a_registration_whose_binary_is_gone() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let gone = dir
+        .path()
+        .join("cargo-target-pool/slot-0/debug/trusty-browser");
+    let hosts = install_host::default_directory(&l.home).expect("dir");
+    install_host::install(&l.state, &hosts, &gone).expect("stale host");
+    let plist = plist_path(dir.path());
+    fs::create_dir_all(plist.parent().expect("p")).expect("mkdir");
+    let stale = launchd::launch_configuration(&gone, &l.state).expect("render");
+    install_host::write_owned(&plist, &stale, 0o600).expect("stale plist");
+    let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
+    launchd::manage(&l, true, &ctl, &signed()).expect("install");
+    // The old job runs the gone binary: boot it out and bootstrap the new plist.
+    assert_eq!(ctl.verbs(), vec!["print", "bootout", "bootstrap"]);
+    assert_eq!(
+        fs::read_to_string(&plist).expect("plist"),
+        launchd::launch_configuration(&l.exe, &l.state).expect("render")
+    );
+    for r in install_host::registration_files(&l.state, &hosts, &l.exe) {
+        assert_eq!(fs::read_to_string(&r.path).expect("read"), r.content);
+    }
+}
+
+/// Seed a full registration (launchers, manifests, plist) for `exe`.
+#[cfg(target_os = "macos")]
+fn register_for(l: &Layout, exe: &Path) {
+    let hosts = install_host::default_directory(&l.home).expect("dir");
+    install_host::install(&l.state, &hosts, exe).expect("host");
+    let plist = plist_path(&l.home);
+    fs::create_dir_all(plist.parent().expect("p")).expect("mkdir");
+    let text = launchd::launch_configuration(exe, &l.state).expect("render");
+    install_host::write_owned(&plist, &text, 0o600).expect("plist");
+}
+
+/// Review round of #11927: `B uninstall-service` with an installed S still matches B's registration.
+#[cfg(target_os = "macos")]
+#[test]
+fn uninstall_from_a_build_binary_matches_its_own_registration() {
+    use trusty_browser::host_exe::{ExeEnv, uninstall_exes};
+    let dir = common::state_dir();
+    let home = fs::canonicalize(dir.path()).expect("canon");
+    let build = home.join("cargo-target-pool/slot-0/debug/trusty-browser");
+    fs::create_dir_all(build.parent().expect("p")).expect("mkdir");
+    fs::write(&build, b"exe").expect("exe");
+    let stable = home.join(".cargo/bin/trusty-browser");
+    fs::create_dir_all(stable.parent().expect("p")).expect("mkdir");
+    fs::write(&stable, b"exe").expect("exe");
+    let env = ExeEnv {
+        home: home.clone(),
+        ..ExeEnv::default()
+    };
+    let exes = uninstall_exes(&build, &env);
+    let l = Layout {
+        home: home.clone(),
+        state: home.join(".trusty/browser"),
+        exe: exes[0].clone(),
+        uid: 501,
+    };
+    register_for(&l, &build);
+    let plist = plist_path(&home);
+    let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
+    launchd::manage_with(&l, false, &exes[1..], &ctl, &signed()).expect("uninstall");
+    assert_eq!(ctl.verbs(), vec!["print", "bootout"]);
+    assert!(!plist.exists());
+    assert!(!l.state.join("chrome-native-host.enroll").exists());
+    assert_eq!(exes, vec![build, stable]);
+}
+
+/// The Architect's case: S uninstall-service takes over a registration whose build binary is gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn uninstall_service_takes_over_a_registration_whose_binary_is_gone() {
+    use trusty_browser::host_exe::{ExeEnv, uninstall_exes};
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let gone = dir
+        .path()
+        .join("cargo-target-pool/slot-0/debug/trusty-browser");
+    register_for(&l, &gone);
+    let env = ExeEnv {
+        home: l.home.clone(),
+        ..ExeEnv::default()
+    };
+    let exes = uninstall_exes(&l.exe, &env);
+    assert_eq!(exes, vec![l.exe.clone()]);
+    let plist = plist_path(dir.path());
+    let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
+    launchd::manage_with(&l, false, &exes[1..], &ctl, &signed()).expect("uninstall");
+    assert_eq!(ctl.verbs(), vec!["print", "bootout"]);
+    assert!(!plist.exists());
+    let hosts = install_host::default_directory(&l.home).expect("dir");
+    for r in install_host::registration_files(&l.state, &hosts, &l.exe) {
+        assert!(!r.path.exists(), "{}", r.path.display());
+    }
+}
+
+/// Review round of #11927: our exact plist for a binary that is not gone stays foreign.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_refuses_our_plist_for_another_live_binary() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let other = dir.path().join("other/trusty-browser");
+    fs::create_dir_all(other.parent().expect("p")).expect("mkdir");
+    fs::write(&other, b"exe").expect("exe");
+    let plist = plist_path(dir.path());
+    fs::create_dir_all(plist.parent().expect("p")).expect("mkdir");
+    let refused = format!(
+        "Refusing to change an unrelated registration: {}",
+        plist.display()
+    );
+    let seed = |exe: &Path| {
+        let _ = fs::remove_file(&plist);
+        let text = launchd::launch_configuration(exe, &l.state).expect("render");
+        install_host::write_owned(&plist, &text, 0o600).expect("plist");
+        text
+    };
+    let text = seed(&other);
+    let err = launchd::manage(&l, true, &FakeCtl::new(113, ""), &signed()).expect_err("refused");
+    assert_eq!(err.to_string(), refused);
+    assert_eq!(fs::read_to_string(&plist).expect("plist"), text);
+    // A binary that cannot be read is not gone either (NotFound only).
+    let Some(locked) = unsearchable(dir.path()) else {
+        return;
+    };
+    let text = seed(&locked.join("trusty-browser"));
+    let result = launchd::manage(&l, true, &FakeCtl::new(113, ""), &signed());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlock");
+    assert_eq!(result.expect_err("refused").to_string(), refused);
+    assert_eq!(fs::read_to_string(&plist).expect("plist"), text);
 }
 
 /// #11522: an already-loaded broker of ours is restarted, not left on its old binary.

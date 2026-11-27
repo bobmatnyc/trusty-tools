@@ -17,7 +17,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-use super::sandbox_settings::{SandboxInputs, SandboxRole, SandboxSettingsError, project_policy};
+use super::sandbox_settings::{
+    ALLOWED_DOMAINS, SandboxInputs, SandboxRole, SandboxSettingsError, project_policy,
+};
 
 /// Keys that widen the sandbox unless `false` (#10107). `disabled` counts
 /// only under `filesystem`.
@@ -39,7 +41,8 @@ const GLOB_CHARS: [char; 4] = ['*', '?', '[', '{'];
 /// Why: see the module doc.
 /// What: for a PM or agent, refuses unless the project file's
 /// `sandbox.enabled` is `true` and `sandbox.allowUnsandboxedCommands` is
-/// `false`, the user file's `sandbox.network.strictAllowlist` is `true`,
+/// `false`, the user file's `sandbox.network.strictAllowlist` is `true` and,
+/// #12042, its `allowedDomains` is a non-empty subset of `ALLOWED_DOMAINS`,
 /// neither file sets a non-empty `sandbox.excludedCommands` (#8928 fix
 /// round), and `settings.local.json` sets no `sandbox` key. #10107: refuses
 /// too when any tier sets `allowAllUnixSockets`, `allowLocalBinding`,
@@ -71,7 +74,9 @@ const GLOB_CHARS: [char; 4] = ['*', '?', '[', '{'];
 /// `an_edit_rule_with_no_home_to_place_it_refuses`,
 /// `unwritten_project_sandbox_keys_refuse_the_launch`,
 /// `additional_directories_outside_the_roots_refuse_the_launch`,
-/// `null_sandbox_values_refuse_the_launch`.
+/// `null_sandbox_values_refuse_the_launch`,
+/// `a_strict_allowlist_with_no_domains_refuses_the_launch`,
+/// `a_foreign_user_domain_refuses_the_launch`.
 pub fn verify_sandbox_settings(
     role: SandboxRole,
     inputs: &SandboxInputs,
@@ -181,7 +186,42 @@ pub fn verify_sandbox_settings(
             "tm's user-level settings do not set `sandbox.network.strictAllowlist: true`",
         ));
     }
-    Ok(())
+    // #12042: under `strictAllowlist` only the user tier's hosts count.
+    user_allowed_domains(&user, &user_file)
+}
+
+/// Refuse a user-tier `sandbox.network.allowedDomains` that is missing, empty,
+/// or names a host outside [`ALLOWED_DOMAINS`].
+///
+/// Why: #12042 — with `strictAllowlist` on, Claude Code ignores project-tier
+/// `allowedDomains`, so a user tier without hosts denies every host, and one
+/// with an extra host widens the sandbox.
+/// What: the value must be a non-empty list of strings, each one of
+/// [`ALLOWED_DOMAINS`]. FAIL-CLOSED: absent, `null`, `[]`, a non-list and a
+/// non-text entry all refuse.
+/// Test: `a_strict_allowlist_with_no_domains_refuses_the_launch`,
+/// `a_foreign_user_domain_refuses_the_launch`,
+/// `widening_sandbox_keys_refuse_the_launch`.
+fn user_allowed_domains(user: &Value, file: &Path) -> Result<(), SandboxSettingsError> {
+    let why = |what: String| refused(&format!("`{}` {what}", file.display()));
+    let list = user.pointer("/sandbox/network/allowedDomains");
+    let Some(domains) = list.and_then(Value::as_array).filter(|d| !d.is_empty()) else {
+        return Err(why(format!(
+            "sets `sandbox.network.strictAllowlist` with `allowedDomains` = {}, so every \
+             host is denied; tm's user tier needs the hosts {ALLOWED_DOMAINS:?}",
+            list.map_or_else(|| "absent".to_owned(), Value::to_string)
+        )));
+    };
+    match domains
+        .iter()
+        .find(|d| !d.as_str().is_some_and(|d| ALLOWED_DOMAINS.contains(&d)))
+    {
+        Some(foreign) => Err(why(format!(
+            "lets the sandbox reach {foreign}, which is not one of tm's hosts \
+             {ALLOWED_DOMAINS:?}"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// The refusal when `settings` sets `sandbox.excludedCommands` to anything but
@@ -266,8 +306,8 @@ fn unwritten_key(found: Option<&Value>, wanted: Option<&Value>, at: &str) -> Opt
     None
 }
 
-/// Refuse a user-tier `sandbox` key other than `network.strictAllowlist` and
-/// `credentials`.
+/// Refuse a user-tier `sandbox` key other than `network.strictAllowlist`,
+/// `network.allowedDomains` and `credentials`.
 ///
 /// Why: #10107 — the merge keeps every user-tier key, and list keys such as
 /// `allowUnixSockets` merge across tiers, so a user-tier list could re-add the
@@ -275,7 +315,8 @@ fn unwritten_key(found: Option<&Value>, wanted: Option<&Value>, at: &str) -> Opt
 /// What: `credentials` passes only as an object. Any other key passes only
 /// when [`is_empty_of_its_type`]; a non-object `sandbox` is left to the
 /// `strictAllowlist` check, which refuses it. `network` passes too as an
-/// object whose other keys are empty of their type. #10107 fix round: Claude
+/// object whose other keys are empty of their type; #12042: its
+/// `allowedDomains` is left to [`user_allowed_domains`]. #10107 fix round: Claude
 /// Code may skip a user file whose values its schema rejects, which would
 /// drop `strictAllowlist` and the credentials deny, so `null` and a
 /// mistyped empty value refuse.
@@ -290,17 +331,18 @@ fn user_tier_keys(user: &Value, file: &Path) -> Result<(), SandboxSettingsError>
         let allowed = match key.as_str() {
             "credentials" => value.is_object(),
             "network" => value.as_object().is_some_and(|network| {
-                network
-                    .iter()
-                    .all(|(k, v)| k == "strictAllowlist" || is_empty_of_its_type(k, v))
+                // #12042: `allowedDomains` is checked by `user_allowed_domains`.
+                network.iter().all(|(k, v)| {
+                    k == "strictAllowlist" || k == "allowedDomains" || is_empty_of_its_type(k, v)
+                })
             }),
             _ => is_empty_of_its_type(key, value),
         };
         if !allowed {
             return Err(refused(&format!(
                 "`{}` sets `sandbox.{key}` to {value}; tm's user tier may hold only \
-                 `sandbox.network.strictAllowlist`, a `sandbox.credentials` object, and \
-                 empty values of a key's own type",
+                 `sandbox.network.strictAllowlist`, tm's `sandbox.network.allowedDomains`, \
+                 a `sandbox.credentials` object, and empty values of a key's own type",
                 file.display()
             )));
         }

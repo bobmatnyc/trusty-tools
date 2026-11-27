@@ -235,6 +235,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use trusty_common::install_paths::MPM_DIR_NAME;
 
     // Serialize env-var mutations so parallel test threads do not race.
     // Each test that sets env vars must hold this lock for its entire duration.
@@ -389,7 +390,7 @@ mod tests {
         let _g = CleanEnvGuard::new();
         let root = resolve_root(None).expect("resolve_root should succeed");
         let home = dirs::home_dir().expect("home dir required");
-        assert_eq!(root, home.join(".trusty-mpm"));
+        assert_eq!(root, home.join(MPM_DIR_NAME));
     }
 
     #[test]
@@ -512,7 +513,7 @@ mod tests {
         set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
         let root = resolve_root(None).expect("resolve_root should succeed");
         let home = dirs::home_dir().expect("home dir required");
-        assert_eq!(root, home.join(".trusty-mpm"));
+        assert_eq!(root, home.join(MPM_DIR_NAME));
     }
 
     #[test]
@@ -528,7 +529,7 @@ mod tests {
         set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
         let root = resolve_root(None).expect("resolve_root should succeed");
         let home = dirs::home_dir().expect("home dir required");
-        assert_eq!(root, home.join(".trusty-mpm"));
+        assert_eq!(root, home.join(MPM_DIR_NAME));
     }
 
     #[test]

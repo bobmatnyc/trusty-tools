@@ -808,7 +808,7 @@ pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, Strin
 
     // #11821: a broken install.toml refuses the clone (df-D1t).
     let base = try_base_clone_path(&gh.owner, &gh.repo).map_err(|e| {
-        format!("inproject: cannot resolve the repos root: {e} — fix ~/.trusty-tools/install.toml")
+        format!("inproject: cannot resolve the repos root: {e} — fix ~/.trusty-tools/install.toml") // path-literal: allow
     })?;
     // #7166: an already-on-disk operator checkout has no account SELECTOR to
     // apply. #9091: `None` still clones as the origin's registry pin, else its

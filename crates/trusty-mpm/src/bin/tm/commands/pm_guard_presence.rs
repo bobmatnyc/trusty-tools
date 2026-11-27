@@ -127,9 +127,11 @@ pub(crate) fn evaluate_presence_verbs(command: &str) -> Option<String> {
         VerbHit::Opaque(why) => format!("names `tm`, and {why}"),
         VerbHit::Unreadable(_) => "names `tm` but cannot be parsed".to_owned(),
     };
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const LAUNCH_DIR: &str = "`~/.trusty-mpm/architect-launch/`"; // path-literal: allow (display text)
     Some(format!(
         "Trust-anchor write denied (#8878): this command {what}. `tm presence` and `tm fleet \
-         bind` mint presence grants and launch records in `~/.trusty-mpm/architect-launch/`, so \
+         bind` mint presence grants and launch records in {LAUNCH_DIR}, so \
          only the Architect session's main thread may run them — no PM, agent or subagent."
     ))
 }
