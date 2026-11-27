@@ -38,9 +38,12 @@ use trusty_mcp::config::{McpServerConfig, McpServerOverride, McpTransport};
 use super::config::{McpIssue, McpTier, ProjectOverrides};
 
 /// What the operator must do to let a refused entry through.
-const REMEDY: &str = "Add this server to ~/.trusty-tools/mcp/servers.toml, the file only you \
-                      write. A project may choose among the servers configured there and \
-                      disable them; it may not introduce or alter a command this harness runs.";
+// #11821: message text only, never read as a path; the bytes are unchanged.
+const REMEDY: &str = concat!(
+    "Add this server to ~/.trusty-tools/mcp/servers.toml, the file only you ", // path-literal: allow
+    "write. A project may choose among the servers configured there and ",
+    "disable them; it may not introduce or alter a command this harness runs.",
+);
 
 /// Whether two transports describe the SAME connection, byte for byte.
 ///
