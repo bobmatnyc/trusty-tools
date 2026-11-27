@@ -234,17 +234,21 @@ fn restart_inner(
         }
     }
     // #11368: deploy before the stop; a failed deploy stops nothing (Q8).
-    let deployed = (ops.deploy)();
-    let failed = match &deployed {
-        Ok(steps) => steps.iter().any(|s| matches!(s, Step::Failed(_))),
-        Err(_) => true,
+    let failed = match (ops.deploy)() {
+        Ok(steps) => {
+            early.extend(steps.iter().map(|s| s.render_line().trim().to_owned()));
+            super::launch_deploy::failed_text(&steps)
+        }
+        Err(e) => {
+            early.push(format!("FAILED  bundle deploy: {e:#}"));
+            Some(format!("{e:#}"))
+        }
     };
-    match deployed {
-        Ok(steps) => early.extend(steps.iter().map(|s| s.render_line().trim().to_owned())),
-        Err(e) => early.push(format!("FAILED  bundle deploy: {e:#}")),
-    }
-    if failed {
-        early.push("the bundle deploy failed, so claude was not stopped".to_owned());
+    if let Some(why) = failed {
+        // #11961: name the failed step's own text, not only a fixed line.
+        early.push(format!(
+            "the bundle deploy failed ({why}), so claude was not stopped"
+        ));
         return RestartReport::done(1, early);
     }
     // As `self-clear.sh`: the ledger may have changed during the idle wait.

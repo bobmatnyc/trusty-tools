@@ -1,0 +1,9 @@
+crate   trusty-gworkspace
+version 0.3.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  enum_struct_variant_field_added field scopes of variant Command::Setup
+accept  function_parameter_count_changed trusty_gworkspace::api::auth::oauth::flow::run_consent now takes 5 parameters instead of 4
+accept  function_parameter_count_changed trusty_gworkspace::api::auth::oauth::flow::run_consent_with now takes 7 parameters instead of 6
+accept  function_parameter_count_changed trusty_gworkspace::api::auth::oauth::run_consent now takes 5 parameters instead of 4
+accept  function_parameter_count_changed trusty_gworkspace::api::auth::oauth::run_consent_with now takes 7 parameters instead of 6
+accept  function_parameter_count_changed trusty_gworkspace::api::auth::run_consent now takes 5 parameters instead of 4

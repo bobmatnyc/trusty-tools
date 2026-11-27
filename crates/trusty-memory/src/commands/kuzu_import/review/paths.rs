@@ -19,7 +19,7 @@ use super::ReviewError;
 /// Test: `default_root_is_under_home`.
 pub(crate) fn default_root() -> Result<PathBuf, ReviewError> {
     let home = dirs::home_dir().ok_or(ReviewError::NoHome)?;
-    Ok(home.join(".trusty-tools").join("kuzu-review"))
+    Ok(home.join(".trusty-tools").join("kuzu-review")) // path-literal: allow — ruling Q4 #8624: masked export root fixed under $HOME, outside git/palace
 }
 
 /// A new run directory name: UTC time plus 8 random hex digits.

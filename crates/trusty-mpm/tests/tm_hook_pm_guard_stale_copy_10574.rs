@@ -11,6 +11,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use crate::common;
 
@@ -26,7 +27,7 @@ impl Fx {
         let root = std::fs::canonicalize(dir.path()).expect("canonical");
         let home = root.join("home");
         let project = root.join("proj");
-        std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir home");
+        std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir home");
         std::fs::create_dir_all(project.join("docs")).expect("mkdir docs");
         std::fs::write(project.join(".trusty-mpm.toml"), config).expect("config");
         std::fs::write(project.join("docs/scenarios.md"), "S1\nS4 Result: ok\n").expect("v1");

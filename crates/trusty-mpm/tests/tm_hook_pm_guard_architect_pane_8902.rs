@@ -12,6 +12,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_architect_pane_8902:: -- --include-ignored`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -41,7 +42,7 @@ impl Fixture {
         let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
         let home = root.join("home");
         let project = root.join("project");
-        std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir root");
+        std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir root");
         std::fs::create_dir_all(&project).expect("mkdir project");
         common::write_disk_threshold(&home, 100);
         // A short path: a tmux socket path is capped near 104 bytes on macOS.
@@ -50,7 +51,7 @@ impl Fixture {
             .arg("120")
             .spawn()
             .expect("spawn the recorded Architect");
-        record_architect(&home.join(".trusty-mpm"), architect.id(), &project)
+        record_architect(&home.join(MPM_DIR_NAME), architect.id(), &project)
             .expect("record the Architect");
         let fx = Self {
             _dir: dir,

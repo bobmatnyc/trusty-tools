@@ -16,6 +16,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_policy_10641::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::process::Stdio;
@@ -54,7 +55,7 @@ fn session(role: Role) -> Session {
             "profile = \"supervisor\"\n",
         )
         .expect("write project config");
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(MPM_DIR_NAME);
         std::fs::create_dir_all(&root).expect("mkdir root");
         std::fs::write(
             root.join("config.toml"),

@@ -15,6 +15,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, try_workspace_root};
 use trusty_mpm::daemon::managed_routes::inproject::{
@@ -78,7 +80,7 @@ impl Fixture {
     fn new() -> Self {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let home = tmp.path().canonicalize().expect("canonical").join("home");
-        let tools = home.join(".trusty-tools");
+        let tools = home.join(TOOLS_DIR_NAME);
         std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
         // An unknown key: the file parses as TOML but is refused.
         std::fs::write(
@@ -191,7 +193,7 @@ fn tm_run_refuses_on_a_broken_install_file_before_cloning_11828() {
         "tm run must refuse on the repos root, got: {stderr}"
     );
     assert!(
-        !fx.home.join("trusty-mpm-projects").exists(),
+        !fx.home.join(DEFAULT_WORKSPACE_DIR).exists(),
         "nothing may be created under the default root"
     );
     assert!(

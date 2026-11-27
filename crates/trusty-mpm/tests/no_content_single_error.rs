@@ -18,6 +18,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use crate::common;
 
@@ -153,7 +154,7 @@ fn sessions_start_offline_names_the_switch_and_both_remedies() {
 #[test]
 fn sessions_start_without_content_deploys_no_stale_agent() {
     let (home, project) = scratch_home_and_project();
-    let stale = home.path().join(".trusty-mpm/framework/agents");
+    let stale = home.path().join(MPM_DIR_NAME).join("framework/agents");
     std::fs::create_dir_all(&stale).expect("stale source dir");
     std::fs::write(
         stale.join("stale-agent.md"),

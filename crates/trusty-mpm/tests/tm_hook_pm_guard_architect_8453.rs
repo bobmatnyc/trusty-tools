@@ -15,6 +15,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_architect_8453::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -52,7 +53,7 @@ fn session(profile: Option<&str>, stamp: Option<&'static str>, allow_listed: boo
     }
     let home = tempfile::tempdir().expect("home");
     if allow_listed {
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(MPM_DIR_NAME);
         std::fs::create_dir_all(&root).expect("mkdir root");
         std::fs::write(
             root.join("config.toml"),

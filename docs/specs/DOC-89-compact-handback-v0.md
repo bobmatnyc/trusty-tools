@@ -1,13 +1,15 @@
-# DOC-89 — Compact handback v0
+# DOC-89 — Compact handback v0 and structured IL block v1
 
 **Status:** Draft
 **Subsystem:** Agent handbacks (BASE-AGENT completion format, Intent Ledger handback tail)
 **Owner:** tm-dogfood (schema); decisions marked OQ belong to the Architect
-**Last-updated:** 2026-11-11
-**Spec ID:** `SPEC-HANDBACK-01~draft` … `SPEC-HANDBACK-05~draft` (DOC-89)
+**Last-updated:** 2026-11-12
+**Spec ID:** `SPEC-HANDBACK-01~draft` … `SPEC-HANDBACK-05~draft` (DOC-89, v0); `SPEC-HANDBACK-06~draft` … `SPEC-HANDBACK-13~draft` (DOC-89, v1)
 **DOC-N claim:** `DOC-89`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). Highest on `origin/main` at 2026-11-11 was `DOC-88`.
 
-Source: agent-comm POC Track 1, plan step 3 (`/Users/masa/trusty-mpm-projects/reviews/agent-comm-poc/plan.md`), owner ruling D0e. This spec proposes a schema for the POC replay. It changes no existing file and is not adopted until the POC verdict is GO.
+**Revision choice (2026-11-12).** v1 is an in-place revision of this file, not a superseding file. The Architect ruled at 17:05Z to merge into DOC-89 and not create a second spec. The file has no frontmatter and every section is still `~draft`, so nothing was accepted and nothing needs a `Superseded` marker; DOC-38 section 4.4 reserves `~v1` for acceptance, so the sections keep `~draft`. v1 adds sections 6 to 13. Sections 1 to 5 stay as the v0 record and the phase-1 fixtures' second input format. The filename keeps `-v0` so existing links hold. Ticket: [#11133](https://github.com/bobmatnyc/trusty-tools/issues/11133) (the Architect task, tracked on #11133). Owner instruction: 2026-11-12 17:01Z and 17:03Z (Architect brief `2026-11-12-structured-response-instruction.md`).
+
+Source of v0: agent-comm POC Track 1, plan step 3 (`/Users/masa/trusty-mpm-projects/reviews/agent-comm-poc/plan.md`), owner ruling D0e. This spec proposes a schema for the POC replay. It changes no existing file and is not adopted until the POC verdict is GO.
 
 ## 1. Scope {#SPEC-HANDBACK-01~draft}
 
@@ -64,7 +66,7 @@ Existing formats: BASE-AGENT "Required completion format" (`content/agents/BASE-
 | C2 | BASE-AGENT requires `[command]: [actual output]` and "show raw output"; v0 caps at 10 lines. | The block carries only the verbatim final result line and exit status per gate. The raw output goes to a file named by `refs` `log:`. Failing gates also quote the first failing test name in `delta`. The rule "never summarise results in your own words" stays satisfied: the final line is verbatim. OQ2 asks whether the owner accepts file-held raw output. |
 | C3 | BASE-AGENT "What changed" lists `file:line — change`; v0 `refs` lists `path@sha:lines` without the change text. | `delta` holds the change in words; `refs` holds locations. The long form keeps the per-line list. |
 | C4 | IL tail `Task: <id>@MMDD \| done \| est \| remaining \| pct` and `CTX-USE:` are not in v0. | Both stay unchanged, after the block and outside the 10-line cap. The extractor must not drop them. |
-| C5 | IL ids (`abc-T22`, `D0e`) are ephemeral; v0 `decided` must be readable later. | `decided` cites `pr#N`, `issue#N`, `commit:<sha12>` or `comment:<url>` and never an IL id alone. An IL id may follow the cite as a hint, `(il:<S id>:<id>)`, qualified per SPEC-IL-01 section 15 (for example `il:S14:Ddb`). A decision with no PR, issue, commit or comment yet uses `@ none` and the receiver treats it as unreferenced. |
+| C5 | IL ids (`<prefix>-T22`, `D0e`) are ephemeral; v0 `decided` must be readable later. | `decided` cites `pr#N`, `issue#N`, `commit:<sha12>` or `comment:<url>` and never an IL id alone. An IL id may follow the cite as a hint, `(il:<S id>:<id>)`, qualified per SPEC-IL-01 section 15 (for example `il:S14:Ddb`). A decision with no PR, issue, commit or comment yet uses `@ none` and the receiver treats it as unreferenced. |
 | C6 | The brief handback shape has `Next: <action>`; v0 has `next`. | `next` is the sender's action for the receiver, inside the block. The IL `Next:` line is the PM's session next. Both may appear; neither replaces the other. |
 | C7 | `Goals:` and `Open D/A:` lines (PM handbacks) overlap `open`. | `open` lists questions with owners. `Open D/A` lists Architect/owner decision ids and stays outside the block. |
 | C8 | Plan says `decided` is "verbatim, dated, attributed" so the IL "reads the same". SPEC-IL-01 `owed` entries are `check`/`expect`/`ref` (80 characters each), not prose. | `decided` is not an `owed` entry. A check the receiver owes is a `next` or an `open ... owner=` line; the PM copies it to `session set --owe` itself. |
@@ -100,3 +102,153 @@ The harness engineer builds against these rules:
 - **OQ3.** Should dispatches carry a `need:` key list (plan, `need` field)? Today no dispatch format has it, so `need` is empty in most replay tasks.
 - **OQ4.** Does the `[VERIFIED]` token in `delta` conflict with PM guards or hooks that grep `### Status:`? Not checked here.
 - **OQ5.** Is a 10-line cap and 240-character line the right size, or should the POC vary it? The plan fixes 10; the 240 is this spec's choice.
+
+---
+
+# v1: structured IL block
+
+## 6. Purpose {#SPEC-HANDBACK-06~draft}
+
+**ID:** SPEC-HANDBACK-06~draft
+
+Every PM turn and every agent handback carries one fenced block with info string `il`. The model fills it once. Scripts parse it to build dashboards, ledgers, update lists and reports. No second model pass extracts or formats.
+
+````
+```il
+goal: <prefix>-G01
+task: <prefix>-T2f@1112
+done: wrote the v1 grammar into DOC-89
+pct: 60
+next: run check_sld.sh
+est: 20m
+remaining: validators, fixtures
+open: <prefix>-D4e <prefix>-A1c
+new: D Which session is exempt? | opts: Architect*; none
+evidence: head=docs/11133-il-block-spec@b59075b7b4
+evidence: log:/tmp/il133-gates.log
+evidence: check_sld.sh => 0 errors; EXIT=0
+```
+````
+
+## 7. Grammar {#SPEC-HANDBACK-07~draft}
+
+**ID:** SPEC-HANDBACK-07~draft
+
+One `key: value` line per key (key, colon, one space). Order is free. Each line is at most 240 characters; `done` is at most 200.
+
+| Key | Status | Value |
+|---|---|---|
+| `goal` | required | goal id |
+| `task` | required | `<id>@MMDD`, with `<id>` a task id |
+| `done` | required | what changed this turn, at most 200 characters |
+| `pct` | required | integer 0 to 100 |
+| `next` | required | one imperative action, or `none` |
+| `est` | optional | time estimate |
+| `remaining` | optional | what is left |
+| `open` | optional | space-separated D and A ids |
+| `new` | optional, repeatable | `D\|A <title> \| opts: a*; b`. `*` marks the recommendation. A decision already made reads `D <title> \| decided: <option> @ <cite>`, with `<cite>` as in C5. |
+| `evidence` | optional, repeatable | `head=<branch>@<sha>`, `run:<id>`, `log:<path>`, or one final gate line ending `EXIT=<n>` |
+| `error` | optional | an error that fits no other key (prose) |
+| `feedback` | optional | prompt feedback (prose) |
+
+An id matches `^[a-z][a-z0-9]{1,7}-[GDAT][0-9a-f]{2}$`. The letter is the type: G goal, D decision, A action, T task. Every key except `new` and `evidence` is a singleton.
+
+### Mapping from the v0 fields
+
+| v0 field | v1 |
+|---|---|
+| `need` | The answer goes in `done`; an unanswerable key becomes `new: A ...` or `error`. No key of its own, because no dispatch format carries `need:` (OQ3). |
+| `delta` | Change text goes in `done`. Gate verdict lines go in `evidence`. `[VERIFIED]` is implied by every gate line ending `EXIT=0`; a failure goes in `error`. |
+| `open` | `open`, ids only. A question with no id becomes `new: A`. |
+| `decided` | `new` with `decided:`. The verbatim quote moves to the detail text of that item. |
+| `refs` | `evidence`. v0 path refs (`path@sha:a-b`, section 4) stay valid inside `evidence`. |
+| `next` | `next`. |
+
+## 8. Rejects {#SPEC-HANDBACK-08~draft}
+
+**ID:** SPEC-HANDBACK-08~draft
+
+A parser rejects the block on any of: a line inside the fence that is not a known key; a repeated singleton; a missing required key; an id that fails the pattern; `pct` outside 0 to 100 or not an integer; a span shaped like a secret. A secret is rejected, never masked. The secret patterns are the repository's credential-scan patterns; phase 1 names the file.
+
+## 9. Precedence and coexistence {#SPEC-HANDBACK-09~draft}
+
+**ID:** SPEC-HANDBACK-09~draft
+
+When a response carries both, the block wins over the legacy `Task:` last line. The legacy line stays valid, and the DATG hook rules for it stay in force, until phase 5. Where `Task:` and `Card:` disagree, `Task:` wins (Architect ruling). The Architect's dashboard ingester (an Architect task, tracked on #11133) keeps its per-source parser for the legacy line; the block is added beside it.
+
+## 10. Validation {#SPEC-HANDBACK-10~draft}
+
+**ID:** SPEC-HANDBACK-10~draft
+
+- **Stop (PM turns).** A validator in `datg.py hook`, modelled on `dash-footer-stop.py`. On a violation it returns `decision:block` with the first violation and the grammar. It allows one retry through `stop_hook_active`. On an internal error it fails open.
+- **SubagentStop (handbacks).** New tm code. On a violation it exits 2 and writes the reason to stderr. It also fails open on an internal error.
+
+Both call one parser, the phase-1 parser.
+
+## 11. IL-only mode {#SPEC-HANDBACK-11~draft}
+
+**ID:** SPEC-HANDBACK-11~draft
+
+From phase 4 this is the default for IL sessions (Architect ruling). The response is the block plus the Dashboard footer. Prose is allowed only in the detail of a new D item, in `error:` and in `feedback:`. Agent handbacks are IL-only too; raw gate output goes in a `log:` file named by `evidence`.
+
+IL-only mode overrides:
+
+- Output style "PM Response Format".
+- prompt-self-improvement's `## Prompt feedback` section; it becomes `feedback:`.
+- The tm-verification-protocols four-part report; it becomes `evidence`.
+- BASE-AGENT "Required completion format"; it becomes `done` plus `evidence`.
+
+BASE-AGENT's rule "show raw output" is met by the verbatim final gate line plus the `log:` path (the v0 question OQ2, now carried by IL-only mode).
+
+## 12. Phases {#SPEC-HANDBACK-12~draft}
+
+**ID:** SPEC-HANDBACK-12~draft
+
+1. Parser plus fixtures. It reads both the block and the legacy line.
+2. Warn-only validation.
+3. Request the block in PM and agent text. Exit criterion: a transcript measurement of output tokens before and after.
+4. Enforce the block. Block-only mode becomes the default for IL sessions.
+5. Drop the legacy-line fallback.
+
+Token savings are unmeasured; this spec claims no number for the block.
+
+## 13. Open questions {#SPEC-HANDBACK-13~draft}
+
+**ID:** SPEC-HANDBACK-13~draft
+
+- **OQ6.** Is the Architect session exempt from IL-only mode?
+- **OQ7.** Where do `log:` files live, and who deletes them?
+- OQ1 to OQ5 above stand.
+
+## Option: id-only exchange {#SPEC-HANDBACK-14~draft}
+
+**ID:** SPEC-HANDBACK-14~draft
+
+**Status:** option, not a decision. Source: Bob via the Architect, 2026-11-12 17:08Z.
+
+**How it works.** At conversation start the relevant IL items load once, with their ids. After that only ids pass in and out. A script expands an id to its full item from the local store.
+
+**The four design questions.**
+
+| Question | Proposed answer |
+|---|---|
+| Cache validity | The store is an append-only table of `(id, version, text)`. A load records the highest version it saw; an id is valid while no later version exists. A change appends a row, never edits one. Proposed. |
+| Id scope (2 hex digits wrap at 256) | An id is unique only inside its session prefix and live window. Exchange uses ids qualified as in SPEC-IL-01 section 15 (for example `S14:Ddb`), and a retired id is not reused while a row for it is still in the loaded set. Reuse after wrap needs a rule from the Architect. Open. |
+| Unknown-id validator | The Stop and SubagentStop checks resolve every id in the block against the loaded table. An id not in the table is a violation, same path as section 10. Proposed. |
+| Expand-on-receipt hook | A hook on the receiving side replaces ids with item text before the model or the owner sees them. Mechanism (PostToolUse or UserPromptSubmit) not chosen. Open. |
+
+**Measured estimate (this sample only).** Tokens use about 4 bytes per token. `datg.py digest` for `tm-trusty-tools` at v159: 1474 bytes (about 369 tokens). Its GOALS and ITEMS sections are empty at v159, so only `owed` is measured: 8 lines, 467 bytes; bare keys, 48 bytes. Those keys are issue numbers, not IL ids. Three distinct Architect brief texts, id-bearing lines against the ids alone:
+
+| Text | Lines | Full line bytes | Ids only bytes | Ratio |
+|---|---|---|---|---|
+| `il-task-triage-2026-11-02.md` | 167 | 10544 (about 2636 tokens) | 1190 (about 298 tokens) | 8.9 |
+| `dream/2026-11-10-digest.md` | 9 | 1961 (about 490 tokens) | 70 (about 18 tokens) | 28.0 |
+| `dream/2026-11-11-applied.md` | 1 | 46 (about 12 tokens) | 7 (about 2 tokens) | 6.6 |
+
+Sample size: three brief texts and one digest. They are Architect briefs, not handbacks, and each "full" figure is the whole line, not only the item text. A fourth file (`2026-11-08-digest.md`) matched the 11-10 file byte for byte and is counted once. The ratios apply to this sample and nothing beyond it.
+
+**Risks.**
+
+- Stale cache: a loaded id points at text changed after load. The versioned table detects it only if the validator compares versions, not just presence.
+- Misread id: an id with no text beside it cannot be caught by a reader or reviewer; a wrong but valid id passes the unknown-id validator.
+- Owner reading raw ids: the owner sees `<prefix>-D4e`, not the decision. The expand-on-receipt hook must cover owner-facing output, or the owner reads ids only.

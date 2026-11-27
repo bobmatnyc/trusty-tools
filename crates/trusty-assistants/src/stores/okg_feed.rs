@@ -123,9 +123,11 @@ impl IndexFeedReport {
 /// What: an exclusive, non-blocking OS file lock on
 /// `<state dir>/agent-feed-locks/<sha256 of the journal path>.lock`. It is
 /// released when the guard drops — on return, on a panic's unwind, and by
-/// the OS if the process dies.
+/// the OS if the process dies. The drop unlocks explicitly, so a copy of the
+/// fd held by a forked child does not keep the lock (#11987).
 /// Test: `concurrent_feed_calls_run_one_pass`,
-/// `feed_lock_is_released_on_panic`.
+/// `feed_lock_is_released_on_panic`,
+/// `feed_lock_is_released_while_a_duplicated_fd_stays_open`.
 #[derive(Debug)]
 pub struct FeedLock {
     _file: std::fs::File,
@@ -164,6 +166,20 @@ impl FeedLock {
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
         }
+    }
+}
+
+impl Drop for FeedLock {
+    /// Why: a flock belongs to the open file description, so it lives until
+    /// the last fd copy closes; a child forked before it execs holds such a
+    /// copy and would keep the next pass out.
+    /// What: unlocks before the file closes. The error is ignored because
+    /// Drop must not panic, and a failed unlock leaves the old behaviour: the
+    /// close of the last fd copy still releases the lock.
+    /// Test: `feed_lock_is_released_while_a_duplicated_fd_stays_open`.
+    fn drop(&mut self) {
+        // #11987: release now, not when a forked child's fd copy closes.
+        let _ = self._file.unlock();
     }
 }
 

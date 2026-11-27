@@ -192,8 +192,11 @@ pub async fn list_projects_registry_op(
 /// [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
 /// runs the SHARED worktree backfill
 /// ([`crate::daemon::project_adoption::adopt_pre_existing_worktrees`], #7357),
-/// and returns 201 with the stored record plus that adoption report.
+/// and returns 201 with the stored record plus that adoption report. A
+/// decommissioned or archived project keeps both flags, and the body's
+/// `inactive_reason` names a session start as the way back (#11969).
 /// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`,
+/// `http_project_register_keeps_a_decommissioned_project_and_names_the_way_back`,
 /// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`,
 /// `register_preserves_unspecified_optional_fields_on_existing_project`,
 /// `register_explicit_fields_still_override_existing`.
@@ -296,7 +299,8 @@ pub async fn register_project_registry_op(
     // persist the record and adopt nothing, so the fix reached only the MCP
     // tool. Both now call the one shared function.
     let adoption = adopt_pre_existing_worktrees(state, &project);
-    Ok(RegisterProjectResponse { project, adoption })
+    // #11969: a decommissioned project stays so; the response says how to revive it.
+    Ok(RegisterProjectResponse::new(project, adoption))
 }
 
 /// Fold a register-time `--gh-config-dir` into a project's `github` binding

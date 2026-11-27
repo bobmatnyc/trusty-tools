@@ -110,6 +110,9 @@ fn mpm_root_from_follows_the_config_dir() {
         mpm_root_from(broken, Some(home.path().to_path_buf())),
         home.path().join(MPM_DIR_NAME)
     );
+    // #11821 P7: with no home the broken install reads the bare dir name.
+    let broken = InstallPaths::resolve_with(|_| None, home.path(), &PathOverrides::default());
+    assert_eq!(mpm_root_from(broken, None), PathBuf::from(MPM_DIR_NAME));
 }
 
 // ── project_roots: fail closed ───────────────────────────────────────────────

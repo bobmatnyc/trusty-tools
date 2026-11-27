@@ -11,6 +11,7 @@
 use crate::tm_hook_pm_guard_trust_anchor_8878::{
     Fixture, bash_payload, run, run_script_under_claude, run_under_claude, run_under_claude_with,
 };
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// The Architect's project with a `.env.local`.
 fn fixture() -> (Fixture, std::path::PathBuf) {
@@ -22,7 +23,10 @@ fn fixture() -> (Fixture, std::path::PathBuf) {
 
 /// The one-shot `tm env` grants the guard has minted under the scratch home.
 fn grants(fx: &Fixture) -> usize {
-    let dir = fx.home.join(".trusty-mpm/architect-launch/envfile-grants");
+    let dir = fx
+        .home
+        .join(MPM_DIR_NAME)
+        .join("architect-launch/envfile-grants");
     std::fs::read_dir(dir).map_or(0, |entries| {
         entries
             .flatten()

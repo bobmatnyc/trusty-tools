@@ -6,6 +6,7 @@
 //! retired dispatch-time cap, even with the daemon down.
 
 use crate::common;
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
 
 use std::io::Write;
 use std::path::Path;
@@ -28,7 +29,7 @@ fn scratch_home() -> tempfile::TempDir {
 /// is unknown; these cases assert the builder cap, not the Fable cap.
 fn record_opus_parent(home: &Path, session_id: &str) {
     trusty_mpm::core::session_model::record_session_model(
-        &home.join(".trusty-mpm"),
+        &home.join(MPM_DIR_NAME),
         session_id,
         "claude-opus-5-5",
     );
@@ -408,7 +409,7 @@ fn an_ask_rule_keeps_the_lease_and_asks() {
 /// `acme/widget` at `<home>/widget/.claude/worktrees/agent-8261`.
 fn leasing_home_and_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
     let home = scratch_home();
-    let config = home.path().join(".trusty-mpm");
+    let config = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&config).expect("config dir");
     std::fs::write(
         config.join("config.toml"),
@@ -451,7 +452,10 @@ fn leasing_home_and_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
 #[test]
 fn a_subagents_leased_build_runs_in_its_slot_directory() {
     let (home, worktree) = leasing_home_and_worktree();
-    let shared = home.path().join(".trusty-tools/cargo-target/acme/widget");
+    let shared = home
+        .path()
+        .join(TOOLS_DIR_NAME)
+        .join("cargo-target/acme/widget");
     let record = home.path().join("cargo-saw");
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).expect("bin dir");
@@ -523,7 +527,7 @@ fn a_subagents_leased_build_runs_in_its_slot_directory() {
 #[test]
 fn a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969() {
     let home = scratch_home();
-    let config = home.path().join(".trusty-mpm");
+    let config = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&config).expect("config dir");
     std::fs::write(
         config.join("config.toml"),

@@ -27,7 +27,8 @@ use crate::vault::{PREFIX, Vault};
 
 /// Expose Trusty Browser to one agent over stdio MCP, by workflow ticket or a connected profile.
 #[derive(Parser, Debug)]
-#[command(name = "trusty-browser-mcp")]
+// #11802: `version` makes `--version` print the crate version and exit 0.
+#[command(name = "trusty-browser-mcp", version)]
 struct Args {
     /// State directory.
     #[arg(long)]
