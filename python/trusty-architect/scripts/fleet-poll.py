@@ -14,8 +14,9 @@ below, for two exceptions), reads new permission_prompt / agent_needs_input
 lines of inbox/events.jsonl, checks host load (5-min avg > LOAD_FACTOR x
 cores), disk and swap, self_ctx_alerts (self-ctx.py: the Architect's own
 context in tokens, which has no `ctx N%` line to read, against the same
-context bar), owner_answer_alerts (dashboard answers not yet relayed), and
-appends each NEW alert as a JSON line to inbox/alerts.jsonl. Dedup state is inbox/poll-state.json: an
+context bar), owner_answer_alerts (dashboard answers not yet relayed), the
+new lines of inbox/pm-messages.jsonl that pm_intake.py classifies as waking
+(#10764; held ones go to inbox/triage.jsonl), and appends each NEW alert as a JSON line to inbox/alerts.jsonl. Dedup state is inbox/poll-state.json: an
 alert with the same (session, pane, kind, fingerprint) is not re-emitted
 until it clears for one cycle, or its kind's re-emit interval passes. load, disk and swap are keyed
 kind|severity|bucket instead (fleet_alert_dedupe.py, ar-T8a): leftover swap with no swap-in/out only
@@ -39,7 +40,8 @@ CONTEXT_BAR_TOKENS (default 250000), CONTEXT_WINDOW_TOKENS (default 1000000);
 see README.md.
 Test: tests/test_fleet_poll.py, tests/test_quiet_sessions.py,
 tests/test_fleet_poll_workspace_servers.py, tests/test_fleet_poll_split.py,
-tests/test_fleet_poll_lock.py, tests/test_fleet_poll_owner_answers.py
+tests/test_fleet_poll_lock.py, tests/test_fleet_poll_owner_answers.py,
+tests/test_fleet_poll_pm_messages.py
 Usage: scripts/fleet-poll.py [--once] [--interval N] [--dry-run]
        (normally run via scripts/start-fleet-poll.sh)
 Exit: 0 after --once or --dry-run; 3 when another live poller holds
@@ -109,6 +111,7 @@ self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
 owner_answers = _load_by_path("owner_answers", "owner_answers.py")  # #10670: the answer store
 fleet_poll_deps = _load_by_path("fleet_poll_deps", "fleet_poll_deps.py")  # PR-B2: dep_degraded
+pm_intake = _load_by_path("pm_intake", "pm_intake.py")  # #10764: the PM-message queue
 watchdog = _load_by_path("architect_watchdog", "architect-watchdog.py")
 il_cron = _load_by_path("il_cron", "il-cron.py")
 ctx_watch = il_cron.ctx_watch
@@ -145,6 +148,7 @@ self_refresh_step = _selfrefresh.self_refresh_step
 
 def cycle(state, dry_run=False, now=None):
     now = time.time() if now is None else now
+    pm_intake.skip_backlog(state)  # #10764: before this cycle writes "sessions"
     try:
         panes = list_panes()
     except TmuxError as e:
@@ -190,6 +194,9 @@ def cycle(state, dry_run=False, now=None):
     candidates += il_cron_alerts(now, dry_run)      # #10571 (prototype :1942)
     candidates += ctx_watch_alerts(now, dry_run)    # #10571 (prototype :1943)
     candidates += read_events(state)
+    # #10764: a queued question, blocker, done or urgent message wakes within one cycle.
+    candidates += pm_intake.poll_step(state, alert, now,
+                                      os.path.join(pm_intake.inbox(), "triage.jsonl"), dry_run)
     candidates += host_alerts(now)
     candidates += self_ctx_alerts(now, dry_run)
     candidates += watch_found

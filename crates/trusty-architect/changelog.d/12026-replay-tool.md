@@ -1,3 +1,0 @@
-Added
-
-- `trusty-architect-replay`, a record-then-replay parity tool for the Architect script ports. `record` runs a script on a sandbox copy of its inputs under a cleared environment holding only an allowlist, and captures argv, stdin, the env, the input files, the files a Python script opened, stdout, stderr, the exit code and the files it wrote. Local paths and listed session names are scrubbed deterministically, and a recording that still holds a home path, a session name or a secret-shaped value is refused and not written. `replay` runs a recording against a binary and reports every differing channel; `check` re-runs the refusal check on fixtures. The library API is `trusty_architect::replay` (Refs [#12026](https://github.com/bobmatnyc/trusty-tools/issues/12026))

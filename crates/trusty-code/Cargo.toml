@@ -37,7 +37,7 @@ name = "trusty-code"
 # `enum_variant_added` / `function_parameter_count_changed` breaks, which
 # Cargo's 0.x rule puts in MINOR.
 # 0.8.1 (#11481): patch — serves `tm-prose-style` as a referenced skill.
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
