@@ -51,7 +51,8 @@ pub enum ShutdownState {
         /// Why nothing was loaded.
         reason: String,
     },
-    /// No call was made: this is a test process.
+    /// No call was made: this is a test process, or (#11643) the palace id
+    /// is not provably this project's own.
     Skipped {
         /// Why no call was made.
         reason: String,
@@ -131,6 +132,9 @@ pub struct ShutdownTarget {
     /// #11551: the id was derived without a checkout, so ask trusty-memory
     /// whether the palace exists before unloading it.
     pub palace_lookup: bool,
+    /// #11643: why the palace id may name another project's palace; when set,
+    /// the unload is skipped and this is the reported reason.
+    pub palace_shared: Option<String>,
 }
 
 impl ShutdownTarget {
@@ -161,20 +165,63 @@ impl ShutdownTarget {
                 search_queries.push(query);
             }
         }
-        let remote = Some(repo_url).filter(|u| !u.trim().is_empty());
-        let palace = match root {
-            Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
-                .map(|r| Some(r.id))
-                .map_err(|e| format!("could not resolve the palace: {e}")),
-            // #11551: with no checkout, derive the id memory keyed the palace
-            // by from what is recorded — the pin file went with the checkout.
-            None => Ok(palace_id_without_checkout(repo_url)),
-        };
         Self {
             search_queries,
-            palace,
+            palace: palace_for(repo_url, root),
             palace_lookup: root.is_none(),
+            palace_shared: None,
         }
+    }
+
+    /// Refuse the palace unload unless no other project can own the same id.
+    ///
+    /// Why: #11643 — the `parent-dir` and `owner/repo` slugs key on the last
+    /// two path parts, so `/a/code/app` and `/b/code/app` both derive
+    /// `code-app`; unloading by that id would close the other project's palace.
+    /// What: `others` is each other active project's name and [`palace_for`]
+    /// answer. One deriving this target's id, or one whose id cannot be
+    /// derived (`Err`, so it might match), sets `palace_shared`, which makes
+    /// the unload a reported [`ShutdownState::Skipped`]. An `Ok(None)` names
+    /// no palace and cannot collide. A target with no id is left as is.
+    /// Test: `a_palace_id_another_project_derives_is_never_unloaded`,
+    /// `decommission_skips_the_unload_when_another_project_shares_the_palace_id`.
+    pub fn refuse_shared_palace(
+        mut self,
+        others: &[(String, Result<Option<String>, String>)],
+    ) -> Self {
+        let Ok(Some(id)) = &self.palace else {
+            return self;
+        };
+        // #11643: the first ambiguous project wins; a miss on all is the
+        // only state in which the unload proceeds.
+        self.palace_shared = others.iter().find_map(|(name, other)| match other {
+            Ok(Some(other)) if other == id => Some(format!(
+                "project '{name}' derives the same palace id {id}; palace unload skipped"
+            )),
+            Err(why) => Some(format!(
+                "project '{name}' has no resolvable palace id ({why}), so {id} may be \
+                 its palace; palace unload skipped"
+            )),
+            _ => None,
+        });
+        self
+    }
+}
+
+/// The palace id of a project with remote `repo_url` and checkout `root`.
+///
+/// What: with a `root`, `trusty_common::palace_resolve` from `root` and
+/// `repo_url`, the call session launch exports `TRUSTY_MEMORY_PALACE` from;
+/// `Err` when it fails. With none, [`palace_id_without_checkout`].
+pub(crate) fn palace_for(repo_url: &str, root: Option<&Path>) -> Result<Option<String>, String> {
+    let remote = Some(repo_url).filter(|u| !u.trim().is_empty());
+    match root {
+        Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
+            .map(|r| Some(r.id))
+            .map_err(|e| format!("could not resolve the palace: {e}")),
+        // #11551: with no checkout, derive the id memory keyed the palace
+        // by from what is recorded — the pin file went with the checkout.
+        None => Ok(palace_id_without_checkout(repo_url)),
     }
 }
 
@@ -456,6 +503,12 @@ async fn unload_palace(socket: Option<&Path>, target: &ShutdownTarget) -> Shutdo
             };
         }
     };
+    // #11643: an id another project may own is never unloaded.
+    if let Some(reason) = &target.palace_shared {
+        return ShutdownState::Skipped {
+            reason: reason.clone(),
+        };
+    }
     if target.palace_lookup
         && let Some(skipped) = palace_absent(socket, palace).await
     {
