@@ -5,8 +5,8 @@
 //! the binary proves that `init` starts `tm-architect` detached with the
 //! supervisor stamp, and that `status` exits 1 until it does.
 //! What: each test owns a scratch HOME and its own tmux server directory
-//! (`TMUX_TMPDIR`, with `TMUX_SOCKET` removed), and puts a fake `claude`
-//! first on `PATH`; the server is
+//! (`TMUX_TMPDIR`, with `TMUX_SOCKET` removed), and puts a fake `claude` and
+//! a fake `launchctl` (#11961) first on `PATH`; the server is
 //! killed when the test ends. Nothing reaches the operator's home or tmux.
 //! Test: `cargo test -p trusty-mpm --test integration tm_fleet::`.
 
@@ -60,6 +60,16 @@ impl FleetEnv {
             ),
         )
         .expect("fake claude");
+        // #11961: a `launchctl` that logs its argv and reaches no launchd:
+        // `print` answers 113 ("could not find service"), anything else fails.
+        trusty_common::exec_stub::write_executable(
+            &bin.path().join("launchctl"),
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {:?}\n[ \"$1\" = print ] && exit 113\nexit 1\n",
+                bin.path().join(LAUNCHCTL_LOG).display().to_string(),
+            ),
+        )
+        .expect("fake launchctl");
         Self {
             home: tempfile::tempdir().expect("scratch home"),
             // Short path: tmux refuses a socket path over `sun_path` (104 bytes).
@@ -144,6 +154,15 @@ impl FleetEnv {
 
     fn dir(&self) -> PathBuf {
         self.home.path().join("arch")
+    }
+
+    /// #11961: the fake `launchctl` never ran `kickstart`.
+    fn assert_no_kickstart(&self) {
+        let log = std::fs::read_to_string(self.bin.path().join(LAUNCHCTL_LOG)).unwrap_or_default();
+        assert!(
+            !log.lines().any(|l| l.starts_with("kickstart")),
+            "tm ran launchctl kickstart: {log}"
+        );
     }
 
     /// The fake `claude`'s argv, one entry per Architect launch (a `--model`
@@ -338,6 +357,9 @@ fn launch_flags(argv: &[String]) -> Vec<&str> {
 
 /// The file, in the fake `bin` dir, where the fake `claude` logs its argv.
 const ARGV_LOG: &str = "claude-argv.log";
+
+/// The file, in the fake `bin` dir, where the fake `launchctl` logs its argv (#11961).
+const LAUNCHCTL_LOG: &str = "launchctl-argv.log";
 
 /// The file, in the fake `bin` dir, where the fake `claude` logs its PID and
 /// argv, one line per start.
@@ -1995,6 +2017,22 @@ fn architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op() {
         text(&out)
     );
     assert_eq!(env.launches(2).len(), 1, "a second up launched again");
+    env.assert_no_kickstart();
+}
+
+/// #11961: `up` under a scratch HOME never reaches the login user's launchd
+/// job: the dashboard restart is a reported skip and no `kickstart` runs.
+#[test]
+fn architect_up_in_a_scratch_home_skips_the_dashboard_restart_11961() {
+    let env = FleetEnv::new();
+    let out = up(&env, &env.dir());
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("dashboard restart: skipped, because"),
+        "{}",
+        text(&out)
+    );
+    env.assert_no_kickstart();
 }
 
 /// #11364 closure: two concurrent `up` calls leave one session and one launch.
@@ -2013,6 +2051,7 @@ fn architect_up_racing_a_second_up_yields_one_architect() {
     }
     assert_eq!(env.launches(2).len(), 1, "two launches: {}", text(&outs[1]));
     assert_eq!(env.recorded_pids().len(), 1);
+    env.assert_no_kickstart();
 }
 
 /// #11364: a pane at a shell gets a bound `claude`.
@@ -2029,6 +2068,7 @@ fn architect_up_launches_bound_into_a_pane_at_a_shell() {
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(env.launches(2).len(), 2, "{}", text(&out));
     assert_eq!(env.status_json()["binding"]["ok"], true, "{}", text(&out));
+    env.assert_no_kickstart();
 }
 
 /// #11364 closure: a live unbound `claude` is reported and never killed.
@@ -2055,6 +2095,7 @@ fn architect_up_reports_and_never_kills_an_unbound_claude() {
         trusty_mpm::core::process::is_process_alive(replaced),
         "up killed it"
     );
+    env.assert_no_kickstart();
 }
 
 /// #11364 closure: from inside Claude Code, `up` neither starts nor stops `claude`.
@@ -2066,6 +2107,7 @@ fn architect_up_inside_claude_code_starts_nothing() {
     let out = env.tm_in_session(&args, None, &[("CLAUDECODE", OsStr::new("1"))]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     assert!(!env.has_session("tm-architect"), "{}", text(&out));
+    env.assert_no_kickstart();
 }
 
 // --- #11365: `tm architect restart` gates against the private tmux server ---

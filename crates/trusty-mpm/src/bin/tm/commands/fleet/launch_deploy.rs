@@ -110,6 +110,9 @@ pub(crate) trait Restarter {
     fn dashboard_loaded(&self) -> Result<bool, String>;
     /// Restart the dashboard under launchd.
     fn kickstart_dashboard(&self) -> anyhow::Result<()>;
+    /// #11961: `Some(home)` when this run's `HOME` is not the login user's,
+    /// so the user's launchd job must not be read or restarted.
+    fn foreign_home(&self) -> Option<String>;
 }
 
 /// The live tmux server and launchd.
@@ -141,6 +144,28 @@ impl Restarter for LiveRestarter {
 
     fn kickstart_dashboard(&self) -> anyhow::Result<()> {
         dashboard_agent::kickstart()
+    }
+
+    fn foreign_home(&self) -> Option<String> {
+        foreign_home_of(
+            dirs::home_dir().as_deref(),
+            dashboard_agent::passwd_home().as_deref(),
+        )
+    }
+}
+
+/// `Some(home)` unless `home` is the `passwd` home, by the `login_steps` rule.
+///
+/// Why: #11961 — `tm architect up` and `restart` kickstarted the login
+/// user's dashboard job from a test's scratch HOME. An unset HOME is foreign
+/// (fail closed).
+/// Test: `a_scratch_home_skips_the_dashboard_restart_and_says_so_11961`,
+/// `the_login_home_still_kickstarts_the_dashboard_11961`.
+pub(crate) fn foreign_home_of(home: Option<&Path>, passwd: Option<&Path>) -> Option<String> {
+    match home {
+        Some(h) if dashboard_agent::same_home(passwd, h) => None,
+        Some(h) => Some(h.display().to_string()),
+        None => Some("an unset HOME".to_owned()),
     }
 }
 
@@ -386,7 +411,9 @@ fn summarize(deployed: Vec<Step>) -> Vec<Step> {
 /// Why: Q4 — once, only on a hashed change, never starting a stopped process.
 /// Test: `a_changed_poller_script_restarts_it_exactly_once_11368`,
 /// `a_changed_dashboard_script_kickstarts_a_loaded_agent_once_11368`,
-/// `inside_claude_code_the_deploy_restarts_nothing_11368`.
+/// `inside_claude_code_the_deploy_restarts_nothing_11368`,
+/// `a_scratch_home_skips_the_dashboard_restart_and_says_so_11961`,
+/// `the_login_home_still_kickstarts_the_dashboard_11961`.
 fn restarts(
     dir: &Path,
     names: &SessionNames,
@@ -431,6 +458,15 @@ fn restarts(
         });
     }
     if !dash.is_empty() {
+        // #11961: a test, sandbox or scratch HOME never reads or restarts
+        // the login user's launchd job; the skip is a reported step.
+        if let Some(home) = host.foreign_home() {
+            steps.push(Step::Skipped(format!(
+                "dashboard restart: skipped, because {home} is not this user's home folder; \
+                 the dashboard agent belongs to the real login"
+            )));
+            return steps;
+        }
         steps.push(match host.dashboard_loaded() {
             Ok(false) => Step::Unchanged(
                 "the dashboard agent is not loaded; a changed script does not start it".to_owned(),
@@ -447,6 +483,21 @@ fn restarts(
         });
     }
     steps
+}
+
+/// The text of each `Failed` step, joined by `; `; `None` when none failed.
+///
+/// Why: #11961 — the verdict after a failed deploy names what failed, not
+/// only a fixed line. Test: `a_failed_deploy_names_the_failed_step_11961`.
+pub(crate) fn failed_text(steps: &[Step]) -> Option<String> {
+    let failed: Vec<&str> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Failed(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!failed.is_empty()).then(|| failed.join("; "))
 }
 
 // The fixtures are shared with `up_tests.rs`.
