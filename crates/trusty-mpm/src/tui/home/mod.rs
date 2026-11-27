@@ -41,8 +41,11 @@ mod machine_tests;
 // #10908: `console_metrics` over UDS against stub sockets.
 #[cfg(test)]
 mod metrics_uds_tests;
-// #10908: `by_*` breakdowns as nested tables in the service view.
+// #10908: `by_*` breakdowns as nested tables in the service view. The file
+// sits outside `home/`: a `/home/` path segment trips the OPERATOR_PATH leak
+// guard, and the baseline only shrinks.
 #[cfg(test)]
+#[path = "../metrics_table_tests.rs"]
 mod metrics_table_tests;
 
 use std::path::PathBuf;
