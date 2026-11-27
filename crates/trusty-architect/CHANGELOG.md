@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.5] — 2026-11-27
+
+### Breaking
+
+- trusty-architect 0.4.4 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-architect-0.4.4.txt` (Refs #8699).
+
+### Added
+
+- `trusty-architect-replay`, a record-then-replay parity tool for the Architect script ports. `record` runs a script on a sandbox copy of its inputs under a cleared environment holding only an allowlist, and captures argv, stdin, the env, the input files, the files a Python script opened, stdout, stderr, the exit code and the files it wrote. Local paths and listed session names are scrubbed deterministically, and a recording that still holds a home path, a session name or a secret-shaped value is refused and not written. `replay` runs a recording against a binary and reports every differing channel; `check` re-runs the refusal check on fixtures. The library API is `trusty_architect::replay` (Refs [#12026](https://github.com/bobmatnyc/trusty-tools/issues/12026))
+
+### Fixed
+
+- `trusty-architect-replay` refuses more of what must not reach a public fixture. An env entry whose key names a credential (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `*_API_KEY`, `*PASSWORD`, a `PASS`, `KEY`, `PAT` or `COOKIE` segment, a final `AUTH` segment, camelCase `githubToken`) is refused, as is an env value holding a URL password (`scheme://user:pw@host`), and so is any `tm-<x>` token that is not one of the repo's skill names, with or without `--session`. A replay mismatch withholds its excerpt when the whole line holds a secret shape, a session token or a local path. A path is scrubbed only at a component boundary, so a `<home>/al` path no longer rewrites `<home>/alice`. The open probe counts an `os.open` with a write flag as a write, not a read, and a missing probe log is an error rather than an empty read list. A symlink inside a seed directory, or one the run leaves in the sandbox, is refused (Refs [#12026](https://github.com/bobmatnyc/trusty-tools/issues/12026))
+
 ## [0.4.4] — 2026-11-27
 
 ### Fixed
