@@ -93,14 +93,23 @@ use trusty_mpm::core::workspace_liveness::workspace_liveness;
 
 use super::guided_resume::ResumeAction;
 
-/// Per-request timeout for the in-pane reachability probes (GET existence
-/// check + POST reactivate), matching the 2s daemon-reachability convention
-/// used elsewhere in this binary (`pm_guard.rs`, `misc.rs`'s hook relay).
+/// Per-request timeout for the in-pane reachability probe (GET existence
+/// check; the POST reactivate uses [`REACTIVATE_TIMEOUT`], #12012), matching
+/// the 2s daemon-reachability convention used elsewhere in this binary
+/// (`pm_guard.rs`, `misc.rs`'s hook relay).
 ///
 /// Why: this path runs on EVERY bare `tm` invocation inside a managed pane —
 /// a hung daemon must not add a long stall before falling through to the
 /// ordinary guided default.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Timeout for the POST reactivate (#12012): the route may wait on
+/// trusty-search to reload a parked index, up to the daemon's
+/// `REACTIVATE_STEPS_BUDGET`. Giving up sooner would read a refusal while the
+/// daemon still finishes, so this waits for the route's own answer.
+const REACTIVATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
+    trusty_mpm::daemon::managed_routes::reactivate::REACTIVATE_STEPS_BUDGET.as_secs() + 15,
+);
 
 /// Environment variable exported into a managed pane's shell (#2023 B) that
 /// identifies which managed session bare `tm`, run after `claude` exits,
@@ -448,7 +457,7 @@ async fn reactivate_managed_session(
 ) -> bool {
     let mut req = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
         .post(format!("/api/v1/sessions/managed/{id}/reactivate"))
-        .timeout(PROBE_TIMEOUT);
+        .timeout(REACTIVATE_TIMEOUT); // #12012: outlast the route's steps budget
     if let Some(pane_id) = caller_pane_id.filter(|s| !s.is_empty()) {
         req = req.query(&[("caller_pane_id", pane_id)]);
     }

@@ -152,4 +152,51 @@ impl SessionManager {
         );
         Ok(record)
     }
+
+    /// Undo a [`Self::mark_reactivated`] whose follow-up steps failed (#12012).
+    ///
+    /// Why: the in-place reactivate route answers an error when the bound
+    /// project or its search index cannot be brought back, and the client then
+    /// does not exec `claude`. A record left `Active` with no runtime would be
+    /// a ghost, so the route rolls the flip back.
+    /// What: sets the record's state back to `prior.state`, or to `Stopped`
+    /// when `prior` was `Active` (the stale-`Active` reconcile path), and
+    /// restores `prior`'s `claude_session_id`, plus its `terminal_at` and
+    /// `stop_cause` when the target is `prior.state`. A record that is no
+    /// longer `Active` is returned unchanged: something else already moved it.
+    /// Test: `a_failed_unpark_rolls_the_reactivate_back_to_stopped`,
+    /// `a_failed_project_reactivation_rolls_the_reactivate_back`,
+    /// `revert_reactivation_restores_the_conversation_and_stop_cause`,
+    /// `revert_reactivation_from_an_active_prior_keeps_the_conversation`,
+    /// `revert_reactivation_leaves_a_record_that_left_active_alone`.
+    pub(crate) async fn revert_reactivation(
+        &self,
+        prior: &SessionRecord,
+    ) -> Result<SessionRecord, ManagedError> {
+        // #12012: one guard over read, check and write, so a decommission
+        // landing in between is never overwritten (as #9034).
+        let mut guard = self.store.write().await;
+        let mut record = guard.get(&prior.id).await?;
+        if record.state != ManagedSessionState::Active {
+            return Ok(record);
+        }
+        let target = match &prior.state {
+            ManagedSessionState::Active => ManagedSessionState::Stopped,
+            other => other.clone(),
+        };
+        let restores_prior = target == prior.state;
+        record.set_lifecycle_state(target, Utc::now());
+        // #12012: the next relaunch resumes the same conversation.
+        record.claude_session_id = prior.claude_session_id.clone();
+        if restores_prior {
+            record.terminal_at = prior.terminal_at;
+            record.stop_cause = prior.stop_cause;
+        }
+        guard.upsert(record.clone()).await?;
+        drop(guard);
+        // #7087: leaving Active changes the active-project set again.
+        self.bump_residency_generation();
+        info!(id = %prior.id, state = %record.state, "in-place reactivate rolled back (#12012)");
+        Ok(record)
+    }
 }

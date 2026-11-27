@@ -47,9 +47,10 @@
 #   PATH (their real state on a stock dev machine — see PR description).
 
 TRUSTY_RUN_OR_CARGO_TIMEOUT_SECS="${TRUSTY_RUN_OR_CARGO_TIMEOUT_SECS:-180}"
-# #11821: this file's directory, for install_paths.py; builtins only (cd, pwd).
-case "${BASH_SOURCE[0]}" in */*) _RUN_OR_CARGO_LIB="${BASH_SOURCE[0]%/*}" ;; *) _RUN_OR_CARGO_LIB=. ;; esac
-_RUN_OR_CARGO_LIB="$(cd "$_RUN_OR_CARGO_LIB" && pwd)"
+# #11821: this file's directory, for install_paths.py.
+# #12021: one assignment in the self-location idiom, so tm's pm-guard resolves
+# the install_paths.py path statically instead of failing closed.
+_RUN_OR_CARGO_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # _run_or_cargo_bash_timeout <secs> <cmd...> — portable fallback for hosts with
 # neither GNU `timeout` nor `gtimeout` (e.g. stock macOS system bash). Runs
