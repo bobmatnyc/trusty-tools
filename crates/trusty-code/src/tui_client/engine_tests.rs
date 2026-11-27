@@ -128,8 +128,9 @@ fn forward_session_done_failed_marks_is_error() {
     );
     assert_eq!(
         rx.try_recv().expect("event"),
+        // #11788: an empty chunk rendered nothing; a failure carries text.
         ReplEvent::AssistantOutput {
-            chunk: String::new(),
+            chunk: "error: the run ended with status `failed`".into(),
             done: true,
             is_error: true,
         }
