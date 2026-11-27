@@ -135,6 +135,7 @@ fn target() -> ShutdownTarget {
         search_queries: vec!["acme/widget".into()],
         palace: Ok(Some("acme-widget".into())),
         palace_lookup: false,
+        palace_shared: None,
     }
 }
 
@@ -309,6 +310,7 @@ async fn a_daemon_not_running_holds_nothing_and_an_unresolved_target_fails() {
         search_queries: Vec::new(),
         palace: Err("could not resolve the palace: bad pin".into()),
         palace_lookup: false,
+        palace_shared: None,
     };
     let report = rig.capability().shut_down(&unresolved).await;
     // #11551: no queries is NotLoaded; a resolve error on a checkout stays Failed.
@@ -382,6 +384,56 @@ fn target_prefers_the_project_key_then_the_remote_then_the_path() {
     assert_eq!(none.palace, Ok(None), "nothing recorded, no palace");
     let checkout = ShutdownTarget::for_project(None, "", Some(root));
     assert!(!checkout.palace_lookup, "a checkout resolves as before");
+}
+
+/// Why: #11643 — `/a/code/app` and `/b/code/app` both derive `code-app`. An
+/// id another active project derives, or may derive because its own id does
+/// not resolve, must never be unloaded; the skip is reported, not guessed.
+/// Test: this test. Fails if a shared or ambiguous id reaches
+/// `memory.palace_get` or `memory.palace_unload`.
+#[tokio::test]
+async fn a_palace_id_another_project_derives_is_never_unloaded() {
+    let mine = ShutdownTarget::for_project(Some("local:1"), "/a/code/app", None);
+    assert_eq!(mine.palace, Ok(Some("code-app".to_string())), "premise");
+    let other = |id: Result<Option<String>, String>| vec![("other".to_string(), id)];
+    let cases = [
+        (other(Ok(Some("code-app".into()))), Some("same palace id")),
+        (
+            other(Err("bad pin".into())),
+            Some("no resolvable palace id"),
+        ),
+        (other(Ok(Some("b-app".into()))), None),
+        (other(Ok(None)), None),
+    ];
+    for (others, refused) in cases {
+        let target = mine.clone().refuse_shared_palace(&others);
+        let rig = rig(healthy_search(), healthy_memory()).await;
+        let report = rig.capability().shut_down(&target).await;
+        match refused {
+            Some(why) => {
+                match &report.palace {
+                    ShutdownState::Skipped { reason } => {
+                        assert!(reason.contains(why) && reason.contains("other"), "{reason}")
+                    }
+                    got => panic!("{others:?}: expected a reported skip, got {got:?}"),
+                }
+                assert!(report.still_loaded().is_empty(), "a skip is no failure");
+                assert!(rig.params_of("memory.palace_get").is_none(), "{others:?}");
+                assert!(rig.params_of(METHOD_PALACE_UNLOAD).is_none(), "{others:?}");
+            }
+            None => assert_eq!(
+                report.palace,
+                ShutdownState::Unloaded {
+                    id: "code-app".into()
+                },
+                "{others:?}"
+            ),
+        }
+    }
+    // A target with no id of its own has nothing to refuse.
+    let none = ShutdownTarget::for_project(Some("local:1"), "", None)
+        .refuse_shared_palace(&other(Err("bad pin".into())));
+    assert_eq!(none.palace_shared, None);
 }
 
 /// A trusty-search whose resolve answers only `path`, and misses all else.
