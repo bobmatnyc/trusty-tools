@@ -152,4 +152,43 @@ impl SessionManager {
         );
         Ok(record)
     }
+
+    /// Undo a [`Self::mark_reactivated`] whose follow-up steps failed (#12012).
+    ///
+    /// Why: the in-place reactivate route answers an error when the bound
+    /// project or its search index cannot be brought back, and the client then
+    /// does not exec `claude`. A record left `Active` with no runtime would be
+    /// a ghost, so the route rolls the flip back.
+    /// What: sets the record's state back to `prior.state`, or to `Stopped`
+    /// when `prior` was `Active` (the stale-`Active` reconcile path), and
+    /// restores `prior`'s `terminal_at`, `stop_cause` and `claude_session_id`
+    /// when the target is `prior.state`. A record that is no longer `Active`
+    /// is returned unchanged: something else already moved it.
+    /// Test: `a_failed_unpark_rolls_the_reactivate_back_to_stopped`,
+    /// `a_failed_project_reactivation_rolls_the_reactivate_back`.
+    pub(crate) async fn revert_reactivation(
+        &self,
+        prior: &SessionRecord,
+    ) -> Result<SessionRecord, ManagedError> {
+        let mut record = self.get(&prior.id).await?;
+        if record.state != ManagedSessionState::Active {
+            return Ok(record);
+        }
+        let target = match &prior.state {
+            ManagedSessionState::Active => ManagedSessionState::Stopped,
+            other => other.clone(),
+        };
+        let restores_prior = target == prior.state;
+        record.set_lifecycle_state(target, Utc::now());
+        if restores_prior {
+            record.terminal_at = prior.terminal_at;
+            record.stop_cause = prior.stop_cause;
+            record.claude_session_id = prior.claude_session_id.clone();
+        }
+        self.store.write().await.upsert(record.clone()).await?;
+        // #7087: leaving Active changes the active-project set again.
+        self.bump_residency_generation();
+        info!(id = %prior.id, state = %record.state, "in-place reactivate rolled back (#12012)");
+        Ok(record)
+    }
 }

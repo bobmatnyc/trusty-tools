@@ -119,7 +119,10 @@ pub async fn reactivate_managed_session(
 ///
 /// #9101: [`caller_pane_refusal`] answers 409 first, so a caller in a pane
 /// that only looks like the record's never gets the record reactivated.
-/// Test: `managed_reactivate_parity` in `daemon::rpc::managed_tests`.
+/// #12012: a reactivated record then runs [`reactivate_project_and_index`];
+/// its failure is a 500 and the record is rolled back off `Active`.
+/// Test: `managed_reactivate_parity` in `daemon::rpc::managed_tests`;
+/// `a_failed_unpark_rolls_the_reactivate_back_to_stopped`.
 pub(crate) async fn reactivate_core(
     state: &Arc<DaemonState>,
     id_str: &str,
@@ -133,10 +136,12 @@ pub(crate) async fn reactivate_core(
     if let Some(why) = caller_pane_refusal(&mgr, &id, params.caller_pane_id.as_deref()).await {
         return RouteOutcome::text(409, why);
     }
-    match mgr.mark_reactivated(&id).await {
-        Ok(record) => RouteOutcome::ok(&record_to_summary(&record)),
+    // #12012: the snapshot a failed project/index step rolls the record back to.
+    let prior = mgr.get(&id).await.ok();
+    let record = match mgr.mark_reactivated(&id).await {
+        Ok(record) => record,
         Err(ManagedError::SessionNotFound(_)) => {
-            RouteOutcome::text(404, format!("session {id_str} not found"))
+            return RouteOutcome::text(404, format!("session {id_str} not found"));
         }
         Err(ManagedError::InvalidState(_, reason)) => match reconcile_stale_active_then_reactivate(
             &mgr,
@@ -146,10 +151,61 @@ pub(crate) async fn reactivate_core(
         )
         .await
         {
-            Some(record) => RouteOutcome::ok(&record_to_summary(&record)),
-            None => RouteOutcome::text(409, reason),
+            Some(record) => record,
+            None => return RouteOutcome::text(409, reason),
         },
-        Err(e) => RouteOutcome::text(500, e.to_string()),
+        Err(e) => return RouteOutcome::text(500, e.to_string()),
+    };
+    match reactivate_project_and_index(state, &mgr, &record).await {
+        Ok(()) => RouteOutcome::ok(&record_to_summary(&record)),
+        Err(why) => RouteOutcome::text(500, roll_back(&mgr, prior.as_ref(), why).await),
+    }
+}
+
+/// Bring back the project `record` binds to, then its search index (#12012).
+///
+/// Why: spawn and resume reactivate a decommissioned project and unpark its
+/// index (#10988, #10989); the in-place relaunch is a third way a session of
+/// that project runs again, so it owes the same two steps.
+/// What: [`crate::project::ProjectRegistry::reactivate_for_session`] (the
+/// spawn rule: only projects the record binds to), then
+/// [`SessionManager::restore_parked_index`]. The first failure is `Err`.
+/// Test: `an_inplace_reactivate_reactivates_the_bound_project_and_unparks_its_index`,
+/// `an_inplace_reactivate_leaves_an_unbound_decommissioned_project_alone`.
+async fn reactivate_project_and_index(
+    state: &Arc<DaemonState>,
+    mgr: &SessionManager,
+    record: &SessionRecord,
+) -> Result<(), String> {
+    let registry = state.project_registry().await;
+    registry.reactivate_for_session(record).await.map_err(|e| {
+        format!(
+            "session {} ({}): its project could not be reactivated and still reads \
+             decommissioned (#12012): {e}",
+            record.id, record.tmux_name
+        )
+    })?;
+    mgr.restore_parked_index(&registry, record).await?;
+    Ok(())
+}
+
+/// Roll a failed in-place reactivate back off `Active`; answers the route's
+/// error text (#12012).
+///
+/// What: [`SessionManager::revert_reactivation`] to `prior`; a missing
+/// snapshot or a failed rollback is named in the text and logged.
+/// Test: `a_failed_unpark_rolls_the_reactivate_back_to_stopped`.
+async fn roll_back(mgr: &SessionManager, prior: Option<&SessionRecord>, why: String) -> String {
+    let Some(prior) = prior else {
+        tracing::error!("in-place reactivate failed with no prior record to roll back to: {why}");
+        return format!("{why}; the session record could not be rolled back (no prior record)");
+    };
+    match mgr.revert_reactivation(prior).await {
+        Ok(record) => format!("{why}; the session record was rolled back to {}", record.state),
+        Err(e) => {
+            tracing::error!(id = %prior.id, "in-place reactivate rollback failed: {e}");
+            format!("{why}; rolling the session record back also failed: {e}")
+        }
     }
 }
 
