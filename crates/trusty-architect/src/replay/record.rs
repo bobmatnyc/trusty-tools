@@ -264,8 +264,24 @@ pub fn record(
     Ok(rec)
 }
 
+/// `path` with every symlink resolved; `what` names the step in the error.
+fn canonical(path: &Path, what: &str) -> Result<PathBuf, ReplayError> {
+    std::fs::canonicalize(path).map_err(|source| ReplayError::Io {
+        what: what.into(),
+        source,
+    })
+}
+
 /// The sandbox input files the probe saw opened or listed; an error when the
 /// script reached a file outside the sandbox that is not its own code.
+///
+/// Why: `reads` must name every input the script used, and an outside open
+/// (live state) must be refused.
+/// What: canonicalizes each logged path and compares it with the canonical
+/// sandbox root, script dir and `sys.path` entries.
+/// Test: `record_refuses_a_read_outside_the_sandbox`,
+/// `record_resolves_a_script_dir_reached_through_a_symlink`,
+/// `record_refuses_a_python_script_whose_dir_does_not_resolve`.
 fn probe_reads(
     py: &Python,
     program: &Path,
@@ -279,13 +295,23 @@ fn probe_reads(
         .ok()
         .filter(|l| l.starts_with("probe\tstart\n"))
         .ok_or(ReplayError::ProbeLog)?;
+    // #12026: each opened path is canonicalized below, so the prefixes it is
+    // compared with must be canonical too (macOS `/var` -> `/private/var`);
+    // an unresolvable root or script dir is an error, never "inside".
+    let root = canonical(root, "canonicalize sandbox root")?;
     let script_dir = std::path::absolute(program)
         .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
+        .as_deref()
+        .and_then(Path::parent)
+        .map(|d| canonical(d, "canonicalize script dir"))
+        .transpose()?;
+    let root = root.as_path();
+    // A `sys.path` entry that does not exist (a `.zip`) keeps its raw form;
+    // a raw prefix can only fail to match, which counts a read as external.
     let lib: Vec<PathBuf> = log
         .lines()
         .filter_map(|l| l.strip_prefix("path\t"))
-        .map(PathBuf::from)
+        .map(|l| std::fs::canonicalize(l).unwrap_or_else(|_| PathBuf::from(l)))
         .collect();
     let mut reads = BTreeSet::new();
     let mut external = Vec::new();
