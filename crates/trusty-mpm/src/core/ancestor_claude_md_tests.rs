@@ -6,6 +6,7 @@
 use super::*;
 use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 use tempfile::TempDir;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// `<tmp>/ancestor/project`, canonicalised so assertions compare the same
 /// spelling the scan reports.
@@ -476,7 +477,7 @@ fn the_home_directory_is_never_a_project_boundary() {
     let Some((tmp, home, _project, file)) = dotfiles_home() else {
         return;
     };
-    std::fs::create_dir_all(home.join(".trusty-mpm")).unwrap();
+    std::fs::create_dir_all(home.join(MPM_DIR_NAME)).unwrap();
     let scratch = home.join("scratch");
     std::fs::create_dir_all(&scratch).unwrap();
 

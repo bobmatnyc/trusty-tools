@@ -759,7 +759,7 @@ fn local_checkout_for_keeps_an_absolute_repo_url() {
 fn local_checkout_for_expands_a_tilde_repo_url_10604() {
     let home = std::path::Path::new("/home/u");
     assert_eq!(
-        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", Some(home)),
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", Some(home)), // path-literal: allow (tilde input)
         Some(PathBuf::from("/home/u/trusty-mpm-projects/trusty-tools"))
     );
     assert_eq!(
@@ -768,7 +768,7 @@ fn local_checkout_for_expands_a_tilde_repo_url_10604() {
     );
     // No home to expand against: no answer, not a guessed managed clone.
     assert_eq!(
-        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", None),
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", None), // path-literal: allow (tilde input)
         None
     );
 }

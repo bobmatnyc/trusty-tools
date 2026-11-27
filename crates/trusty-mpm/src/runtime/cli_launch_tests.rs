@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{CliLaunch, CliLaunchError};
 use crate::runtime::launch_spec::LaunchSpec;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 /// The env assignments as `K=V` words, for substring assertions.
 fn env_words(spec: &LaunchSpec) -> Vec<String> {
@@ -260,7 +261,9 @@ fn inplace_and_client_specs_match_the_lines_they_replace() {
 fn worst_case_cli_launch_line_is_short_and_carries_no_token() {
     use crate::core::session_profile::{SessionProfile, launch_env};
     let home = Path::new("/Users/an-operator-with-a-long-name");
-    let mut managed = home.join("trusty-mpm-projects/an-operator-with-a-long-name");
+    let mut managed = home
+        .join(DEFAULT_WORKSPACE_DIR)
+        .join("an-operator-with-a-long-name");
     managed.push("an-uncomfortably-long-repository-name/dd0e2fb8-1111-2222-3333-444455556666");
     let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir_at(home);
     let root = crate::core::paths::FrameworkPaths::under(home).crate_config_root();

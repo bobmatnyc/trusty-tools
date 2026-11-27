@@ -86,9 +86,12 @@ fn check_session_profile_with(
 }
 
 /// The warning when the user config carries both grant tables.
-const BOTH_TABLES: &str = "~/.trusty-mpm/config.toml has both `[architect]` and the legacy \
-                           `[supervisor]`; `[architect]` is used and `[supervisor]` is ignored — \
-                           merge it into `[architect]` and delete it";
+// #11821: message text only; the bytes are unchanged.
+const BOTH_TABLES: &str = concat!(
+    "~/.trusty-mpm/config.toml has both `[architect]` and the legacy ", // path-literal: allow
+    "`[supervisor]`; `[architect]` is used and `[supervisor]` is ignored — \
+     merge it into `[architect]` and delete it",
+);
 
 /// The profile row's status and message, before the both-tables warning.
 fn profile_verdict(project_dir: Option<&Path>, config: &MpmConfig) -> (CheckStatus, String) {
@@ -240,7 +243,7 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("not allow-listed in ~/.trusty-mpm/config.toml"),
+                .contains("not allow-listed in ~/.trusty-mpm/config.toml"), // path-literal: allow
             "{}",
             check.message
         );
@@ -249,7 +252,7 @@ mod tests {
     #[test]
     fn an_allow_listed_architect_is_ok() {
         let (project, home) = fixture();
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(trusty_common::install_paths::MPM_DIR_NAME);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("config.toml"),
@@ -269,7 +272,7 @@ mod tests {
     #[test]
     fn both_architect_tables_warn() {
         let (project, home) = fixture();
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(trusty_common::install_paths::MPM_DIR_NAME);
         std::fs::create_dir_all(&root).unwrap();
         let listed = format!("{:?}", project.path().display().to_string());
         std::fs::write(
@@ -297,7 +300,7 @@ mod tests {
     /// An allow-listed Architect project and its scratch home.
     fn allow_listed() -> (tempfile::TempDir, tempfile::TempDir) {
         let (project, home) = fixture();
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(trusty_common::install_paths::MPM_DIR_NAME);
         std::fs::create_dir_all(&root).unwrap();
         let listed = format!("{:?}", project.path().display().to_string());
         std::fs::write(

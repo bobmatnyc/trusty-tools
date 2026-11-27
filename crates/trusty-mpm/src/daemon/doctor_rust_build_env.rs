@@ -316,7 +316,7 @@ pub(super) fn gather(project_dir: Option<&Path>, home: &Path) -> BuildEnvFacts {
         Err(e @ BuildEnvError::NoRepoIdentity) => {
             return BuildEnvFacts::Undetermined(format!(
                 "{e}. Set `build.cargo_target_dir` in \
-                 `~/.trusty-tools/trusty-mpm/config.yaml`"
+                 `~/.trusty-tools/trusty-mpm/config.yaml`" // path-literal: allow
             ));
         }
     };

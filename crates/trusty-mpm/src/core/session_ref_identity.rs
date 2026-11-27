@@ -244,7 +244,7 @@ pub(crate) fn session_ref_git_env_with(
                     return ambient(&format!(
                         "ambient git credential, no gh pin for {shown}. To pin one: `tm projects \
                          register <name> --repo-url {shown} --gh-account <login>`, or map the \
-                         repository's org in the [accounts] table of ~/.trusty-mpm/config.toml"
+                         repository's org in the [accounts] table of ~/.trusty-mpm/config.toml" // path-literal: allow
                     ));
                 }
                 Err(env) => return refused(&warning_of(&env), None, None),

@@ -255,7 +255,7 @@ pub fn protected_architect_dirs(
     // #10992: no home means the user config cannot be read; refuse.
     let home = home
         .filter(|h| h.is_absolute())
-        .ok_or("no home directory, so ~/.trusty-mpm/config.toml cannot be read")?;
+        .ok_or("no home directory, so ~/.trusty-mpm/config.toml cannot be read")?; // path-literal: allow
     let config = read_user_config(home)?;
     // #10992 critic HIGH: no profile filter — a malformed `.trusty-mpm.toml`
     // must not hide a recorded Architect.
