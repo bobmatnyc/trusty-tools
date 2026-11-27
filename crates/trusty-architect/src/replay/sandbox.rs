@@ -96,7 +96,9 @@ impl Sandbox {
     }
 
     /// Runs `program prefix.. argv..` in the sandbox with exactly `env` plus
-    /// `HOME` (the root) and `PATH` ([`SANDBOX_PATH`]); every value expanded.
+    /// `HOME` (the root) and `PATH` ([`SANDBOX_PATH`], after `fakes` when
+    /// given); every value expanded.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
         &self,
         program: &Path,
@@ -105,14 +107,20 @@ impl Sandbox {
         env: &BTreeMap<String, String>,
         stdin: &str,
         timeout: Duration,
+        fakes: Option<&Path>,
     ) -> Result<Finished, ReplayError> {
+        // See #12028: the fake stubs shadow every host binary of the same name.
+        let path = match fakes {
+            Some(dir) => format!("{}:{SANDBOX_PATH}", dir.to_string_lossy()),
+            None => SANDBOX_PATH.to_owned(),
+        };
         let mut cmd = Command::new(program);
         cmd.args(prefix)
             .args(argv.iter().map(|a| self.expand(a)))
             .current_dir(&self.root)
             .env_clear()
             .env("HOME", &self.root)
-            .env("PATH", SANDBOX_PATH);
+            .env("PATH", path);
         for (k, v) in env {
             cmd.env(k, self.expand(v));
         }

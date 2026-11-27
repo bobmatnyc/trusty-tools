@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::fakes::{FakeAnswer, FakeDir, Fakes};
 use super::sandbox::{Sandbox, Snapshot, changes, rel_key};
-use super::{ROOT_TOKEN, Recording, ReplayError, Scrubber, VERSION, check};
+use super::{FAKES_VERSION, ROOT_TOKEN, Recording, ReplayError, Scrubber, VERSION, check};
 
 /// The most seed bytes one recording copies; a fixture is text, not a tree.
 const SEED_LIMIT: u64 = 16 * 1024 * 1024;
@@ -79,6 +80,8 @@ pub struct RecordSpec {
     pub sessions: Vec<String>,
     /// The run's deadline.
     pub timeout: Duration,
+    /// Fake executables by name; empty records without fakes (#12028).
+    pub fakes: BTreeMap<String, Vec<FakeAnswer>>,
 }
 
 /// The Python probe for a `.py` program: the interpreter, its arguments and
@@ -136,9 +139,13 @@ pub(super) fn run_scrubber(
     sb: &Sandbox,
     program: &Path,
     python: Option<&Python>,
+    fakes: Option<&FakeDir>,
     parent_env: &BTreeMap<String, String>,
 ) -> Scrubber {
     let mut s = Scrubber::new().path(sb.root(), ROOT_TOKEN);
+    if let Some(f) = fakes {
+        s = s.path(f.root(), "{FAKES}"); // See #12028
+    }
     // A script's own directory shows only in its tracebacks; a binary's
     // directory (`/bin`) would also match `PATH` text, so it is left alone.
     if let Some(py) = python {
@@ -212,6 +219,18 @@ pub fn record(
     let argv: Vec<String> = spec.argv.iter().map(|a| input.text(a)).collect();
     let stdin = input.text(&spec.stdin);
     let python = Python::for_program(&spec.program, parent_env)?;
+    // See #12028: the stubs answer the scrubbed inputs the recording keeps.
+    let stubs = Fakes {
+        stubs: spec.fakes.clone(),
+        calls: Vec::new(),
+    }
+    .map(|t| input.text(t))
+    .stubs;
+    let fake_dir = if stubs.is_empty() {
+        None
+    } else {
+        Some(FakeDir::new(&stubs, &|t| sb.expand(t))?)
+    };
     let mut run_env = env.clone();
     let (program, prefix) = match &python {
         Some(py) => {
@@ -221,7 +240,16 @@ pub fn record(
         }
         None => (spec.program.clone(), Vec::new()),
     };
-    let fin = sb.run(&program, &prefix, &argv, &run_env, &stdin, spec.timeout)?;
+    let bin = fake_dir.as_ref().map(FakeDir::bin);
+    let fin = sb.run(
+        &program,
+        &prefix,
+        &argv,
+        &run_env,
+        &stdin,
+        spec.timeout,
+        bin,
+    )?;
     let exit = fin.status.code().ok_or(ReplayError::Signal)?;
     let after = sb.snapshot()?;
     let reads = match &python {
@@ -245,8 +273,23 @@ pub fn record(
             .transpose()?;
         writes.insert(k, content);
     }
+    let fakes = match &fake_dir {
+        None => None,
+        Some(dir) => {
+            let calls = dir.calls()?;
+            let names = calls.iter().filter_map(|c| c.first());
+            if let Some(name) = names.into_iter().find(|n| !stubs.contains_key(*n)) {
+                return Err(ReplayError::Undeclared(name.clone()));
+            }
+            Some(Fakes { stubs, calls })
+        }
+    };
     let raw = Recording {
-        version: VERSION,
+        version: if fakes.is_some() {
+            FAKES_VERSION
+        } else {
+            VERSION
+        },
         argv,
         stdin,
         env,
@@ -256,9 +299,16 @@ pub fn record(
         stderr: text(fin.stderr, "stderr")?,
         exit,
         writes,
+        fakes,
     };
-    let scrubber =
-        run_scrubber(&sb, &spec.program, python.as_ref(), parent_env).sessions(&spec.sessions);
+    let scrubber = run_scrubber(
+        &sb,
+        &spec.program,
+        python.as_ref(),
+        fake_dir.as_ref(),
+        parent_env,
+    )
+    .sessions(&spec.sessions);
     let rec = scrubber.recording(raw);
     check(&rec, &spec.sessions)?;
     Ok(rec)

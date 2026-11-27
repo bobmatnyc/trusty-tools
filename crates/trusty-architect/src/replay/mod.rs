@@ -13,9 +13,12 @@
 //! session name or a secret-shaped value. [`replay`] runs a target binary on
 //! a fresh sandbox built from the recording and reports every differing
 //! channel. [`save`] is the only fixture writer and checks before it writes.
+//! A recording may declare [`Fakes`]: stub executables first on `PATH`
+//! whose answers and calls the recording holds (#12028).
 //! Test: `tests/replay_tool.rs`, `tests/replay_level_lint.rs`.
 
 mod diff;
+mod fakes;
 mod record;
 mod sandbox;
 mod scrub;
@@ -26,11 +29,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub use diff::{Channel, Mismatch, Target, replay};
+pub use fakes::{FakeAnswer, Fakes, GUARDED};
 pub use record::{EnvRule, RecordSpec, record};
 pub use scrub::{Refusal, RefusalKind, SKILL_NAMES, Scrubber, check};
 
 /// The recording format version this build reads and writes.
 pub const VERSION: u32 = 1;
+/// The version of a recording that declares [`Fakes`] (#12028). A version-1
+/// reader ignores the `fakes` field and would replay without the stubs, so a
+/// recording with fakes carries this version and an old reader refuses it.
+/// A recording without fakes stays version 1, byte for byte.
+pub const FAKES_VERSION: u32 = 2;
 /// The token that stands for the sandbox root in every recorded string.
 pub const ROOT_TOKEN: &str = "{ROOT}";
 /// The fixed `PATH` both sides run under; the parent's `PATH` is never recorded.
@@ -63,6 +72,22 @@ pub struct Recording {
     pub exit: i32,
     /// Files the run created or changed (`Some(content)`) or deleted (`None`).
     pub writes: BTreeMap<String, Option<String>>,
+    /// Fake executables and the calls the run made to them; absent from the
+    /// JSON when the recording declares none (#12028).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fakes: Option<Fakes>,
+}
+
+impl Recording {
+    /// The version this recording must carry: [`FAKES_VERSION`] with fakes,
+    /// else [`VERSION`].
+    pub fn expected_version(&self) -> u32 {
+        if self.fakes.is_some() {
+            FAKES_VERSION
+        } else {
+            VERSION
+        }
+    }
 }
 
 /// A record, replay or fixture step that could not complete.
@@ -100,6 +125,10 @@ pub enum ReplayError {
         /// The first one, with the home directory shown as `~`.
         first: String,
     },
+    /// The run called a [`GUARDED`] executable the recording does not declare
+    /// as a fake (#12028).
+    #[error("the program called {0}, which is not declared as a fake; declare one")]
+    Undeclared(String),
     /// The open probe's log is missing or lacks its first line, so the files
     /// the script opened are unknown (#12026).
     #[error("the open probe log is missing or damaged; the script's reads are unknown")]
@@ -147,6 +176,7 @@ pub fn save(path: &Path, rec: &Recording, sessions: &[String]) -> Result<(), Rep
 }
 
 /// Reads a fixture, refusing a wrong version or one that fails [`check`].
+/// A fixture with fakes must be [`FAKES_VERSION`]; one without, [`VERSION`].
 pub fn load(path: &Path) -> Result<Recording, ReplayError> {
     let format = |reason: String| ReplayError::Format {
         path: path.to_path_buf(),
@@ -157,9 +187,10 @@ pub fn load(path: &Path) -> Result<Recording, ReplayError> {
         source,
     })?;
     let rec: Recording = serde_json::from_str(&text).map_err(|e| format(e.to_string()))?;
-    if rec.version != VERSION {
+    // See #12028: the version follows whether the recording declares fakes.
+    if rec.version != rec.expected_version() {
         return Err(format(format!(
-            "version {} (this build reads {VERSION})",
+            "version {} (this build reads {VERSION}, or {FAKES_VERSION} with fakes)",
             rec.version
         )));
     }
