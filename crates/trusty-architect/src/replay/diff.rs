@@ -9,7 +9,9 @@
 //! differing channel. A `.py` target runs under the recorder's open probe, so
 //! a Python self-replay sees the same interpreter frames. A recording with
 //! fakes replays with the same stubs first on `PATH`, and its call list is
-//! one more channel (#12028).
+//! one more channel (#12028). A recording with a clock replays with its
+//! instant in [`super::CLOCK_ENV`], which a `.py` target's probe freezes on
+//! and a Rust replay entry point reads (#12028).
 //! Test: `replay_reports_a_one_byte_change_in_each_channel`,
 //! `replay_of_an_unchanged_program_is_clean`.
 
@@ -22,7 +24,7 @@ use super::fakes::{FakeDir, calls_diff};
 use super::record::{Python, run_scrubber};
 use super::sandbox::{Sandbox, changes};
 use super::scrub::leaks;
-use super::{Recording, ReplayError};
+use super::{CLOCK_ENV, Recording, ReplayError};
 
 /// Longest excerpt, in bytes, of a differing line shown in a [`Mismatch`].
 const EXCERPT: usize = 100;
@@ -150,6 +152,9 @@ pub fn replay(
         None => (target.program.clone(), Vec::new()),
     };
     prefix.extend(target.prefix.iter().cloned());
+    if let Some(t) = rec.clock {
+        env.insert(CLOCK_ENV.into(), t.to_string()); // See #12028
+    }
     // See #12028: the recorded stubs, so the target meets the same answers.
     let fake_dir = match &rec.fakes {
         Some(f) => Some(FakeDir::new(&f.stubs, &|t| sb.expand(t))?),

@@ -10,6 +10,9 @@
 //! listing (an `os.open` write flag counts as a write, not a read), so
 //! `reads` names the input files the script used and an open outside the
 //! sandbox (live state) is refused. A missing probe log is an error.
+//! With [`RecordSpec::clock`] set, the probe first runs [`CLOCK_PY`], which
+//! freezes the script's wall clock at that instant, and `TZ` defaults to
+//! `UTC` in the recorded env (#12028).
 //! Test: `record_captures_argv_stdin_env_files_and_writes`,
 //! `record_keeps_env_outside_the_allowlist_out`,
 //! `record_refuses_a_read_outside_the_sandbox`,
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use super::fakes::{FakeAnswer, FakeDir, Fakes};
 use super::sandbox::{Sandbox, Snapshot, changes, rel_key};
-use super::{FAKES_VERSION, ROOT_TOKEN, Recording, ReplayError, Scrubber, VERSION, check};
+use super::{CLOCK_ENV, ROOT_TOKEN, Recording, ReplayError, Scrubber, check};
 
 /// The most seed bytes one recording copies; a fixture is text, not a tree.
 const SEED_LIMIT: u64 = 16 * 1024 * 1024;
@@ -31,6 +34,13 @@ const SEED_LIMIT: u64 = 16 * 1024 * 1024;
 /// script's environment is the allowlist alone.
 const PROBE: &str = r#"import os, runpy, sys
 _log = open(os.environ.pop("TRUSTY_REPLAY_PROBE"), "a", encoding="utf-8")
+_clock = os.environ.pop("TRUSTY_REPLAY_CLOCK", None)
+if _clock is not None:
+    _ns = {}
+    _src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clock.py")
+    with open(_src, encoding="utf-8") as _f:
+        exec(compile(_f.read(), _src, "exec"), _ns)
+    _ns["freeze"](_clock)
 _log.write("probe\tstart\n")
 _W = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 for _p in sys.path[1:]:
@@ -53,6 +63,10 @@ sys.argv = sys.argv[1:]
 sys.path[0] = os.path.dirname(_script)
 runpy.run_path(_script, run_name="__main__")
 "#;
+
+/// The clock wrapper the probe loads when [`CLOCK_ENV`] is set (#12028). It
+/// patches the time functions; the script runs unmodified.
+const CLOCK_PY: &str = include_str!("clock.py");
 
 /// One allowlist entry: a fixed value (may hold `{ROOT}`) or the parent's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +96,8 @@ pub struct RecordSpec {
     pub timeout: Duration,
     /// Fake executables by name; empty records without fakes (#12028).
     pub fakes: BTreeMap<String, Vec<FakeAnswer>>,
+    /// The frozen instant, epoch seconds; `None` runs on the live clock (#12028).
+    pub clock: Option<i64>,
 }
 
 /// The Python probe for a `.py` program: the interpreter, its arguments and
@@ -111,10 +127,12 @@ impl Python {
             .ok_or(ReplayError::NoPython)?;
         let dir = Sandbox::new("probe")?;
         let probe = dir.root().join("probe.py");
-        std::fs::write(&probe, PROBE).map_err(|source| ReplayError::Io {
-            what: "write probe".into(),
-            source,
-        })?;
+        for (name, text) in [("probe.py", PROBE), ("clock.py", CLOCK_PY)] {
+            std::fs::write(dir.root().join(name), text).map_err(|source| ReplayError::Io {
+                what: format!("write {name}"),
+                source,
+            })?;
+        }
         let script = std::path::absolute(program).map_err(|source| ReplayError::Io {
             what: "resolve script".into(),
             source,
@@ -183,12 +201,16 @@ fn text(bytes: Vec<u8>, field: &str) -> Result<String, ReplayError> {
 ///
 /// Why: see the module doc; `parent_env` is a parameter so a test can prove
 /// a variable outside the allowlist never arrives.
-/// What: refuse an env rule for `HOME` or `PATH` (#12028), then seed, run,
-/// diff the sandbox, scrub, [`check`]. Returns the
+/// What: refuse an env rule for `HOME` or `PATH`, and a clock on a program
+/// that is not a `.py` script (#12028), then seed, run,
+/// diff the sandbox, scrub, [`check`]. With a clock, `TZ=UTC` joins the env
+/// unless a rule names `TZ`, and the program gets [`CLOCK_ENV`]. Returns the
 /// scrubbed recording; nothing is written.
 /// Test: `record_captures_argv_stdin_env_files_and_writes`,
 /// `record_keeps_env_outside_the_allowlist_out`,
-/// `a_recorded_path_env_cannot_displace_the_fake_stubs`.
+/// `a_recorded_path_env_cannot_displace_the_fake_stubs`,
+/// `a_clocked_script_replays_clean_against_a_stand_in_that_reads_the_seam`,
+/// `clock_on_a_program_the_wrapper_cannot_freeze_is_refused`.
 pub fn record(
     spec: &RecordSpec,
     parent_env: &BTreeMap<String, String>,
@@ -205,6 +227,14 @@ pub fn record(
     {
         return Err(ReplayError::BadArg(format!(
             "--env {k}: the sandbox sets HOME and PATH itself"
+        )));
+    }
+    // See #12028: only the `.py` probe freezes the clock; a recording must
+    // not claim an instant the program never ran at.
+    if spec.clock.is_some() && spec.program.extension().and_then(|e| e.to_str()) != Some("py") {
+        return Err(ReplayError::BadArg(format!(
+            "--clock: {} is not a .py script, so its clock cannot be frozen",
+            spec.program.display()
         )));
     }
     // Inputs are scrubbed before the run, so the program sees exactly what is
@@ -232,6 +262,11 @@ pub fn record(
             env.insert(k.clone(), input.text(v));
         }
     }
+    if spec.clock.is_some() {
+        // See #12028: pin the zone too, so local time is the same on every host.
+        env.entry("TZ".to_owned())
+            .or_insert_with(|| "UTC".to_owned());
+    }
     let argv: Vec<String> = spec.argv.iter().map(|a| input.text(a)).collect();
     let stdin = input.text(&spec.stdin);
     let python = Python::for_program(&spec.program, parent_env)?;
@@ -248,6 +283,9 @@ pub fn record(
         Some(FakeDir::new(&stubs, &|t| sb.expand(t))?)
     };
     let mut run_env = env.clone();
+    if let Some(t) = spec.clock {
+        run_env.insert(CLOCK_ENV.into(), t.to_string()); // See #12028
+    }
     let (program, prefix) = match &python {
         Some(py) => {
             let log = py.log.to_string_lossy().into_owned();
@@ -300,12 +338,8 @@ pub fn record(
             Some(Fakes { stubs, calls })
         }
     };
-    let raw = Recording {
-        version: if fakes.is_some() {
-            FAKES_VERSION
-        } else {
-            VERSION
-        },
+    let mut raw = Recording {
+        version: 0,
         argv,
         stdin,
         env,
@@ -316,7 +350,9 @@ pub fn record(
         exit,
         writes,
         fakes,
+        clock: spec.clock,
     };
+    raw.version = raw.expected_version();
     let scrubber = run_scrubber(
         &sb,
         &spec.program,

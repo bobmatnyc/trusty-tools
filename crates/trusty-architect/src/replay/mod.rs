@@ -14,7 +14,10 @@
 //! a fresh sandbox built from the recording and reports every differing
 //! channel. [`save`] is the only fixture writer and checks before it writes.
 //! A recording may declare [`Fakes`]: stub executables first on `PATH`
-//! whose answers and calls the recording holds (#12028).
+//! whose answers and calls the recording holds (#12028), and a frozen
+//! [`Recording::clock`]: the recorder runs a Python script under a wrapper
+//! that pins its wall clock, and replay hands the same instant to the target
+//! in [`CLOCK_ENV`] (#12028).
 //! Test: `tests/replay_tool.rs`, `tests/replay_level_lint.rs`.
 
 mod diff;
@@ -40,6 +43,21 @@ pub const VERSION: u32 = 1;
 /// recording with fakes carries this version and an old reader refuses it.
 /// A recording without fakes stays version 1, byte for byte.
 pub const FAKES_VERSION: u32 = 2;
+/// The version of a recording with a [`Recording::clock`], with or without
+/// fakes (#12028). A version-2 reader would replay it on the live clock, so
+/// it refuses this version.
+pub const CLOCK_VERSION: u32 = 3;
+/// The variable that carries a recording's frozen instant (epoch seconds) to
+/// the program, on record and on replay; never recorded.
+///
+/// Why: the target of a replay is a separate process, and the instant has to
+/// reach it without a setting the shipped binaries obey (#12028).
+/// What: the Python wrapper pops it and freezes the clock; a Rust replay
+/// entry point (an example or test binary, never a shipped `[[bin]]`) reads
+/// it and passes a fixed [`crate::clock::Clock`] to the ported code.
+/// Test: `a_clocked_script_replays_clean_against_a_stand_in_that_reads_the_seam`,
+/// `a_stand_in_that_ignores_the_clock_seam_reports_a_diff`.
+pub const CLOCK_ENV: &str = "TRUSTY_REPLAY_CLOCK";
 /// The token that stands for the sandbox root in every recorded string.
 pub const ROOT_TOKEN: &str = "{ROOT}";
 /// The fixed `PATH` both sides run under; the parent's `PATH` is never recorded.
@@ -76,13 +94,19 @@ pub struct Recording {
     /// JSON when the recording declares none (#12028).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fakes: Option<Fakes>,
+    /// The frozen instant, epoch seconds, both sides ran at; absent from the
+    /// JSON when the run used the live clock (#12028).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<i64>,
 }
 
 impl Recording {
-    /// The version this recording must carry: [`FAKES_VERSION`] with fakes,
-    /// else [`VERSION`].
+    /// The version this recording must carry: [`CLOCK_VERSION`] with a
+    /// clock, [`FAKES_VERSION`] with fakes, else [`VERSION`].
     pub fn expected_version(&self) -> u32 {
-        if self.fakes.is_some() {
+        if self.clock.is_some() {
+            CLOCK_VERSION // See #12028
+        } else if self.fakes.is_some() {
             FAKES_VERSION
         } else {
             VERSION
@@ -176,7 +200,7 @@ pub fn save(path: &Path, rec: &Recording, sessions: &[String]) -> Result<(), Rep
 }
 
 /// Reads a fixture, refusing a wrong version or one that fails [`check`].
-/// A fixture with fakes must be [`FAKES_VERSION`]; one without, [`VERSION`].
+/// The version must be [`Recording::expected_version`].
 pub fn load(path: &Path) -> Result<Recording, ReplayError> {
     let format = |reason: String| ReplayError::Format {
         path: path.to_path_buf(),
@@ -190,7 +214,8 @@ pub fn load(path: &Path) -> Result<Recording, ReplayError> {
     // See #12028: the version follows whether the recording declares fakes.
     if rec.version != rec.expected_version() {
         return Err(format(format!(
-            "version {} (this build reads {VERSION}, or {FAKES_VERSION} with fakes)",
+            "version {} (this build reads {VERSION}, {FAKES_VERSION} with fakes, \
+             {CLOCK_VERSION} with a clock)",
             rec.version
         )));
     }
