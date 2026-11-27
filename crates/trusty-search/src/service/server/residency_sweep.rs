@@ -101,13 +101,16 @@ async fn run_residency_sweep_tick_inner(state: &Arc<SearchAppState>, hook: impl 
 /// What: two candidate sources feed one park loop. (1) Grace: when the active
 /// set is trusted, a resident non-member whose absence and last activity both
 /// reach the grace period parks, even under the cap. (2) Cap: over the cap,
-/// [`crate::service::lazy_loader::ids_to_park`] ranks only non-members. A
-/// stale or absent set leaves (1) empty and (2) unpinned, which is the
-/// pre-#10533 tick. Warm pins and a `Running` reindex block either source.
+/// [`crate::service::lazy_loader::ids_to_park`] ranks only non-members, and
+/// keeps one non-member when members fill the cap (ruling (b)). An untrusted
+/// set leaves (1) empty and (2) unpinned, which is the pre-#10533 tick. Warm
+/// pins and a `Running` reindex block either source.
+/// `TRUSTY_MAX_RESIDENT_INDEXES=off` returns before either source runs.
 /// Test: `sweep_keeps_an_active_set_member_resident_past_the_cap`,
 /// `non_member_parks_only_after_the_grace_period_with_no_query`,
 /// `stale_or_absent_set_sweep_behaves_as_today`,
-/// `running_reindex_blocks_an_active_set_grace_park`.
+/// `running_reindex_blocks_an_active_set_grace_park`,
+/// `max_resident_off_parks_nothing_not_even_a_grace_park`.
 async fn run_residency_sweep_tick_at(
     state: &Arc<SearchAppState>,
     now: Instant,
@@ -122,8 +125,21 @@ async fn run_residency_sweep_tick_at(
         return; // TRUSTY_MAX_RESIDENT_INDEXES=off — nothing is ever parked.
     };
 
-    // #10533: `None` when the active set is stale, absent or empty.
-    let members = state.residency_pins.members(now);
+    // #10533: `None` when the active set is stale, absent, empty, or names no
+    // registered index.
+    let registered = super::residency_pins::registered_in(state);
+    let members = state.residency_pins.members(now, &registered);
+    let member_count = members.as_ref().map_or(0, HashSet::len);
+    // #10533 ruling (b): warn once per change when the pins fill the cap.
+    if state
+        .residency_pins
+        .note_over_cap(member_count > 0 && member_count >= cap)
+    {
+        tracing::warn!(
+            "residency-sweep: {member_count} active-set index(es) fill the resident cap of \
+             {cap}; the most recently active non-member keeps one slot"
+        );
+    }
     let resident_ids: HashSet<String> = state.registry.list().into_iter().map(|id| id.0).collect();
     if resident_ids.len() <= cap && members.is_none() {
         return;
@@ -207,11 +223,16 @@ async fn run_residency_sweep_tick_at(
 /// Why (#10533): design section 3, ACTIVE to PARKED. A warm pin or a
 /// `Running` reindex keeps it out of the grace list up front, so the cap stage
 /// still counts it as resident.
-/// What: `false` whenever `pinned` is empty (stale, absent or empty set). The
-/// last activity is the later of the persisted recency key and the in-memory
-/// `last_queried_write_cache` stamp.
+/// What: `false` whenever `pinned` is empty (untrusted set). The last
+/// activity is the latest of the persisted recency key (last query or
+/// reindex), the in-memory `last_queried_write_cache` stamp, and the
+/// indexer's own activity clock, which every query, grep, chunk page and
+/// ingest advances. An indexer whose lock is held counts as active.
 /// Test: `non_member_parks_only_after_the_grace_period_with_no_query`,
-/// `running_reindex_blocks_an_active_set_grace_park`.
+/// `running_reindex_blocks_an_active_set_grace_park`,
+/// `a_search_without_a_stamp_write_keeps_a_non_member_within_grace`,
+/// `grep_and_list_chunks_keep_a_non_member_resident_within_grace`,
+/// `a_recent_reindex_counts_as_activity_for_the_grace_period`.
 fn grace_candidate(
     state: &SearchAppState,
     entry: &PersistedIndex,
@@ -226,14 +247,23 @@ fn grace_candidate(
     if state.warm.is_pinned(&entry.id) || reindex_running(state, &id) {
         return false;
     }
+    // #10533: the stamp is written at most once per 60 s, and grep, chunk
+    // pages and the fan-out never write it; the indexer clock sees them all.
+    let Some(handle) = state.registry.get(&id) else {
+        return false;
+    };
+    let Ok(indexer) = handle.indexer.try_read() else {
+        return false;
+    };
+    let clock = now_unix.saturating_sub(indexer.idle_duration().as_secs());
     let cached = state
         .last_queried_write_cache
         .get(&id)
         .map_or(0, |stamp| *stamp);
-    let last_activity = warmboot_sort_key(entry).max(cached);
+    let last_activity = warmboot_sort_key(entry).max(cached).max(clock);
     let pins = &state.residency_pins;
     grace_expired(
-        pins.absent_for(&entry.id, now),
+        pins.absent_for(&entry.id, now, &super::residency_pins::registered_in(state)),
         last_activity,
         pins.grace(),
         now_unix,

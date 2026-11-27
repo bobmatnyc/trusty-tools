@@ -389,6 +389,8 @@ async fn health_counter_wire_shape_is_unchanged_by_the_id_field() {
         // TRUSTY_MAX_RESIDENT_INDEXES=off.
         ("resident_index_cap", "number"),
         ("resident_index_cap_source", "string"),
+        // #10533: additive `{trusted, pinned_members}`; always present.
+        ("residency_active_set", "object"),
         ("disk_bytes", "number"),
         ("cpu_pct", "number"),
         ("background_reindex_queue_depth", "number"),

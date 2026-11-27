@@ -286,9 +286,13 @@ pub fn residency_sweep_secs() -> u64 {
 /// absent). A pinned entry is never returned. Pinned residents still count
 /// against `cap`, so the non-pinned rest keep the top `cap - pinned` slots by
 /// recency and the remainder is returned; empty when `resident_entries.len() <=
-/// cap`. With `pinned` empty this is the pre-#10533 selection exactly.
+/// cap`. When pinned residents fill a non-zero cap, one non-pinned slot is
+/// kept anyway (ruling (b)). With `pinned` empty this is the pre-#10533
+/// selection exactly.
 /// Test: `ids_to_park_keeps_top_n_by_recency`, `ids_to_park_empty_when_under_cap`,
-/// `ids_to_park_never_chooses_an_active_set_member`.
+/// `ids_to_park_never_chooses_an_active_set_member`,
+/// `active_set_members_count_against_the_cap`,
+/// `cap_keeps_the_most_recent_non_member_when_members_fill_the_cap`.
 pub fn ids_to_park(
     resident_entries: Vec<PersistedIndex>,
     cap: usize,
@@ -301,7 +305,12 @@ pub fn ids_to_park(
     let (kept, rankable): (Vec<_>, Vec<_>) = resident_entries
         .into_iter()
         .partition(|e| pinned.contains(&e.id));
-    let budget = cap.saturating_sub(kept.len());
+    let mut budget = cap.saturating_sub(kept.len());
+    // #10533 ruling (b): members filling the cap still leave the most recently
+    // active non-member resident, so every sweep does not park all of them.
+    if cap > 0 && !kept.is_empty() {
+        budget = budget.max(1);
+    }
     let (_keep_resident, park) = select_warmboot_entries(rankable, Some(budget));
     park
 }

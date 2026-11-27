@@ -6,10 +6,13 @@
 //! What: [`spawn_residency_pull_ticker`] pulls the set every
 //! `TRUSTY_RESIDENCY_PULL_SECS` (default 30) and hands the result to
 //! [`apply_pull`], which records it in `state.residency_pins` and pre-wakes
-//! every member that is registered but cold-parked. `TRUSTY_RESIDENCY=off`
-//! or a pull interval of `0` spawns nothing, so the sweep runs as before.
+//! members that are registered but cold-parked, leaving one resident slot for
+//! a non-member. `TRUSTY_RESIDENCY=off` or a pull interval of `0` spawns
+//! nothing, so the sweep runs as before.
 //! Test: `apply_pull_records_a_set_and_keeps_it_across_a_failure`,
-//! `prewake_targets_names_only_cold_registered_members`.
+//! `prewake_targets_names_only_cold_registered_members`,
+//! `prewake_leaves_one_slot_for_a_non_member`,
+//! `pull_interval_zero_disables_the_ticker`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -25,7 +28,8 @@ use crate::core::registry::{IndexHandle, IndexId};
 
 /// Deadline for one `mpm.residency.active` pull. Matches
 /// `trusty_common::memory_rpc::DEFAULT_TIMEOUT`, the sibling UDS client.
-const ACTIVE_SET_PULL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Test: `active_set_pull_timeout_is_five_seconds`.
+pub(super) const ACTIVE_SET_PULL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn the active-set pull ticker.
 ///
@@ -39,19 +43,19 @@ const ACTIVE_SET_PULL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Test: the tick body is `apply_pull`, covered by
 /// `apply_pull_records_a_set_and_keeps_it_across_a_failure`.
 pub(super) fn spawn_residency_pull_ticker(state: Arc<SearchAppState>) {
-    if !residency_enabled(std::env::var(RESIDENCY_ENABLED_ENV).ok().as_deref()) {
-        tracing::info!("residency-pull: disabled via {RESIDENCY_ENABLED_ENV}=off");
+    let Some(period) = pull_interval(
+        std::env::var(RESIDENCY_ENABLED_ENV).ok().as_deref(),
+        std::env::var(RESIDENCY_PULL_SECS_ENV).ok().as_deref(),
+    ) else {
+        tracing::info!(
+            "residency-pull: disabled via {RESIDENCY_ENABLED_ENV}=off or {RESIDENCY_PULL_SECS_ENV}=0"
+        );
         return;
-    }
-    let secs = residency_pull_secs(std::env::var(RESIDENCY_PULL_SECS_ENV).ok().as_deref());
-    if secs == 0 {
-        tracing::info!("residency-pull: disabled via {RESIDENCY_PULL_SECS_ENV}=0");
-        return;
-    }
+    };
     let weak = Arc::downgrade(&state);
     drop(state);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(secs));
+        let mut interval = tokio::time::interval(period);
         // A slow pre-wake must not trigger a burst of catch-up pulls.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -67,31 +71,57 @@ pub(super) fn spawn_residency_pull_ticker(state: Arc<SearchAppState>) {
     });
 }
 
+/// The pull period, or `None` when `TRUSTY_RESIDENCY` is off or
+/// `TRUSTY_RESIDENCY_PULL_SECS` is `0` (the ticker then never spawns).
+/// Test: `pull_interval_zero_disables_the_ticker`.
+pub(super) fn pull_interval(enabled: Option<&str>, secs: Option<&str>) -> Option<Duration> {
+    if !residency_enabled(enabled) {
+        return None;
+    }
+    let secs = residency_pull_secs(secs);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
 /// Record one pull result and pre-wake the members it names.
 ///
 /// What: `Ok` is observed at `now`; `Err` is a pull failure at `now`. Then,
 /// while the set is trusted, each id from [`prewake_targets`] is loaded
 /// through the query path and its watcher resumed. A load that fails (the
 /// embedder is not ready, the index is parked in the project map) is logged at
-/// debug and retried on the next tick.
-/// Test: `apply_pull_records_a_set_and_keeps_it_across_a_failure`.
+/// debug and retried on the next tick. A change of the set's freshness is
+/// logged once at info.
+/// Test: `apply_pull_records_a_set_and_keeps_it_across_a_failure`,
+/// `freshness_change_reports_each_transition_once`.
 pub(super) async fn apply_pull(
     state: &Arc<SearchAppState>,
     pulled: Result<ActiveProjectSet, String>,
     now: Instant,
 ) {
-    match pulled {
-        Ok(set) => state.residency_pins.observe(set, now),
+    let registered = super::residency_pins::registered_in(state);
+    let ok = match pulled {
+        Ok(set) => {
+            state.residency_pins.observe(set, now, &registered);
+            true
+        }
         Err(e) => {
             tracing::debug!("residency-pull: mpm.residency.active unavailable: {e}");
             state.residency_pins.on_pull_failure(now);
-            return;
+            false
         }
+    };
+    // #10533: one info line per fresh/stale change, not one per pull.
+    if let Some(fresh) = state.residency_pins.freshness_change(now) {
+        let word = if fresh { "fresh" } else { "stale" };
+        tracing::info!("residency-pull: the active-project set is now {word}");
     }
-    let Some(members) = state.residency_pins.members(now) else {
+    if !ok {
+        return;
+    }
+    let Some(members) = state.residency_pins.members(now, &registered) else {
         return;
     };
-    for id in prewake_targets(state, &members) {
+    let cap = crate::service::lazy_loader::resolve_max_resident_indexes_for(state.machine_tier).cap;
+    for id in prewake_targets(state, &members, cap) {
         match super::index_resolve::resolve_or_load_index(state, &id).await {
             Ok(handle) => {
                 resume_watcher(state, &handle).await;
@@ -109,8 +139,16 @@ pub(super) async fn apply_pull(
 /// The members that are registered but not resident: cold-parked and not
 /// permanently failed. Sorted, so the wake order is stable.
 ///
-/// Test: `prewake_targets_names_only_cold_registered_members`.
-pub(super) fn prewake_targets(state: &SearchAppState, members: &HashSet<String>) -> Vec<IndexId> {
+/// #10533 ruling (b): under a cap, resident members plus the targets stay at
+/// most `cap - 1`, so one slot is free for a non-member. `cap: None`
+/// (`TRUSTY_MAX_RESIDENT_INDEXES=off`) has no bound.
+/// Test: `prewake_targets_names_only_cold_registered_members`,
+/// `prewake_leaves_one_slot_for_a_non_member`.
+pub(super) fn prewake_targets(
+    state: &SearchAppState,
+    members: &HashSet<String>,
+    cap: Option<usize>,
+) -> Vec<IndexId> {
     let mut ids: Vec<IndexId> = members
         .iter()
         .map(|id| IndexId::new(id.clone()))
@@ -121,6 +159,13 @@ pub(super) fn prewake_targets(state: &SearchAppState, members: &HashSet<String>)
         })
         .collect();
     ids.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(cap) = cap {
+        let resident_members = members
+            .iter()
+            .filter(|id| state.registry.get(&IndexId::new((*id).clone())).is_some())
+            .count();
+        ids.truncate(cap.saturating_sub(1).saturating_sub(resident_members));
+    }
     ids
 }
 
