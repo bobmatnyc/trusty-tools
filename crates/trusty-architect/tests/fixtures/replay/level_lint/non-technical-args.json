@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "non-technical",
+    "Ship",
+    "the",
+    "app",
+    "via",
+    "cargo",
+    "now,",
+    "see",
+    "README.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "level_lint [non-technical]: tool `cargo` (line 1)\nlevel_lint [non-technical]: path `README.md` (line 1)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

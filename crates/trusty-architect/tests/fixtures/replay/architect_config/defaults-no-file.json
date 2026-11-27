@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/README.md": "no config here\n"
+  },
+  "reads": [],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npath: {ROOT}/r/local/architect.json\nowner_name: \nmemory_palace: \ndashboard_port: 7890\ntailnet_url: \nunknown: \nprojects_root: {ROOT}/trusty-mpm-projects\nclaude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npoll_interval_s: 60\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

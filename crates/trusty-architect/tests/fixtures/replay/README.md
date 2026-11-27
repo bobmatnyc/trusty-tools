@@ -7,29 +7,72 @@ a fixture holding a home path or a secret-shaped value fails the suite.
 
 ## level_lint
 
-The first end-to-end example: three runs of the Architect's `level_lint.py`,
-recorded from `<prototype-dir>/scripts/level_lint.py` and replayed in
-`tests/replay_level_lint.rs` against the Rust stand-in
-`examples/replay_standin_level_lint.rs`.
+Sixteen runs of the Architect's `level_lint.py`, replayed in
+`tests/replay_level_lint.rs` against `examples/replay_port.rs level_lint`
+(the port, `trusty_architect::level_lint`; #12028 P1c retired the #12026
+stand-in). The first three (`pm-strict-file`, `unknown-level-stdin`,
+`engineer-quiet`) are #12026's and still replay clean against the frozen
+Python reference; the other thirteen were recorded from it on 2026-11-27. No recording
+needs `--clock`: the script reads no time.
 
-Regenerate from a checkout of the prototype (inputs are plain text):
+| Recording | Case |
+|---|---|
+| `rules-corpus` | Every rule, URL masking, overlaps, Unicode `\w`/`\d`, `re.I` job names |
+| `crlf-file` | `\r\n` and a lone `\r` in a `--file` (universal newlines) |
+| `non-technical-args`, `cto-equals-quiet`, `abbrev-and-dashes` | TEXT arguments, `--level=cto`, `--lev`/`--s` abbreviations, `--` |
+| `empty-stdin`, `empty-file` | Empty input |
+| `bad-arg-*`, `help` | argparse paths |
+
+Not recordable: a run without `--level` reads the store beside the script
+(`<checkout>/local/owner-queue`), outside the sandbox, so the recorder refuses
+it; `tests/level_lint_smoke.rs` covers that path on the shipped binary, and
+the `technical_level` `read-*` recordings cover the read itself. A missing
+`--file` ends in a traceback, which the port reduces to its last line.
+
+Regenerate with the script and its imports (`technical_level.py`,
+`dashboard_store.py`, `dashboard_jsonl.py`, `dashboard_schema.py`) copied to
+a sandbox directory `P`, never the live checkout:
 
 ```sh
-P=<prototype-dir>/scripts/level_lint.py
-printf 'Ran cargo test on src/lib.rs:12 with --no-fail-fast.\nSet RUST_LOG first, then see `poll_once`.\n' > note.md
-printf 'Ship it with --force; tmux keeps the pane.\n' > stdin.txt
 R=trusty-architect-replay; D=tests/fixtures/replay/level_lint
-$R record --out $D/pm-strict-file.json --seed note.md=note.md -- $P --level pm --strict --file note.md
-$R record --out $D/unknown-level-stdin.json --stdin-file stdin.txt -- $P --level wizard
-$R record --out $D/engineer-quiet.json --seed note.md=note.md -- $P --level engineer --file note.md
+$R record --out $D/rules-corpus.json --seed corpus.md=corpus.md -- $P/level_lint.py --level pm --strict --file corpus.md
+$R replay $D/*.json -- $P/level_lint.py
+$R replay $D/*.json -- <target>/debug/examples/replay_port level_lint
 ```
 
-Check that the Python script and the stand-in both replay clean:
+## technical_level and architect_config
+
+Both are libraries. Each directory holds `driver.py`, copied beside the
+frozen Python reference module (and the modules it imports) at record time
+(2026-11-27), that calls the
+library and prints its answers; `examples/replay_port.rs` mirrors each driver
+line for line. `tests/replay_readers.rs` replays them.
+
+- `technical_level/`: `driver.py table | value V... | read ROOT`, twelve
+  recordings: the tables, odd values, a read of a `dir` and a `jsonl` store,
+  a missing store, key or valid value (all `pm`), and the store errors (a
+  corrupt document, the other format, a bad `DASHBOARD_FORMAT`), which the
+  driver prints as the exception class only: the store's own message texts
+  differ by design (#10063).
+- `architect_config/`: `driver.py ROOT`, twenty-seven recordings: a full file
+  (repeated key, unknown keys, a big integer, path normalisation), defaults
+  for a missing or blank file, every environment override, `ARCHITECT_CONFIG`
+  present and missing, each JSON error class, every type and range refusal.
 
 ```sh
-$R replay $D/pm-strict-file.json $D/unknown-level-stdin.json $D/engineer-quiet.json -- $P
-$R replay $D/pm-strict-file.json $D/unknown-level-stdin.json $D/engineer-quiet.json -- <target>/debug/examples/replay_standin_level_lint
+R=trusty-architect-replay; D=tests/fixtures/replay/architect_config
+cp $D/driver.py $P/ac_driver.py
+$R record --out $D/full-file.json --seed full=r -- $P/ac_driver.py '{ROOT}/r'
+$R replay $D/*.json -- <target>/debug/examples/replay_port architect_config
 ```
+
+## ledger_spec_check (not ported)
+
+`ledger_spec_check.py` imports `test_ledger_spec` from its own directory and
+runs its Python `unittest` guards in process; the guards start `datg.py`,
+`il_dashboard_sync.py` and `dashboard-db.py` by `sys.executable`. A recording
+cannot capture that (fakes reach only a `PATH` lookup), and a Rust port has no
+Python guards to run, so #12028 P1c leaves it unported.
 
 ## spec_drift_check
 

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "pm",
+    "--strict"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

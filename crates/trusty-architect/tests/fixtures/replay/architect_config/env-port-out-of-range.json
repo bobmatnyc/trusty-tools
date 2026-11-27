@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_PORT": "99999999999999999999999"
+  },
+  "files": {
+    "r/README.md": "no config here\n"
+  },
+  "reads": [],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: environment: DASHBOARD_PORT: must be an integer in 1..65535\n",
+  "exit": 1,
+  "writes": {}
+}

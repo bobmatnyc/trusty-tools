@@ -1,32 +1,25 @@
-//! #12026 end-to-end: the `level_lint.py` recordings replay clean against a Rust binary.
+//! #12026 end-to-end, #12028 P1c port: every `level_lint.py` recording replays clean against the port.
 //!
 //! The recordings in `tests/fixtures/replay/level_lint/` were made from the
-//! Architect's `level_lint.py` and replay clean against it (see the fixture
-//! README); this test replays the same files against the Rust stand-in
-//! `examples/replay_standin_level_lint.rs`, the target P1 (#12028) replaces.
+//! Architect's `level_lint.py` (the first three by #12026, the rest from the
+//! frozen Python reference on 2026-11-27) and replay clean against it (see the
+//! fixture README); this test replays them against `examples/replay_port.rs`,
+//! which runs `trusty_architect::level_lint::run`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 use std::time::Duration;
 
 use trusty_architect::replay::{Target, load, replay};
 
 mod replay_support;
 
-const NAME: &str = "replay_standin_level_lint";
-
-fn standin() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| replay_support::build_example(NAME))
-}
-
 #[test]
-fn level_lint_recordings_replay_clean_against_the_rust_stand_in() {
+fn level_lint_recordings_replay_clean_against_the_port() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/replay/level_lint");
     let target = Target {
-        program: standin().to_path_buf(),
-        prefix: Vec::new(),
+        program: replay_support::build_example("replay_port"),
+        prefix: vec!["level_lint".to_owned()],
     };
     let parent = BTreeMap::from([("PATH".to_owned(), std::env::var("PATH").unwrap_or_default())]);
     let mut names = Vec::new();
@@ -41,9 +34,22 @@ fn level_lint_recordings_replay_clean_against_the_rust_stand_in() {
     assert_eq!(
         names,
         [
+            "abbrev-and-dashes.json",
+            "bad-arg-ambiguous.json",
+            "bad-arg-explicit.json",
+            "bad-arg-missing-value.json",
+            "bad-arg-option-in-text.json",
+            "bad-arg-unrecognized.json",
+            "crlf-file.json",
+            "cto-equals-quiet.json",
+            "empty-file.json",
+            "empty-stdin.json",
             "engineer-quiet.json",
+            "help.json",
+            "non-technical-args.json",
             "pm-strict-file.json",
-            "unknown-level-stdin.json"
+            "rules-corpus.json",
+            "unknown-level-stdin.json",
         ]
     );
     let strict = load(&dir.join("pm-strict-file.json")).unwrap();
@@ -53,4 +59,12 @@ fn level_lint_recordings_replay_clean_against_the_rust_stand_in() {
         "the probe saw the file read"
     );
     assert_eq!(strict.exit, 1);
+    // Every rule fires at least once in the corpus recording.
+    let corpus = load(&dir.join("rules-corpus.json")).unwrap();
+    for rule in ["path", "sha", "flag", "envvar", "job", "tool", "identifier"] {
+        assert!(
+            corpus.stdout.contains(&format!("]: {rule} `")),
+            "{rule} missing"
+        );
+    }
 }

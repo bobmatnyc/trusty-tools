@@ -1,0 +1,4 @@
+Added
+- `trusty-architect-level-lint`, the Rust port of the Architect's `level_lint.py`, with the library functions `level_lint::lint` and `level_lint::run`; it replaces the #12026 replay stand-in. Sixteen recordings of the frozen script replay clean against it (#12028).
+- `technical_level` (the six levels, their rules, `normalize`, `line` and `read` from the dashboard store) and `architect_config::load` (the `local/architect.json` reader with its environment overrides and refusals; JSON nested deeper than 1,000 levels is a `ConfigError`), ports of the Architect's `technical_level.py` and `architect_config.py`. Thirty-nine recordings made through small Python drivers replay clean against them (#12028).
+- A shared Python 3.14 `argparse` parser for the script ports; `spec_drift_check` now uses it and also reads `-1x`-style arguments and `-hX` chains as Python does (#12028).

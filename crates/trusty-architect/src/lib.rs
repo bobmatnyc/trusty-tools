@@ -24,12 +24,17 @@
 //! `trusty-architect-sched` binary (shadow mode, parity, cutover, rollback).
 //! #10063 adds [`dashboard`], the Architect dashboard store (formats, locking,
 //! versions, batches, tally).
+//! #12028 P1c adds [`technical_level`], [`level_lint`] (and its
+//! `trusty-architect-level-lint` binary) and [`architect_config`], ports of
+//! the Architect's level and config readers.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
 //
 // See #9171
 
+pub mod architect_config;
+mod argparse;
 pub mod classify;
 mod clock;
 pub mod dashboard;
@@ -42,10 +47,12 @@ pub mod install_paths;
 // #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
 pub mod il;
 pub mod ledger;
+pub mod level_lint;
 mod pointer;
 pub mod poller;
 mod process;
 mod pyjson;
+mod pyjson_load;
 mod pystr;
 pub mod quiet;
 // #12026: record-then-replay parity tool for the script ports.
@@ -61,6 +68,7 @@ mod sha1;
 mod sha256;
 // See #12028: the spec_drift_check.py port (P1b).
 pub mod spec_drift;
+pub mod technical_level;
 mod tmux;
 pub mod verbs;
 

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/local/architect.json": "{\n  \"owner_name\": \"Sample Owner\",\n  \"memory_palace\": \"sample-palace\",\n  \"dashboard_port\": 7900,\n  \"tailnet_url\": \"https://box.example.test:7890/\",\n  \"repos\": {\n    \"tools\": {\"slug\": \"acme/tools\", \"gh_config_dir\": \"~/.config/gh-acme\", \"checkout\": \"/srv/tools\", \"branch\": \"main\"},\n    \"site\": {\"slug\": \"acme/site\"}\n  },\n  \"caps\": {\"builder_slots\": 2, \"load_factor\": 1.5, \"max_agents\": 12, \"budget\": 1e-5, \"huge\": 123456789012345678901234567890},\n  \"projects_root\": \"projects/../work/./tree/\",\n  \"claude_config_dir\": \"~/cc\",\n  \"poll_interval_s\": 30,\n  \"zeta\": true,\n  \"alpha\": null,\n  \"owner_name\": \"Second Owner\"\n}\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npath: {ROOT}/r/local/architect.json\nowner_name: Second Owner\nmemory_palace: sample-palace\ndashboard_port: 7900\ntailnet_url: https://box.example.test:7890/\nrepo tools: slug=acme/tools gh_config_dir=~/.config/gh-acme checkout=/srv/tools\nrepo site: slug=acme/site gh_config_dir= checkout=\ncap builder_slots: 2\ncap load_factor: 1.5\ncap max_agents: 12\ncap budget: 1e-05\ncap huge: 123456789012345678901234567890\nunknown: alpha repos.tools.branch zeta\nprojects_root: {ROOT}/work/tree\nclaude_config_dir: {ROOT}/cc\npoll_interval_s: 30\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "argv": [
+    "read",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "q/meta.jsonl": "{\"data\":{\"technical_level\":\"pm\"},\"id\":\"settings\",\"sv\":1,\"version\":1}\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "read raised StoreError\n",
+  "exit": 1,
+  "writes": {}
+}
