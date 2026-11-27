@@ -27,6 +27,11 @@ path = "src/bin/trusty-architect-il.rs"
 name = "trusty-architect-replay"
 path = "src/bin/trusty-architect-replay.rs"
 
+# #12028: the spec_drift_check.py port.
+[[bin]]
+name = "trusty-architect-spec-drift-check"
+path = "src/bin/trusty-architect-spec-drift-check.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

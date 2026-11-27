@@ -59,6 +59,8 @@ pub mod self_ctx;
 pub mod serve;
 mod sha1;
 mod sha256;
+// See #12028: the spec_drift_check.py port (P1b).
+pub mod spec_drift;
 mod tmux;
 pub mod verbs;
 

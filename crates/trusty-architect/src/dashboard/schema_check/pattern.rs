@@ -14,8 +14,14 @@
 //! Pike VM (two thread lists, no recursion), so stack use does not depend on
 //! the input and time is O(input × program) (#10063 df-G01): `.` skips `\n`,
 //! `$` also matches before one final `\n`.
+//! [`Pattern::compile_python`] (#12028) also takes `\b`, `\B`, `\d`, `\D`,
+//! `\s`, `\S`, `\w` and `\W` outside a class, with Python's Unicode classes
+//! from [`crate::pystr`], for patterns a manifest supplies at run time.
 //! Test: `pattern_matches_like_python_re_search`, `pattern_refuses_unsupported_syntax`,
-//! `shipped_patterns_match_a_megabyte_on_a_small_stack`.
+//! `shipped_patterns_match_a_megabyte_on_a_small_stack`,
+//! `python_shorthands_match_like_re_search`.
+
+use crate::pystr::{is_digit, is_space, is_word};
 
 /// The largest `{n}` / `{n,m}` count a pattern may use.
 pub const MAX_COUNT: usize = 1000;
@@ -39,6 +45,9 @@ enum Inst {
     },
     Start,
     End,
+    // See #12028: `\d`/`\s`/`\w` (negated: `\D`/`\S`/`\W`) and `\b`/`\B`.
+    Short(Short, bool),
+    Boundary(bool),
     Split(usize, usize),
     Jmp(usize),
     Match,
@@ -54,6 +63,8 @@ enum Node {
     },
     Start,
     End,
+    Short(Short, bool),
+    Boundary(bool),
     Group(Vec<Vec<Node>>),
     Repeat {
         node: Box<Node>,
@@ -62,10 +73,29 @@ enum Node {
     },
 }
 
+/// A Python shorthand class.
+#[derive(Debug, Clone, Copy)]
+enum Short {
+    Digit,
+    Space,
+    Word,
+}
+
+impl Short {
+    fn test(self, c: char) -> bool {
+        match self {
+            Self::Digit => is_digit(c),
+            Self::Space => is_space(c),
+            Self::Word => is_word(c),
+        }
+    }
+}
+
 struct Parser<'a> {
     chars: Vec<char>,
     pos: usize,
     source: &'a str,
+    python: bool,
 }
 
 impl Pattern {
@@ -74,10 +104,23 @@ impl Pattern {
     /// # Errors
     /// A message naming the unsupported or malformed part.
     pub fn compile(source: &str) -> Result<Self, String> {
+        Self::compile_with(source, false)
+    }
+
+    /// Parses `source` with the Python shorthands as well (see the module doc).
+    ///
+    /// # Errors
+    /// A message naming the unsupported or malformed part.
+    pub fn compile_python(source: &str) -> Result<Self, String> {
+        Self::compile_with(source, true)
+    }
+
+    fn compile_with(source: &str, python: bool) -> Result<Self, String> {
         let mut p = Parser {
             chars: source.chars().collect(),
             pos: 0,
             source,
+            python,
         };
         let alts = p.alternation()?;
         if p.pos != p.chars.len() {
@@ -141,6 +184,13 @@ impl Pattern {
                 Inst::End if i == s.len() || (i + 1 == s.len() && s[i] == '\n') => {
                     stack.push(pc + 1);
                 }
+                Inst::Boundary(want) => {
+                    let before = i > 0 && is_word(s[i - 1]);
+                    let after = s.get(i).is_some_and(|c| is_word(*c));
+                    if (before != after) == want {
+                        stack.push(pc + 1);
+                    }
+                }
                 _ => {}
             }
         }
@@ -152,6 +202,7 @@ impl Pattern {
         match &self.prog[pc] {
             Inst::Char(c) => *c == ch,
             Inst::Any => ch != '\n',
+            Inst::Short(class, negate) => class.test(ch) != *negate,
             Inst::Class { negate, ranges } => {
                 ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&ch)) != *negate
             }
@@ -244,6 +295,8 @@ impl Emitter {
                 .map(drop),
             Node::Start => self.push(Inst::Start).map(drop),
             Node::End => self.push(Inst::End).map(drop),
+            Node::Short(c, n) => self.push(Inst::Short(*c, *n)).map(drop),
+            Node::Boundary(b) => self.push(Inst::Boundary(*b)).map(drop),
             Node::Group(inner) => self.alts(inner),
             Node::Repeat { node, min, max } => {
                 for _ in 0..*min {
@@ -314,6 +367,19 @@ impl Parser<'_> {
             '$' => Node::End,
             '.' => Node::Any,
             '[' => self.class()?,
+            '\\' if self.python => match self.peek() {
+                Some(c @ ('b' | 'B' | 'd' | 'D' | 's' | 'S' | 'w' | 'W')) => {
+                    self.pos += 1;
+                    let negate = c.is_ascii_uppercase();
+                    match c.to_ascii_lowercase() {
+                        'b' => Node::Boundary(!negate),
+                        'd' => Node::Short(Short::Digit, negate),
+                        's' => Node::Short(Short::Space, negate),
+                        _ => Node::Short(Short::Word, negate),
+                    }
+                }
+                _ => Node::Char(self.escaped()?),
+            },
             '\\' => Node::Char(self.escaped()?),
             '(' => {
                 if self.peek() == Some('?') {
@@ -482,5 +548,22 @@ mod tests {
             assert!(Pattern::compile(bad).is_err(), "{bad}");
         }
         assert!(Pattern::compile("a{1000}").is_ok());
+    }
+
+    #[test]
+    fn python_shorthands_match_like_re_search() -> Result<(), String> {
+        let word = Pattern::compile_python("\\bAcme\\b")?;
+        assert!(word.search("an Acme host") && word.search("Acme"));
+        assert!(!word.search("Acmes") && !word.search("_Acme"));
+        assert!(Pattern::compile_python("build-\\d+")?.search("build-\u{663}"));
+        assert!(Pattern::compile_python("a\\s+b")?.search("a \u{a0}b"));
+        assert!(Pattern::compile_python("^\\w\\W\\S\\D$")?.search("x-yz"));
+        assert!(
+            Pattern::compile_python("a\\Bb")?.search("ab")
+                && !Pattern::compile_python("a\\B")?.search("a")
+        );
+        assert!(Pattern::compile_python("ws-[a-z-]+-0[0-9]")?.search("ws-main-branch-07"));
+        assert!(Pattern::compile("\\b").is_err() && Pattern::compile_python("[\\d]").is_err());
+        Ok(())
     }
 }

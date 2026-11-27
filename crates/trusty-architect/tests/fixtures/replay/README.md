@@ -30,3 +30,48 @@ Check that the Python script and the stand-in both replay clean:
 $R replay $D/pm-strict-file.json $D/unknown-level-stdin.json $D/engineer-quiet.json -- $P
 $R replay $D/pm-strict-file.json $D/unknown-level-stdin.json $D/engineer-quiet.json -- <target>/debug/examples/replay_standin_level_lint
 ```
+
+## spec_drift_check
+
+Eleven runs of the frozen Python reference, the Architect's
+`spec_drift_check.py`, recorded on 2026-11-27 with `--clock 1795784400` and
+replayed in `tests/replay_spec_drift_check.rs` against
+`examples/replay_port.rs`. Each recording passes the root as `--root {ROOT}`.
+Every recording is the recorder's capture of the reference's real output;
+none was written or edited by hand. The input of each is its `files`: a
+curated sample checkout (manifest, spec, instruction files, skills,
+references, codex docs, owner-queue items, soak log, improvement ledger)
+built with sample names only. It is not a copy of any live tree.
+
+The `-h` path is not recorded: the reference's help description names an
+instance id, which the port omits. A unit test in `src/spec_drift/args.rs`
+pins that one difference.
+
+`daily-pass` and `daily-no-log` run the reference on a sample checkout shaped
+like the daily input, with no orphan reference, so every check passes or is
+pending. `drift-orphan-fail` adds one reference the manifest does not list and
+reproduces the reference's current orphan-reference failure (INV-03).
+
+| Recording | Case |
+|---|---|
+| `daily-pass` | The PASS path (PASS and PENDING only, exit 0) |
+| `daily-no-log` | The same with `--no-log`: no writes |
+| `drift-orphan-fail` | A reference not in the manifest (INV-03 FAIL); writes the ledger |
+| `drift-many-fail` | Every check fails, CRLF and non-ASCII text included |
+| `pre-phase-pending` | Before phase 1: no skill index, no owner queue, an unenforced sentence (WARN) |
+| `missing-manifest`, `empty-manifest`, `manifest-key-errors` | Error and empty inputs |
+| `bad-arg-unrecognized`, `bad-arg-root-value`, `bad-arg-explicit` | argparse paths |
+
+Regenerate: lay a recording's `files` into a directory `S`, then, with the
+script and the `dashboard_*.py` modules it imports copied to a sandbox
+directory `P` (never the live checkout; use a path without a symlinked
+component, `/private/tmp` rather than `/tmp` on macOS):
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/spec_drift_check
+$R record --clock 1795784400 --out $D/daily-pass.json \
+  $(for e in $(ls -A $S); do printf -- '--seed %s=%s ' "$S/$e" "$e"; done) \
+  -- $P/spec_drift_check.py --root '{ROOT}'
+$R replay $D/*.json -- $P/spec_drift_check.py
+$R replay $D/*.json -- <target>/debug/examples/replay_port spec_drift_check
+```

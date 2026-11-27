@@ -1,0 +1,57 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    ".claude/skills/.hidden-draft/SKILL.md": "# Hidden draft, ignored by glob\n",
+    ".claude/skills/architect-dashboard/SKILL.md": "# Dashboard\n\nItems carry a session.\n",
+    ".claude/skills/architect-operating-rules/SKILL.md": "# Clean\n\nEach rule has exactly one home file.\n",
+    ".claude/skills/architect-workflow/SKILL.md": "# Clean\n",
+    ".claude/skills/architect/references/architect-drift-guard.md": "# Drift guard\n\nRun the drift check once a day.\nUse `python3 scripts/spec_drift_check.py`.\n",
+    ".claude/skills/architect/references/architect-writing-style.md": "# Writing style\n\nOne idea per sentence. The owner1x tag is not a rig term.\n",
+    ".claude/skills/architect/references/instance-host.md": "# Clean\n",
+    ".claude/skills/architect/references/instance-index.md": "# Clean\n",
+    ".claude/skills/sample-outside/SKILL.md": "# Outside scope\n",
+    ".claude/skills/sample-retiring/SKILL.md": "# Retiring\n",
+    "AGENTS.md": "# Agents\n\nNever restart a system daemon.\nRead the skill index first.\n",
+    "ARCHITECT.md": "# Architect\n\nThe Architect supervises the fleet.\n",
+    "CLAUDE.md": "# Claude\n\nSee AGENTS.md.\n",
+    "docs/architect/codex-support.md": "# Clean\n",
+    "docs/architect/history.md": "# History\n",
+    "docs/specs/SPEC-ARCHITECT-COMPONENTS.md": "# SPEC-ARCHITECT-COMPONENTS (sample)\n\nThe pass calls `scripts/spec_drift_check.py` once a day.\n\n## Invariants\n\nINV-01 tags. INV-02 files. INV-03 orphans. INV-04 budget. INV-05 scrub.\nINV-06 single source. INV-07 index. INV-08 this list. INV-09 the call. INV-10 scope.\n\n## Components\n\n### C1 Instructions\n### C2 Operating rules\n### C3 Workflow\n### C4 Dashboard\n### C5 Drift guard\n### C6 Writing\n### C7 Codex\n### C8 Rig\n",
+    "docs/specs/architect-components.manifest.json": "{\n  \"_doc\": \"Sample component manifest for the spec drift check replay.\",\n  \"agents_md_budget\": {\n    \"lines\": 40,\n    \"bytes\": 4500\n  },\n  \"outside_scope\": [\n    \"sample-outside\"\n  ],\n  \"retiring\": [\n    \"sample-retiring\"\n  ],\n  \"rig_terms\": [\n    \"\\\\bAcme\\\\b\",\n    \"/srv/acme/\",\n    \"\\\\bowner1\\\\b\",\n    \"examplecorp\",\n    \"\\\\bHOSTX\\\\b\",\n    \"host-linux\",\n    \"ws-[a-z-]+-0[0-9]\",\n    \"build-\\\\d+\",\n    \"secret\\\\s+word\"\n  ],\n  \"single_source\": [\n    {\n      \"id\": \"SS-01\",\n      \"home\": \"agents-md\",\n      \"sentence\": \"Never restart a system daemon.\"\n    },\n    {\n      \"id\": \"SS-02\",\n      \"home\": \"architect-operating-rules\",\n      \"sentence\": \"Each rule has   exactly one home file.\"\n    },\n    {\n      \"id\": \"SS-03\",\n      \"home\": \"architect-drift-guard\",\n      \"sentence\": \"Run the drift check once a day.\"\n    },\n    {\n      \"id\": \"SS-04\",\n      \"home\": \"architect-workflow\",\n      \"sentence\": \"Ship after the check.\",\n      \"enforce\": false\n    }\n  ],\n  \"files\": [\n    {\n      \"name\": \"agents-md\",\n      \"component\": 1,\n      \"kind\": \"generic\",\n      \"path\": \"AGENTS.md\",\n      \"scrubbed\": true\n    },\n    {\n      \"name\": \"codex-support\",\n      \"component\": 7,\n      \"kind\": \"generic\",\n      \"path\": \"docs/architect/codex-support.md\"\n    },\n    {\n      \"name\": \"architect-operating-rules\",\n      \"component\": 2,\n      \"kind\": \"generic\",\n      \"scrubbed\": false\n    },\n    {\n      \"name\": \"architect-workflow\",\n      \"component\": 3,\n      \"kind\": \"generic\",\n      \"scrubbed\": false\n    },\n    {\n      \"name\": \"architect-dashboard\",\n      \"component\": 4,\n      \"kind\": \"generic\"\n    },\n    {\n      \"name\": \"architect-drift-guard\",\n      \"component\": 5,\n      \"kind\": \"generic\",\n      \"scrubbed\": false\n    },\n    {\n      \"name\": \"architect-writing-style\",\n      \"component\": 6,\n      \"kind\": \"generic\",\n      \"scrubbed\": true\n    },\n    {\n      \"name\": \"instance-index\",\n      \"component\": 8,\n      \"kind\": \"rig\"\n    },\n    {\n      \"name\": \"instance-host\",\n      \"component\": 8,\n      \"kind\": \"rig\"\n    },\n    {\n      \"name\": \"architect-review\",\n      \"component\": 3,\n      \"kind\": \"generic\",\n      \"phase\": 1\n    }\n  ],\n  \"session_scope_enforced\": false\n}\n",
+    "local/improvements.md": "# Improvements\n\n- 2026-11-20T09:00Z sample entry. Status: closed.\n",
+    "local/soak/spec-drift.jsonl": "{\"date\": \"2026-11-26\", \"detail\": {}, \"exit\": 0, \"results\": {}, \"ts\": \"2026-11-26T13:00:00Z\"}\n"
+  },
+  "reads": [
+    ".claude/skills/architect-dashboard/SKILL.md",
+    ".claude/skills/architect-operating-rules/SKILL.md",
+    ".claude/skills/architect-workflow/SKILL.md",
+    ".claude/skills/architect/references/architect-drift-guard.md",
+    ".claude/skills/architect/references/architect-writing-style.md",
+    ".claude/skills/architect/references/instance-host.md",
+    ".claude/skills/architect/references/instance-index.md",
+    ".claude/skills/sample-outside/SKILL.md",
+    ".claude/skills/sample-retiring/SKILL.md",
+    "AGENTS.md",
+    "ARCHITECT.md",
+    "CLAUDE.md",
+    "docs/architect/codex-support.md",
+    "docs/architect/history.md",
+    "docs/specs/SPEC-ARCHITECT-COMPONENTS.md",
+    "docs/specs/architect-components.manifest.json"
+  ],
+  "stdout": "INV-01 PASS 10 entries tagged\nINV-02 PENDING 1 entries wait for their phase: architect-review\nINV-03 PASS no orphans\nINV-04 PENDING AGENTS.md 4 lines, 69 bytes (budget 40 lines, 4500 bytes); enforced from phase 1 (skill index not present)\nINV-05 PASS 2 scrubbed generic files clean\nINV-06 WARN 3 of 4 single-source; not yet single: SS-04 in no file (home .claude/skills/architect-workflow/SKILL.md)\nINV-07 PENDING skill index not present (phase 1)\nINV-08 PASS 10 invariants and 8 component sections match\nINV-09 PASS spec and drift-guard skill both call it\nINV-10 PENDING no dashboard items found; enforced when session_scope_enforced is true\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/soak/spec-drift.jsonl": "{\"date\": \"2026-11-26\", \"detail\": {}, \"exit\": 0, \"results\": {}, \"ts\": \"2026-11-26T13:00:00Z\"}\n{\"date\": \"2026-11-27\", \"detail\": {\"INV-02\": \"1 entries wait for their phase: architect-review\", \"INV-04\": \"AGENTS.md 4 lines, 69 bytes (budget 40 lines, 4500 bytes); enforced from phase 1 (skill index not present)\", \"INV-06\": \"3 of 4 single-source; not yet single: SS-04 in no file (home .claude/skills/architect-workflow/SKILL.md)\", \"INV-07\": \"skill index not present (phase 1)\", \"INV-10\": \"no dashboard items found; enforced when session_scope_enforced is true\"}, \"exit\": 0, \"results\": {\"INV-01\": \"PASS\", \"INV-02\": \"PENDING\", \"INV-03\": \"PASS\", \"INV-04\": \"PENDING\", \"INV-05\": \"PASS\", \"INV-06\": \"WARN\", \"INV-07\": \"PENDING\", \"INV-08\": \"PASS\", \"INV-09\": \"PASS\", \"INV-10\": \"PENDING\"}, \"ts\": \"2026-11-27T13:00:00Z\"}\n"
+  },
+  "clock": 1795784400
+}

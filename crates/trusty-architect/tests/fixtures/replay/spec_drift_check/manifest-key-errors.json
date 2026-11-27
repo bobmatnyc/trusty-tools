@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "docs/specs/SPEC-ARCHITECT-COMPONENTS.md": "# SPEC-ARCHITECT-COMPONENTS (sample)\n\nThe pass calls `scripts/spec_drift_check.py` once a day.\n\n## Invariants\n\nINV-01 tags. INV-02 files. INV-03 orphans. INV-04 budget. INV-05 scrub.\nINV-06 single source. INV-07 index. INV-08 this list. INV-09 the call. INV-10 scope.\n\n## Components\n\n### C1 Instructions\n### C2 Operating rules\n### C3 Workflow\n### C4 Dashboard\n### C5 Drift guard\n### C6 Writing\n### C7 Codex\n### C8 Rig\n",
+    "docs/specs/architect-components.manifest.json": "{}\n"
+  },
+  "reads": [
+    "docs/specs/SPEC-ARCHITECT-COMPONENTS.md",
+    "docs/specs/architect-components.manifest.json"
+  ],
+  "stdout": "INV-01 FAIL check error: KeyError: 'files'\nINV-02 FAIL check error: KeyError: 'files'\nINV-03 FAIL check error: KeyError: 'files'\nINV-04 FAIL check error: FileNotFoundError: [Errno 2] No such file or directory: '{ROOT}/AGENTS.md'\nINV-05 FAIL check error: KeyError: 'rig_terms'\nINV-06 FAIL check error: KeyError: 'files'\nINV-07 PENDING skill index not present (phase 1)\nINV-08 PASS 10 invariants and 8 component sections match\nINV-09 FAIL no spec_drift_check.py call in: architect-drift-guard (not found)\nINV-10 PENDING no dashboard items found; enforced when session_scope_enforced is true\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {
+    "local/improvements.md": "- 2026-11-27T13:00Z soak FINDING (spec_drift_check): 7 FAIL. INV-01: check error: KeyError: 'files' | INV-02: check error: KeyError: 'files' | INV-03: check error: KeyError: 'files' | INV-04: check error: FileNotFoundError: [Errno 2] No such file or directory: '{ROOT}/AGENTS.md' | INV-05: check error: KeyError: 'rig_terms' | INV-06: check error: KeyError: 'files' | INV-09: no spec_drift_check.py call in: architect-drift-guard (not found). Fix: repair the file or the manifest named, then re-run the check. Status: open.\n",
+    "local/soak/spec-drift.jsonl": "{\"date\": \"2026-11-27\", \"detail\": {\"INV-01\": \"check error: KeyError: 'files'\", \"INV-02\": \"check error: KeyError: 'files'\", \"INV-03\": \"check error: KeyError: 'files'\", \"INV-04\": \"check error: FileNotFoundError: [Errno 2] No such file or directory: '{ROOT}/AGENTS.md'\", \"INV-05\": \"check error: KeyError: 'rig_terms'\", \"INV-06\": \"check error: KeyError: 'files'\", \"INV-07\": \"skill index not present (phase 1)\", \"INV-09\": \"no spec_drift_check.py call in: architect-drift-guard (not found)\", \"INV-10\": \"no dashboard items found; enforced when session_scope_enforced is true\"}, \"exit\": 1, \"results\": {\"INV-01\": \"FAIL\", \"INV-02\": \"FAIL\", \"INV-03\": \"FAIL\", \"INV-04\": \"FAIL\", \"INV-05\": \"FAIL\", \"INV-06\": \"FAIL\", \"INV-07\": \"PENDING\", \"INV-08\": \"PASS\", \"INV-09\": \"FAIL\", \"INV-10\": \"PENDING\"}, \"ts\": \"2026-11-27T13:00:00Z\"}\n"
+  },
+  "clock": 1795784400
+}
