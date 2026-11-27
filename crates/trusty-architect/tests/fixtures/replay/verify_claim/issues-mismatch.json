@@ -1,0 +1,99 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"status\", \"repo\": \"example-org/example-repo\", \"claims\": {\"issues\": [{\"n\": 7, \"state\": \"closed\", \"reason\": \" not planned \"}, {\"n\": 8, \"state\": \"open\"}, {\"n\": 9, \"state\": \"closed\"}, {\"n\": 10, \"state\": \"closed\"}, {\"n\": 11, \"state\": \"open\", \"reason\": \"reopened\"}]}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MATCH issue 7 state CLOSED\nMISMATCH issue 7 state_reason  not planned : expected  not planned , got completed\nMISMATCH issue 8 state OPEN: expected OPEN, got CLOSED\nUNCHECKED issue 9: number is a pull request, not an issue\nUNCHECKED issue 10: gh api failed: Not Found\nMATCH issue 11 state OPEN\nMISMATCH issue 11 state_reason reopened: expected reopened, got null\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues/7"
+          ],
+          "stdout": "{\"state\": \"closed\", \"state_reason\": \"completed\"}",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues/8"
+          ],
+          "stdout": "{\"state\": \"closed\", \"state_reason\": \"completed\"}",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues/9"
+          ],
+          "stdout": "{\"state\": \"closed\", \"pull_request\": {\"url\": \"https://example.test/pulls/9\"}}",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues/10"
+          ],
+          "stdout": "{\"message\": \"Not Found\"}",
+          "stderr": "gh: Not Found (HTTP 404)\n",
+          "exit": 1
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues/11"
+          ],
+          "stdout": "{\"state\": \"open\", \"state_reason\": null}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues/7"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues/8"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues/9"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues/10"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues/11"
+      ]
+    ]
+  }
+}

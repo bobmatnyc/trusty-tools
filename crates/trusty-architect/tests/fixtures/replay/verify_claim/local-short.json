@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"head\": \"abc\", \"base\": \"zz\", \"merge_sha\": \"55555\", \"claims\": {\"files\": 1}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED head abc: claimed sha has under 10 hex characters\nUNCHECKED base zz: not a hex sha\nUNCHECKED merge_sha 55555: claimed sha has under 10 hex characters\nUNCHECKED files 1: needs a head and a base present in the checkout\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

@@ -1,0 +1,97 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {
+    "VERIFY_CLAIM_OFFLINE": "1"
+  },
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"base\": \"3333333333cccccccccc4444444444dddddddddd\"}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MATCH head 1111111111aaaaaaaaaa2222222222bbbbbbbbbb exists in example-repo\nMATCH base 3333333333cccccccccc4444444444dddddddddd exists in example-repo\nMATCH head 1111111111aaaaaaaaaa2222222222bbbbbbbbbb descends from base 3333333333cccccccccc4444444444dddddddddd\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "git": [
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "1111111111aaaaaaaaaa2222222222bbbbbbbbbb^{commit}"
+          ],
+          "stdout": "1111111111aaaaaaaaaa2222222222bbbbbbbbbb\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "3333333333cccccccccc4444444444dddddddddd^{commit}"
+          ],
+          "stdout": "3333333333cccccccccc4444444444dddddddddd\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "merge-base",
+            "--is-ancestor",
+            "3333333333cccccccccc4444444444dddddddddd",
+            "1111111111aaaaaaaaaa2222222222bbbbbbbbbb"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "1111111111aaaaaaaaaa2222222222bbbbbbbbbb^{commit}"
+      ],
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "3333333333cccccccccc4444444444dddddddddd^{commit}"
+      ],
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "merge-base",
+        "--is-ancestor",
+        "3333333333cccccccccc4444444444dddddddddd",
+        "1111111111aaaaaaaaaa2222222222bbbbbbbbbb"
+      ]
+    ]
+  }
+}

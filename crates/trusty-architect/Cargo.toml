@@ -68,6 +68,11 @@ path = "src/bin/trusty-architect-aliases.rs"
 name = "trusty-architect-il-agent"
 path = "src/bin/trusty-architect-il-agent.rs"
 
+# #12028 P1g: the verify-claim.py port.
+[[bin]]
+name = "trusty-architect-verify-claim"
+path = "src/bin/trusty-architect-verify-claim.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

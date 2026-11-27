@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {
+    "VERIFY_CLAIM_OFFLINE": "1"
+  },
+  "files": {
+    "event.json": "{\"kind\": \"published\", \"repo\": \"example-org/example-repo\", \"pr\": 30, \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"ci_run\": 31, \"crate\": \"sample-crate\", \"version\": \"1.0.0\", \"claims\": {\"checks\": {\"pass\": 1}, \"ci_conclusion\": \"success\", \"issues\": [{\"n\": 32, \"state\": \"open\"}]}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED pr 30 head: gh pr view failed: offline (VERIFY_CLAIM_OFFLINE=1)\nUNCHECKED pr 30 checks pass: gh pr checks failed: offline (VERIFY_CLAIM_OFFLINE=1)\nUNCHECKED ci_run 31: gh run view failed: offline (VERIFY_CLAIM_OFFLINE=1)\nUNCHECKED issue 32: gh api failed: offline (VERIFY_CLAIM_OFFLINE=1)\nUNCHECKED crates_io_max sample-crate: crates.io lookup failed: offline (VERIFY_CLAIM_OFFLINE=1)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

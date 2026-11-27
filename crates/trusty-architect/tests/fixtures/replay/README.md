@@ -272,3 +272,65 @@ ok   tests/fixtures/replay/il_agent/state-missing.json
 PASS: all fifty-one recordings replay clean against the port (exit 0), and
 `il_agent_recordings_replay_clean_against_the_port` reports
 `test result: ok. 1 passed; 0 failed`.
+
+## verify_claim (#12028 P1g)
+
+Sixty-six runs of the frozen Python reference, the Architect's
+`verify-claim.py` with `verify_claim_input.py` and `architect_config.py`,
+recorded on 2026-11-27 and replayed in `tests/replay_verify_claim.rs`
+against `examples/replay_port.rs verify_claim`. Every recording is the
+recorder's capture of the reference's real output; none was written or
+edited by hand. gh, git and curl are fakes declared in each recording, so
+the replay also compares every command's argv. Inputs use sample names only
+(`example-org/example-repo`, `example-two/second`, `sample-crate`, padded
+hex SHAs). The script reads no time and writes nothing.
+
+`driver.py` is copied beside the frozen modules as `vc_driver.py`. The script
+reads `local/architect.json` under its own checkout, outside the sandbox;
+the driver points `architect_config.load()` at the working directory (the
+sandbox root), runs `main()` unchanged, and prints an uncaught exception as
+its traceback's last line, which is what the port prints.
+
+| Recording | Case |
+|---|---|
+| `pr-clearance-match`, `pr-merged-match`, `pr-mismatch` | Every PR claim matching and differing; a bare repo name, a digit-string `pr`, an upper-case SHA prefix; a version on a non-`published` event runs no curl |
+| `pr-short-and-notsha`, `pr-gh-fails`, `pr-null-reply` | Short and non-hex SHAs; a gh error that is not a rate limit (no REST); a `null` reply |
+| `pr-reply-list`, `pr-state-not-string` | Values the script cannot use: an `AttributeError` |
+| `rate-limit-rest`, `rate-limit-rest-closed`, `rate-limit-rest-fails`, `rate-limit-rest-unexpected`, `rate-limit-check-runs-unexpected` | The REST fallback for the PR and its check runs: a match, a closed PR, too many check runs, a failed and an unexpected reply |
+| `issues-match`, `issues-mismatch`, `issues-no-account`, `no-repo` | Issue states and reasons, a pull-request number, a failed read, an unmapped owner, no repo |
+| `local-match`, `local-absent`, `local-mismatch`, `local-git-fails`, `local-git-broken`, `local-short`, `local-no-checkout` | Local-checkout claims, git failures, short SHAs, no checkout |
+| `published-*` | crates.io: match, mismatch, a curl failure, a reply without `crate`, an invalid crate name |
+| `ci-*` | The CI run: match, mismatch (a falsy conclusion), no claim, a gh failure |
+| `offline`, `offline-local` | `VERIFY_CLAIM_OFFLINE=1`: gh and curl unchecked, git still runs |
+| `config-*` | No `repos` key, no file, bad JSON, `repos` not an object, two gh dirs for one owner, a missing and a present `ARCHITECT_CONFIG` file |
+| `badinput-*`, `usage-*` | Every `BADINPUT` message, invalid JSON, a missing file, an empty file and empty stdin, CRLF; the usage paths |
+| `input-stdin`, `input-literal`, `no-checkable-claims` | The `-` and literal forms; an event with nothing to check |
+| `guard-refusal` | A `gh api` path outside the read-only pattern: `PermissionError` |
+
+Not recorded: a gh child's environment (the recorder logs argv only);
+`tests/verify_claim_smoke.rs` proves on the shipped binary that a gh child
+gets no `GH_TOKEN` or `GITHUB_TOKEN` and the owner's `GH_CONFIG_DIR`. An
+unreadable or non-UTF-8 event file and undecodable command output end in a
+traceback or a decode error the port words differently.
+
+Regenerate with the three modules and the driver copied to a sandbox
+directory `P`; each case seeds `local/architect.json`, a sample checkout
+directory `work/example-repo` and `event.json` from a directory `S`, and
+passes `--fakes`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/verify_claim
+$R record --out $D/pr-clearance-match.json --seed $S/local=local --seed $S/work=work \
+  --seed $S/event.json=event.json --fakes $S/fakes.json -- $P/vc_driver.py event.json
+$R replay $D/*.json -- <target>/debug/examples/replay_port verify_claim
+```
+
+The last line ends:
+
+```
+ok   tests/fixtures/replay/verify_claim/usage-help.json
+ok   tests/fixtures/replay/verify_claim/usage-no-args.json
+ok   tests/fixtures/replay/verify_claim/usage-two-args.json
+```
+
+PASS: all sixty-six recordings replay clean against the port (exit 0).

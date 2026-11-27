@@ -1,0 +1,95 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"head\": \"7777777777999999999988888888880000000000\", \"base\": \"3333333333cccccccccc4444444444dddddddddd\", \"merge_sha\": \"5555555555eeeeeeeeee6666666666ffffffffff\", \"claims\": {\"commits\": 1}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MISMATCH head 7777777777999999999988888888880000000000: expected commit present in local checkout, got absent (no fetch was run)\nMATCH base 3333333333cccccccccc4444444444dddddddddd exists in example-repo\nUNCHECKED merge_sha 5555555555eeeeeeeeee6666666666ffffffffff: not in local checkout (it may be behind origin; no fetch was run)\nUNCHECKED commits 1: needs a head and a base present in the checkout\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "git": [
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "7777777777999999999988888888880000000000^{commit}"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 1
+        },
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "3333333333cccccccccc4444444444dddddddddd^{commit}"
+          ],
+          "stdout": "3333333333cccccccccc4444444444dddddddddd\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "5555555555eeeeeeeeee6666666666ffffffffff^{commit}"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 1
+        }
+      ]
+    },
+    "calls": [
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "7777777777999999999988888888880000000000^{commit}"
+      ],
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "3333333333cccccccccc4444444444dddddddddd^{commit}"
+      ],
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "5555555555eeeeeeeeee6666666666ffffffffff^{commit}"
+      ]
+    ]
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"status\", \"repo\": \"example-org/example-repo\", \"ci_run\": \"9002\", \"claims\": {\"ci_conclusion\": \"success\", \"ci_head\": \"7777777777999999999988888888880000000000\"}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MISMATCH ci_run 9002 conclusion success: expected success, got in_progress\nMISMATCH ci_run 9002 head 7777777777999999999988888888880000000000: expected 7777777777999999999988888888880000000000, got 1111111111aaaaaaaaaa2222222222bbbbbbbbbb\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "run",
+            "view",
+            "9002",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "conclusion,headSha,status"
+          ],
+          "stdout": "{\"conclusion\": \"\", \"headSha\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"status\": \"in_progress\"}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "run",
+        "view",
+        "9002",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "conclusion,headSha,status"
+      ]
+    ]
+  }
+}
