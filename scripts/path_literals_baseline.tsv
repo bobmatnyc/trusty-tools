@@ -9,9 +9,6 @@ crates/trusty-common/src/catchup/state.rs	2
 crates/trusty-common/src/content/mod.rs	1
 crates/trusty-installer/src/commands/bootstrap_sites_tests.rs	1
 crates/trusty-installer/src/commands/plist_bootstrap.rs	1
-crates/trusty-mpm/src/assets/architect/scripts/architect_config.py	1
-crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py	1
-crates/trusty-mpm/src/assets/architect/scripts/dashboard_viz.py	2
 crates/trusty-mpm/src/bin/tm/commands/doctor_builder_cap.rs	3
 crates/trusty-mpm/src/bin/tm/commands/egress_guard_architect_tests.rs	1
 crates/trusty-mpm/src/bin/tm/commands/fleet/notify_hook.rs	1
@@ -112,9 +109,3 @@ crates/trusty-secrets/src/server/errors.rs	7
 crates/trusty-secrets/src/server/onepassword_tests.rs	1
 crates/trusty-secrets/src/server/settings_tests.rs	3
 crates/trusty-secrets/src/store/onepassword/program.rs	2
-python/trusty-architect/scripts/architect_config.py	1
-python/trusty-architect/scripts/dashboard_projects.py	1
-python/trusty-architect/scripts/dashboard_viz.py	2
-python/trusty-architect/tests/test_architect_config.py	1
-python/trusty-architect/tests/test_config.py	2
-python/trusty-architect/tests/test_dashboard_projects_registry.py	8
