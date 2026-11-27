@@ -44,10 +44,9 @@ INBOX = os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ROOT, "inbox")
 STATE_PATH = os.path.join(INBOX, "token-watch-state.json")
 HOURLY_PATH = os.path.join(ROOT, "local", "usage", "token-hourly.jsonl")
 THRESHOLDS_PATH = os.path.join(ROOT, "local", "usage", "token-thresholds.json")
-# #11821: the default dir comes from architect_config, the one place it is spelled.
-_CLAUDE_DIR = os.path.expanduser(architect_config.DEFAULT_CLAUDE_CONFIG_DIR)
-TRANSCRIPT_BASE = os.environ.get("TRANSCRIPT_BASE") or os.path.join(_CLAUDE_DIR, "projects")
-SESSIONS_DIR = os.environ.get("SESSIONS_DIR") or os.path.join(_CLAUDE_DIR, "sessions")
+# #11821 P6b: the default dir is the install's managed claude-config dir, read only when a variable is unset.
+TRANSCRIPT_BASE = os.environ.get("TRANSCRIPT_BASE") or os.path.join(architect_config.managed_claude_config_dir(), "projects")
+SESSIONS_DIR = os.environ.get("SESSIONS_DIR") or os.path.join(architect_config.managed_claude_config_dir(), "sessions")
 
 BUDGET_S = 20.0            # hard cap per scan; resumes next cycle
 READ_CAP = 16 * 1024 * 1024

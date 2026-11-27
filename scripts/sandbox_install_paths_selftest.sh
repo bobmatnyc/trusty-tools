@@ -105,6 +105,21 @@ for launcher in sandbox_daemon sandbox_computer_daemon; do
   [ -n "$SEEN" ] || tail -n 5 "$WORK/$launcher.log" | sed 's/^/    /'
 done
 
+# (4) #11821 P6b: the writer never follows a symlinked .trusty-tools out of the home.
+SIP_PY="$SCRIPT_DIR/lib/sandbox_install_paths.py"
+H="$WORK/link-home"
+mkdir -p "$H" "$WORK/outside/tools"
+ln -s "$WORK/outside/tools" "$H/.trusty-tools"
+OUT="$(python3 -I "$SIP_PY" write --home "$H" --config-dir "$H/c" 2>&1)" && RC=0 || RC=$?
+check "writer refuses a symlinked .trusty-tools" '[ "$RC" -eq 1 ] && [[ "$OUT" == *"is a symlink"* ]]'
+check "writer wrote nothing through the symlink" '[ ! -e "$WORK/outside/tools/install.toml" ]'
+H="$WORK/plain-home"
+mkdir -p "$H"
+OUT="$(python3 -I "$SIP_PY" write --home "$H" --config-dir "$H/c" 2>&1)" && RC=0 || RC=$?
+# #11821 P6b: read the mode through python, not `stat -f`; GNU stat treats `-f` as file-system mode and prints a report.
+MODE="$(python3 -I -c 'import os, sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$H/.trusty-tools/install.toml" 2>/dev/null || true)"
+check "writer writes a plain home's install.toml owner-only" '[ "$RC" -eq 0 ] && [ "$MODE" = 600 ]'
+
 if [ "$FAILS" -ne 0 ]; then
   echo "sandbox_install_paths_selftest: $FAILS check(s) failed"
   exit 1

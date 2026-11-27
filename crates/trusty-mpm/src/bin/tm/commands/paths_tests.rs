@@ -69,6 +69,28 @@ fn cli_parses_paths_show_and_set() {
     ));
 }
 
+/// #11821 P6b: `paths` made `pat` a prefix of both `path` and `paths`; `tm pat
+/// <alias>` must still run `tm path`, and no `pa`/`pat` prefix picks `paths`.
+#[test]
+fn cli_pat_prefix_resolves_to_path_11821() {
+    for argv in [
+        &["tm", "pat", "trusty-tools"][..],
+        &["tm", "pat", "set"],
+        &["tm", "pat", "trusty-tools", "--root", "/r"],
+    ] {
+        match Cli::try_parse_from(argv).map(|cli| cli.command) {
+            Ok(Some(Command::Path { alias, .. })) => assert_eq!(alias, argv[2]),
+            other => panic!("{argv:?} must parse as `tm path`, got {other:?}"),
+        }
+    }
+    // `pa` stays ambiguous between `path` and `paths`; it never picks `paths`.
+    let pa = Cli::try_parse_from(["tm", "pa", "set"]).map(|cli| cli.command);
+    assert!(
+        !matches!(pa, Ok(Some(Command::Paths { .. }))),
+        "`tm pa set` must not reach `tm paths`: {pa:?}"
+    );
+}
+
 #[test]
 fn show_prints_each_path_with_its_source() {
     let home = tempfile::tempdir().expect("home");
