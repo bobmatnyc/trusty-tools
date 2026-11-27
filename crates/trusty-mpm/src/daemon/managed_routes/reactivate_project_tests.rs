@@ -322,10 +322,10 @@ async fn a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active(
     abandon_a_slow_reactivate_and_expect_stopped().await;
 }
 
-/// See PR (rollback outside tracing macro): the departed-client rollback must
-/// run when WARN is off. A process-global registry (raised by
-/// `enable_event_capture` elsewhere in this binary) admits WARN, so this test
-/// raises it too and then scopes a no-op subscriber over the reactivate.
+/// #12046: the departed-client rollback must run when WARN is off. A
+/// process-global registry (raised by `enable_event_capture` elsewhere in this
+/// binary) admits WARN, so this test raises it too and then scopes a no-op
+/// subscriber over the reactivate.
 /// Test: this function IS the test. Fails if the rollback is a `tracing::warn!`
 /// argument, which a disabled event never evaluates.
 #[tokio::test]

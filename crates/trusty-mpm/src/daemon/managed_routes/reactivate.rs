@@ -223,8 +223,8 @@ async fn finish_detached(
             && outcome.is_success()
         {
             let why = "the reactivate caller went away before the answer (#12012)".to_string();
-            // See PR (rollback outside tracing macro): a disabled WARN never
-            // evaluates a macro argument, so the rollback must run first.
+            // #12046: a disabled WARN never evaluates a macro argument, so
+            // the rollback must run first.
             let rolled_back = roll_back(&mgr, prior.as_ref(), why).await;
             tracing::warn!(id = %record.id, "{rolled_back}");
         }
