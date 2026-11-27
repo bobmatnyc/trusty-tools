@@ -50,6 +50,8 @@ mod session_parent_link_10476;
 mod standalone_isolation;
 mod test_session_lifecycle;
 mod worktree_disk_usage_gate;
+// #11217: an inherited GIT_COMMON_DIR never registers another repository.
+mod worktree_git_env_11217;
 mod worktree_request_fail_closed;
 
 /// Force libtest onto one test thread for this target (#8345).

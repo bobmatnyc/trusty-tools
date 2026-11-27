@@ -470,3 +470,183 @@ async fn client_registration_keeps_the_path_form_at_the_canonical_path_11828() {
 
     assert_eq!(only_row(&registry).repo_url, root.to_string_lossy());
 }
+
+/// A checkout at `dir` with origin `remote` and one empty commit, so
+/// `git worktree add` has a HEAD to branch from (#11217).
+fn committed_checkout(dir: &Path, remote: &str) -> PathBuf {
+    let root = checkout(dir, remote);
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    root
+}
+
+/// A linked worktree of `main` at `wt` on a new branch, canonicalized.
+fn linked_worktree(main: &Path, wt: &Path) -> PathBuf {
+    let branch = wt.file_name().and_then(|n| n.to_str()).expect("utf-8 name");
+    git(
+        main,
+        &["worktree", "add", "-q", "-b", branch, &wt.to_string_lossy()],
+    );
+    wt.canonicalize().expect("canonical worktree")
+}
+
+/// #11217 regression: a session in a subdirectory of a linked worktree
+/// registers the MAIN checkout's row, never the worktree path, and a second
+/// start (from the worktree or the main checkout) writes nothing. Fails on
+/// pre-fix main, which returned `LinkedWorktree` and wrote no row.
+#[tokio::test]
+async fn a_linked_worktree_session_registers_the_main_checkout_11217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+    let main = committed_checkout(
+        &tmp.path().join("widget"),
+        "https://github.com/Acme/Widget.git",
+    );
+    let wt = linked_worktree(&main, &tmp.path().join("widget-wt"));
+    let sub = wt.join("src");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+
+    let outcome = register_session_checkout(&registry, &sub, None)
+        .await
+        .expect("a worktree session registers");
+
+    assert_eq!(
+        outcome,
+        SessionRegistration::Registered {
+            name: "widget".into()
+        }
+    );
+    assert_eq!(
+        registered_checkout(&registry, "acme/widget").expect("assign resolves"),
+        main
+    );
+    let raw = String::from_utf8(registry_bytes(&registry).expect("written")).expect("utf-8");
+    assert!(
+        !raw.contains("widget-wt"),
+        "the worktree path was stored: {raw}"
+    );
+    let first = registry_bytes(&registry);
+    for dir in [&wt, &main] {
+        let again = register_session_checkout(&registry, dir, None)
+            .await
+            .expect("second start");
+        assert_eq!(
+            again,
+            SessionRegistration::AlreadyRegistered {
+                name: "widget".into(),
+                checkout: Some(main.clone()),
+                root: main.clone(),
+            },
+            "{}",
+            dir.display()
+        );
+    }
+    assert_eq!(registry_bytes(&registry), first, "no duplicate or rewrite");
+}
+
+/// #11217 fail closed: a worktree whose admin dir names a missing common dir,
+/// one with a broken `.git` file, and one whose main checkout was deleted all
+/// refuse and write no row.
+#[tokio::test]
+async fn a_worktree_whose_main_checkout_cannot_be_resolved_writes_nothing_11217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+
+    // Missing common dir: the worktree's `commondir` points nowhere.
+    let main = committed_checkout(&tmp.path().join("a"), "https://github.com/acme/a");
+    let wt = linked_worktree(&main, &tmp.path().join("a-wt"));
+    let admin = main.join(".git/worktrees/a-wt");
+    std::fs::write(admin.join("commondir"), "/nonexistent/11217/.git\n").expect("break");
+    let outcome = register_session_checkout(&registry, &wt, None).await;
+    assert!(
+        matches!(outcome, Err(SessionRegistrationError::UnverifiedRoot(_))),
+        "{outcome:?}"
+    );
+
+    // Broken `.git` file in a worktree.
+    let main_b = committed_checkout(&tmp.path().join("b"), "https://github.com/acme/b");
+    let wt_b = linked_worktree(&main_b, &tmp.path().join("b-wt"));
+    std::fs::write(wt_b.join(".git"), "gitdir: /nonexistent/11217\n").expect("break");
+    let outcome = register_session_checkout(&registry, &wt_b, None).await;
+    assert!(
+        matches!(outcome, Err(SessionRegistrationError::UnverifiedRoot(_))),
+        "{outcome:?}"
+    );
+
+    // Main checkout no longer exists.
+    let main_c = committed_checkout(&tmp.path().join("c"), "https://github.com/acme/c");
+    let wt_c = linked_worktree(&main_c, &tmp.path().join("c-wt"));
+    std::fs::remove_dir_all(&main_c).expect("delete main");
+    let outcome = register_session_checkout(&registry, &wt_c, None).await;
+    assert!(
+        matches!(outcome, Err(SessionRegistrationError::UnverifiedRoot(_))),
+        "{outcome:?}"
+    );
+
+    assert_eq!(registry_bytes(&registry), None, "a row was written");
+}
+
+/// #11217 fail closed: a worktree of a bare repository has no main working
+/// tree, so it is `MainCheckoutUnresolved` and nothing is written.
+#[tokio::test]
+async fn a_bare_repo_worktree_writes_nothing_11217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+    let src = committed_checkout(&tmp.path().join("src"), "https://github.com/acme/bare");
+    let bare = tmp.path().join("bare.git");
+    git(
+        tmp.path(),
+        &["clone", "-q", "--bare", &src.to_string_lossy(), "bare.git"],
+    );
+    let wt = linked_worktree(&bare, &tmp.path().join("bare-wt"));
+
+    let outcome = register_session_checkout(&registry, &wt, None).await;
+
+    assert!(
+        matches!(&outcome, Err(SessionRegistrationError::MainCheckoutUnresolved(p)) if *p == wt),
+        "{outcome:?}"
+    );
+    assert_eq!(registry_bytes(&registry), None, "a row was written");
+}
+
+/// #11217 D50 boundary: a worktree of repo A, placed inside repo B's tree
+/// while B is registered, resolves to A's main checkout only; `acme/b` still
+/// resolves to B, and exactly two rows exist.
+#[tokio::test]
+async fn a_worktree_of_repo_a_never_resolves_to_repo_b_11217() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let registry = tmp.path().join("registry");
+    let repo_a = committed_checkout(&tmp.path().join("a"), "https://github.com/acme/a");
+    let repo_b = committed_checkout(&tmp.path().join("b"), "https://github.com/acme/b");
+    register_session_checkout(&registry, &repo_b, None)
+        .await
+        .expect("register b");
+    let nested = repo_b.join(".claude/worktrees");
+    std::fs::create_dir_all(&nested).expect("mkdir nested");
+    let wt = linked_worktree(&repo_a, &nested.join("a-task"));
+
+    let outcome = register_session_checkout(&registry, &wt, None)
+        .await
+        .expect("register a from its worktree");
+
+    assert_eq!(
+        outcome,
+        SessionRegistration::Registered { name: "a".into() }
+    );
+    assert_eq!(registered_checkout(&registry, "acme/a").expect("a"), repo_a);
+    assert_eq!(registered_checkout(&registry, "acme/b").expect("b"), repo_b);
+    let rows = crate::project::store::read_projects(&registry).expect("read");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+}

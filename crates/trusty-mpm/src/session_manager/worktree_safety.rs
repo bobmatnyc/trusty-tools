@@ -182,17 +182,9 @@ const GIT_PINNED_GLOBAL_ARGS: &[&str] = &[
 /// `pub(crate)` since #6391 so a failing worktree removal can name which of
 /// these the ambient environment carried, instead of reporting only that the
 /// directory is still there.
-pub(crate) const GIT_ENV_REDIRECTS: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_NAMESPACE",
-    "GIT_CONFIG_COUNT",
-];
+// #11217: the list moved to trusty-common, unchanged, to share one scrub.
+#[cfg(test)]
+pub(crate) const GIT_ENV_REDIRECTS: &[&str] = trusty_common::git::GIT_ENV_REDIRECTS;
 
 /// Working-tree status for the candidate itself.
 // #8572: `pub(crate)` so the main-checkout HEAD-switch guard reads dirt the same way.
@@ -1109,7 +1101,7 @@ pub(crate) fn git_stdout_warning_free(dir: &Path, args: &[&str]) -> Result<Strin
 /// Why: EVERY git call in this module has to be immune to the two hijacks that
 /// turn a dirty worktree into a clean report — config keys that suppress
 /// output ([`GIT_PINNED_GLOBAL_ARGS`]) and environment variables that point git
-/// at a different repository ([`GIT_ENV_REDIRECTS`]). Centralising it here is
+/// at a different repository ([`GIT_ENV_REDIRECTS`](trusty_common::git::GIT_ENV_REDIRECTS)). Centralising it here is
 /// what makes "every git call" true rather than aspirational; a future call
 /// site cannot forget.
 /// What: `git <pinned globals> -C <dir> <args>`, with the redirect variables
@@ -1128,9 +1120,8 @@ pub(crate) fn git_command(dir: &Path, args: &[&str]) -> Command {
         .arg("-C")
         .arg(dir)
         .args(args);
-    for key in GIT_ENV_REDIRECTS {
-        cmd.env_remove(key);
-    }
+    // #11217: the shared scrub, identical to the loop it replaced.
+    trusty_common::git::remove_redirects(&mut cmd);
     cmd
 }
 
@@ -1140,7 +1131,7 @@ pub(crate) fn git_command(dir: &Path, args: &[&str]) -> Command {
 /// Why: `git worktree` resolves its repository from `GIT_DIR` ahead of its own
 /// `-C`, so an ambient redirect aims the removal at a DIFFERENT repository than
 /// the one every gate before it just examined. Those gates all route through
-/// [`git_command`], which strips [`GIT_ENV_REDIRECTS`]; the removal did not,
+/// [`git_command`], which strips [`GIT_ENV_REDIRECTS`](trusty_common::git::GIT_ENV_REDIRECTS); the removal did not,
 /// because each of its two call sites spelt the command out with a bare
 /// `Command::new("git")`. That left the one call that actually deletes as the
 /// only unhardened one. What an operator sees is a reap in which every gate
