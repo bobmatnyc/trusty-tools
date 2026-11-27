@@ -207,10 +207,14 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
     })
 }
 
-/// The user-tier keys for `role`: `network.strictAllowlist` and the
-/// credentials deny, which only the user tier honors (#8928). The Architect
-/// gets nothing.
-/// Test: `the_user_policy_carries_strict_allowlist_and_credentials`.
+/// The user-tier keys for `role`: `network.strictAllowlist`, the
+/// [`ALLOWED_DOMAINS`] beside it, and the credentials deny, which only the
+/// user tier honors (#8928). The Architect gets nothing.
+///
+/// #12042: with `strictAllowlist` on, Claude Code ignores project-tier
+/// `allowedDomains`, so the hosts must sit in the same tier as the flag.
+/// Test: `the_user_policy_carries_strict_allowlist_and_credentials`,
+/// `writing_preserves_unrelated_keys_and_verifies`.
 pub fn user_policy(role: SandboxRole) -> Option<Value> {
     if role == SandboxRole::Architect {
         return None;
@@ -221,7 +225,8 @@ pub fn user_policy(role: SandboxRole) -> Option<Value> {
         .collect();
     Some(json!({
         "sandbox": {
-            "network": { "strictAllowlist": true },
+            // #12042: the allowlist goes with the flag that restricts it.
+            "network": { "strictAllowlist": true, "allowedDomains": ALLOWED_DOMAINS },
             "credentials": { "envVars": env },
         },
     }))
@@ -272,7 +277,10 @@ pub enum SandboxSettingsError {
 /// `<workspace>/.claude/settings.json` (#10102, see
 /// [`sandbox_roles::write_project_tier`]); merges [`user_policy`]
 /// into `<user_config_dir>/settings.json` with [`merge_policy`] under the
-/// settings lock; then runs [`verify_sandbox_settings`].
+/// settings lock; then runs [`verify_sandbox_settings`]. #12042: the merge
+/// replaces `allowedDomains` with tm's list before verify reads it, so a user
+/// file that 1.14.14 left with `strictAllowlist` and no hosts is repaired by
+/// this write, and the operator's other keys are kept.
 ///
 /// # Errors
 ///
@@ -280,7 +288,9 @@ pub enum SandboxSettingsError {
 ///
 /// Test: `writing_preserves_unrelated_keys_and_verifies`,
 /// `a_local_override_refuses_the_launch`,
-/// `two_sandboxed_roles_in_one_workspace_keep_each_others_entries`.
+/// `two_sandboxed_roles_in_one_workspace_keep_each_others_entries`,
+/// `a_launch_write_repairs_a_strict_allowlist_with_no_domains`,
+/// `a_failed_user_write_leaves_a_hostless_file_refused`.
 pub fn write_sandbox_settings(
     role: SandboxRole,
     inputs: &SandboxInputs,
@@ -298,6 +308,7 @@ pub fn write_sandbox_settings(
         crate::core::settings_lock::with_settings_lock(&path, || {
             let mut settings = super::malformed_backup::load_settings_object(&path)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // #12042: replaces a stale or missing `allowedDomains` (not a union key).
             merge_policy(&mut settings, &policy);
             crate::core::settings_lock::publish(&path, &settings)
         })

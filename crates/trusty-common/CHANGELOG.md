@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.10] — 2026-11-27
+
+### Breaking
+
+- trusty-common 0.70.9 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-common-0.70.9.txt` (Refs #8699).
+
+### Changed
+
+- `content::default_cache_dir` and the catch-up watermark state (`load_catchup_state`, `save_catchup_state` and their `_in` forms with no state root) now resolve `.trusty-mpm` under the configured config dir (`TRUSTY_MPM_CONFIG_DIR`, then `install.toml`, then `$HOME`). With no env var and no install file the paths are unchanged: `~/.trusty-mpm/content` and `~/.trusty-mpm/projects/<palace-id>/catchup-state.json`. A broken `install.toml` makes `default_cache_dir` return `None` and the watermark save fail before creating any directory; the watermark load reads it as no watermark (#11821).
+
 ## [0.70.9] — 2026-11-27
 
 ### Breaking
