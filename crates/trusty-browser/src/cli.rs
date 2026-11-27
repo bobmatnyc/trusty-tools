@@ -139,11 +139,31 @@ pub fn resolve(path: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// The canonical path of this binary, which the launchers and plist run.
+/// The canonical path of this binary.
 fn own_exe() -> Result<PathBuf, String> {
     std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|e| e.to_string())
+}
+
+/// The binary the launchers and plist run: never a cargo build path.
+///
+/// Why: a registered build path dies with the next clean or pool recycle (#11927).
+/// What: [`crate::host_exe::registered_exe`] over this binary and the process
+/// environment; a substituted binary is named on stderr.
+/// Test: `launchd_plist_never_records_a_build_binary` in `tests/cli.rs`.
+fn registered_exe() -> Result<PathBuf, String> {
+    let me = own_exe()?;
+    let env = crate::host_exe::ExeEnv::from_process(home()?);
+    let exe = crate::host_exe::registered_exe(&me, &env)?;
+    if exe != me {
+        eprintln!(
+            "trusty-browser: registering {} instead of the build binary {}",
+            exe.display(),
+            me.display()
+        );
+    }
+    Ok(exe)
 }
 
 #[cfg(target_os = "macos")]
@@ -242,11 +262,16 @@ fn migrate_keychain(state: &Path) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn launchd_layout(state: &Path) -> Result<crate::launchd::Layout, String> {
+fn launchd_layout(state: &Path, install: bool) -> Result<crate::launchd::Layout, String> {
+    // #11927: install records a stable binary; uninstall may run from any build.
+    let exe = match install {
+        true => registered_exe()?,
+        false => registered_exe().or_else(|_| own_exe())?,
+    };
     Ok(crate::launchd::Layout {
         home: home()?,
         state: state.to_path_buf(),
-        exe: own_exe()?,
+        exe,
         uid: crate::private::uid(),
     })
 }
@@ -280,7 +305,9 @@ fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         Command::LaunchdPlist => {
-            let text = crate::launchd::launch_configuration(&own_exe()?, state).map_err(e)?;
+            // #11927: every writer records the stable binary, never a build path.
+            let text =
+                crate::launchd::launch_configuration(&registered_exe()?, state).map_err(e)?;
             print!("{text}");
             std::io::stdout().flush().map_err(e)?;
             Ok(ExitCode::SUCCESS)
@@ -291,8 +318,9 @@ fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
                 signing: sign.signing(),
                 tool: &crate::codesign::SystemCodesign,
             };
-            let path = crate::install_host::install_signed(state, &dir, &own_exe()?, &signer)
-                .map_err(e)?;
+            let path =
+                crate::install_host::install_signed(state, &dir, &registered_exe()?, &signer)
+                    .map_err(e)?;
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
         }
@@ -302,7 +330,7 @@ fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
                 _ => crate::codesign::Signing::Skip,
             };
             let install = matches!(command, Command::InstallService(_));
-            let layout = launchd_layout(state)?;
+            let layout = launchd_layout(state, install)?;
             let signer = crate::codesign::Signer {
                 signing,
                 tool: &crate::codesign::SystemCodesign,
