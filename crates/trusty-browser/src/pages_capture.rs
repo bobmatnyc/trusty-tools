@@ -127,11 +127,10 @@ pub fn aspect_matches(c: &Capture) -> Result<(), Refusal> {
 /// Image pixels to viewport CSS pixels, else `OutOfViewport`.
 ///
 /// Why: CDP input takes viewport CSS pixels, while the agent reads image
-/// pixels; device pixel ratio, page zoom and any capture downscale all sit
-/// between them. What: the scale is the measured image-to-region ratio per
-/// axis, which equals `devicePixelRatio` (Chrome folds page zoom into it)
-/// times the capture scale; the point must lie inside the image and the
-/// mapped point inside the viewport.
+/// pixels; device pixel ratio and page zoom sit between them. What: the
+/// scale is the measured image-to-region ratio per axis, which equals
+/// `devicePixelRatio` (Chrome folds page zoom into it); the point must lie
+/// inside the image and the mapped point inside the viewport.
 /// Test: `image_pixels_map_to_css_at_1x_2x_and_zoomed`,
 /// `points_outside_the_viewport_are_refused`.
 pub fn to_css(c: &Capture, x: i64, y: i64) -> Result<(f64, f64), Refusal> {

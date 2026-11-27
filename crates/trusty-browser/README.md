@@ -177,8 +177,9 @@ A narrower mode for a QA workflow tied to one enrolled page and identity.
 `Page.captureScreenshot` over the existing `debugger` permission and adds no
 permission. A coordinate action takes pixels of that image and its
 `capture_id`. The broker maps them to CSS pixels by the image-to-viewport
-ratio, which is `devicePixelRatio` (page zoom included) times any downscale
-taken to fit the 1 MiB frame. A capture older than 5 s, or one whose viewport
+ratio, which is `devicePixelRatio` (page zoom included). A capture too large
+for the 1 MiB frame answers `CaptureTooLarge`; it is never downscaled or
+truncated. A capture older than 5 s, or one whose viewport
 size, ratio, zoom, scroll or document changed, answers `StaleCapture`, and a
 point outside the viewport answers `OutOfViewport`. The agent still never
 writes a selector.

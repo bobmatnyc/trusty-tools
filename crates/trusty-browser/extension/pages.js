@@ -1018,10 +1018,10 @@ TrustyPages.commands = deps => {
   // What: probes, attaches chrome.debugger only to an accessible tab still on the lease's document (the
   //   debugging bar resizes the viewport, so the metrics are read after the attach, as a coordinate action
   //   reads them), then CDP Page.captureScreenshot as PNG of the viewport or the element's visible box. A PNG
-  //   over CAPTURE_BUDGET is retaken at half, then quarter scale; still too large answers CaptureTooLarge.
+  //   over CAPTURE_BUDGET answers CaptureTooLarge; it is never retaken smaller (#11211 AC4).
   //   Bounded at 6 s; always detaches, and once it returns no leftover capture reaches a later attachment.
   //   Uses the existing debugger permission only.
-  // Test: tests/js/pages.test.mjs `an oversized png is retaken at half and quarter scale, then refused CaptureTooLarge`,
+  // Test: tests/js/pages.test.mjs `the first png over the budget is refused CaptureTooLarge with no retake`,
   //   `a screenshot whose attach fails on the same document answers DebuggerBusy`,
   //   `a timed-out screenshot sends no capture after it returns`; `png_size_reads_the_ihdr`.
   async function capture(req) {
@@ -1056,17 +1056,16 @@ TrustyPages.commands = deps => {
     async function shoot() {
       const {region: box, metrics} = await viewOf(req, req.ref);
       const region = box || {x:0, y:0, width:metrics.css_width, height:metrics.css_height};
-      for (const scale of [1, 0.5, 0.25]) {
-        const params = {format:"png", captureBeyondViewport:false};
-        if (box || scale !== 1) {
-          params.clip = {x:region.x + metrics.scroll_x, y:region.y + metrics.scroll_y, width:region.width,
-            height:region.height, scale};
-        }
-        const shot = await shotOf(params);
-        if (typeof shot?.data !== "string") throw new Error("capture");
-        if (shot.data.length <= CAPTURE_BUDGET) return {document:req.document, data:shot.data, region, metrics};
+      const params = {format:"png", captureBeyondViewport:false};
+      if (box) {
+        params.clip = {x:region.x + metrics.scroll_x, y:region.y + metrics.scroll_y, width:region.width,
+          height:region.height, scale:1};
       }
-      throw refuse("CaptureTooLarge", {tab:req.tab});
+      const shot = await shotOf(params);
+      if (typeof shot?.data !== "string") throw new Error("capture");
+      // #11211 AC4: the first capture over the budget is refused; no downscale retry.
+      if (shot.data.length > CAPTURE_BUDGET) throw refuse("CaptureTooLarge", {tab:req.tab});
+      return {document:req.document, data:shot.data, region, metrics};
     }
   }
 

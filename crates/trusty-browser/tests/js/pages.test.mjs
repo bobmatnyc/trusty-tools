@@ -45,14 +45,16 @@ test("a viewport screenshot is taken over the debugger with the metrics read aft
   assert.equal(f.cdp[1].params.clip, undefined);
 });
 
-test("an oversized png is retaken at half and quarter scale, then refused CaptureTooLarge", async () => {
+// #11211 AC4: an image over the budget is a typed error, never a smaller or truncated image.
+test("the first png over the budget is refused CaptureTooLarge with no retake", async () => {
   const f = await codeFixture();
   const {grant} = await connectGrant(f);
   withView(f);
   f.png = "A".repeat(700004);
   const big = await f.command("page_screenshot", {grant, tab:7, document:"doc-7", ref:null});
-  assert.equal(big.error, "CaptureTooLarge");
-  assert.deepEqual(shots(f).map(c => c.params.clip?.scale), [undefined, 0.5, 0.25]);
+  assert.deepEqual(big, {id:big.id, ok:false, error:"CaptureTooLarge", tab:7});
+  assert.equal(shots(f).length, 1);
+  assert.equal(shots(f)[0].params.clip, undefined);
   assert.equal(f.cdp.at(-1).method, "detach");
 });
 
