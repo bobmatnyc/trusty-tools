@@ -1108,8 +1108,9 @@ pub(super) async fn front_gate_or_escalate(
 /// `core::session_launch::worktree_sync`'s own unit tests cover the sync/
 /// self-heal primitives; `an_operator_resume_reactivates_the_bound_decommissioned_project`,
 /// `an_operator_resume_leaves_an_unbound_decommissioned_project_decommissioned`
-/// and `a_failed_reactivation_on_operator_resume_is_the_route_error` cover the
-/// #11983 reactivation.
+/// `a_failed_reactivation_on_operator_resume_is_the_route_error` and
+/// `a_failed_launch_on_operator_resume_leaves_the_project_decommissioned`
+/// cover the #11983 reactivation.
 pub async fn resume_managed(
     state: &Arc<DaemonState>,
     id: &ManagedSessionId,
@@ -1130,10 +1131,7 @@ pub async fn resume_managed(
     mgr.note_operator_resume(id).await;
     // #10989 F3: unpark a decommission park before the launch; a failure is
     // this resume's error once the runtime is up, as on the spawn path.
-    // #11983: reactivate the bound project by spawn's rule; a failure is this
-    // resume's error once the runtime is up, ahead of the unpark's.
     let registry = state.project_registry().await;
-    let reactivated = reactivate_project(&registry, &record).await;
     let restored = mgr.restore_parked_index(&registry, &record).await;
 
     let workspace = record
@@ -1249,7 +1247,11 @@ pub async fn resume_managed(
         // an error.
         return Err(ResumeManagedError::Other(msg));
     }
-    reactivated.map_err(ResumeManagedError::Other)?; // #11983
+    // #11983: reactivate only once every launch gate passed, as spawn does, so
+    // a failed launch leaves the project decommissioned; ahead of the unpark.
+    reactivate_project(&registry, &record)
+        .await
+        .map_err(ResumeManagedError::Other)?;
     restored.map_err(ResumeManagedError::Other)?;
 
     Ok(mgr.get(id).await.unwrap_or(record))
