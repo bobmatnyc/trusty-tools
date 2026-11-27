@@ -720,7 +720,7 @@ fn loop_recovers_from_a_transient_probe_error() {
 fn shim_refusal(reset_epoch: Option<u64>) -> String {
     let when = match reset_epoch {
         Some(epoch) => format!("it resets at 2026-11-09 02:00:00 UTC (epoch {epoch})"),
-        None => "the reset time is unknown (gh api rate_limit did not answer)".to_string(),
+        None => "the reset time is unknown (gh api rate_limit gave no reset)".to_string(),
     };
     format!(
         "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on its \
@@ -740,6 +740,16 @@ fn classify_reads_the_shim_refusal_and_its_reset_epoch() {
     );
     assert_eq!(
         hit(shim_refusal(None)),
+        Some(rate_limit::RateLimited { reset_epoch: None })
+    );
+    // #11803: a LITERAL copy of the shim's unknown-kind line backs off with no
+    // reset, even though it carries gh's own limit text.
+    let unknown = "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on a \
+         GraphQL rate limit of unknown kind (gh account 'bot' on github.com); gh api rate_limit \
+         did not answer with the remaining quota, so tm cannot tell the primary limit from a \
+         secondary one. tm did not retry it. gh said: GraphQL: API rate limit already exceeded.";
+    assert_eq!(
+        hit(unknown.to_string()),
         Some(rate_limit::RateLimited { reset_epoch: None })
     );
     // A REST quota and gh's own unmarked text are generic probe errors.

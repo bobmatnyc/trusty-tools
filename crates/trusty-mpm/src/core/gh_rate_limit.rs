@@ -16,6 +16,7 @@
 
 use crate::core::gh_session_shim::{
     RATE_LIMIT_REFUSAL_MARKER, RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER,
+    RATE_LIMIT_UNKNOWN_KIND_MARKER,
 };
 
 /// Consecutive rate-limited polls that end the wait with an error.
@@ -45,16 +46,19 @@ pub struct RateLimited {
 /// A marker with no readable epoch gives `reset_epoch: None`. The shim's
 /// short-window line ([`RATE_LIMIT_SHORT_WINDOW_MARKER`]) also gives
 /// `reset_epoch: None`, so [`backoff_secs`] backs off exponentially instead
-/// of sleeping to the hourly reset. No marker gives `None`.
+/// of sleeping to the hourly reset, and so does the unknown-kind line
+/// ([`RATE_LIMIT_UNKNOWN_KIND_MARKER`]). No marker gives `None`.
 /// Test: `classify_reads_the_shim_refusal_and_its_reset_epoch`,
-/// `classify_reads_the_short_window_line_as_a_backoff_with_no_reset`.
+/// `classify_reads_the_short_window_line_as_a_backoff_with_no_reset`,
+/// `classify_reads_the_unknown_kind_line_as_a_backoff_with_no_reset`.
 pub fn classify(err: &anyhow::Error) -> Option<RateLimited> {
     let text = format!("{err:#}");
     let Some(at) = text.find(RATE_LIMIT_REFUSAL_MARKER) else {
         // #11233: quota left — a short-window limit, never a sleep to the reset.
-        return text
-            .contains(RATE_LIMIT_SHORT_WINDOW_MARKER)
-            .then_some(RateLimited { reset_epoch: None });
+        // #11803: an unread quota is a short backoff too.
+        return (text.contains(RATE_LIMIT_SHORT_WINDOW_MARKER)
+            || text.contains(RATE_LIMIT_UNKNOWN_KIND_MARKER))
+        .then_some(RateLimited { reset_epoch: None });
     };
     let tail = &text[at..];
     let reset_epoch = tail
@@ -71,12 +75,17 @@ pub fn classify(err: &anyhow::Error) -> Option<RateLimited> {
 /// remains. The marker decides, not `reset_epoch`: a primary line whose reset
 /// lookup failed has no epoch either.
 /// What: the short-window name when [`RATE_LIMIT_SHORT_WINDOW_MARKER`] is in
-/// the error chain, else the primary name.
+/// the error chain, the unknown-kind name for [`RATE_LIMIT_UNKNOWN_KIND_MARKER`]
+/// (#11803), else the primary name.
 /// Test: `classify_reads_the_short_window_line_as_a_backoff_with_no_reset`,
+/// `classify_reads_the_unknown_kind_line_as_a_backoff_with_no_reset`,
 /// `a_short_window_refusal_is_not_reported_as_the_primary_limit`.
 pub fn limit_name(err: &anyhow::Error) -> &'static str {
-    if format!("{err:#}").contains(RATE_LIMIT_SHORT_WINDOW_MARKER) {
+    let text = format!("{err:#}");
+    if text.contains(RATE_LIMIT_SHORT_WINDOW_MARKER) {
         "short-window or secondary GraphQL rate limit"
+    } else if text.contains(RATE_LIMIT_UNKNOWN_KIND_MARKER) {
+        "GraphQL rate limit of unknown kind"
     } else {
         "primary GraphQL rate limit"
     }
@@ -164,6 +173,24 @@ mod tests {
             20
         );
         assert!(!RATE_LIMIT_SHORT_WINDOW_MARKER.contains(RATE_LIMIT_REFUSAL_MARKER));
+    }
+
+    /// #11803: the shim's unknown-kind line is a short backoff with no reset,
+    /// named neither primary nor short-window, and shares no marker text.
+    #[test]
+    fn classify_reads_the_unknown_kind_line_as_a_backoff_with_no_reset() {
+        let err = anyhow::anyhow!(
+            "{RATE_LIMIT_UNKNOWN_KIND_MARKER} (gh account 'bot' on github.com); gh api \
+             rate_limit did not answer. gh said: GraphQL: API rate limit already exceeded."
+        );
+        let short = Some(RateLimited { reset_epoch: None });
+        assert_eq!(classify(&err), short);
+        assert_eq!(classify_any(&err), short);
+        assert_eq!(limit_name(&err), "GraphQL rate limit of unknown kind");
+        for other in [RATE_LIMIT_REFUSAL_MARKER, RATE_LIMIT_SHORT_WINDOW_MARKER] {
+            assert!(!RATE_LIMIT_UNKNOWN_KIND_MARKER.contains(other), "{other}");
+            assert!(!other.contains(RATE_LIMIT_UNKNOWN_KIND_MARKER), "{other}");
+        }
     }
 
     #[test]
