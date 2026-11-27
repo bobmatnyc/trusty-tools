@@ -26,12 +26,16 @@ use super::resume_error::ResumeManagedError;
 
 const REPO: &str = "https://github.com/acme/widget";
 
-/// A driver whose panes name their sessions and that accepts every line, so
-/// the route runs to its end. It lists no sessions, so the post-send launch
-/// check reads "unverifiable" and changes nothing.
-struct AcceptDriver;
+/// A driver whose panes name their sessions. With `refuse_launch` unset it
+/// accepts every line, so the route runs to its end; it lists no sessions, so
+/// the post-send launch check reads "unverifiable" and changes nothing. With
+/// `refuse_launch` set it refuses the launch line (`--launch-spec`), so
+/// `spawn_resume` fails after the resume began.
+struct LaunchDriver {
+    refuse_launch: bool,
+}
 
-impl ManagedTmuxDriver for AcceptDriver {
+impl ManagedTmuxDriver for LaunchDriver {
     fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
         Ok(())
     }
@@ -40,7 +44,10 @@ impl ManagedTmuxDriver for AcceptDriver {
         Ok(())
     }
 
-    fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+    fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
+        if self.refuse_launch && text.contains(" --launch-spec ") {
+            return Err(ManagedError::TmuxUnavailable("launch refused".into()));
+        }
         Ok(())
     }
 
@@ -86,12 +93,20 @@ fn project(name: &str, repo_url: &str, key: &str) -> Project {
 }
 
 /// A daemon with project `widget` registered and one `Active` session bound
-/// to it, over [`AcceptDriver`].
+/// to it, over a [`LaunchDriver`] that accepts the launch line.
 async fn bound_session(dir: &std::path::Path) -> (Arc<DaemonState>, ManagedSessionId) {
+    bound_session_over(dir, false).await
+}
+
+/// [`bound_session`] over a [`LaunchDriver`] with `refuse_launch` as given.
+async fn bound_session_over(
+    dir: &std::path::Path,
+    refuse_launch: bool,
+) -> (Arc<DaemonState>, ManagedSessionId) {
     let state = Arc::new(
         DaemonState::with_root_isolated_managed_and_driver(
             dir.join("framework"),
-            Arc::new(AcceptDriver),
+            Arc::new(LaunchDriver { refuse_launch }),
         )
         .await,
     );
@@ -281,5 +296,37 @@ async fn a_failed_reactivation_on_operator_resume_is_the_route_error() {
             .expect("row")
             .is_decommissioned(),
         "a failed reactivation must leave the record decommissioned"
+    );
+}
+
+/// #11983 Fail-Open Check: a launch that fails after the resume began leaves
+/// the project decommissioned, and the route error is the launch's own.
+/// Test: this function IS the test. Fails if `resume_managed` reactivates the
+/// project before the launch gates pass.
+#[tokio::test]
+async fn a_failed_launch_on_operator_resume_leaves_the_project_decommissioned() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session_over(dir.path(), true).await;
+    let parked: Parked = Arc::default();
+    let _rig = decommission(&state, &id, &parked).await;
+
+    let got = resume(&state, &id).await;
+
+    let msg = got
+        .expect_err("the refused launch line must fail the resume")
+        .to_string();
+    assert!(
+        msg.contains("resume spawn failed"),
+        "the route error must be the launch failure: {msg}"
+    );
+    let widget = state
+        .project_registry()
+        .await
+        .get("widget")
+        .await
+        .expect("row");
+    assert!(
+        widget.is_decommissioned() && widget.is_archived(),
+        "a failed launch reactivated the project"
     );
 }
