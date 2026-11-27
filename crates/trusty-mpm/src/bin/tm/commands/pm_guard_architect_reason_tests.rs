@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::json;
+use trusty_common::install_paths::MPM_DIR_NAME;
 use trusty_mpm::core::architect_launch::{self, ARCHITECT_RECORDS};
 use trusty_mpm::core::twin_identity::ClaudeProcess;
 
@@ -45,7 +46,7 @@ fn anchor_write(fx: &Fixture) -> Value {
 
 /// Move the record written for `from` to `to`'s file name.
 fn rename_record(fx: &Fixture, from: u32, to: u32) {
-    let root = fx.home.join(".trusty-mpm");
+    let root = fx.home.join(MPM_DIR_NAME);
     let src = ARCHITECT_RECORDS.path(&root, from);
     std::fs::rename(src, ARCHITECT_RECORDS.path(&root, to)).expect("rename record");
 }

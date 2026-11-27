@@ -62,17 +62,17 @@ fn egress_anchor_config_yaml_writes_are_denied() {
     std::fs::hard_link(&yaml, &hard).expect("hard link");
     assert!(pm_verdict(&fx, "Write", write_input(&hard, "x")).is_some());
     for spelling in [
-        "~/.trusty-tools/trusty-mpm/config.yaml",
+        "~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (guard input)
         "~/.Trusty-Tools/Trusty-MPM/CONFIG.YAML",
     ] {
         let input = json!({ "file_path": spelling, "content": "x" });
         assert!(pm_verdict(&fx, "Write", input).is_some(), "{spelling}");
     }
     for command in [
-        "echo x > ~/.trusty-tools/trusty-mpm/config.yaml",
-        "cp a.txt ~/.trusty-tools/trusty-mpm/config.yaml",
-        "sed -i s/a/b/ ~/.trusty-tools/trusty-mpm/config.yaml",
-        "ln -sf a.txt \"$HOME/.trusty-tools/trusty-mpm/config.yaml\"",
+        "echo x > ~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (guard input)
+        "cp a.txt ~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (guard input)
+        "sed -i s/a/b/ ~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (guard input)
+        "ln -sf a.txt \"$HOME/.trusty-tools/trusty-mpm/config.yaml\"", // path-literal: allow (guard input)
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
@@ -103,28 +103,28 @@ fn egress_anchor_managed_settings_writes_are_denied() {
 fn egress_anchor_rm_and_mv_of_the_config_dir_are_denied() {
     let fx = egress_fixture();
     for command in [
-        "rm -rf ~/.trusty-tools/trusty-mpm",
-        "rm -rf ~/.trusty-tools",
-        "rm ~/.trusty-tools/trusty-mpm/config.yaml",
-        "rm -rf ~/.trusty-tools/trusty-mpm/*",
-        "rm -rf $HOME/.trusty-tools/*",
-        "rmdir ~/.trusty-tools/trusty-mpm/claude-config",
-        "unlink ~/.trusty-tools/trusty-mpm/claude-config/settings.json",
-        "sudo rm -r -- ~/.trusty-tools/trusty-mpm",
-        "mv ~/.trusty-tools/trusty-mpm /tmp/gone",
-        "mv ~/.trusty-tools /tmp/gone",
-        "rm ~/.trusty-mpm/config.toml",
+        "rm -rf ~/.trusty-tools/trusty-mpm", // path-literal: allow (guard input)
+        "rm -rf ~/.trusty-tools",            // path-literal: allow (guard input)
+        "rm ~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (guard input)
+        "rm -rf ~/.trusty-tools/trusty-mpm/*", // path-literal: allow (guard input)
+        "rm -rf $HOME/.trusty-tools/*",      // path-literal: allow (guard input)
+        "rmdir ~/.trusty-tools/trusty-mpm/claude-config", // path-literal: allow (guard input)
+        "unlink ~/.trusty-tools/trusty-mpm/claude-config/settings.json", // path-literal: allow (guard input)
+        "sudo rm -r -- ~/.trusty-tools/trusty-mpm", // path-literal: allow (guard input)
+        "mv ~/.trusty-tools/trusty-mpm /tmp/gone",  // path-literal: allow (guard input)
+        "mv ~/.trusty-tools /tmp/gone",             // path-literal: allow (guard input)
+        "rm ~/.trusty-mpm/config.toml",             // path-literal: allow (guard input)
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
     for command in [
-        "rm ~/.trusty-tools/trusty-mpm/logs/x.log",
+        "rm ~/.trusty-tools/trusty-mpm/logs/x.log", // path-literal: allow (guard input)
         "rm -f a.txt",
         "rm -rf build/*",
         "rm *.log",
         "cd /tmp && rm -rf *",
-        "mv ~/.trusty-tools/trusty-mpm/logs/a /tmp/a",
-        "echo x > ~/.trusty-tools/trusty-mpm/notes.md",
+        "mv ~/.trusty-tools/trusty-mpm/logs/a /tmp/a", // path-literal: allow (guard input)
+        "echo x > ~/.trusty-tools/trusty-mpm/notes.md", // path-literal: allow (guard input)
     ] {
         assert_eq!(pm_bash(&fx, command), None, "denied: {command}");
     }
@@ -149,7 +149,7 @@ fn egress_anchor_unresolvable_location_denies_every_write() {
 fn egress_anchor_unplaceable_bash_write_is_denied() {
     let fx = egress_fixture();
     for command in [
-        "cd ~/.trusty-tools/trusty-mpm && echo x > config.yaml",
+        "cd ~/.trusty-tools/trusty-mpm && echo x > config.yaml", // path-literal: allow (guard input)
         "cd claude-config && cp a.txt settings.json",
         "cp a.txt $DIR/config.yaml",
         "cd somewhere && rm -rf .trusty-tools",
@@ -360,11 +360,11 @@ fn verdicts_for_every_caller(fx: &Fixture, command: &str) -> [Option<String>; 3]
 fn egress_anchor_delete_with_an_expansion_is_judged_by_its_parent() {
     let fx = egress_fixture();
     for command in [
-        "rm ~/.trusty-tools/trusty-mpm/$F",
-        "rm ~/.trusty-mpm/$X",
+        "rm ~/.trusty-tools/trusty-mpm/$F", // path-literal: allow (guard input)
+        "rm ~/.trusty-mpm/$X",              // path-literal: allow (guard input)
         "rm \"$D/config.yaml\"",
-        "rm \"$HOME/.trusty-mpm/twin/armed/$R\"",
-        "rm -f ~/.trusty-tools/trusty-mpm/`cat f`",
+        "rm \"$HOME/.trusty-mpm/twin/armed/$R\"", // path-literal: allow (guard input)
+        "rm -f ~/.trusty-tools/trusty-mpm/`cat f`", // path-literal: allow (guard input)
     ] {
         for (caller, verdict) in verdicts_for_every_caller(&fx, command)
             .into_iter()

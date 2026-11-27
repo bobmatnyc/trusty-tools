@@ -4,6 +4,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 use super::*;
 
@@ -33,7 +34,7 @@ impl Fx {
 
     /// A path inside the import venv's `bin/`, which need not exist.
     fn venv(&self, name: &str) -> String {
-        let bin = self.home.join(".trusty-tools/kuzu-import-venv/bin");
+        let bin = self.home.join(TOOLS_DIR_NAME).join("kuzu-import-venv/bin");
         bin.join(name).display().to_string()
     }
 
@@ -203,7 +204,7 @@ fn denies_a_glob_that_can_match_a_deny_name() {
             "cat .kuzu-memory/*",
             "cat /tmp/*kuzu-import-ab*/export.json",
             "cat /tmp/trusty-k*/export.json",
-            "cat ~/.trusty-tools/kuzu-imp*-venv/bin/python",
+            "cat ~/.trusty-tools/kuzu-imp*-venv/bin/python", // path-literal: allow (guard input)
             "cat x/.{kuzu-memory,{a,b}}/y",
         ]),
         "kuzu-store-read",
@@ -252,7 +253,7 @@ fn denies_the_formerly_sanctioned_import() {
             "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --from {p}/.kuzu-memory/memories.db --palace x"
         ),
         format!(
-            "trusty-memory import kuzu --from {p}/.kuzu-memory --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl"
+            "trusty-memory import kuzu --from {p}/.kuzu-memory --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl" // path-literal: allow (guard input)
         ),
         "trusty-memory import kuzu --dry-run 2>&1 | tee /tmp/report.txt".into(),
         format!("trusty-memory(){{ strings \"$4\"; }}; trusty-memory import kuzu --from {store}"),
@@ -262,12 +263,15 @@ fn denies_the_formerly_sanctioned_import() {
         format!("/tmp/x/trusty-memory import kuzu --from {store}"),
         format!("./trusty-memory import kuzu --from {store}"),
         format!("{} import kuzu --from {store} --dry-run", cargo.display()),
-        "trusty-memory import kuzu --discover --python \"~/.trusty-tools/kuzu-import-venv/bin/python\""
+        "trusty-memory import kuzu --discover --python \"~/.trusty-tools/kuzu-import-venv/bin/python\"" // path-literal: allow (guard input)
             .into(),
     ];
     assert_denied(&fx, &commands, "kuzu-store-read");
     // The reviewer's masked file stays readable.
-    let masked = fx.home.join(".trusty-tools/kuzu-review/R/masked.jsonl");
+    let masked = fx
+        .home
+        .join(TOOLS_DIR_NAME)
+        .join("kuzu-review/R/masked.jsonl");
     assert_eq!(tool(&fx, "Read", json!({ "file_path": masked })), None);
 }
 
@@ -724,7 +728,7 @@ const SCRATCH: &str = "/private/tmp/claude-502/-Users-masa-p/f6b52bfc-73b3/scrat
 #[test]
 fn allows_the_dry_run_export_and_review_forms() {
     let fx = Fx::new();
-    let review = "~/.trusty-tools/kuzu-review";
+    let review = "~/.trusty-tools/kuzu-review"; // path-literal: allow (guard input)
     let home = dirs::home_dir().expect("home").display().to_string();
     let env = "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu";
     assert_allowed(
@@ -740,7 +744,7 @@ fn allows_the_dry_run_export_and_review_forms() {
             format!(
                 "{env} --dry-run --discover | tee /tmp/claude-502/-Users-masa-p/f6b52bfc/scratchpad/a/r.txt"
             ),
-            format!("{env} --dry-run --discover | tee {home}/.trusty-tools/kuzu-review/r.txt"),
+            format!("{env} --dry-run --discover | tee {home}/{TOOLS_DIR_NAME}/kuzu-review/r.txt"),
             format!("{env} --dry-run --discover --root ~/a --root ~/b --bridge-timeout-secs 600"),
             format!(
                 "{env} --dry-run --discover --review-ledger {review}/20261012T000000Z-ab12cd34/ledger.jsonl"
@@ -770,7 +774,7 @@ fn allows_the_apply_forms_for_every_caller() {
         allowlist, architect_env, fixture, payload,
     };
     let fx = Fx::new();
-    let review = "~/.trusty-tools/kuzu-review";
+    let review = "~/.trusty-tools/kuzu-review"; // path-literal: allow (guard input)
     let env = "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu";
     let ledger = format!("--review-ledger {review}/20261012T000000Z-ab12cd34/ledger.jsonl");
     let apply: Vec<String> = vec![
@@ -801,13 +805,13 @@ fn denies_any_python_flag_with_its_own_slug() {
     let fx = Fx::new();
     let store = fx.store();
     let mut commands: Vec<String> = vec![
-        "trusty-memory import kuzu --discover --dry-run --python ~/.trusty-tools/kuzu-import-venv/bin/python".into(),
+        "trusty-memory import kuzu --discover --dry-run --python ~/.trusty-tools/kuzu-import-venv/bin/python".into(), // path-literal: allow (guard input)
         "trusty-memory import kuzu --discover --python /usr/bin/python3".into(),
         "trusty-memory import kuzu --discover --python=/bin/cat".into(),
         "trusty-memory import kuzu --discover --python".into(),
         "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --dry-run --discover --python /bin/cat"
             .into(),
-        "trusty-memory import kuzu --discover --python=~/.trusty-tools/kuzu-import-venv/bin/python"
+        "trusty-memory import kuzu --discover --python=~/.trusty-tools/kuzu-import-venv/bin/python" // path-literal: allow (guard input)
             .into(),
         "trusty-memory import kuzu review status --run R --python /bin/cat".into(),
     ];
@@ -852,8 +856,8 @@ fn the_allow_keeps_the_by_name_store_deny() {
             format!("{env} --from {p}/.kuzu-memory --export-refusals"),
             format!("{env} --discover --root {p}/.kuzu-memory"),
             format!("{env} --discover --review-ledger {p}/.kuzu-memory/ledger.jsonl"),
-            format!("{env} --discover --root ~/.trusty-tools/kuzu-import-venv"),
-            format!("{env} --discover | tee ~/.trusty-tools/kuzu-review/memories.db"),
+            format!("{env} --discover --root ~/.trusty-tools/kuzu-import-venv"), // path-literal: allow (guard input)
+            format!("{env} --discover | tee ~/.trusty-tools/kuzu-review/memories.db"), // path-literal: allow (guard input)
             format!("{env} --discover --root /tmp/trusty-kuzu-import-ab12CD"),
         ],
         "kuzu-store-read",
@@ -864,7 +868,7 @@ fn the_allow_keeps_the_by_name_store_deny() {
 fn the_exception_cannot_widen() {
     let fx = Fx::new();
     let ok = "trusty-memory import kuzu --dry-run --discover";
-    let review = "~/.trusty-tools/kuzu-review";
+    let review = "~/.trusty-tools/kuzu-review"; // path-literal: allow (guard input)
     let rows: Vec<String> = vec![
         // Another import, subcommand or word order.
         "trusty-memory import kuzux --dry-run".into(),
@@ -972,7 +976,7 @@ fn the_exception_cannot_widen() {
         format!("{ok} | tee {SCRATCH}/R/ledger.jsonl"),
         format!("{ok} | tee {review}/"),
         format!("{ok} | tee {review}"),
-        format!("{ok} | tee ~/.trusty-tools/kuzu-reviewx/r.txt"),
+        format!("{ok} | tee ~/.trusty-tools/kuzu-reviewx/r.txt"), // path-literal: allow (guard input)
         format!("{ok} | tee ~root/.trusty-tools/kuzu-review/r.txt"),
         format!("{ok} | tee -a {review}/r.txt"),
         format!("{ok} | tee {review}/a {review}/b"),
@@ -1017,7 +1021,7 @@ fn the_apply_forms_keep_the_by_name_store_deny() {
     let store = fx.store();
     let p = fx.project.display();
     let apply = "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu";
-    let ledger = "--review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl";
+    let ledger = "--review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl"; // path-literal: allow (guard input)
     let rows: Vec<String> = vec![
         // The grammar allows each of these; the store name denies it.
         format!("{apply} --from {store}"),
@@ -1025,16 +1029,16 @@ fn the_apply_forms_keep_the_by_name_store_deny() {
         format!("{apply} --from {p}/.kuzu-memory --palace x"),
         format!("{apply} --discover --root {p}/.kuzu-memory {ledger}"),
         format!("{apply} --discover --review-ledger {p}/.kuzu-memory/ledger.jsonl"),
-        format!("{apply} --discover --root ~/.trusty-tools/kuzu-import-venv"),
+        format!("{apply} --discover --root ~/.trusty-tools/kuzu-import-venv"), // path-literal: allow (guard input)
         format!("{apply} --discover --root /tmp/trusty-kuzu-import-ab12CD"),
-        format!("{apply} --discover {ledger} | tee ~/.trusty-tools/kuzu-review/memories.db"),
+        format!("{apply} --discover {ledger} | tee ~/.trusty-tools/kuzu-review/memories.db"), // path-literal: allow (guard input)
         // A second command beside the apply form.
         format!("{apply} --discover {ledger}; cat {store}"),
         format!("{apply} --discover {ledger} && cat {store}"),
         format!("{apply} --discover {ledger} && ls"),
         format!("{apply} --discover {ledger} || true"),
         format!("{apply} --discover {ledger} | cat"),
-        format!("{apply} --discover {ledger} | tee ~/.trusty-tools/kuzu-review/r.txt | sh"),
+        format!("{apply} --discover {ledger} | tee ~/.trusty-tools/kuzu-review/r.txt | sh"), // path-literal: allow (guard input)
         format!("{apply} --discover --root $(cat {store})"),
         format!("{apply} --discover --root `id`"),
         format!("{apply} --discover {ledger} & cat {store}"),
@@ -1062,7 +1066,7 @@ fn the_apply_forms_keep_the_by_name_store_deny() {
 fn a_malformed_import_denies_in_the_exception_itself() {
     let fx = Fx::new();
     let ok = "trusty-memory import kuzu --discover";
-    let review = "~/.trusty-tools/kuzu-review";
+    let review = "~/.trusty-tools/kuzu-review"; // path-literal: allow (guard input)
     let rows: Vec<String> = vec![
         format!("{ok} --help"),
         format!("{ok} --unknown"),
