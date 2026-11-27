@@ -458,6 +458,18 @@ pub fn recent_events(state: &Arc<DaemonState>) -> EventsResponse {
     }
 }
 
+/// The daemon's own recent events (`GET /events/daemon/poll`,
+/// `mpm.events.daemon_poll`), e.g. `ci_transition` (#12049).
+///
+/// Test: `a_watch_transition_is_readable_where_tm_events_reads_12049`.
+pub fn recent_daemon_events(
+    state: &Arc<DaemonState>,
+) -> crate::daemon::api::types::DaemonEventsResponse {
+    crate::daemon::api::types::DaemonEventsResponse {
+        events: state.action_events().recent_daemon_events(),
+    }
+}
+
 /// One session's slice of the ring buffer (`GET /sessions/{id}/events/poll`,
 /// `mpm.sessions.events_poll`).
 ///

@@ -241,6 +241,14 @@ pub struct EventsResponse {
     pub events: Vec<HookEventRecord>,
 }
 
+/// Response of `GET /events/daemon/poll`: events the daemon itself emitted,
+/// such as the PR watch's `ci_transition` (#12049).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonEventsResponse {
+    /// Oldest first.
+    pub events: Vec<trusty_common::control_bus::HarnessEvent>,
+}
+
 /// Response of `POST /sessions`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterSessionResponse {

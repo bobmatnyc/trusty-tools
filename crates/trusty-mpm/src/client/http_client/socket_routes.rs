@@ -88,6 +88,7 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "mpm.sessions.events_poll",
     ),
     ("GET", "/events/poll", "mpm.events.poll"),
+    ("GET", "/events/daemon/poll", "mpm.events.daemon_poll"),
     ("POST", "/hooks", "mpm.hooks.ingest"),
     // ---- managed sessions (slice 4), fleet-wide first ----
     ("POST", "/api/v1/sessions/managed", "mpm.managed.spawn"),

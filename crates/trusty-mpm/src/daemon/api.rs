@@ -241,6 +241,7 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         )
         .route("/events", get(stream_events))
         .route("/events/poll", get(recent_events))
+        .route("/events/daemon/poll", get(recent_daemon_events))
         .route("/hooks", post(ingest_hook))
         .route("/breakers", get(breakers))
         .route("/optimizer", get(get_optimizer))
@@ -535,6 +536,25 @@ pub async fn list_sessions(
 pub async fn recent_events(State(state): State<Arc<DaemonState>>) -> Json<EventsResponse> {
     // #6288: the body is shared with `mpm.events.poll` over the Unix socket.
     Json(sessions_ops::recent_events(&state))
+}
+
+/// `GET /events/daemon/poll` — events the daemon itself emitted (#12049).
+///
+/// Why: `tm events` read only hook records, so the PR watch's
+/// `ci_transition` was never visible there.
+/// What: the bounded ring `ActionEvents::recent_daemon_events` keeps, oldest
+/// first; shared with `mpm.events.daemon_poll`.
+/// Test: `a_watch_transition_is_readable_where_tm_events_reads_12049`.
+#[utoipa::path(
+    get,
+    path = "/events/daemon/poll",
+    tag = "events",
+    responses((status = 200, description = "Recent daemon-emitted events"))
+)]
+pub async fn recent_daemon_events(
+    State(state): State<Arc<DaemonState>>,
+) -> Json<DaemonEventsResponse> {
+    Json(sessions_ops::recent_daemon_events(&state))
 }
 
 /// `GET /events` — live SSE stream of every hook event.

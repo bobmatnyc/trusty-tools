@@ -56,13 +56,13 @@ impl ActionPublisher {
     /// What: the closed check and the buffer write share one lock with the
     /// drain, so an event is either drained or counted, never stranded. A
     /// late event is logged at counts 1, 2, 4, 8, ... so a flood stays a few
-    /// lines.
+    /// lines. #12049: returns whether `event` was buffered.
     /// Test: `an_event_after_the_settle_is_counted_lost_10412`.
-    pub(super) fn buffer(&self, event: HarnessEvent) {
+    pub(super) fn buffer(&self, event: HarnessEvent) -> bool {
         let closed = self.settle.closed.lock();
         if !*closed {
             self.client.send(event);
-            return;
+            return true;
         }
         drop(closed);
         let late = self.settle.late.fetch_add(1, Ordering::Relaxed) + 1;
@@ -72,6 +72,7 @@ impl ActionPublisher {
                 "action events: event after the stop settled the buffer; lost"
             );
         }
+        false
     }
 
     /// Events offered after the stop drained the buffer.

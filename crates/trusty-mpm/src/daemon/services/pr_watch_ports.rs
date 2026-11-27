@@ -50,7 +50,12 @@ pub struct BusEmitter {
 impl Emitter for BusEmitter {
     async fn emit(&self, event: HarnessEvent) -> anyhow::Result<()> {
         if let Some(publisher) = &self.publisher {
-            publisher.publish_event(event);
+            // #12049: a publish the stopped buffer refused is an emit error,
+            // so the watch keeps the transition and retries it.
+            anyhow::ensure!(
+                publisher.try_publish_event(event),
+                "the bus buffer is settled for stop; event not taken"
+            );
             return Ok(());
         }
         let dir = self
@@ -62,6 +67,55 @@ impl Emitter for BusEmitter {
             .map_err(|e| anyhow::anyhow!("spool task failed: {e}"))??;
         anyhow::ensure!(written == 1, "spool wrote {written} events, wanted 1");
         Ok(())
+    }
+}
+
+/// [`BusEmitter`] plus the daemon's own-event ring `tm events` reads (#12049).
+///
+/// Why: the watch handed `ci_transition` to the bus only, while `tm events`
+/// reads the daemon (`GET /events/daemon/poll`), so the event never showed.
+/// What: emits through `inner`; only on `Ok` keeps the event in
+/// [`ActionEvents::remember_daemon_event`](crate::daemon::action_events::ActionEvents::remember_daemon_event).
+/// An `Err` records nothing, so the watch's retry adds no duplicate.
+/// Test: `a_watch_transition_is_readable_where_tm_events_reads_12049`,
+/// `a_late_publish_is_an_emit_error_and_records_nothing_12049`.
+pub(crate) struct RecordingEmitter {
+    /// The bus-or-spool hand-off.
+    pub(crate) inner: BusEmitter,
+    /// The daemon whose ring keeps the event.
+    pub(crate) state: Arc<DaemonState>,
+}
+
+#[async_trait::async_trait]
+impl Emitter for RecordingEmitter {
+    async fn emit(&self, event: HarnessEvent) -> anyhow::Result<()> {
+        self.inner.emit(event.clone()).await?;
+        self.state.action_events().remember_daemon_event(event);
+        Ok(())
+    }
+}
+
+/// The loop's production ports over `state`, spooling under `data_dir`.
+///
+/// Test: `a_watch_transition_is_readable_where_tm_events_reads_12049`.
+pub(crate) fn daemon_ports(
+    state: Arc<DaemonState>,
+    data_dir: &std::path::Path,
+    reader: Arc<dyn crate::core::pr_watch::gh::PrReader>,
+) -> Ports {
+    let inner = BusEmitter {
+        publisher: state.action_events().publisher().cloned(),
+        spool_dir: Some(spool::spool_dir(data_dir)),
+    };
+    Ports {
+        reader,
+        // #12049: was the bare `BusEmitter`, invisible to `tm events`.
+        emitter: Arc::new(RecordingEmitter {
+            inner,
+            state: Arc::clone(&state),
+        }),
+        ledger: Arc::new(DbatgLedger),
+        waker: Arc::new(PaneWaker { state }),
     }
 }
 
@@ -210,19 +264,12 @@ pub(crate) fn spawn_if_enabled(
             return;
         }
     };
-    let ports = Ports {
-        // #11673: per-repo identity, resolved per call; was `resolve_gh_env(None)`.
-        reader: Arc::new(daemon_reader(
-            crate::project::registry_data_dir(),
-            GH_CALL_BUDGET,
-        )),
-        emitter: Arc::new(BusEmitter {
-            publisher: state.action_events().publisher().cloned(),
-            spool_dir: Some(spool::spool_dir(&data_dir)),
-        }),
-        ledger: Arc::new(DbatgLedger),
-        waker: Arc::new(PaneWaker { state }),
-    };
+    // #11673: per-repo identity, resolved per call; was `resolve_gh_env(None)`.
+    let reader = Arc::new(daemon_reader(
+        crate::project::registry_data_dir(),
+        GH_CALL_BUDGET,
+    ));
+    let ports = daemon_ports(state, &data_dir, reader);
     let interval = pr_watch_loop::parse_interval_secs(
         std::env::var(pr_watch_loop::ENV_INTERVAL_SECS)
             .ok()
@@ -235,3 +282,7 @@ pub(crate) fn spawn_if_enabled(
 #[cfg(test)]
 #[path = "pr_watch_identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "pr_watch_events_tests.rs"]
+mod events_tests;
