@@ -23,6 +23,8 @@ mod auth_cost;
 // #11821 P3: the config trees follow the configured config dir.
 mod config_dir_routing_11821_p3;
 mod daemon_serve_drain;
+// #11700: `tm fleet status` after a content update, then `sync-assets`.
+mod fleet_status_sync_assets_11700;
 // #9121: a test daemon's environment carries no inherited secret.
 mod architect_floor_host;
 // #10459: every Architect launch seam refuses an old Claude Code before any write.
