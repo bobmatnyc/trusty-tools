@@ -38,8 +38,11 @@ pub(super) fn check_org_accounts(home: &Path) -> DoctorCheck {
         Ok((accounts, None)) if accounts.is_empty() => DoctorCheck::new(
             NAME,
             CheckStatus::Ok,
-            "[accounts] missing in ~/.trusty-mpm/config.toml — no org maps to a gh account; \
-             clones and spawns use the registry pin or the ambient identity",
+            // #11821: message text only; the bytes are unchanged.
+            concat!(
+                "[accounts] missing in ~/.trusty-mpm/config.toml — no org maps to a gh account; ", // path-literal: allow
+                "clones and spawns use the registry pin or the ambient identity",
+            ),
         ),
         Ok((accounts, None)) => DoctorCheck::new(
             NAME,
@@ -67,7 +70,7 @@ mod tests {
     /// A scratch home whose `.trusty-mpm/config.toml` holds `body`.
     fn home_with(body: &str) -> tempfile::TempDir {
         let home = tempfile::tempdir().expect("tempdir");
-        let root = home.path().join(".trusty-mpm");
+        let root = home.path().join(trusty_common::install_paths::MPM_DIR_NAME);
         std::fs::create_dir_all(&root).expect("mkdir");
         std::fs::write(root.join("config.toml"), body).expect("write");
         home

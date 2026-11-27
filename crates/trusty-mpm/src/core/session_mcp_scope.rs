@@ -401,7 +401,7 @@ pub fn provision(cwd: &Path, config_dir: &Path) -> Result<PathBuf, ScopeError> {
         path: PathBuf::from(SESSION_MCP_DIR),
         source: std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "cannot resolve the home directory holding ~/.trusty-tools",
+            "cannot resolve the home directory holding ~/.trusty-tools", // path-literal: allow
         ),
     })?;
     provision_at(&path, config_dir)

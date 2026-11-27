@@ -468,7 +468,9 @@ mod tests {
 
         // managed_root mirrors the real default (`~/.trusty-mpm`) under the
         // fake home, so this test exercises the exact production shape.
-        let managed_root = fake_home.path().join(".trusty-mpm");
+        let managed_root = fake_home
+            .path()
+            .join(trusty_common::install_paths::MPM_DIR_NAME);
         let agents_src = managed_root.join("framework").join("agents");
         std::fs::create_dir_all(&agents_src).unwrap();
         std::fs::write(

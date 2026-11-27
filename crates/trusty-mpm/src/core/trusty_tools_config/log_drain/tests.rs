@@ -12,6 +12,7 @@ use std::process::Command;
 use trusty_common::log_drain::DrainTarget;
 
 use super::*;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// Parse a `log_drain:` YAML fragment into a full [`TrustyToolsConfig`].
 fn config_from_yaml(yaml: &str) -> TrustyToolsConfig {
@@ -122,7 +123,7 @@ log_drain:
     assert_eq!(sources.len(), 1);
     let source = &sources[0];
     assert_eq!(source.crate_name, "trusty-mpm");
-    assert_eq!(source.root, home().join(".trusty-mpm").join("logs"));
+    assert_eq!(source.root, home().join(MPM_DIR_NAME).join("logs"));
     assert_eq!(source.include, vec!["trusty-mpm.log*".to_string()]);
     assert_eq!(source.level_filter, Some(Level::Info));
 }

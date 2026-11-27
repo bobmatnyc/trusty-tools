@@ -193,15 +193,59 @@ fn default_state_and_install_host_live_under_home() {
     );
     let launcher =
         std::fs::read_to_string(real.join(".trusty/browser/chrome-native-host")).expect("launcher");
-    assert!(launcher.starts_with(&format!(
-        "#!/bin/sh\nexec {} native-host --socket ",
-        exe.display()
-    )));
-    let plist = text(&run(home.path(), &["launchd-plist"]).stdout);
+    // #11927: a guard line names a missing binary before the exec.
+    assert!(launcher.starts_with(&format!("#!/bin/sh\n[ -x {} ] || ", exe.display())));
+    assert!(launcher.contains(&format!("\nexec {} native-host --socket ", exe.display())));
+    // #11927: this test binary is a build path; `launchd-plist` needs an installed one.
+    stable_binary(home.path());
+    let plist = text(&run_hermetic(home.path(), &["launchd-plist"]).stdout);
     assert!(plist.contains(&format!(
         "<string>{}/.trusty/browser</string>",
         real.display()
     )));
+}
+
+/// [`run`] without the cargo install roots of the caller's environment.
+fn run_hermetic(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_trusty-browser"))
+        .args(args)
+        .env("HOME", home)
+        .env_remove("CARGO_HOME")
+        .env_remove("CARGO_INSTALL_ROOT")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run")
+}
+
+/// A placeholder `cargo install` binary at `<home>/.cargo/bin/trusty-browser`.
+fn stable_binary(home: &Path) -> std::path::PathBuf {
+    let bin = home.join(".cargo/bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    let exe = bin.join("trusty-browser");
+    std::fs::write(&exe, b"exe").expect("exe");
+    std::fs::canonicalize(exe).expect("canon")
+}
+
+/// #11927: the build binary never prints itself into a plist.
+#[test]
+fn launchd_plist_never_records_a_build_binary() {
+    let home = common::state_dir();
+    let build = std::fs::canonicalize(env!("CARGO_BIN_EXE_trusty-browser")).expect("exe");
+    let build = build.display().to_string();
+    let out = run_hermetic(home.path(), &["launchd-plist"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(!text(&out.stdout).contains(&build));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains(&build) && err.contains("cargo install"),
+        "{err}"
+    );
+    let stable = stable_binary(home.path());
+    let out = run_hermetic(home.path(), &["launchd-plist"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let plist = text(&out.stdout);
+    assert!(plist.contains(&format!("<string>{}</string>", stable.display())));
+    assert!(!plist.contains(&build), "{plist}");
 }
 
 #[test]

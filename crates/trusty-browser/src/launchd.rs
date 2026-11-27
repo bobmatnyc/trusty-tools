@@ -102,8 +102,10 @@ pub enum Presence {
     Absent,
     /// Exactly what we would write.
     Ours,
-    /// Exactly what Python 0.7.0 wrote; replaced on install, removed on uninstall.
-    Python,
+    /// An earlier registration of ours, replaced on install and removed on
+    /// uninstall: exactly what Python 0.7.0 wrote, or (#11927) a pre-#11927
+    /// launcher, or a launcher or plist whose binary is gone.
+    Previous,
 }
 
 /// `installed_content`, extended with the one-time Python match.
@@ -126,7 +128,7 @@ pub fn installed(
     let text = fs::read_to_string(path).unwrap_or_default();
     // A file that is not ours must still be a regular owner-controlled one.
     if meta.is_file() && install_host::same_file(path, &text, mode) && legacy(&text) {
-        return Ok(Presence::Python);
+        return Ok(Presence::Previous);
     }
     Err(io::Error::other(format!(
         "Refusing to change an unrelated registration: {}",
@@ -147,25 +149,45 @@ pub struct Layout {
     pub uid: u32,
 }
 
-fn legacy_for(r: &Registration, state: &Path) -> Box<dyn Fn(&str) -> bool> {
-    let name = r.path.file_name().map(|n| n.to_string_lossy().into_owned());
-    let sock = match name.as_deref() {
-        Some("chrome-native-host") => Some(state.join("service.sock")),
-        Some("chrome-native-host.enroll") => Some(state.join("enrollment.sock")),
-        // Manifests are identical in both ports: they name the same launcher.
-        _ => None,
-    };
-    match sock {
-        Some(sock) => Box::new(move |t| python_launcher(t, &sock)),
+fn legacy_for(r: &Registration, exe: &Path) -> Box<dyn Fn(&str) -> bool> {
+    // Manifests are identical in both ports: they name the same launcher.
+    match install_host::launcher_socket(&r.path) {
+        // #11927: also an earlier Rust launcher, or one whose binary is gone.
+        Some(sock) => {
+            let exe = exe.to_path_buf();
+            Box::new(move |t| {
+                python_launcher(t, &sock) || install_host::previous_launcher(t, &sock, &exe)
+            })
+        }
         None => Box::new(|_| false),
     }
+}
+
+/// Why: `install-service` from a stable binary must replace the plist a
+/// removed build binary left, or the repair the popup names refuses (#11927).
+/// What: true when `text` is exactly our plist for the binary it names and
+/// `state`, and that binary is [`install_host::binary_gone`].
+/// Test: `install_service_replaces_a_registration_whose_binary_is_gone`,
+/// `install_service_refuses_our_plist_for_another_live_binary` in `tests/install.rs`.
+fn stale_plist(text: &str, state: &Path) -> bool {
+    let Some(old) = text
+        .lines()
+        .find_map(|l| l.strip_prefix("\t\t<string>")?.strip_suffix("</string>"))
+        .map(unescape)
+    else {
+        return false;
+    };
+    let old = Path::new(&old);
+    // #11927 review: only NotFound is gone; an unreadable binary is not.
+    install_host::binary_gone(old) && launch_configuration(old, state).is_ok_and(|p| p == text)
 }
 
 /// `install-service` (`install = true`) or `uninstall-service`.
 ///
 /// Why: one routine keeps Python's ownership checks for both verbs.
-/// What: refuses a plist or registration file it did not write (except
-/// Python's own, see [`Presence::Python`]) and a loaded job whose plist is
+/// What: refuses a plist or registration file it did not write, except an
+/// earlier registration of ours ([`Presence::Previous`]: Python 0.7.0's, the
+/// 0.8.2 launcher, or one whose binary is gone), and a loaded job whose plist is
 /// elsewhere. Install: LaunchAgents 0700, state 0700, publish the extension,
 /// the host registrations, the plist (0600), then `bootstrap`, or
 /// `kickstart -k` when the job is already loaded (#11522). Uninstall: `bootout` when loaded, then remove every owned file.
@@ -178,6 +200,27 @@ pub fn manage(
     ctl: &dyn Launchctl,
     signer: &Signer<'_>,
 ) -> Result<(), LaunchdError> {
+    manage_with(layout, install, &[], ctl, signer)
+}
+
+/// [`manage`], where uninstall also owns the exact registration of each `also` binary.
+///
+/// Why: `B uninstall-service` builds its layout for a substituted S, yet the
+/// registration may name B; uninstall records nothing, so matching both is
+/// safe (#11927 review).
+/// What: on uninstall, a plist or launcher byte-identical to what `also[i]`
+/// would write counts as [`Presence::Previous`] and is removed. Install
+/// ignores `also`, so it never takes over another binary's registration.
+/// Test: `uninstall_from_a_build_binary_matches_its_own_registration`,
+/// `uninstall_service_takes_over_a_registration_whose_binary_is_gone` in `tests/install.rs`.
+pub fn manage_with(
+    layout: &Layout,
+    install: bool,
+    also: &[PathBuf],
+    ctl: &dyn Launchctl,
+    signer: &Signer<'_>,
+) -> Result<(), LaunchdError> {
+    let also = if install { &[][..] } else { also };
     if !cfg!(target_os = "macos") {
         return Err(io::Error::other("launchd service installation requires macOS").into());
     }
@@ -190,8 +233,18 @@ pub fn manage(
     let registrations = install_host::registration_files(state, &manifests, &layout.exe);
     let configuration = launch_configuration(&layout.exe, state)?;
     let st = state.clone();
+    // #11927 review: uninstall also owns the exact registration of each `also` binary.
+    let also_plists = also
+        .iter()
+        .map(|o| launch_configuration(o, state))
+        .collect::<io::Result<Vec<_>>>()?;
+    let also_hosts: Vec<_> = also
+        .iter()
+        .map(|o| install_host::registration_files(state, &manifests, o))
+        .collect();
     let present = installed(&plist_path, &configuration, 0o600, &move |t| {
-        python_plist(t, &st)
+        // #11927: also our plist for a binary that is gone.
+        python_plist(t, &st) || stale_plist(t, &st) || also_plists.iter().any(|p| p == t)
     })?;
     let loaded = ctl.run(&["print", &target])?;
     let marker = format!("path = {}\n", plist_path.display());
@@ -199,8 +252,10 @@ pub fn manage(
         return Err(io::Error::other(format!("A different launchd job owns {LABEL}")).into());
     }
     let mut owned = Vec::new();
-    for r in &registrations {
-        let p = installed(&r.path, &r.content, r.mode, &*legacy_for(r, state))?;
+    for (i, r) in registrations.iter().enumerate() {
+        let legacy = legacy_for(r, &layout.exe);
+        let other = |t: &str| also_hosts.iter().any(|h| h[i].content == t);
+        let p = installed(&r.path, &r.content, r.mode, &|t| legacy(t) || other(t))?;
         if p != Presence::Absent {
             owned.push((r, p));
         }
@@ -212,20 +267,20 @@ pub fn manage(
         install_host::mkdir_0700(state)?;
         crate::assets::extension_path(state)?;
         for (r, p) in &owned {
-            if *p == Presence::Python {
+            if *p == Presence::Previous {
                 install_host::replace_owned(&r.path, &r.content, r.mode)?;
             }
         }
         install_host::install(state, &manifests, &layout.exe)?;
-        if present == Presence::Python {
+        if present == Presence::Previous {
             install_host::replace_owned(&plist_path, &configuration, 0o600)?;
         }
         install_host::write_owned(&plist_path, &configuration, 0o600)?;
         // #11440: a loaded Python job keeps running its old plist until booted out.
-        if loaded.code == 0 && present == Presence::Python {
+        if loaded.code == 0 && present == Presence::Previous {
             checked(ctl, &["bootout", &target])?;
         }
-        if loaded.code != 0 || present == Presence::Python {
+        if loaded.code != 0 || present == Presence::Previous {
             checked(ctl, &["bootstrap", &domain, &plist_path.to_string_lossy()])?;
         } else {
             // #11522: a loaded job keeps its old process; restart it so an upgrade

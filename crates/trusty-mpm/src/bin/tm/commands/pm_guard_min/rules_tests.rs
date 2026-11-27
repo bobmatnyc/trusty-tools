@@ -103,7 +103,7 @@ fn r1_flags_writes_to_each_anchor() {
     for cmd in [
         "echo x > ~/.cargo/bin/tm",
         "cp ./tm ~/.cargo/bin/trusty-mpm",
-        "tee -a ~/.trusty-mpm/config.toml < /dev/null",
+        "tee -a ~/.trusty-mpm/config.toml < /dev/null", // path-literal: allow (guard input)
         "plutil -extract ProgramArguments json ~/Library/LaunchAgents/com.example.a.plist",
         "sed -i '' s/a/b/ ~/.claude/settings.local.json",
         "rm ~/Library/LaunchAgents/com.trusty.mpm.plist",

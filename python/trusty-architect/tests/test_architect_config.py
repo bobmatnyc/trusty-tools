@@ -270,9 +270,11 @@ def test_projects_root_and_claude_config_dir_resolve_absolute_with_env_winning(t
     assert (cfg.projects_root, cfg.claude_config_dir) == (str(tmp_path / "pr"), str(tmp_path / "cc"))
     cfg = ac.load(root=str(tmp_path), environ={"ARCHITECT_PROJECTS_ROOT": "/srv/p", "CLAUDE_CONFIG_DIR": "/srv/c"})
     assert (cfg.projects_root, cfg.claude_config_dir) == ("/srv/p", "/srv/c")
-    default = ac.load(root=str(tmp_path / "none"), environ={})
-    assert default.projects_root == os.path.expanduser("~/trusty-mpm-projects")
-    assert default.claude_config_dir == ac.default_claude_config_dir({})
+    # #11821 P7: an explicit fixture home, so the operator's own install.toml is never read.
+    bare = {"HOME": str(tmp_path / "h")}
+    default = ac.load(root=str(tmp_path / "none"), environ=bare)
+    assert default.projects_root == str(tmp_path / "h" / "trusty-mpm-projects")
+    assert default.claude_config_dir == ac.default_claude_config_dir(bare)
     assert "projects_root" not in default.unknown and "claude_config_dir" not in default.unknown
 
 

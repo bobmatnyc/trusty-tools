@@ -583,10 +583,14 @@ mod tests {
         };
 
         let palace_id = derive_palace_id_for(tmp.path()).expect("a temp dir resolves to a palace");
-        let Some(home) = dirs::home_dir() else {
-            return; // No home dir resolvable: nothing to assert about.
+        // #11821: the default state dir sits under the shared reader's config dir.
+        let Ok(config_dir) = crate::install_paths::try_config_dir() else {
+            return; // No config dir resolvable: nothing to assert about.
         };
-        let home_dir = home.join(".trusty-mpm").join("projects").join(&palace_id);
+        let home_dir = config_dir
+            .join(crate::install_paths::MPM_DIR_NAME)
+            .join("projects")
+            .join(&palace_id);
         assert!(
             !home_dir.exists(),
             "precondition: a fresh tempdir's palace must not already have a \

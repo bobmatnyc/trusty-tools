@@ -209,11 +209,13 @@ pub(crate) fn lock_names_target(
 /// ([`super::launchd_probe::daemon_restart_command_for`]).
 /// Test: `slow_listing_stops_without_autostart`.
 pub(crate) fn slow_daemon_error(url: &str, why: &str, restart_cmd: &str) -> anyhow::Error {
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const LOG: &str = "~/.trusty-mpm/daemon.log"; // path-literal: allow (display text)
     anyhow::anyhow!(
         "the trusty-mpm daemon at {url} may be running but is not responding ({why}). \
          Not starting a second daemon and not redirecting to a managed clone. \
          Run `tm` again in a moment; if it stays unresponsive, restart it with \
-         `{restart_cmd}`. `tm doctor` and ~/.trusty-mpm/daemon.log show its state."
+         `{restart_cmd}`. `tm doctor` and {LOG} show its state."
     )
 }
 

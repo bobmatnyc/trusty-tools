@@ -5,6 +5,7 @@ use std::io::Read as _;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// Sets process-global env vars for one `#[serial]` test, restoring them on drop.
 ///
@@ -48,11 +49,11 @@ async fn connect_session_refuses_an_old_claude_code_before_any_write() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path().canonicalize().expect("canonical");
     let (home, project) = (root.join("home"), root.join("project"));
-    for dir in [home.join(".trusty-mpm"), project.clone()] {
+    for dir in [home.join(MPM_DIR_NAME), project.clone()] {
         std::fs::create_dir_all(dir).expect("mkdir");
     }
     std::fs::write(
-        home.join(".trusty-mpm/config.toml"),
+        home.join(MPM_DIR_NAME).join("config.toml"),
         format!(
             "[architect]\nprojects = [{:?}]\n",
             project.display().to_string()

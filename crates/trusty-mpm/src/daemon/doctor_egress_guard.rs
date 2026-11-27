@@ -284,9 +284,12 @@ mod tests {
     #[test]
     fn egress_doctor_flags_missing_egress_entry() {
         let fx = fixture(&[("settings.json", provisioned(None))]);
-        std::fs::create_dir_all(fx.home.join(".trusty-mpm")).expect("mkdir");
+        std::fs::create_dir_all(fx.home.join(trusty_common::install_paths::MPM_DIR_NAME))
+            .expect("mkdir");
         std::fs::write(
-            fx.home.join(".trusty-mpm/config.toml"),
+            fx.home
+                .join(trusty_common::install_paths::MPM_DIR_NAME)
+                .join("config.toml"),
             "[pm_guard]\nenabled = false\n",
         )
         .expect("write config");

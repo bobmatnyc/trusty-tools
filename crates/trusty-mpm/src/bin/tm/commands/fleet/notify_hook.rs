@@ -38,7 +38,7 @@ pub(crate) fn settings_path(home: &Path) -> PathBuf {
 
 /// The line every Skipped outcome prints.
 fn fix_line() -> String {
-    format!("edit ~/.trusty-mpm/config.toml, then {NOTIFICATION_HOOK_FIX}")
+    format!("edit ~/.trusty-mpm/config.toml, then {NOTIFICATION_HOOK_FIX}") // path-literal: allow (display text)
 }
 
 /// Enable the hook for the Architect in `dir` (canonical); see the module doc.

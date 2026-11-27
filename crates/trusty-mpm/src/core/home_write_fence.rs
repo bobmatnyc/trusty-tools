@@ -18,9 +18,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
+
 /// Home entries a test must never write: Claude Code's user config, and every
 /// trusty-* install and config root.
-const FENCED_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", ".trusty-mpm", ".trusty-tools"];
+const FENCED_HOME_ENTRIES: &[&str] = &[".claude", ".claude.json", MPM_DIR_NAME, TOOLS_DIR_NAME];
 
 static FENCED_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 

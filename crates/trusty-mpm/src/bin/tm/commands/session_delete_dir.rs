@@ -179,6 +179,7 @@ mod tests {
     use super::*;
     use crate::cli::{Cli, Command, SessionAction};
     use clap::Parser as _;
+    use trusty_common::install_paths::TOOLS_DIR_NAME;
 
     #[test]
     fn cli_parses_session_delete_project_dir() {
@@ -238,7 +239,7 @@ mod tests {
     #[test]
     fn a_broken_install_file_refuses_the_delete() {
         let home = tempfile::tempdir().expect("scratch home");
-        let tools = home.path().join(".trusty-tools");
+        let tools = home.path().join(TOOLS_DIR_NAME);
         std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
         std::fs::write(tools.join("install.toml"), "bogus = 1\n").expect("write install.toml");
         let broken = trusty_common::install_paths::read_install_file(home.path())
