@@ -16,7 +16,8 @@
 //! `scrub_matches_a_path_only_at_a_component_boundary`,
 //! `check_refuses_an_unscrubbed_home_path_session_and_secret`,
 //! `check_refuses_an_unlisted_tm_session_name_but_not_a_skill_name`,
-//! `check_refuses_a_secret_named_env_key`.
+//! `check_refuses_a_secret_named_env_key`,
+//! `check_refuses_a_segment_or_camel_case_credential_key_and_a_url_password`.
 
 use std::path::Path;
 
@@ -69,7 +70,7 @@ pub const SKILL_NAMES: [&str; 28] = [
 ];
 
 /// Env key fragments that name a credential, matched caselessly anywhere in
-/// the key; `TOKEN` is matched as a whole `_` segment so `TOKENIZERS_*` passes.
+/// the key.
 const SECRET_KEY_PARTS: [&str; 9] = [
     "PASSWORD",
     "PASSWD",
@@ -80,6 +81,12 @@ const SECRET_KEY_PARTS: [&str; 9] = [
     "API-KEY",
     "PRIVATE_KEY",
     "ACCESS_KEY",
+];
+
+/// Env key segments that name a credential, matched whole so `TOKENIZERS_*`,
+/// `KEYBOARD_*`, `PATH` and `BYPASS_*` pass (see [`key_segments`]).
+const SECRET_KEY_SEGMENTS: [&str; 9] = [
+    "TOKEN", "TOKENS", "KEY", "KEYS", "PAT", "PASS", "PW", "COOKIE", "COOKIES",
 ];
 
 /// What a refused recording still holds.
@@ -113,8 +120,8 @@ struct Rule {
 /// Where a [`Rule`] may match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bound {
-    /// A path: not followed by a name character, so `/Users/al` never
-    /// matches inside `/Users/alice`.
+    /// A path: not followed by a name character, so a `<home>/al` needle
+    /// never matches inside `<home>/alice`.
     Path,
     /// A session name: a name character on neither side.
     Name,
@@ -158,13 +165,60 @@ fn has_session_token(s: &str) -> bool {
     })
 }
 
-/// True when env key `k` names a credential (see [`SECRET_KEY_PARTS`]).
+/// `k` split at every non-alphanumeric character and at each camelCase
+/// boundary (`githubToken`, `GHToken`), each segment upper-cased.
+fn key_segments(k: &str) -> Vec<String> {
+    let chars: Vec<char> = k.chars().collect();
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            segs.push(std::mem::take(&mut cur));
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+        let camel = c.is_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next_lower)
+            });
+        if camel && !cur.is_empty() {
+            segs.push(std::mem::take(&mut cur));
+        }
+        cur.extend(c.to_uppercase());
+    }
+    segs.push(cur);
+    segs.retain(|s| !s.is_empty());
+    segs
+}
+
+/// True when env key `k` names a credential: a [`SECRET_KEY_PARTS`] fragment
+/// anywhere, a [`SECRET_KEY_SEGMENTS`] segment, or a final `AUTH` segment
+/// (`NPM_AUTH`; `SSH_AUTH_SOCK` passes).
 fn secret_env_key(k: &str) -> bool {
     let upper = k.to_ascii_uppercase();
+    let segs = key_segments(k);
     SECRET_KEY_PARTS.iter().any(|p| upper.contains(p))
-        || upper
-            .split('_')
-            .any(|seg| seg == "TOKEN" || seg == "TOKENS")
+        || segs
+            .iter()
+            .any(|s| SECRET_KEY_SEGMENTS.contains(&s.as_str()))
+        || segs.last().is_some_and(|s| s == "AUTH")
+}
+
+/// True when `v` holds a URL with a password, `scheme://user:pw@host`.
+fn has_url_password(v: &str) -> bool {
+    v.match_indices("://").any(|(i, m)| {
+        let rest = &v[i + m.len()..];
+        let end = rest
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let authority = &rest[..end];
+        authority.rfind('@').is_some_and(|at| {
+            authority[..at]
+                .split_once(':')
+                .is_some_and(|(_, pw)| !pw.is_empty())
+        })
+    })
 }
 
 impl Scrubber {
@@ -330,10 +384,11 @@ fn leak_kind(s: &str, sessions: &[Rule]) -> Option<RefusalKind> {
 ///
 /// Why: the last gate before a public fixture (#12026 AC3).
 /// What: scans every string [`fields`] lists, then each env entry as
-/// `KEY=VALUE` and by key name; the first hit is the error.
+/// `KEY=VALUE`, by key name and for a URL password; the first hit is the error.
 /// Test: `check_refuses_an_unscrubbed_home_path_session_and_secret`,
 /// `check_refuses_an_unlisted_tm_session_name_but_not_a_skill_name`,
 /// `check_refuses_a_secret_named_env_key`,
+/// `check_refuses_a_segment_or_camel_case_credential_key_and_a_url_password`,
 /// `committed_replay_fixtures_pass_the_refusal_check`.
 pub fn check(rec: &Recording, sessions: &[String]) -> Result<(), Refusal> {
     let session_rules: Vec<Rule> = sessions
@@ -353,7 +408,7 @@ pub fn check(rec: &Recording, sessions: &[String]) -> Result<(), Refusal> {
     // #12026: a key and its value are separate fields, so `GITHUB_TOKEN` and
     // its value each pass alone; the pair and the key name are checked here.
     for (i, (k, v)) in rec.env.iter().enumerate() {
-        if secret_env_key(k) || looks_secret(&format!("{k}={v}")) {
+        if secret_env_key(k) || has_url_password(v) || looks_secret(&format!("{k}={v}")) {
             return Err(Refusal {
                 field: format!("env#{i}"),
                 kind: RefusalKind::Secret,

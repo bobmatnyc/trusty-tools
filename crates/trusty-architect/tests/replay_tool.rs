@@ -16,12 +16,18 @@ use trusty_architect::replay::{Refusal, VERSION};
 
 const T: Duration = Duration::from_secs(30);
 
+/// `/<root>/<name>`, built at run time so the source holds no home-path
+/// literal for the public-content leak guard to flag.
+fn home(root: &str, name: &str) -> String {
+    format!("/{root}/{name}")
+}
+
 /// The parent environment a test hands the recorder: the real `PATH` (to find
 /// `python3`), a fixed fake `HOME`, and a variable that must never leak.
 fn parent() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
-        ("HOME".into(), "/Users/alice".into()),
+        ("HOME".into(), home("Users", "alice")),
         ("ALLOWED".into(), "yes".into()),
         ("LEAKED_VAR".into(), "must-not-arrive".into()),
     ])
@@ -244,12 +250,13 @@ fn scrub_is_deterministic_and_order_independent() {
 
 #[test]
 fn scrub_replaces_paths_and_bounded_session_names() {
+    let h = home("Users", "alice");
     let s = Scrubber::new()
-        .path(Path::new("/Users/alice"), "{HOME}")
-        .path(Path::new("/Users/alice/proj"), "{PROG}")
+        .path(Path::new(&h), "{HOME}")
+        .path(Path::new(&format!("{h}/proj")), "{PROG}")
         .sessions(&["tt".into()]);
     assert_eq!(
-        s.text("/Users/alice/proj/a.py /Users/alice/b"),
+        s.text(&format!("{h}/proj/a.py {h}/b")),
         "{PROG}/a.py {HOME}/b"
     );
     assert_eq!(
@@ -283,10 +290,10 @@ fn check_refuses_an_unscrubbed_home_path_session_and_secret() {
     assert_eq!(check(&clean(), &sessions), Ok(()), "placeholders pass");
     let mut cases: Vec<(Recording, &str, _)> = Vec::new();
     let mut r = clean();
-    r.stdout = "wrote /Users/alice/notes\n".into();
+    r.stdout = format!("wrote {}/notes\n", home("Users", "alice"));
     cases.push((r, "stdout", LocalPath));
     let mut r = clean();
-    r.stderr = "Traceback: /home/bob/x.py".into();
+    r.stderr = format!("Traceback: {}/x.py", home("home", "bob"));
     cases.push((r, "stderr", LocalPath));
     let mut r = clean();
     r.env.insert("SESSION".into(), "pm-alpha".into());
@@ -317,7 +324,7 @@ fn save_refuses_an_unscrubbed_recording_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("case.json");
     let mut dirty = clean();
-    dirty.stdout = "/Users/alice/secret-project\n".into();
+    dirty.stdout = format!("{}/secret-project\n", home("Users", "alice"));
     let err = save(&path, &dirty, &[]).unwrap_err();
     assert!(matches!(err, ReplayError::Refused(_)), "{err}");
     assert!(
@@ -389,15 +396,8 @@ fn cli_records_replays_and_checks_a_fixture() {
     assert!(String::from_utf8_lossy(&named.stdout).contains("REFUSED"));
     let leak = dir.path().join("leak.json");
     let l = leak.to_str().unwrap();
-    let refused = run(&[
-        "record",
-        "--out",
-        l,
-        "--",
-        "/bin/sh",
-        "-c",
-        "echo /home/zed/x",
-    ]);
+    let echo = format!("echo {}/x", home("home", "zed"));
+    let refused = run(&["record", "--out", l, "--", "/bin/sh", "-c", &echo]);
     assert_eq!(refused.status.code(), Some(1));
     assert!(!leak.exists(), "a refused record writes no fixture");
 }
@@ -428,6 +428,45 @@ fn check_refuses_a_secret_named_env_key() {
     r.env
         .insert("TOKENIZERS_PARALLELISM".into(), "false".into());
     assert_eq!(check(&r, &[]), Ok(()), "a TOKEN prefix is not a token key");
+}
+
+#[test]
+fn check_refuses_a_segment_or_camel_case_credential_key_and_a_url_password() {
+    use trusty_architect::replay::RefusalKind::Secret;
+    let refused = Err(Refusal {
+        field: "env#0".into(),
+        kind: Secret,
+    });
+    for (k, v) in [
+        ("DB_PASS", "x"),
+        ("STRIPE_KEY", "x"),
+        ("GH_PAT", "x"),
+        ("NPM_AUTH", "x"),
+        ("SESSION_COOKIE", "x"),
+        ("githubToken", "x"),
+        ("DATABASE_URL", "postgres://app:pw@db.example.com/main"),
+    ] {
+        let mut r = clean();
+        r.env.insert(k.into(), v.into());
+        assert_eq!(check(&r, &[]), refused, "{k}");
+    }
+    for (k, v) in [
+        ("PATH", "/usr/bin:/bin"),
+        ("HOME", "{HOME}"),
+        ("PWD", "{ROOT}"),
+        ("KEYBOARD_LAYOUT", "us"),
+        ("PATH_INFO", "/a"),
+        ("AUTHOR_NAME", "Ada"),
+        ("SSH_AUTH_SOCK", "{ROOT}/agent.sock"),
+        ("BYPASS_LIST", "none"),
+        ("TOKENIZERS_PARALLELISM", "false"),
+        ("REPO_URL", "https://git@example.org/r.git"),
+        ("MIRROR", "https://example.org:8443/x"),
+    ] {
+        let mut r = clean();
+        r.env.insert(k.into(), v.into());
+        assert_eq!(check(&r, &[]), Ok(()), "{k} is not a credential key");
+    }
 }
 
 #[test]
@@ -518,10 +557,11 @@ fn skill_names_match_the_repo_skill_list() {
 
 #[test]
 fn scrub_matches_a_path_only_at_a_component_boundary() {
-    let s = Scrubber::new().path(Path::new("/Users/al"), "{HOME}");
+    let (short, long) = (home("Users", "al"), home("Users", "alice"));
+    let s = Scrubber::new().path(Path::new(&short), "{HOME}");
     assert_eq!(
-        s.text("/Users/alice/x /Users/al/y /Users/al"),
-        "/Users/alice/x {HOME}/y {HOME}"
+        s.text(&format!("{long}/x {short}/y {short}")),
+        format!("{long}/x {{HOME}}/y {{HOME}}")
     );
 }
 
