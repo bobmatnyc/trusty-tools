@@ -1,0 +1,3 @@
+Fixed
+- `tm architect up` and `tm architect restart` no longer read or kickstart the login user's `architect-dashboard` launchd job when `HOME` is not that user's home folder (a test, a sandbox, a scratch HOME). The skipped dashboard restart is reported as a step. With the real home the dashboard still restarts as before (#11961).
+- A failed bundle deploy now names the failed step in its verdict line, for example `the bundle deploy failed (dashboard restart: ...), so nothing was launched`, and a failed `launchctl kickstart` names its exit status when launchd prints no stderr (#11961).
