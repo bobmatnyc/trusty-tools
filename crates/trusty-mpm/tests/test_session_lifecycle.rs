@@ -12,6 +12,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use serde_json::{Value, json};
 use trusty_mpm::core::host_state_gate::ALLOW_HOST_STATE_ENV;
@@ -330,7 +331,7 @@ async fn full_user_cycle() {
     let _tmux_tmpdir = EnvOverride::set("TMUX_TMPDIR", scratch_home.path());
     let _tmux = EnvOverride::remove("TMUX");
 
-    let server = TestServer::spawn(&scratch_home.path().join(".trusty-mpm")).await;
+    let server = TestServer::spawn(&scratch_home.path().join(MPM_DIR_NAME)).await;
     let client = reqwest::Client::new();
 
     // 1. Start a session.

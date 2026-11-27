@@ -10,6 +10,7 @@
 //! Test: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test env_serial architect_floor_host::`.
 
+use trusty_common::install_paths::MPM_DIR_NAME;
 use trusty_mpm::session_manager::{ArchitectFloor, KillVerdict};
 
 /// Restores the named variables on drop, so a failed assertion cannot leak
@@ -46,7 +47,7 @@ impl Drop for EnvOverride {
 /// A scratch home holding one Architect sidecar for session `tm-arch`.
 fn home_with_sidecar() -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("scratch home");
-    let sidecars = home.path().join(".trusty-mpm").join("architect-launch");
+    let sidecars = home.path().join(MPM_DIR_NAME).join("architect-launch");
     std::fs::create_dir_all(&sidecars).expect("sidecar dir");
     let body = serde_json::json!({"pid": 111, "start_time": 1, "session": "tm-arch"});
     std::fs::write(sidecars.join("111.architect-session"), body.to_string()).expect("sidecar");

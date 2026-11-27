@@ -36,6 +36,7 @@
 //! Test: this file IS the test module.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,7 +55,7 @@ const MIGRATION_MARKER: &str = "migrations.json";
 
 /// Run the probe and return the framework root it should have written.
 fn framework_root_of(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm")
+    home.join(MPM_DIR_NAME)
 }
 
 /// The operator's own framework root, when this process started with a `$HOME`.
@@ -417,7 +418,7 @@ fn no_test_source_names_the_bin_env_outside_the_helper() {
     assert!(
         findings.is_empty(),
         "a test source names the cargo binary-path variable directly (#7568). A spawned `tm` \
-         that inherits `$HOME` resolves the OPERATOR's `~/.trusty-mpm`. Build the command with \
+         that inherits `$HOME` resolves the OPERATOR's `~/{MPM_DIR_NAME}`. Build the command with \
          `common::tm_command()` / `common::tm_command_in(home)`, or — if you need the PATH \
          rather than a `Command` — `common::tm_bin()` plus `common::isolate_spawned_tm` on the \
          process you do spawn.\n  {}",

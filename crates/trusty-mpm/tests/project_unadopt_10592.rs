@@ -7,12 +7,13 @@
 //! Test: `cargo test -p trusty-mpm --test integration project_unadopt_10592`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::path::{Path, PathBuf};
 
 /// The ledger file the CLI reads under `home`.
 fn ledger(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm")
+    home.join(MPM_DIR_NAME)
         .join("project-registry")
         .join("worktrees.json")
 }

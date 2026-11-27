@@ -15,6 +15,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_trust_anchor_8878::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -50,7 +51,7 @@ impl Fixture {
         let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
         let home = root.join("home");
         let project = root.join("architect");
-        std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir root");
+        std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir root");
         std::fs::create_dir_all(&project).expect("mkdir project");
         std::fs::write(
             project.join(".trusty-mpm.toml"),
@@ -58,7 +59,7 @@ impl Fixture {
         )
         .expect("write profile");
         std::fs::write(
-            home.join(".trusty-mpm/config.toml"),
+            home.join(MPM_DIR_NAME).join("config.toml"),
             format!(
                 "[supervisor]\nprojects = [{:?}]\n",
                 project.display().to_string()
@@ -74,7 +75,7 @@ impl Fixture {
     }
 
     fn anchor(&self) -> PathBuf {
-        self.home.join(".trusty-mpm/config.toml")
+        self.home.join(MPM_DIR_NAME).join("config.toml")
     }
 }
 
@@ -185,7 +186,7 @@ pub(crate) fn run_script_under_claude(
         .spawn()
         .expect("spawn the fake claude");
     if recorded {
-        let root = fx.home.join(".trusty-mpm");
+        let root = fx.home.join(MPM_DIR_NAME);
         let record =
             record_architect(&root, child.id(), &fx.project).expect("record the fake claude");
         // #8878 PR2a: a sandboxed run is a present Bob — a grant sealed with
@@ -485,7 +486,7 @@ fn a_pm_cannot_mint_a_presence_grant_8878() {
     assert!(!out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("presence unavailable"), "{stderr}");
-    let anchor = fx.home.join(".trusty-mpm/architect-launch");
+    let anchor = fx.home.join(MPM_DIR_NAME).join("architect-launch");
     let grants = std::fs::read_dir(&anchor)
         .map(|d| {
             d.flatten()

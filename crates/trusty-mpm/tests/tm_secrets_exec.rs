@@ -12,6 +12,7 @@
 //! Test: this file IS the test module.
 
 use crate::common;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -139,7 +140,7 @@ impl Fixture {
             .prefix("tsx")
             .tempdir_in("/tmp")
             .expect("home");
-        let dir = home.path().join(".trusty-tools/trusty-secrets");
+        let dir = home.path().join(TOOLS_DIR_NAME).join("trusty-secrets");
         std::fs::create_dir_all(&dir).expect("socket dir");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         let listener = trusty_common::uds::bind_hardened(&dir.join("secrets.sock")).expect("bind");

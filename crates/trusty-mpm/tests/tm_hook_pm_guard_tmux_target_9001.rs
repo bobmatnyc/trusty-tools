@@ -10,6 +10,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_tmux_target_9001::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::process::Stdio;
@@ -27,7 +28,7 @@ fn guard(command: &str, env: &[(&str, &str)]) -> String {
     let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
     let home = root.join("home");
     let project = root.join("project");
-    std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir root");
+    std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir root");
     std::fs::create_dir_all(&project).expect("mkdir project");
     common::write_disk_threshold(&home, 100);
     let mut cmd = common::tm_command_in(&home);
