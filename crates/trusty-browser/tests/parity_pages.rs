@@ -874,3 +874,74 @@ async fn an_unknown_open_tab_is_journaled_and_never_opens_a_second_tab() {
     assert_eq!(wire(&recv_json(&mut a).await), unknown);
     broker.close().await;
 }
+
+/// Assert the worker hears no `page_open_tab` before it goes quiet for 300 ms.
+async fn no_tab_opened(worker: &mut UnixStream) {
+    while let Ok(cmd) = tokio::time::timeout(Duration::from_millis(300), recv_json(worker)).await {
+        let op = cmd.get("op").and_then(Json::as_str);
+        assert_ne!(op, Some("page_open_tab"), "a tab opened: {}", wire(&cmd));
+    }
+}
+
+/// #11208 AC2: `open_tab` opens no tab without a live grant held by an
+/// attached session. A connection that never attached, a request that carries
+/// any tab lease (its own or another session's), and a session whose grant was
+/// revoked are each refused, and the worker hears no `page_open_tab`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_tab_opens_no_tab_without_a_held_grant() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut b = conns.remove("b").expect("b");
+    let mut worker = conns.remove("worker").expect("worker");
+    let open = r#"{"op":"open_tab","request_id":"o1","url":"https://example.test/"}"#;
+    let mut bare = UnixStream::connect(state.join("agent.sock"))
+        .await
+        .expect("connect");
+    send_json(&mut bare, open).await;
+    assert_eq!(
+        wire(&recv_json(&mut bare).await),
+        r#"{"ok":false,"error":"InvalidRequest"}"#
+    );
+    for (own, lease) in [
+        (true, A_EARLY_LEASE),
+        (false, A_EARLY_LEASE),
+        (false, "stale"),
+    ] {
+        let sock = if own { &mut a } else { &mut b };
+        let leased = format!(
+            r#"{{"op":"open_tab","request_id":"o2","url":"https://example.test/","lease":"{lease}"}}"#
+        );
+        send_json(sock, &leased).await;
+        assert_eq!(
+            wire(&recv_json(sock).await),
+            r#"{"ok":false,"error":"InvalidRequest"}"#,
+            "{lease}"
+        );
+    }
+    no_tab_opened(&mut worker).await;
+    let mut operator = UnixStream::connect(state.join("operator.sock"))
+        .await
+        .expect("connect");
+    send_json(
+        &mut operator,
+        r#"{"op":"revoke_grant","grant":"g-27f66c0d132f"}"#,
+    )
+    .await;
+    let revoked = recv_json(&mut operator).await;
+    assert_eq!(
+        revoked.get("ok"),
+        Some(&Json::Bool(true)),
+        "{}",
+        wire(&revoked)
+    );
+    send_json(&mut b, open).await;
+    assert_eq!(
+        wire(&recv_json(&mut b).await),
+        r#"{"ok":false,"error":"GrantEnded","reason":"revoked"}"#
+    );
+    no_tab_opened(&mut worker).await;
+    broker.close().await;
+}
