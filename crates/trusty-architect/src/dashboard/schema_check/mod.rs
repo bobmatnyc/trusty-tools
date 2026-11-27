@@ -16,7 +16,7 @@
 //! `schema_enforce_refuses_and_warn_writes`, `prototype_schemas_load_and_fixtures_validate`,
 //! `media_is_a_known_collection`, `watch_changes_is_a_known_collection`.
 
-mod pattern;
+pub(crate) mod pattern;
 mod walk;
 
 use std::collections::BTreeMap;

@@ -30,3 +30,39 @@ Check that the Python script and the stand-in both replay clean:
 $R replay $D/pm-strict-file.json $D/unknown-level-stdin.json $D/engineer-quiet.json -- $P
 $R replay $D/pm-strict-file.json $D/unknown-level-stdin.json $D/engineer-quiet.json -- <target>/debug/examples/replay_standin_level_lint
 ```
+
+## spec_drift_check
+
+Twelve runs of the Architect's `spec_drift_check.py` at freeze commit
+`60d8a97750`, recorded with `--clock 1795784400` (2026-11-27T13:00:00Z, the
+M0c job's 13:00 UTC slot) and replayed in `tests/replay_spec_drift_check.rs`
+against `examples/replay_port.rs`. The M0c job runs `python3
+scripts/spec_drift_check.py` from the checkout, so the root is the checkout;
+each recording passes it as `--root {ROOT}`. The seed set is the `files` of
+each recording: a sample checkout with the live tree's shape (manifest,
+spec, instruction files, skills, references, codex docs, owner-queue items,
+soak log, improvement ledger) and sample names only.
+
+| Recording | Case |
+|---|---|
+| `daily-pass` | The daily-job input, PASS path (PASS and PENDING only, exit 0) |
+| `daily-no-log` | The same with `--no-log`: no writes |
+| `drift-orphan-fail` | A reference not in the manifest (the live INV-03 shape); writes the ledger |
+| `drift-many-fail` | Every check fails, CRLF and non-ASCII text included |
+| `pre-phase-pending` | Before phase 1: no skill index, no owner queue, an unenforced sentence (WARN) |
+| `missing-manifest`, `empty-manifest`, `manifest-key-errors` | Error and empty inputs |
+| `bad-arg-unrecognized`, `bad-arg-root-value`, `bad-arg-explicit`, `help` | argparse paths |
+
+Regenerate: lay a recording's `files` into a directory `S`, then, with the
+script and the `dashboard_*.py` modules it imports copied to a sandbox
+directory `P` (never the live checkout; use a path without a symlinked
+component, `/private/tmp` rather than `/tmp` on macOS):
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/spec_drift_check
+$R record --clock 1795784400 --out $D/daily-pass.json \
+  $(for e in $(ls -A $S); do printf -- '--seed %s=%s ' "$S/$e" "$e"; done) \
+  -- $P/spec_drift_check.py --root '{ROOT}'
+$R replay $D/*.json -- $P/spec_drift_check.py
+$R replay $D/*.json -- <target>/debug/examples/replay_port spec_drift_check
+```
