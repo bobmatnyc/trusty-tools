@@ -555,11 +555,11 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
 #[path = "session_start_clear_tests.rs"]
 mod clear_tests;
 #[cfg(test)]
-#[path = "session_start_taint_tests.rs"]
-mod taint_tests;
-#[cfg(test)]
 #[path = "session_start_helper_tests.rs"]
 mod helper_tests;
+#[cfg(test)]
+#[path = "session_start_taint_tests.rs"]
+mod taint_tests;
 
 #[cfg(test)]
 #[path = "session_end_server_tests.rs"]
