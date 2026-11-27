@@ -382,7 +382,7 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "owner launch policy refused: the managed repos root is unresolved because \
-     install.toml is broken ({0}); fix ~/.trusty-tools/install.toml or set TRUSTY_MPM_REPOS_ROOT"
+     install.toml is broken ({0}); fix ~/.trusty-tools/install.toml or set TRUSTY_MPM_REPOS_ROOT" // path-literal: allow
 )]
 pub struct ProvisionError(#[from] pub trusty_common::install_paths::InstallPathsError);
 

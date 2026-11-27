@@ -72,8 +72,9 @@ fn build_log_drain_check(
                 "log_drain",
                 CheckStatus::Fail,
                 format!(
-                    "`log_drain:` in ~/.trusty-tools/trusty-mpm/config.yaml is invalid, so the \
-                     drain never started — {e}"
+                    "`log_drain:` in {cfg} is invalid, so the \
+                     drain never started — {e}",
+                    cfg = "~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (#11821: message text)
                 ),
             );
         }

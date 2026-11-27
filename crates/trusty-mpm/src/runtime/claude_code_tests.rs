@@ -20,6 +20,7 @@
 use super::super::launch_spec::LaunchSpec;
 use super::super::test_helpers::FakeTmux;
 use super::*;
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
 
 /// The `LaunchSpec` an adapter call typed a reference to, read back off disk.
 ///
@@ -322,7 +323,7 @@ fn build_prompt_file_records_under_the_named_framework_root() {
         root.path().display()
     );
     assert!(
-        !home.home().join(".trusty-mpm").join("usage").exists(),
+        !home.home().join(MPM_DIR_NAME).join("usage").exists(),
         "the producer wrote under the PROCESS home ({}) instead of the root it \
          was given — this is #7568's defect, and on a real machine that home is \
          the operator's own",
@@ -353,7 +354,7 @@ fn an_ambient_build_prompt_file_records_under_whatever_home_it_inherits() {
     std::fs::remove_file(&path).ok();
 
     assert!(
-        usage_dir_of(&home.home().join(".trusty-mpm")).exists(),
+        usage_dir_of(&home.home().join(MPM_DIR_NAME)).exists(),
         "the ambient form must record under the process's home — if this stops \
          holding, the guard above is asserting on something nothing produces \
          any more and must be re-pointed (decoy home {})",
@@ -986,7 +987,7 @@ fn spawn_resume_trust_seed_stays_within_redirected_home() {
     let fake = FakeTmux::new();
     // #8233: the root is now an argument; it names the same redirected home the
     // assertions above pinned, so this test still proves the containment.
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.path().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.path().join(MPM_DIR_NAME));
     adapter
         .spawn_resume(
             "tmpm-4206",
@@ -1318,7 +1319,7 @@ fn drive_spawn(fake: &std::sync::Arc<FakeTmux>, home: &HomeGuard) -> String {
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn(
             "tm-sess",
@@ -1446,7 +1447,7 @@ fn spawn_errors_when_the_line_is_refused() {
 
     let adapter = ClaudeCodeAdapter::new(
         std::sync::Arc::new(Refusing),
-        &home.home().join(".trusty-mpm"),
+        &home.home().join(MPM_DIR_NAME),
     );
     let err = adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
@@ -1472,7 +1473,7 @@ fn spawn_names_the_remote_session_after_its_tmux_session() {
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn("tm-dogfood", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("spawn must succeed with claude on PATH");
@@ -1496,7 +1497,7 @@ fn spawn_resume_names_the_remote_session_after_its_tmux_session() {
     let cwd = home.home().join("ws");
     std::fs::create_dir_all(&cwd).expect("mkdir ws");
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn_resume(
             "tm-dogfood",
@@ -1538,7 +1539,7 @@ fn spawn_resume_with_id_uses_resume_flag() {
     std::fs::write(projects.join("conv-77.jsonl"), b"{}").expect("seed conversation");
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1583,7 +1584,7 @@ fn spawn_resume_falls_back_to_session_target_when_pane_id_unknown() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1632,7 +1633,7 @@ fn spawn_resume_sends_prompt_file_when_binary_available() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1674,7 +1675,7 @@ fn spawn_and_resume_disable_auto_memory_when_trusty_memory_is_down() {
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let root = home.home().join(".trusty-mpm");
+    let root = home.home().join(MPM_DIR_NAME);
 
     let spawned = FakeTmux::new();
     ClaudeCodeAdapter::new(spawned.clone(), &root)
@@ -1708,7 +1709,7 @@ fn spawn_and_resume_disable_auto_memory_when_trusty_memory_is_down() {
 /// Write `yaml` as the config under the redirected home's state root — the
 /// file the adapter's named framework root resolves to (#8405).
 fn write_state_config(home: &HomeGuard, yaml: &str) {
-    let root = home.home().join(".trusty-tools").join("trusty-mpm");
+    let root = home.home().join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&root).expect("mkdir state root");
     std::fs::write(root.join("config.yaml"), yaml).expect("write config");
 }
@@ -1778,7 +1779,10 @@ fn spawn_falls_back_with_the_tmux_option_on_an_unreadable_config() {
         }
     }
     let logged = buffer.tail(256).join("\n");
-    let config = home.home().join(".trusty-tools/trusty-mpm/config.yaml");
+    let config = home
+        .home()
+        .join(TOOLS_DIR_NAME)
+        .join("trusty-mpm/config.yaml");
     assert!(
         logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
         "the warning must name the file: {logged}"
@@ -1821,7 +1825,7 @@ fn drive_resume(
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn_resume(
             "tm-sess",
@@ -1956,7 +1960,7 @@ fn spawn_interrupts_the_sessions_own_pane_never_the_active_one() {
     let _path = PathGuard::prepend(&bin_dir);
 
     let tmux = std::sync::Arc::new(PaneAware::default());
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &home.home().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &home.home().join(MPM_DIR_NAME));
     adapter
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("the spawn must reach the pane");
@@ -2120,7 +2124,7 @@ fn adapter_with_unwritable_prompt_dir(
     let path = PathGuard::prepend(&bin_dir);
     let not_a_dir = home.home().join("not-a-dir");
     std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
-    let mut adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(".trusty-mpm"));
+    let mut adapter = ClaudeCodeAdapter::new(fake.clone(), &home.home().join(MPM_DIR_NAME));
     adapter.prompt_dir = not_a_dir.clone();
     (adapter, not_a_dir, path)
 }
@@ -2181,7 +2185,7 @@ fn inplace_resume_command_refuses_when_the_prompt_file_cannot_be_written() {
     let home = HomeGuard::set();
     let fake = FakeTmux::new();
     let (_adapter, not_a_dir, _path) = adapter_with_unwritable_prompt_dir(&fake, &home);
-    let fw = FrameworkPaths::from_root(home.home().join(".trusty-mpm"));
+    let fw = FrameworkPaths::from_root(home.home().join(MPM_DIR_NAME));
     let err = build_inplace_resume_command_with(&fw, &not_a_dir, home.home(), None)
         .map(|_| ())
         .expect_err("an in-place PM relaunch without its prompt must be refused");

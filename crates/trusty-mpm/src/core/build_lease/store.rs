@@ -126,7 +126,9 @@ impl SlotDir {
     pub fn resolve_in(home: Option<&Path>, fallback: &Path) -> Result<Self, StoreError> {
         let (canonical, canonical_error) = match home {
             None => (
-                PathBuf::from("~/.trusty-mpm").join(SLOT_DIR_NAME),
+                PathBuf::from("~")
+                    .join(trusty_common::install_paths::MPM_DIR_NAME)
+                    .join(SLOT_DIR_NAME),
                 "no home directory".to_string(),
             ),
             // #11821: a broken install.toml makes the canonical store unusable;

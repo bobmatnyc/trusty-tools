@@ -11,6 +11,7 @@
 
 use super::tests::EnvVarGuard;
 use super::*;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// The `[catchup]` section with auto-inject on and both network-free sources
 /// off, so the watermark write runs without dialling a live trusty-memory.
@@ -61,7 +62,7 @@ fn session_prep_writes_the_catchup_watermark_under_the_framework_root() {
             "home injected: {inject_home}; one watermark under {}: {written:?}",
             fw.root.display()
         );
-        let home_state = home.path().join(".trusty-mpm").join("projects");
+        let home_state = home.path().join(MPM_DIR_NAME).join("projects");
         assert!(
             !home_state.exists(),
             "home injected: {inject_home}; the watermark must not fall back to \

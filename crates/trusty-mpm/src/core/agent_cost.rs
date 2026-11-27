@@ -311,7 +311,7 @@ pub fn stop_reason(context_tokens: u64, max_tokens: u64) -> String {
          Everything else — including Write, Edit, Read, and any other Bash — is denied until the \
          PM re-dispatches you. Commit and push what you have, then SendMessage the PM: what you \
          completed, what remains, and what a fresh agent needs to finish it. To raise the ceiling \
-         instead, set agent_cost.max_tokens in ~/.trusty-mpm/config.toml."
+         instead, set agent_cost.max_tokens in ~/.trusty-mpm/config.toml." // path-literal: allow
     )
 }
 

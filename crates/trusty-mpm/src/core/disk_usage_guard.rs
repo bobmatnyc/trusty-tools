@@ -56,7 +56,7 @@ pub const DEFAULT_MAX_USAGE_PCT: u8 = 90;
 pub const MAX_USAGE_PCT_KEY: &str = "disk.max_usage_pct";
 
 /// Shown when the config path cannot be resolved (no home directory).
-const CONFIG_PATH_FALLBACK: &str = "~/.trusty-tools/trusty-mpm/config.yaml";
+const CONFIG_PATH_FALLBACK: &str = "~/.trusty-tools/trusty-mpm/config.yaml"; // path-literal: allow
 
 /// One mount's measured usage, as the gate saw it.
 ///

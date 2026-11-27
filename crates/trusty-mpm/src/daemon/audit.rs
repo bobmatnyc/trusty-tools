@@ -339,7 +339,7 @@ mod tests {
         let root = roots
             .iter()
             .find(|r| r.ends_with(".trusty-mpm"))
-            .expect("the lib binary fences ~/.trusty-mpm");
+            .expect("the lib binary fences ~/.trusty-mpm"); // path-literal: allow
         let logger = AuditLogger::for_stream(&root.join("tm-8545-fence-probe"), "overseer");
         logger.log(sample_entry());
     }

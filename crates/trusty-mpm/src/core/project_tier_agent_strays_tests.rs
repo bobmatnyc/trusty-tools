@@ -10,6 +10,7 @@
 use super::*;
 use tempfile::TempDir;
 use trusty_agents_common::agents::manifest::{ManifestEntry, Origin, checksum};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// A hermetic `FrameworkPaths` whose agent SOURCE dir is inside `base`.
 ///
@@ -402,7 +403,7 @@ fn a_tier_bundled_agents_deploy_to_is_never_swept() {
     let backups = TempDir::new().unwrap();
     let project = home.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let mut paths = FrameworkPaths::for_managed_project(home.path().join(".trusty-mpm"), &project);
+    let mut paths = FrameworkPaths::for_managed_project(home.path().join(MPM_DIR_NAME), &project);
     // As in `hermetic_paths`: keep the agent SOURCE off the real repository.
     paths.trusty_mpm_root = None;
     bundle(&paths, "qa");
