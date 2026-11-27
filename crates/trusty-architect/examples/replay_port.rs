@@ -12,20 +12,23 @@
 //! drivers `tests/fixtures/replay/<script>/driver.py` line for line, as do
 //! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d),
 //! `brief-id` (#12028 P1e), `il_agent` (#12028 P1f) and `verify_claim`
-//! (#12028 P1g).
+//! (#12028 P1g). `gh-session-track` (#12087) runs the script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
 //! `technical_level_recordings_replay_clean_against_the_port`,
 //! `architect_config_recordings_replay_clean_against_the_port`,
 //! `stale_tasks_recordings_replay_clean_against_the_port`, the three
 //! other `tests/replay_tasks.rs` tests, the `tests/replay_writers.rs` tests and
-//! `il_agent_recordings_replay_clean_against_the_port` and
-//! `verify_claim_recordings_replay_clean_against_the_port`.
+//! `il_agent_recordings_replay_clean_against_the_port`,
+//! `verify_claim_recordings_replay_clean_against_the_port` and
+//! `gh_session_track_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use trusty_architect::gh_session_track;
 use trusty_architect::il_agent;
 use trusty_architect::replay::CLOCK_ENV;
 use trusty_architect::spec_drift::{self, Outcome};
@@ -315,13 +318,27 @@ fn main() -> ExitCode {
                 },
             )
         }
+        // See #12087: the recordings run the script itself with `--root`;
+        // the sandbox root stands for the checkout (its `local/architect.json`).
+        "gh-session-track" => {
+            let at = frozen.map_or_else(|| SystemClock.now_unix(), |t| t as f64);
+            gh_session_track::cli::run(
+                &rest,
+                &gh_session_track::cli::Options {
+                    checkout: std::env::current_dir().ok(),
+                    environ: std::env::vars().collect(),
+                    clock: Arc::new(FakeClock::new(at)),
+                },
+            )
+        }
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
             eprintln!(
                 "replay_port: no port named {other:?}; known: spec_drift_check, level_lint, \
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
-                 il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim"
+                 il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
+                 gh-session-track"
             );
             return ExitCode::from(2);
         }

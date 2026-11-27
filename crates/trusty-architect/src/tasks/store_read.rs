@@ -28,6 +28,17 @@ use super::{JsonFail, read_json};
 pub(crate) struct PyDoc {
     pub(crate) id: String,
     pub(crate) data: PyValue,
+    /// The stored `version` (#12087: `if_version` of a write); see [`doc_version`].
+    pub(crate) version: u64,
+}
+
+/// `_load`'s version: a positive `int` (not a `bool`) that fits `u64`, else 1.
+/// A larger `int` reads as 1, as the crate's `Store` reads it.
+fn doc_version(v: Option<&PyValue>) -> u64 {
+    match v {
+        Some(PyValue::Int(PyInt::Small(n))) if *n >= 1 => n.unsigned_abs(),
+        _ => 1,
+    }
 }
 
 /// `os.path.abspath(p)`: joined to the working directory, then `normpath`.
@@ -82,6 +93,42 @@ pub(crate) fn list_docs(root: &str, format: Format, coll: &str) -> Result<Vec<Py
     }
 }
 
+/// `Store(root).get(coll, id)` for an absolute `root`; `Ok(None)` where it
+/// raises `NotFound` (#12087: `gh-session-track` reads `meta/gh_track`).
+pub(crate) fn get_doc(
+    root: &str,
+    format: Format,
+    coll: &str,
+    id: &str,
+) -> Result<Option<PyDoc>, String> {
+    if format == Format::Jsonl {
+        return Ok(list_docs(root, format, coll)?
+            .into_iter()
+            .find(|d| d.id == id));
+    }
+    if Path::new(&format!("{root}/{coll}.jsonl")).exists() {
+        return Err(format!(
+            "{root} holds {coll}.jsonl: set DASHBOARD_FORMAT=jsonl"
+        ));
+    }
+    let path = format!("{root}/{coll}/{id}.json");
+    let raw = match read_json(Path::new(&path)) {
+        Ok(v) => v,
+        Err(JsonFail::NotFound) => return Ok(None),
+        Err(JsonFail::Error(e)) => return Err(format!("unreadable document {path}: {e}")),
+    };
+    let PyValue::Dict(mut pairs) = raw else {
+        return Err(format!("document {path} is not a JSON object"));
+    };
+    let version = doc_version(pairs.iter().find(|(k, _)| k == "version").map(|p| &p.1));
+    pairs.retain(|(k, _)| k != "version");
+    Ok(Some(PyDoc {
+        id: id.to_owned(),
+        data: PyValue::Dict(pairs),
+        version,
+    }))
+}
+
 /// `os.listdir(dir)`; `Ok(None)` when it does not exist.
 fn names(dir: &str) -> Result<Option<Vec<String>>, String> {
     let rd = match std::fs::read_dir(dir) {
@@ -115,11 +162,19 @@ fn dir_docs(cdir: &str) -> Result<Vec<PyDoc>, String> {
         let PyValue::Dict(mut pairs) = raw else {
             return Err(format!("document {path} is not a JSON object"));
         };
+        let version = doc_version(
+            pairs
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "version")
+                .map(|p| &p.1),
+        );
         pairs.retain(|(k, _)| k != "version");
         let id = n[..n.len() - 5].to_owned();
         out.push(PyDoc {
             id,
             data: PyValue::Dict(pairs),
+            version,
         });
     }
     Ok(out)
@@ -179,6 +234,7 @@ fn read_coll(path: &str) -> Result<Vec<PyDoc>, String> {
         out.push(PyDoc {
             id: id.clone(),
             data: data.clone(),
+            version: doc_version(version),
         });
     }
     out.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));

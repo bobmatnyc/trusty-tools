@@ -73,6 +73,11 @@ path = "src/bin/trusty-architect-il-agent.rs"
 name = "trusty-architect-verify-claim"
 path = "src/bin/trusty-architect-verify-claim.rs"
 
+# #12087: the gh-session-track.py port.
+[[bin]]
+name = "trusty-architect-gh-session-track"
+path = "src/bin/trusty-architect-gh-session-track.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

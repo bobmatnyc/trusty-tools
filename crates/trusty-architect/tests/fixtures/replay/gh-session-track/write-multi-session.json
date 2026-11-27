@@ -1,0 +1,162 @@
+{
+  "version": 3,
+  "argv": [
+    "--repo",
+    "example-org/example-repo",
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\"\n    }\n  }\n}\n",
+    "q/meta/gh_track.json": "{\n  \"at\": \"2026-11-26T13:00:00Z\",\n  \"prs_open\": 3,\n  \"repo\": \"example-org/old\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 4\n}\n",
+    "q/sessions/alpha.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"gh_at\": \"2026-11-26T13:00:00Z\",\n    \"issues\": {\n      \"open\": 9\n    },\n    \"note\": \"kept by another writer\",\n    \"pr_stats\": {\n      \"open\": 1\n    },\n    \"prs\": [\n      {\n        \"n\": 1,\n        \"state\": \"draft\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/1\"\n      }\n    ],\n    \"started_at\": \"2026-10-12T03:46Z\"\n  },\n  \"name\": \"alpha\",\n  \"project\": \"trusty-tools/example-repo\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 3\n}\n",
+    "q/sessions/beta-01.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"prs\": [\n      {\n        \"n\": 2,\n        \"state\": \"red\",\n        \"url\": \"\"\n      }\n    ]\n  },\n  \"name\": \"beta-01\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 7\n}\n",
+    "q/sessions/blank.json": "{\n  \"name\": \"\",\n  \"updated\": \"2026-11-27T13:00:00Z\"\n}\n",
+    "q/sessions/gamma-01.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"name\": \"gamma-01\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\"\n}\n",
+    "q/sessions/gamma-02.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"note\": \"untouched\"\n  },\n  \"name\": \"gamma-02\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 2\n}\n",
+    "q/sessions/noname.json": "{\n  \"project\": \"sample-app\",\n  \"updated\": \"2026-11-27T13:00:00Z\"\n}\n"
+  },
+  "reads": [
+    "q/meta/gh_track.json",
+    "q/sessions/alpha.json",
+    "q/sessions/beta-01.json",
+    "q/sessions/blank.json",
+    "q/sessions/gamma-01.json",
+    "q/sessions/gamma-02.json",
+    "q/sessions/noname.json"
+  ],
+  "stdout": "alpha: PRs #1 draft #3 running #5 dirty #6 hold #9 unknown #11 ready (merged 1/24h 3/7d) | issues 9 open, 6 bugs (P1 4), P1 6, P2 2, security 1, merged-open 0\nbeta-01: PRs #2 red #4 running #10 red (merged 2/24h 2/7d) | issues 3 open, 1 bugs (P1 1), P1 1, P2 0, security 0, merged-open 1\ntotals: 11 PRs (cap 15) {'draft': 1, 'red': 2, 'running': 2, 'dirty': 1, 'hold': 1, 'ready': 2, 'behind': 1, 'unknown': 1}, merged 3 (24h) 5 (7d); 13 issues, 8 bugs (P1 5), P1 7, P2 2, security 1, merged-open 1\nissues closed 2 (24h) 4 (7d) | merged, awaiting release 2\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "q/.lock": "",
+    "q/meta/gh_track.json": "{\n  \"at\": \"2026-11-27T13:00:00Z\",\n  \"awaiting_release\": 2,\n  \"bugs\": 8,\n  \"bugs_p1\": 5,\n  \"closed_24h\": 2,\n  \"closed_7d\": 4,\n  \"issues_open\": 13,\n  \"merged_24h\": 3,\n  \"merged_7d\": 5,\n  \"merged_7d_capped\": false,\n  \"merged_open\": 1,\n  \"p1\": 7,\n  \"p2\": 2,\n  \"prs_by_state\": {\n    \"behind\": 1,\n    \"dirty\": 1,\n    \"draft\": 1,\n    \"hold\": 1,\n    \"ready\": 2,\n    \"red\": 2,\n    \"running\": 2,\n    \"unknown\": 1\n  },\n  \"prs_cap\": 15,\n  \"prs_open\": 11,\n  \"repo\": \"example-org/example-repo\",\n  \"security\": 1,\n  \"version\": 5\n}\n",
+    "q/sessions/alpha.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"gh_at\": \"2026-11-27T13:00:00Z\",\n    \"issues\": {\n      \"bugs\": 6,\n      \"bugs_p1\": 4,\n      \"merged_open\": 0,\n      \"open\": 9,\n      \"p1\": 6,\n      \"p2\": 2,\n      \"security\": 1,\n      \"top\": [\n        {\n          \"n\": 100,\n          \"tag\": \"security\",\n          \"title\": \"Sample issue 100\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/100\"\n        },\n        {\n          \"n\": 101,\n          \"tag\": \"P1 bug\",\n          \"title\": \"Sample issue 101\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/101\"\n        },\n        {\n          \"n\": 110,\n          \"tag\": \"P1 bug\",\n          \"title\": \"Sample issue 110\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/110\"\n        },\n        {\n          \"n\": 111,\n          \"tag\": \"P1 bug\",\n          \"title\": \"Sample issue 111\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/111\"\n        },\n        {\n          \"n\": 112,\n          \"tag\": \"P1 bug\",\n          \"title\": \"Sample issue 112\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/112\"\n        },\n        {\n          \"n\": 102,\n          \"tag\": \"P1\",\n          \"title\": \"Sample issue 102\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/102\"\n        }\n      ]\n    },\n    \"note\": \"kept by another writer\",\n    \"pr_stats\": {\n      \"by_state\": {\n        \"dirty\": 1,\n        \"draft\": 1,\n        \"hold\": 1,\n        \"ready\": 1,\n        \"running\": 1,\n        \"unknown\": 1\n      },\n      \"merged_24h\": 1,\n      \"merged_7d\": 3,\n      \"merged_7d_capped\": false,\n      \"open\": 6\n    },\n    \"prs\": [\n      {\n        \"n\": 1,\n        \"state\": \"draft\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/1\"\n      },\n      {\n        \"n\": 3,\n        \"state\": \"running\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/3\"\n      },\n      {\n        \"n\": 5,\n        \"state\": \"dirty\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/5\"\n      },\n      {\n        \"n\": 6,\n        \"state\": \"hold\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/6\"\n      },\n      {\n        \"n\": 9,\n        \"state\": \"unknown\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/9\"\n      },\n      {\n        \"n\": 11,\n        \"state\": \"ready\",\n        \"url\": \"\"\n      }\n    ],\n    \"started_at\": \"2026-10-12T03:46:00Z\"\n  },\n  \"name\": \"alpha\",\n  \"project\": \"trusty-tools/example-repo\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 4\n}\n",
+    "q/sessions/beta-01.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"gh_at\": \"2026-11-27T13:00:00Z\",\n    \"issues\": {\n      \"bugs\": 1,\n      \"bugs_p1\": 1,\n      \"merged_open\": 1,\n      \"open\": 3,\n      \"p1\": 1,\n      \"p2\": 0,\n      \"security\": 0,\n      \"top\": [\n        {\n          \"n\": 106,\n          \"tag\": \"P1 bug\",\n          \"title\": \"A sample issue title that runs past the eighty character cap so the summary cuts\",\n          \"url\": \"https://github.com/example-org/example-repo/issues/106\"\n        }\n      ]\n    },\n    \"pr_stats\": {\n      \"by_state\": {\n        \"red\": 2,\n        \"running\": 1\n      },\n      \"merged_24h\": 2,\n      \"merged_7d\": 2,\n      \"merged_7d_capped\": false,\n      \"open\": 3\n    },\n    \"prs\": [\n      {\n        \"n\": 2,\n        \"state\": \"red\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/2\"\n      },\n      {\n        \"n\": 4,\n        \"state\": \"running\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/4\"\n      },\n      {\n        \"n\": 10,\n        \"state\": \"red\",\n        \"url\": \"https://github.com/example-org/example-repo/pull/10\"\n      }\n    ]\n  },\n  \"name\": \"beta-01\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 8\n}\n"
+  },
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "open",
+            "-L",
+            "200",
+            "--json",
+            "number,title,url,isDraft,labels,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,updatedAt"
+          ],
+          "stdout": "[{\"number\": 9, \"title\": \"Sample change 9\", \"url\": \"https://github.com/example-org/example-repo/pull/9\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergeStateStatus\": null, \"headRefName\": \"feat/9\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 2, \"title\": \"Sample change 2\", \"url\": \"https://github.com/example-org/example-repo/pull/2\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/beta\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/2\", \"baseRefName\": \"main\", \"statusCheckRollup\": [{\"conclusion\": \"FAILURE\", \"status\": \"COMPLETED\"}, {\"status\": \"IN_PROGRESS\", \"conclusion\": \"\"}], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 11, \"title\": \"Sample change 11\", \"url\": null, \"isDraft\": false, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/11\", \"baseRefName\": \"main\", \"statusCheckRollup\": [{\"status\": \"COMPLETED\", \"conclusion\": \"SUCCESS\"}], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 1, \"title\": \"Sample change 1\", \"url\": \"https://github.com/example-org/example-repo/pull/1\", \"isDraft\": true, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergeStateStatus\": \"DIRTY\", \"headRefName\": \"feat/1\", \"baseRefName\": \"main\", \"statusCheckRollup\": [{\"conclusion\": \"FAILURE\"}], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 3, \"title\": \"Sample change 3\", \"url\": \"https://github.com/example-org/example-repo/pull/3\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/3\", \"baseRefName\": \"main\", \"statusCheckRollup\": [{\"status\": \"IN_PROGRESS\", \"conclusion\": null}], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 4, \"title\": \"Sample change 4\", \"url\": \"https://github.com/example-org/example-repo/pull/4\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/beta-01\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/4\", \"baseRefName\": \"main\", \"statusCheckRollup\": [{\"state\": \"PENDING\", \"context\": \"ci/sample\"}], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 5, \"title\": \"Sample change 5\", \"url\": \"https://github.com/example-org/example-repo/pull/5\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/alpha\"}, {\"name\": \"do-not-merge\"}], \"mergeStateStatus\": \"DIRTY\", \"headRefName\": \"feat/5\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 6, \"title\": \"Sample change 6\", \"url\": \"https://github.com/example-org/example-repo/pull/6\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/alpha\"}, {\"name\": \"do-not-merge\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/6\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 7, \"title\": \"Sample change 7\", \"url\": \"https://github.com/example-org/example-repo/pull/7\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/gamma\"}, {\"name\": \"trusty-memory\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/7\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 8, \"title\": \"Sample change 8\", \"url\": \"https://github.com/example-org/example-repo/pull/8\", \"isDraft\": false, \"labels\": [], \"mergeStateStatus\": \"BEHIND\", \"headRefName\": \"feat/8\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 10, \"title\": \"Sample change 10\", \"url\": \"https://github.com/example-org/example-repo/pull/10\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/beta\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/10\", \"baseRefName\": \"main\", \"statusCheckRollup\": [{\"state\": \"ERROR\", \"context\": \"ci/sample\"}], \"updatedAt\": \"2026-11-27T12:00:00Z\"}]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "issue",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "open",
+            "-L",
+            "1000",
+            "--json",
+            "number,title,url,labels"
+          ],
+          "stdout": "[{\"number\": 100, \"title\": \"Sample issue 100\", \"url\": \"https://github.com/example-org/example-repo/issues/100\", \"labels\": [{\"name\": \"bug:security\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 101, \"title\": \"Sample issue 101\", \"url\": \"https://github.com/example-org/example-repo/issues/101\", \"labels\": [{\"name\": \"type:bug\"}, {\"name\": \"P1\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 102, \"title\": \"Sample issue 102\", \"url\": \"https://github.com/example-org/example-repo/issues/102\", \"labels\": [{\"name\": \"P1\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 103, \"title\": \"Sample issue 103\", \"url\": \"https://github.com/example-org/example-repo/issues/103\", \"labels\": [{\"name\": \"bug\"}, {\"name\": \"P2\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 104, \"title\": \"Sample issue 104\", \"url\": \"https://github.com/example-org/example-repo/issues/104\", \"labels\": [{\"name\": \"P2\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 105, \"title\": \"Sample issue 105\", \"url\": \"https://github.com/example-org/example-repo/issues/105\", \"labels\": [{\"name\": \"status:merged\"}, {\"name\": \"ws/beta\"}]}, {\"number\": 106, \"title\": \"A sample issue title that runs past the eighty character cap so the summary cuts it short here\", \"url\": \"https://github.com/example-org/example-repo/issues/106\", \"labels\": [{\"name\": \"bug:regression\"}, {\"name\": \"P1\"}, {\"name\": \"ws/beta\"}]}, {\"number\": 107, \"title\": \"Sample issue 107\", \"url\": \"https://github.com/example-org/example-repo/issues/107\", \"labels\": [{\"name\": \"bug\"}]}, {\"number\": 108, \"title\": \"Sample issue 108\", \"url\": \"https://github.com/example-org/example-repo/issues/108\", \"labels\": [{\"name\": \"ws/beta\"}]}, {\"number\": 112, \"title\": \"Sample issue 112\", \"url\": \"https://github.com/example-org/example-repo/issues/112\", \"labels\": [{\"name\": \"bug\"}, {\"name\": \"P1\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 110, \"title\": \"Sample issue 110\", \"url\": \"https://github.com/example-org/example-repo/issues/110\", \"labels\": [{\"name\": \"bug\"}, {\"name\": \"P1\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 111, \"title\": \"Sample issue 111\", \"url\": \"https://github.com/example-org/example-repo/issues/111\", \"labels\": [{\"name\": \"type:bug\"}, {\"name\": \"P1\"}, {\"name\": \"ws/alpha\"}]}, {\"number\": 113, \"title\": null, \"url\": null, \"labels\": [{\"name\": null}, {\"name\": \"P1\"}, {\"name\": \"ws/alpha\"}]}]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "pr",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "merged",
+            "--search",
+            "merged:>=2026-11-20",
+            "-L",
+            "1000",
+            "--json",
+            "number,labels,mergedAt,title,headRefName,closingIssuesReferences"
+          ],
+          "stdout": "[{\"number\": 200, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergedAt\": \"2026-11-27T12:00:00Z\", \"title\": \"Merged 200\", \"headRefName\": \"m/200\", \"closingIssuesReferences\": []}, {\"number\": 201, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergedAt\": \"2026-11-24T13:00:00Z\", \"title\": \"Merged 201\", \"headRefName\": \"m/201\", \"closingIssuesReferences\": []}, {\"number\": 202, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergedAt\": \"2026-11-19T13:00:00Z\", \"title\": \"Merged 202\", \"headRefName\": \"m/202\", \"closingIssuesReferences\": []}, {\"number\": 203, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergedAt\": \"2026-11-27T14:00:00Z\", \"title\": \"Merged 203\", \"headRefName\": \"m/203\", \"closingIssuesReferences\": []}, {\"number\": 204, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergedAt\": null, \"title\": \"Merged 204\", \"headRefName\": \"m/204\", \"closingIssuesReferences\": []}, {\"number\": 205, \"labels\": [{\"name\": \"ws/beta\"}], \"mergedAt\": \"2026-11-27T11:00:00Z\", \"title\": \"Merged 205\", \"headRefName\": \"m/205\", \"closingIssuesReferences\": [{\"number\": 108}, {\"number\": 999}]}, {\"number\": 206, \"labels\": [{\"name\": \"ws/beta\"}], \"mergedAt\": \"2026-11-26T13:00:00Z\", \"title\": \"Merged 206\", \"headRefName\": \"m/206\", \"closingIssuesReferences\": []}, {\"number\": 207, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergedAt\": \"2026-11-26T12:59:59Z\", \"title\": \"Merged 207\", \"headRefName\": \"m/207\", \"closingIssuesReferences\": []}]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues?state=closed&since=2026-11-20T13:00:00Z&per_page=100",
+            "--paginate",
+            "--slurp"
+          ],
+          "stdout": "[[{\"number\": 300, \"closed_at\": \"2026-11-27T11:00:00Z\"}, {\"number\": 301, \"closed_at\": \"2026-11-22T13:00:00Z\"}, {\"number\": 302, \"closed_at\": \"2026-11-27T12:00:00Z\", \"pull_request\": {\"url\": \"https://github.com/example-org/example-repo/pull/302\"}}], [{\"number\": 303, \"closed_at\": null}, {\"number\": 304, \"closed_at\": \"2026-11-27T14:00:00Z\"}, {\"number\": 305, \"closed_at\": \"not a time\"}, {\"number\": 306, \"closed_at\": \"2026-11-20T13:00:00Z\"}, {\"number\": 307, \"closed_at\": \"2026-11-26T13:00:00Z\"}]]\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "open",
+        "-L",
+        "200",
+        "--json",
+        "number,title,url,isDraft,labels,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,updatedAt"
+      ],
+      [
+        "gh",
+        "issue",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "open",
+        "-L",
+        "1000",
+        "--json",
+        "number,title,url,labels"
+      ],
+      [
+        "gh",
+        "pr",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "merged",
+        "--search",
+        "merged:>=2026-11-20",
+        "-L",
+        "1000",
+        "--json",
+        "number,labels,mergedAt,title,headRefName,closingIssuesReferences"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues?state=closed&since=2026-11-20T13:00:00Z&per_page=100",
+        "--paginate",
+        "--slurp"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

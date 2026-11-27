@@ -334,3 +334,69 @@ ok   tests/fixtures/replay/verify_claim/usage-two-args.json
 ```
 
 PASS: all sixty-six recordings replay clean against the port (exit 0).
+
+## gh-session-track (#12087)
+
+Twenty-six runs of the frozen Python reference, the Architect's
+`gh-session-track.py` with `dashboard_store.py`, `dashboard_jsonl.py` and
+`dashboard_schema.py`, recorded on 2026-11-27 with `--clock 1795784400` and
+replayed in `tests/replay_gh_session_track.rs` against
+`examples/replay_port.rs gh-session-track`. Every recording is the
+recorder's capture of the reference's real output; none was written or
+edited by hand. gh is a fake declared in each recording, so the replay also
+compares the argv of all four queries. Every run passes
+`--repo example-org/example-repo` and `--root {ROOT}/q`; sessions are
+`alpha`, `beta-01`, `gamma-01`, `gamma-02` and `zeta`, and every input is a
+sample built with sample names only.
+
+The write arms are in the replay set (Architect ruling, option A): each
+`write-*` recording's `writes` holds the store files the reference wrote,
+and a clean replay proves the port wrote the same bytes. Two differences of
+the Rust store are handled without a normalizer:
+
+- The store lock `.lock` and the change log `changes*.jsonl`, which only the
+  Rust store writes (LDG-2.8.3), are left out of the comparison on both
+  sides by `replay::skip_written_file`, the same rule
+  `tests/dashboard_golden.rs` uses.
+- The Rust store restamps `updated` with its batch clock (#10678); the
+  reference keeps the stored value. Every seeded document carries
+  `updated` equal to the recorded instant (`2026-11-27T13:00:00Z`), so both
+  write one value. `store_batch_restamps_updated_with_the_batch_clock` pins
+  the restamp; a recording seeded with an older `updated` replays with one
+  diff, on that line.
+
+| Recording | Case |
+|---|---|
+| `dry-run-text` | Every chip state, `ws/` exact and `-NN` prefix matches, an ambiguous prefix, a crate label with no session, the top-six cut and title cap, the 24-hour and 7-day edges, a future and a null time, PR rows in the closed pages, nameless sessions |
+| `dry-run-json`, `dry-run-abbrev` | `--json` (non-ASCII escaped), `--dry --js` |
+| `dry-run-empty`, `dry-run-empty-json`, `dry-run-no-store` | Empty replies, an empty store, no store |
+| `dry-run-jsonl` | `DASHBOARD_FORMAT=jsonl` |
+| `gh-fails-pr-list`, `gh-fails-api`, `gh-invalid-json`, `gh-invalid-json-text` | gh failures: a long stderr cut at 200, the REST read, an empty and an invalid reply; nothing written |
+| `store-corrupt-session`, `store-session-not-object`, `store-wrong-format`, `store-bad-format`, `store-corrupt-meta` | Store errors before the batch; nothing written |
+| `write-one-session`, `write-multi-session`, `write-json`, `write-new-store`, `write-empty-replies` | The write arm: one session, three sessions with other `details` keys kept and an existing `meta/gh_track` (version 4), `--json`, a store that does not exist yet, a tracked session with no items |
+| `write-batch-fails` | A batch that fails at its second op (an invalid doc id): exit 1, nothing written |
+| `help`, `bad-arg-*` | argparse paths |
+
+Not recorded: a version-conflict retry needs a second writer between the
+read and the batch, which a recording cannot schedule; the reference cannot
+conflict with itself. `gh_session_track_retries_a_conflict_then_writes` and
+`gh_session_track_gives_up_after_three_conflicts_and_writes_nothing` cover
+it on a tempdir `Store` (`DashError::Conflict` is the script's
+`ds.Conflict`). A `jsonl` write reads `schemas/dashboard/` beside the
+script, outside the sandbox. A run without `--repo` names the reference's
+default repo, a login. The reference keys its sessions by a `set`, so a
+`--json` plan of two sessions has no fixed order; the port orders by name.
+A gh item of a shape the script cannot use ends in a traceback.
+`tests/gh_session_track_smoke.rs` covers the checkout defaults, the gh
+environment and the no-checkout refusal on the shipped binary.
+
+Regenerate: lay a recording's `files` into a directory `S` and its
+`fakes.stubs` into `S/fakes.json`, with the four scripts copied to a sandbox
+directory `P` (never the live checkout):
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/gh-session-track
+$R record --clock 1795784400 --out $D/write-one-session.json --seed $S/local=local --seed $S/q=q \
+  --fakes $S/fakes.json -- $P/gh-session-track.py --repo example-org/example-repo --root '{ROOT}/q'
+$R replay $D/*.json -- <target>/debug/examples/replay_port gh-session-track
+```

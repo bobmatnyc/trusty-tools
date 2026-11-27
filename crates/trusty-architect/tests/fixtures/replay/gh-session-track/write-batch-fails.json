@@ -1,0 +1,151 @@
+{
+  "version": 3,
+  "argv": [
+    "--repo",
+    "example-org/example-repo",
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\"\n    }\n  }\n}\n",
+    "q/sessions/alpha.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"details\": {\n    \"note\": \"kept\"\n  },\n  \"name\": \"alpha\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 1\n}\n",
+    "q/sessions/bad id.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"name\": \"zeta\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\"\n}\n",
+    "q/sessions/beta-01.json": "{\n  \"created\": \"2026-11-01T09:00:00Z\",\n  \"name\": \"beta-01\",\n  \"project\": \"sample-app\",\n  \"status\": \"running\",\n  \"updated\": \"2026-11-27T13:00:00Z\",\n  \"version\": 1\n}\n"
+  },
+  "reads": [
+    "q/sessions/alpha.json",
+    "q/sessions/bad id.json",
+    "q/sessions/beta-01.json"
+  ],
+  "stdout": "",
+  "stderr": "gh-session-track: invalid doc id 'bad id': use letters, digits, '_', '-', '.', max 80, no leading '.'\n",
+  "exit": 1,
+  "writes": {
+    "q/.lock": ""
+  },
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "open",
+            "-L",
+            "200",
+            "--json",
+            "number,title,url,isDraft,labels,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,updatedAt"
+          ],
+          "stdout": "[{\"number\": 30, \"title\": \"Sample change 30\", \"url\": \"https://github.com/example-org/example-repo/pull/30\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/zeta\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/30\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}, {\"number\": 31, \"title\": \"Sample change 31\", \"url\": \"https://github.com/example-org/example-repo/pull/31\", \"isDraft\": false, \"labels\": [{\"name\": \"ws/alpha\"}], \"mergeStateStatus\": \"CLEAN\", \"headRefName\": \"feat/31\", \"baseRefName\": \"main\", \"statusCheckRollup\": [], \"updatedAt\": \"2026-11-27T12:00:00Z\"}]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "issue",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "open",
+            "-L",
+            "1000",
+            "--json",
+            "number,title,url,labels"
+          ],
+          "stdout": "[]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "pr",
+            "list",
+            "-R",
+            "example-org/example-repo",
+            "--state",
+            "merged",
+            "--search",
+            "merged:>=2026-11-20",
+            "-L",
+            "1000",
+            "--json",
+            "number,labels,mergedAt,title,headRefName,closingIssuesReferences"
+          ],
+          "stdout": "[]\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/issues?state=closed&since=2026-11-20T13:00:00Z&per_page=100",
+            "--paginate",
+            "--slurp"
+          ],
+          "stdout": "[]\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "open",
+        "-L",
+        "200",
+        "--json",
+        "number,title,url,isDraft,labels,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,updatedAt"
+      ],
+      [
+        "gh",
+        "issue",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "open",
+        "-L",
+        "1000",
+        "--json",
+        "number,title,url,labels"
+      ],
+      [
+        "gh",
+        "pr",
+        "list",
+        "-R",
+        "example-org/example-repo",
+        "--state",
+        "merged",
+        "--search",
+        "merged:>=2026-11-20",
+        "-L",
+        "1000",
+        "--json",
+        "number,labels,mergedAt,title,headRefName,closingIssuesReferences"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/issues?state=closed&since=2026-11-20T13:00:00Z&per_page=100",
+        "--paginate",
+        "--slurp"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}
