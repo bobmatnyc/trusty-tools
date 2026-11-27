@@ -746,7 +746,9 @@ pub async fn handle_removed_in_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::watch_test_support::{await_watch_condition, await_watch_condition_within};
+    use crate::service::watch_test_support::{
+        await_watch_condition, await_watch_condition_within, start_until_ready,
+    };
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::RwLock;
@@ -897,14 +899,16 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let _task = spawn_watch_loop(
-            dir.path(),
-            crate::core::registry::IndexId::new("watch-loop-test"),
-            Arc::clone(&indexer),
-            tracker.clone(),
-            Arc::new(crate::core::file_events::FileEventFeed::new()),
-        )
-        .expect("watch loop starts");
+        let _task = start_until_ready("watch loop", || {
+            // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+            spawn_watch_loop(
+                dir.path(),
+                crate::core::registry::IndexId::new("watch-loop-test"),
+                Arc::clone(&indexer),
+                tracker.clone(),
+                Arc::new(crate::core::file_events::FileEventFeed::new()),
+            )
+        });
 
         let file = dir.path().join("lib.rs");
         let indexed = {
@@ -945,14 +949,16 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let _task = spawn_watch_loop(
-            dir.path(),
-            crate::core::registry::IndexId::new("watch-loop-test"),
-            Arc::clone(&indexer),
-            tracker.clone(),
-            Arc::new(crate::core::file_events::FileEventFeed::new()),
-        )
-        .expect("watch loop starts");
+        let _task = start_until_ready("watch loop", || {
+            // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+            spawn_watch_loop(
+                dir.path(),
+                crate::core::registry::IndexId::new("watch-loop-test"),
+                Arc::clone(&indexer),
+                tracker.clone(),
+                Arc::new(crate::core::file_events::FileEventFeed::new()),
+            )
+        });
 
         let cdk_dir = dir.path().join("cdk.out/asset.abc/python");
         std::fs::create_dir_all(&cdk_dir).expect("mkdir");
@@ -1010,14 +1016,16 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let task = spawn_watch_loop(
-            dir.path(),
-            crate::core::registry::IndexId::new("watch-loop-test"),
-            Arc::clone(&indexer),
-            tracker.clone(),
-            Arc::new(crate::core::file_events::FileEventFeed::new()),
-        )
-        .expect("watch loop starts");
+        let task = start_until_ready("watch loop", || {
+            // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+            spawn_watch_loop(
+                dir.path(),
+                crate::core::registry::IndexId::new("watch-loop-test"),
+                Arc::clone(&indexer),
+                tracker.clone(),
+                Arc::new(crate::core::file_events::FileEventFeed::new()),
+            )
+        });
 
         // Stop immediately. #3049: `stop` now AWAITS the consumer's termination,
         // so there is no in-flight teardown left to sleep for — the settle sleep
@@ -1056,14 +1064,16 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let _task = spawn_watch_loop(
-            dir.path(),
-            crate::core::registry::IndexId::new("watch-loop-test"),
-            Arc::clone(&indexer),
-            tracker.clone(),
-            Arc::new(crate::core::file_events::FileEventFeed::new()),
-        )
-        .expect("watch loop starts");
+        let _task = start_until_ready("watch loop", || {
+            // #9466: a real start can overrun the 5 s bound on a loaded host; retry it.
+            spawn_watch_loop(
+                dir.path(),
+                crate::core::registry::IndexId::new("watch-loop-test"),
+                Arc::clone(&indexer),
+                tracker.clone(),
+                Arc::new(crate::core::file_events::FileEventFeed::new()),
+            )
+        });
 
         let file = dir.path().join("memo.docx");
         let indexed = {

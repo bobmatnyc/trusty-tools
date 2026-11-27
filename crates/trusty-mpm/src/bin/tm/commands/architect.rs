@@ -30,6 +30,10 @@ pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
         Some(ArchitectAction::Attach) => super::architect_up::attach(),
         // #11773: the read-only drift report.
         Some(ArchitectAction::Drift { json, dir }) => super::architect_drift::run(json, dir),
+        // #11368: put the previous release's kept copy back.
+        Some(ArchitectAction::Restore { version, dir }) => {
+            super::architect_restore::run(version.as_deref(), dir.as_deref())
+        }
         Some(ArchitectAction::Restart {
             wait,
             dir,
@@ -123,8 +127,11 @@ fn execute(
         | ArchitectAction::Up(_)
         | ArchitectAction::Attach
         | ArchitectAction::Drift { .. }
+        | ArchitectAction::Restore { .. }
         | ArchitectAction::Restart { .. } => Err(VerbError::Usage(
-            "dashboard, up, attach and drift run through `run_any`, never `execute`".to_owned(),
+            "dashboard, up, attach, drift, restore and restart run through `run_any`, never \
+             `execute`"
+                .to_owned(),
         )),
     };
     match result {

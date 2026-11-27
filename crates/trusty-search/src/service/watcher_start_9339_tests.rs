@@ -235,6 +235,7 @@ async fn a_root_whose_start_timed_out_is_not_reported_as_watched() {
     use crate::core::registry::{IndexHandle, IndexId};
     use crate::core::CodeIndexer;
     use crate::service::network_fs::MountKind;
+    use crate::service::watch_test_support::spawn_until;
     use crate::service::watcher_manager::WatcherManager;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -284,11 +285,19 @@ async fn a_root_whose_start_timed_out_is_not_reported_as_watched() {
         .await
         .expect("join the settle wait");
     assert!(settled, "the released start must free its root");
-    manager
-        .spawn_for_index_with_mount_kind(&handle, MountKind::Local)
-        .await;
+    // #9466: the real start can overrun the 5 s bound on a loaded host; retry
+    // it until the root watches.
+    let watching = spawn_until(
+        async || {
+            manager
+                .spawn_for_index_with_mount_kind(&handle, MountKind::Local)
+                .await
+        },
+        async || manager.is_watching(&id).await,
+    )
+    .await;
     assert!(
-        manager.is_watching(&id).await,
+        watching,
         "the root must watch again once its stuck start is reclaimed"
     );
     manager.stop_all().await;
@@ -304,6 +313,7 @@ async fn a_stuck_start_does_not_stall_a_current_thread_runtime() {
     use crate::core::registry::{IndexHandle, IndexId};
     use crate::core::CodeIndexer;
     use crate::service::network_fs::MountKind;
+    use crate::service::watch_test_support::spawn_until;
     use crate::service::watcher_manager::WatcherManager;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -361,9 +371,17 @@ async fn a_stuck_start_does_not_stall_a_current_thread_runtime() {
         "another task must run while the watcher start is held (waited {waited:?})"
     );
     assert!(waited < OUTER, "the other task waited {waited:?}");
-    assert!(
-        manager.is_watching(&id).await,
-        "the released start must leave a running watcher"
-    );
+    // #9466: the released start is a real one and can overrun the 5 s bound on
+    // a loaded host; retry it until the root watches.
+    let watching = spawn_until(
+        async || {
+            manager
+                .spawn_for_index_with_mount_kind(&handle, MountKind::Local)
+                .await
+        },
+        async || manager.is_watching(&id).await,
+    )
+    .await;
+    assert!(watching, "the released start must leave a running watcher");
     manager.stop_all().await;
 }

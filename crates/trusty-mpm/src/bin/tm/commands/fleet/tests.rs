@@ -1139,10 +1139,13 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
 #[test]
 fn the_start_command_drops_tmux_socket() {
     let cmd = super::poller::start_command(Path::new(STUB_DIR), &SessionNames::default_names());
-    let removed = cmd
-        .get_envs()
-        .any(|(key, value)| key == "TMUX_SOCKET" && value.is_none());
-    assert!(removed, "TMUX_SOCKET is not removed");
+    // #10701: TMUX and TMUX_PANE would put the script on the caller's server.
+    for var in ["TMUX_SOCKET", "TMUX", "TMUX_PANE"] {
+        let removed = cmd
+            .get_envs()
+            .any(|(key, value)| key == var && value.is_none());
+        assert!(removed, "{var} is not removed");
+    }
 }
 
 /// #9822: both ported skills classify the input box with the Rust verb, not

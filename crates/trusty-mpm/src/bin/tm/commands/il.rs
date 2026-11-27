@@ -4,7 +4,8 @@
 //! What: [`run`] resolves the Architect directory (`--dir`, else the recorded
 //! Architect, as `tm fleet` does) and calls `trusty_mpm::core::il_schedule`.
 //! `show` prints the schedule on stdout and its source on stderr; an edit
-//! prints one report line. Every refusal or write failure is an error.
+//! prints one report line; `diff` prints the preset comparison (#11002).
+//! Every refusal or write failure is an error.
 //! Test: `cli_parses_every_il_config_verb`; the behaviour in
 //! `core::il_schedule::tests`.
 
@@ -49,6 +50,12 @@ pub(crate) fn run(action: IlAction) -> anyhow::Result<()> {
             value,
             session,
         } => il_schedule::update(&path, |s| s.set(session.as_deref(), &key, &value))?,
+        // #11002: ADR-0077 D6, the preset diff and the versioned migration.
+        IlConfigAction::Diff => {
+            print!("{}", il_schedule::diff(&path)?.render(&path));
+            return Ok(());
+        }
+        IlConfigAction::Update => il_schedule::upgrade(&path)?,
         IlConfigAction::Reset { force } => il_schedule::reset(&path, force)?,
     };
     println!("{}", outcome.message);

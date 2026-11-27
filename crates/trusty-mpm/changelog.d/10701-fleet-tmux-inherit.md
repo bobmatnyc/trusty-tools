@@ -1,0 +1,2 @@
+Fixed
+- `tm fleet init` and `tm fleet relaunch` now run every tmux command on the fleet's own server (`-L default`), and start the poller script with `TMUX` and `TMUX_PANE` removed. Run from a pane of another tmux server, they no longer create or kill sessions there through the inherited `$TMUX`, also when `TRUSTY_MPM_ALLOW_HOST_STATE=1` lifts the host-state gate. When that server cannot be resolved, they run no tmux command and say why (#10701).

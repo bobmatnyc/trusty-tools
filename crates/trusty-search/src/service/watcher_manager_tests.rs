@@ -15,43 +15,9 @@ fn handle_for(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
     ))
 }
 
-/// Upper bound on [`spawn_until`]: room for several overrun
-/// `WATCHER_START_BOUND` starts on a loaded host; a healthy host is done on
-/// the first spawn.
-const SPAWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Run `spawn`, then run it again until `done` holds or [`SPAWN_BUDGET`]
-/// passes. Returns whether `done` held.
-///
-/// Why: #9466 — a real OS-watch start that overruns `WATCHER_START_BOUND`
-/// under host load is recorded `Failed`, and a test that asserted right after
-/// one spawn went red. Production retries a failed root on the next query;
-/// this is that retry, so the caller's assertions still run unchanged.
-/// What: polls `done` every 50 ms; while a timed-out start is still in
-/// flight a re-spawn records nothing, so the loop simply waits it out.
-/// Test: `spawn_is_idempotent`, `stop_all_clears_all`,
-/// `a_stuck_root_start_does_not_block_the_other_roots`.
-pub(super) async fn spawn_until(spawn: impl AsyncFn(), done: impl AsyncFn() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + SPAWN_BUDGET;
-    spawn().await;
-    while !done().await {
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        spawn().await;
-    }
-    true
-}
-
-/// [`spawn_until`] for `spawn_for_index`, until every root of `handle` watches.
-pub(super) async fn spawn_until_watching(mgr: &WatcherManager, handle: &Arc<IndexHandle>) {
-    spawn_until(
-        async || mgr.spawn_for_index(handle).await,
-        async || !mgr.needs_root_resync(handle).await,
-    )
-    .await;
-}
+// #9466: the spawn retry helpers live in `watch_test_support`, shared with the other
+// watcher tests that start a real OS watcher.
+pub(super) use crate::service::watch_test_support::{spawn_until, spawn_until_watching};
 
 /// Why: the opt-out gate must match ONLY the exact value "1" so a stray
 /// `TRUSTY_DISABLE_WATCHER=true` (or `0`, or any other value) doesn't

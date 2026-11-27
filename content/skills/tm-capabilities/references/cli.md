@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-74 top-level commands.
+75 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -28,6 +28,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
   - `restart` — Restart the Architect behind the checkpoint gate (#11365)
+  - `restore` — Put back the files the last launch deploy replaced (#11368)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
   - `serve` — The poll cycle as a service, run on local events (#9779)
   - `up` — Bring the Architect up from any state, then attach (#11364)
@@ -90,13 +91,15 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `hook` — Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop)
 - `hooks` — Project-settings hook hygiene: detect and remove tm hook contamination (issue #2940)
   - `clean` — Remove tm-owned hook entries from project-level `.claude/settings.json` / `settings.local.json` files
-- `il` — The Architect IL schedule: `tm il config show|enroll|remove|set|reset`
+- `il` — The Architect IL schedule: `tm il config show|enroll|remove|set|diff|update|reset`
   - `config` — Show and edit the IL schedule, `<architect>/local/il-schedule.json`
+    - `diff` — Compare the schedule with the current built-in preset; writes nothing
     - `enroll` — Enroll a session for IL clearing
     - `remove` — Remove an enrolled session
     - `reset` — Restore the built-in preset; an edited file needs `--force`
     - `set` — Set `thresholds.<key>`, or a session field with `--session`
     - `show` — Print the schedule; the built-in preset when the file is absent
+    - `update` — Migrate the schedule to the current preset version, keeping your edits
 - `install` — Install the bundled framework artifacts to `~/.trusty-mpm/framework/`
 - `internal-spawn-disclaimed` — \[INTERNAL\] Spawn a program with macOS TCC responsibility disclaimed (issue #2997) — not for direct use
 - `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
@@ -350,4 +353,5 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `watch` — Watch a board for label-routed issues and dispatch them autonomously
   - `listen` — Long-running: poll on `--interval-secs`, dispatching new issues each cycle
   - `poll` — One-shot: list label-matched issues, dispatch each, then exit
+- `whats-new` — Print the curated highlights of the installed trusty-mpm release
 - `worktrees` — List the worktrees the machine-wide ledger records (#8994)

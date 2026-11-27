@@ -971,7 +971,7 @@ pub(crate) enum Command {
     /// store is written in-process under the same lock.
     // #9758. Test: `cli_parses_every_dbatg_verb`.
     Dbatg(DbatgArgs),
-    /// The Architect IL schedule: `tm il config show|enroll|remove|set|reset`.
+    /// The Architect IL schedule: `tm il config show|enroll|remove|set|diff|update|reset`.
     // #11001 (ADR-0077). Test: `cli_parses_every_il_config_verb`.
     Il {
         /// IL action to perform.
@@ -1669,6 +1669,13 @@ pub(crate) enum Command {
     // #7907: names the stdin fields that key the 💸 segment's ledger lookup,
     // so a verifier can build a synthetic payload from `--help` alone.
     Statusline,
+
+    /// Print the curated highlights of the installed trusty-mpm release.
+    ///
+    /// Each feature is a few lines and ends with the command to try. When this
+    /// release has no highlights file, the newest earlier one is shown.
+    /// `tm doctor` points here once per release (#11003).
+    WhatsNew,
 
     /// Print this session's commit-stats trailers, or splice them into a
     /// commit message file (#7074).

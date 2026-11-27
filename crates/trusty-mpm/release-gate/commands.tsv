@@ -143,6 +143,7 @@ architect dashboard ids	SAFE	$H	architect dashboard ids --root $H/dash P	-	0	-
 architect up	SKIP	-	-	-	-	-	brings up the Architect session: tmux + claude, then attaches
 architect attach	SKIP	-	-	-	-	-	attaches to the Architect tmux session; TTY
 architect drift	SAFE	$H	architect drift --dir $H/no-architect	-	0	summary:	read-only (#11773): an empty dir reads every managed path absent; exit 1 only on an edited file
+architect restore	SAFE	$H	architect restore --dir $H/no-architect	-	1	no kept copy	pinned 1: no launch deploy kept a copy there (#11368); read-only on that path
 architect restart	SKIP	-	-	-	-	-	restarts the Architect behind a checkpoint gate
 architect serve	SKIP	-	-	-	-	-	long-running poll loop (--once exits); polls tmux and may send Slack when configured (default-off); never run in the gate
 presence local	SKIP	-	-	-	-	-	Touch ID / login password prompt, owner present
@@ -160,6 +161,8 @@ il config show	SAFE	$H	il config show --dir $H	-	0	session_example	prints the bu
 il config enroll	SAFE	$H	il config enroll gate-s --project $H/proj --dir $H	-	0	enrolled: gate-s	writes only $H/local/il-schedule.json
 il config set	SAFE	$H	il config set --session gate-s thresholds.floor_ctx 180000 --dir $H	-	0	set: gate-s.thresholds.floor_ctx	after enroll
 il config remove	SAFE	$H	il config remove gate-s --dir $H	-	0	removed: gate-s	after set
+il config diff	SAFE	$H	il config diff --dir $H	-	0	preset: built in	reads only; compares with the preset (#11002)
+il config update	SAFE	$H	il config update --dir $H	-	0	unchanged: schema_version	the file is current after remove (#11002)
 il config reset	SAFE	$H	il config reset --force --dir $H	-	0	reset:	restores the preset in $H/local/il-schedule.json
 paths show	SAFE	$H	paths show	-	0	projects_root	prints the resolved paths; writes nothing (#11821)
 paths set	SKIP	-	-	-	-	-	owner-only: refused inside a Claude Code session and while tm sessions are live (#11821)
@@ -244,6 +247,7 @@ meta run	SKIP	-	-	-	-	-	boots PM plus sub-agents against an LLM; `--demo` canned
 statusline	SAFE	$H	statusline	$FX/empty.json	0	-	stdin JSON
 commit-trailers	SAFE	$H	commit-trailers	-	0	-	reads local stores
 banner	SAFE	$H	banner	-	0	-	seeds $H/.trusty-mpm/banner.txt
+whats-new	SAFE	$H	whats-new	-	0	What's new in trusty-mpm	prints embedded text; writes nothing (#11003)
 mcp share	SAFE	$H	mcp share gate-m	-	0	-	retired (#7892), prints why
 mcp unshare	SAFE	$H	mcp unshare gate-m	-	0	-	retired
 mcp list	SAFE	$H	mcp list --json	-	0	-	

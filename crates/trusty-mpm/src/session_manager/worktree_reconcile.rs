@@ -801,9 +801,9 @@ impl super::manager::SessionManager {
     /// filesystem work on a blocking thread matters — the scan runs `git` once
     /// per anchor and `rev-parse` twice per worktree, which is not something to
     /// do on the async runtime.
-    /// What: snapshots every record, collects `pane_current_path` for each
-    /// record whose tmux session is alive, and runs the reconcile on a blocking
-    /// thread. Reads only; writes nothing anywhere.
+    /// What: snapshots every record, then on one blocking thread collects
+    /// `pane_current_path` for each record whose tmux session is alive and runs
+    /// the reconcile. Reads only; writes nothing anywhere.
     ///
     /// KNOWN INCOMPLETENESS, stated rather than hidden: the live-cwd set covers
     /// panes of MANAGED sessions only. A pane in an unmanaged tmux session, and
@@ -822,21 +822,24 @@ impl super::manager::SessionManager {
         adopted: &[PathBuf],
     ) -> Result<ReconcileReport, anyhow::Error> {
         let records = self.list().await;
-        let mut live_cwds: Vec<PathBuf> = Vec::new();
-        for r in &records {
-            // #10101: each record's cwd is read on its own tmux server.
-            let Ok(tmux) = super::tmux_route::route(self.tmux.as_ref(), r) else {
-                continue;
-            };
-            if tmux.session_exists(&r.tmux_name)
-                && let Some(cwd) = tmux.get_pane_cwd(&r.tmux_name)
-            {
-                live_cwds.push(std::fs::canonicalize(&cwd).unwrap_or(cwd));
-            }
-        }
+        let tmux_driver = std::sync::Arc::clone(&self.tmux);
         let repos_root = repos_root.to_path_buf();
         let adopted = adopted.to_vec();
+        // #11885: the per-record tmux probes spawn subprocesses, so they run on
+        // the blocking thread too; on the worker they held a caller's timeout off.
         tokio::task::spawn_blocking(move || {
+            let mut live_cwds: Vec<PathBuf> = Vec::new();
+            for r in &records {
+                // #10101: each record's cwd is read on its own tmux server.
+                let Ok(tmux) = super::tmux_route::route(tmux_driver.as_ref(), r) else {
+                    continue;
+                };
+                if tmux.session_exists(&r.tmux_name)
+                    && let Some(cwd) = tmux.get_pane_cwd(&r.tmux_name)
+                {
+                    live_cwds.push(std::fs::canonicalize(&cwd).unwrap_or(cwd));
+                }
+            }
             reconcile_worktrees(&repos_root, &records, &live_cwds, Utc::now(), &adopted)
         })
         .await

@@ -123,6 +123,62 @@ fn plan_of(config: &TrustyToolsConfig, home: &Path) -> ResolvedLogDrain {
     }
 }
 
+/// Git config injected through the environment, beyond the
+/// [`crate::session_manager::worktree_safety::GIT_ENV_REDIRECTS`] set.
+const GIT_ENV_CONFIG_INJECTION: &[&str] = &["GIT_CONFIG_PARAMETERS"];
+
+/// A `git -C <repo>` command that reads no ambient git state.
+///
+/// Why (#11731): the fixture's `git init`/`git remote add` inherited the
+/// process environment. The host exports `GIT_CONFIG_COUNT=2` plus its pairs
+/// (the per-repo gh identity), and a `CredentialSandbox` in another test
+/// thread removed and restored them one at a time, so a fixture git could see
+/// a count with a missing `GIT_CONFIG_VALUE_<n>` and fail ("missing config
+/// value"). `remote add` failing was ignored, and the probe then found no
+/// origin.
+/// What: strips the repository redirects and env-injected config, points
+/// `HOME` at `home`, and reads an empty global config and no system config.
+/// Test: `the_fixture_git_reads_no_ambient_git_state`.
+fn hermetic_git(repo: &Path, home: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(repo);
+    for key in crate::session_manager::worktree_safety::GIT_ENV_REDIRECTS
+        .iter()
+        .chain(GIT_ENV_CONFIG_INJECTION)
+    {
+        cmd.env_remove(key);
+    }
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
+#[test]
+fn the_fixture_git_reads_no_ambient_git_state() {
+    // #11731: the fixture git must not inherit the host's git config or a
+    // redirect, whatever the process environment holds at spawn time.
+    let home = Path::new("/nonexistent-11731-home");
+    let cmd = hermetic_git(Path::new("/repo"), home);
+    let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+    for key in ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_DIR"] {
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new(key)),
+            Some(&None),
+            "{key} must be removed from the fixture git's environment"
+        );
+    }
+    let set = |key: &str| envs.get(std::ffi::OsStr::new(key)).copied().flatten();
+    assert_eq!(set("HOME"), Some(home.as_os_str()));
+    assert_eq!(
+        set("GIT_CONFIG_GLOBAL"),
+        Some(home.join(".gitconfig").as_os_str())
+    );
+    assert_eq!(set("GIT_CONFIG_NOSYSTEM"), Some(std::ffi::OsStr::new("1")));
+}
+
 /// A temp directory holding one log file with `body`.
 fn log_dir_with(tmp: &TempDir, body: &str) -> std::path::PathBuf {
     let dir = tmp.path().join("logs");
@@ -538,19 +594,22 @@ async fn the_object_key_comes_from_the_source_root_s_git_origin() {
     let repo = tmp.path().join("checkout");
     let logs = repo.join("logs");
     std::fs::create_dir_all(&logs).expect("repo dirs");
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(args)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    if !git(&["init"]) {
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    // #11731: every fixture git runs with no ambient git state.
+    let git = |args: &[&str]| hermetic_git(&repo, &home).args(args).output();
+    if !git(&["init"]).is_ok_and(|o| o.status.success()) {
         return; // no usable git on this runner
     }
-    let _ = git(&["remote", "add", "origin", "git@github.com:acme/pricing.git"]);
+    // #11731: a failed `remote add` was ignored and surfaced later as a
+    // misleading "fixture config resolves" panic; fail here with git's reason.
+    let added = git(&["remote", "add", "origin", "git@github.com:acme/pricing.git"])
+        .expect("git ran for init, so it runs for remote add");
+    assert!(
+        added.status.success(),
+        "git remote add failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
     std::fs::write(logs.join("trusty-code.log"), "INFO a line\n").expect("write log file");
 
     let dest = tmp.path().join("dest");

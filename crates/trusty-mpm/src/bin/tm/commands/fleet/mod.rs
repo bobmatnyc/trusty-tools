@@ -29,6 +29,9 @@ mod il_init;
 mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
+// #11368: the bundle deploy every `up` and `restart` runs, and its undo copy.
+pub(crate) mod launch_backup;
+pub(crate) mod launch_deploy;
 // #10885: the Architect's Notification hook step and status row.
 mod notify_hook;
 mod poller;

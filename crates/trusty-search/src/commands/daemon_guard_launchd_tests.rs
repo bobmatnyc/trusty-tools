@@ -120,10 +120,11 @@ fn kickstart_argv_has_no_kill_flag() {
 }
 
 fn stub(dir: &Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+    // #11911: write through the shared helper so no write fd to the stub exists
+    // in this process when it is exec'd (ETXTBSY under parallel sibling tests).
     let path = dir.join("stub-launchctl");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    trusty_common::exec_stub::write_executable(&path, format!("#!/bin/sh\n{body}\n"))
+        .expect("write stub");
     path
 }
 

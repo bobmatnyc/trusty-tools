@@ -140,6 +140,19 @@ impl Rig {
         err.data.expect("typed refusal carries data")
     }
 
+    /// Wait until the `held_pull` fake holds a pull (it wrote its marker).
+    async fn pull_held(&self) {
+        let marker = fake_lsp_server::pull_marker(&self.dir.path().join("g.pid"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake never held a pull"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     fn diag_params(&self) -> Value {
         json!({"scope": "file", "path": self.file()})
     }
@@ -347,14 +360,16 @@ async fn workspace_scope_keeps_the_push_for_the_requested_file() {
 async fn a_sync_during_the_pull_makes_the_answer_stale() {
     // (d) a v2 sync lands while the v1 pull is in flight; the v1 answer
     // must not go out stamped as current.
-    let rig = Arc::new(Rig::new("slow_pull"));
+    let rig = Arc::new(Rig::new("held_pull"));
     // Warm the server so the race is between the pull and the second sync.
     rig.ok("analyze.lsp_references", rig.refs_params()).await;
     let first = {
         let rig = Arc::clone(&rig);
         tokio::spawn(async move { rig.call("analyze.lsp_diagnostics", rig.diag_params()).await })
     };
-    tokio::time::sleep(Duration::from_millis(fake_lsp_server::SLOW_PULL_MS / 4)).await;
+    // #11935: wait until the fake holds the v1 pull; it answers only after
+    // the v2 didChange, so a fixed sleep no longer decides the order.
+    rig.pull_held().await;
     std::fs::write(rig.file(), "pub fn answer() -> u32 { 43 }\n").unwrap();
     let second = {
         let rig = Arc::clone(&rig);
