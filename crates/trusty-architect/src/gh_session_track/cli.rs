@@ -98,12 +98,15 @@ fn secret_shape(s: &str) -> Option<String> {
     looks_secret(s).then(|| "secret-shaped value".to_owned())
 }
 
+/// The repo slug, the gh child environment and the project mark.
+type Resolved = (String, Vec<(String, String)>, String);
+
 /// The repo, the gh child environment and the project mark from the config.
 fn resolve(
     config: &Config,
     repo_arg: Option<String>,
     environ: &[(String, String)],
-) -> Result<(String, Vec<(String, String)>, String), String> {
+) -> Result<Resolved, String> {
     let home = environ
         .iter()
         .find(|(k, _)| k == "HOME")
