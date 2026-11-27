@@ -410,20 +410,45 @@ fn attest_developer_id_rejects_every_non_developer_id_shape() {
     }
 }
 
-/// Write a fake `codesign` into `dir` that exits `sign_exit` on a sign call,
-/// passes `--verify`, and prints `display` to stderr for `-dvv`.
+/// Exit codes a [`fake_codesign`] returns for each of its three call shapes.
 #[cfg(unix)]
-fn fake_codesign(dir: &std::path::Path, sign_exit: i32, display: &str) -> std::path::PathBuf {
+#[derive(Clone, Copy)]
+struct FakeExits {
+    /// The sign call (`--force … --sign`).
+    sign: i32,
+    /// `--verify --deep --strict`.
+    verify: i32,
+    /// `-dvv` (after printing the display fixture to stderr).
+    display: i32,
+}
+
+/// Every call succeeds.
+#[cfg(unix)]
+const ALL_OK: FakeExits = FakeExits {
+    sign: 0,
+    verify: 0,
+    display: 0,
+};
+
+/// Write a fake `codesign` into `dir`: each call shape exits with its code in
+/// `exits`, writing a failure note to stderr, and `-dvv` prints `display`.
+#[cfg(unix)]
+fn fake_codesign(dir: &std::path::Path, exits: FakeExits, display: &str) -> std::path::PathBuf {
     let display_file = dir.join("display.txt");
     std::fs::write(&display_file, display).expect("write display fixture");
     let script = dir.join("codesign");
+    // #11587: per-call exits so the verify and display error arms are reachable.
     crate::commands::test_support::write_exec_script(
         &script,
         &format!(
             "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    \
-             -dvv) cat '{}' >&2; exit 0 ;;\n    --verify) exit 0 ;;\n  esac\ndone\n\
-             echo 'errSecInternalComponent' >&2\nexit {sign_exit}\n",
-            display_file.display()
+             -dvv) cat '{file}' >&2; exit {display} ;;\n    \
+             --verify) echo 'invalid signature' >&2; exit {verify} ;;\n  esac\ndone\n\
+             echo 'errSecInternalComponent' >&2\nexit {sign}\n",
+            file = display_file.display(),
+            display = exits.display,
+            verify = exits.verify,
+            sign = exits.sign,
         ),
     );
     script
@@ -441,21 +466,33 @@ fn secrets_bin_dir() -> tempfile::TempDir {
 /// accepts an ad-hoc signature, so the pre-#11587 pipeline reported success
 /// for a binary with no Team ID. Every bad outcome must now be an error.
 /// What: drives `sign_set_with` for `trusty-secrets` against a fake codesign
-/// that (a) fails the sign call, (b) leaves an ad-hoc signature, (c) leaves
-/// a wrong Team ID; asserts each is `SignSetError::Sign` naming the cause.
+/// that (a) fails the sign call, (b) fails `--verify`, (c) fails `-dvv`,
+/// (d) prints an empty `-dvv` summary, (e) leaves an ad-hoc signature,
+/// (f) leaves a wrong Team ID; asserts each is `SignSetError::Sign` naming
+/// the cause.
 /// Test: This is the test.
 #[cfg(unix)]
 #[test]
 fn sign_set_with_fails_closed_on_every_bad_signature() {
     let wrong_team = developer_id_display("ZZZZZ99999");
-    let cases: [(i32, &str, &str); 3] = [
-        (1, ADHOC_DISPLAY, "codesign failed"),
-        (0, ADHOC_DISPLAY, "ad-hoc"),
-        (0, &wrong_team, "ZZZZZ99999"),
+    let good = developer_id_display("ABCDE12345");
+    let exits = |sign, verify, display| FakeExits {
+        sign,
+        verify,
+        display,
+    };
+    let cases: [(FakeExits, &str, &str); 6] = [
+        (exits(1, 0, 0), ADHOC_DISPLAY, "codesign failed"),
+        // #11587 fix round: the verify and display error arms.
+        (exits(0, 1, 0), &good, "post-sign verification failed"),
+        (exits(0, 0, 1), &good, "could not read the signature"),
+        (ALL_OK, "", "could not read the signature"),
+        (ALL_OK, ADHOC_DISPLAY, "ad-hoc"),
+        (ALL_OK, &wrong_team, "ZZZZZ99999"),
     ];
-    for (sign_exit, display, cause) in cases {
+    for (fake_exits, display, cause) in cases {
         let tools = tempfile::tempdir().expect("tempdir");
-        let codesign = fake_codesign(tools.path(), sign_exit, display);
+        let codesign = fake_codesign(tools.path(), fake_exits, display);
         let bin = secrets_bin_dir();
         let result =
             strict::sign_set_with(codesign.as_os_str(), bin.path(), SECRETS_SET, TEST_IDENTITY);
@@ -477,7 +514,7 @@ fn sign_set_with_fails_closed_on_every_bad_signature() {
 #[test]
 fn sign_set_with_accepts_a_matching_developer_id_signature() {
     let tools = tempfile::tempdir().expect("tempdir");
-    let codesign = fake_codesign(tools.path(), 0, &developer_id_display("ABCDE12345"));
+    let codesign = fake_codesign(tools.path(), ALL_OK, &developer_id_display("ABCDE12345"));
     let bin = secrets_bin_dir();
     let signed =
         strict::sign_set_with(codesign.as_os_str(), bin.path(), SECRETS_SET, TEST_IDENTITY)

@@ -16,8 +16,11 @@
 # binary.
 #
 # What:
-#   1. `cargo install trusty-secrets --version <v> --locked` (hard-fail).
-#   2. `tctl sign trusty-secrets --dir <cargo bin dir>` (hard-fail). `tctl`
+#   1. `cargo install trusty-secrets --version <v> --locked --root <root>`
+#      (hard-fail). <root> is CARGO_INSTALL_ROOT, else CARGO_HOME, passed
+#      explicitly so the signed path is the installed path. A trusty-secrets
+#      on PATH elsewhere is a hard failure.
+#   2. `tctl sign trusty-secrets --dir <root>/bin` (hard-fail). `tctl`
 #      owns every codesign flag and identifier
 #      (crates/trusty-installer/src/commands/macos_signing/mod.rs); this
 #      script duplicates none of them. `tctl sign` reads the signature back
@@ -45,7 +48,15 @@
 
 set -euo pipefail
 
-CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+# #11587 fix round: cargo picks its install root from --root, then
+# CARGO_INSTALL_ROOT, then the `install.root` config key, then CARGO_HOME.
+# This script resolves the root itself and passes it as `--root`, so the
+# binary it signs is exactly the one `cargo install` wrote, whatever
+# `install.root` says. Signing `$CARGO_HOME/bin` blindly could sign a stale
+# binary there while the new install stayed ad-hoc.
+INSTALL_ROOT="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
+readonly INSTALL_ROOT
+readonly CARGO_BIN_DIR="$INSTALL_ROOT/bin"
 readonly SECRETS_BIN="$CARGO_BIN_DIR/trusty-secrets"
 
 # The CODESIGN identifier `tctl sign trusty-secrets` applies, mirrored here
@@ -81,12 +92,31 @@ resolve_tctl() {
 run_cargo_install() {
     section "Step 1: cargo install trusty-secrets --version $TRUSTY_SECRETS_VERSION --locked (registry)"
     if [[ "$TRUSTY_CODESIGN_DRY_RUN" == "1" ]]; then
-        info "[DRY RUN] cargo install trusty-secrets --version $TRUSTY_SECRETS_VERSION --locked"
+        info "[DRY RUN] cargo install trusty-secrets --version $TRUSTY_SECRETS_VERSION --locked --root $INSTALL_ROOT"
         return 0
     fi
-    cargo install trusty-secrets --version "$TRUSTY_SECRETS_VERSION" --locked
+    cargo install trusty-secrets --version "$TRUSTY_SECRETS_VERSION" --locked --root "$INSTALL_ROOT"
     if [[ ! -f "$SECRETS_BIN" ]]; then
-        error "$SECRETS_BIN not found after cargo install."
+        error "$SECRETS_BIN not found after cargo install --root $INSTALL_ROOT."
+        exit 1
+    fi
+    check_path_resolves_to_install
+}
+
+# #11587 fix round: fail when PATH runs a different trusty-secrets than the one
+# just installed; signing this one would leave the binary that runs unsigned.
+check_path_resolves_to_install() {
+    local on_path resolved expected
+    if ! on_path="$(command -v trusty-secrets)"; then
+        info "trusty-secrets is not on PATH; signing $SECRETS_BIN."
+        return 0
+    fi
+    resolved="$(cd "$(dirname "$on_path")" && pwd -P)/$(basename "$on_path")"
+    expected="$(cd "$CARGO_BIN_DIR" && pwd -P)/trusty-secrets"
+    if [[ "$resolved" != "$expected" ]]; then
+        error "PATH runs $resolved, but cargo installed $expected."
+        error "Signing $expected would leave the binary that runs unsigned. Fix PATH or"
+        error "CARGO_INSTALL_ROOT so they agree, then re-run."
         exit 1
     fi
 }

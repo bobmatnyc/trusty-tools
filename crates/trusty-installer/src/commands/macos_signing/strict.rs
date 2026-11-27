@@ -76,7 +76,8 @@ pub(crate) fn codesign_verify(codesign: &OsStr, path: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-/// Read `codesign -dvv <path>` (it writes its summary to stderr).
+/// Read `codesign -dvv <path>` (it writes its summary to stderr); a non-zero
+/// exit or an empty summary is an error, never an empty success.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn codesign_display(codesign: &OsStr, path: &Path) -> anyhow::Result<String> {
     let out = std::process::Command::new(codesign)
@@ -85,7 +86,8 @@ fn codesign_display(codesign: &OsStr, path: &Path) -> anyhow::Result<String> {
         .output()
         .with_context(|| format!("running codesign -dvv on {}", path.display()))?;
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() {
+    // #11587: an empty summary carries nothing to attest; treat it as unreadable.
+    if !out.status.success() || stderr.trim().is_empty() {
         anyhow::bail!(
             "could not read the signature of {} back: {stderr}",
             path.display()

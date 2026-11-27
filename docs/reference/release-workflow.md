@@ -937,10 +937,14 @@ Install from the registry, then sign (ADR-0043: never `--path`):
 
 ```bash
 scripts/install-trusty-secrets-signed.sh --version <v>
-# equivalent to:
-cargo install trusty-secrets --version <v> --locked
-tctl sign trusty-secrets
+# equivalent to, with ROOT = $CARGO_INSTALL_ROOT, else $CARGO_HOME:
+cargo install trusty-secrets --version <v> --locked --root "$ROOT"
+tctl sign trusty-secrets --dir "$ROOT/bin"
 ```
+
+The script passes `--root` so it signs the file cargo just wrote, even when
+`install.root` points elsewhere. It fails when `trusty-secrets` on `PATH` is a
+different file.
 
 🔴 **Re-run after every install.** An upgrade that skips the sign step reverts
 the binary to ad-hoc with no warning, and the per-item prompts return.
