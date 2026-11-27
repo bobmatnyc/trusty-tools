@@ -304,16 +304,7 @@ pub async fn spawn_managed(
     // decommissioned project. A failure is the caller's error: the session
     // runs, but the project still reads decommissioned.
     let registry = state.project_registry().await;
-    registry
-        .reactivate_for_session(&record)
-        .await
-        .map_err(|e| {
-            format!(
-                "session {} ({}) is running, but its project could not be reactivated and \
-             still reads decommissioned (#10988): {e}",
-                record.id, record.tmux_name
-            )
-        })?;
+    reactivate_project(&registry, &record).await?;
     // #10989: undo a decommission park of this project's index; a failure is named.
     state
         .session_manager()
@@ -322,6 +313,26 @@ pub async fn spawn_managed(
         .await?;
 
     Ok(record)
+}
+
+/// Reactivate the project `record` binds to, naming a failure (#10988).
+///
+/// Why: spawn and operator resume (#11983) both return a reactivation failure
+/// as the route error, so the operator sees the project still reads
+/// decommissioned. What: [`crate::project::ProjectRegistry::reactivate_for_session`]
+/// with its error worded for the caller.
+/// Test: `a_failed_reactivation_on_operator_resume_is_the_route_error`.
+async fn reactivate_project(
+    registry: &crate::project::ProjectRegistry,
+    record: &SessionRecord,
+) -> Result<Vec<String>, String> {
+    registry.reactivate_for_session(record).await.map_err(|e| {
+        format!(
+            "session {} ({}) is running, but its project could not be reactivated and \
+             still reads decommissioned (#10988): {e}",
+            record.id, record.tmux_name
+        )
+    })
 }
 
 /// Kick off turnkey `--task` injection for a freshly-spawned session (#1903 / #1299).
@@ -1095,7 +1106,10 @@ pub(super) async fn front_gate_or_escalate(
 /// `resume_managed_backfills_missing_status_line` in
 /// `tests/session_manager_mvp.rs` covers the self-heal call added here;
 /// `core::session_launch::worktree_sync`'s own unit tests cover the sync/
-/// self-heal primitives.
+/// self-heal primitives; `an_operator_resume_reactivates_the_bound_decommissioned_project`,
+/// `an_operator_resume_leaves_an_unbound_decommissioned_project_decommissioned`
+/// and `a_failed_reactivation_on_operator_resume_is_the_route_error` cover the
+/// #11983 reactivation.
 pub async fn resume_managed(
     state: &Arc<DaemonState>,
     id: &ManagedSessionId,
@@ -1116,9 +1130,11 @@ pub async fn resume_managed(
     mgr.note_operator_resume(id).await;
     // #10989 F3: unpark a decommission park before the launch; a failure is
     // this resume's error once the runtime is up, as on the spawn path.
-    let restored = mgr
-        .restore_parked_index(&*state.project_registry().await, &record)
-        .await;
+    // #11983: reactivate the bound project by spawn's rule; a failure is this
+    // resume's error once the runtime is up, ahead of the unpark's.
+    let registry = state.project_registry().await;
+    let reactivated = reactivate_project(&registry, &record).await;
+    let restored = mgr.restore_parked_index(&registry, &record).await;
 
     let workspace = record
         .workspace_path
@@ -1233,6 +1249,7 @@ pub async fn resume_managed(
         // an error.
         return Err(ResumeManagedError::Other(msg));
     }
+    reactivated.map_err(ResumeManagedError::Other)?; // #11983
     restored.map_err(ResumeManagedError::Other)?;
 
     Ok(mgr.get(id).await.unwrap_or(record))
