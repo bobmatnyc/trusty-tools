@@ -412,7 +412,7 @@ fn batch_input_must_be_a_list() {
     let not_op = run_at(&["datg", "--project", p, "batch"], "[1]", &env, NOW);
     assert_eq!(
         (not_op.code, not_op.stderr.as_str()),
-        (2, "datg: each op must be an object\n")
+        (2, "datg: each operation must be an object\n")
     );
     let unknown = run_at(
         &["datg", "--project", p, "batch"],
@@ -422,7 +422,7 @@ fn batch_input_must_be_a_list() {
     );
     assert_eq!(
         (unknown.code, unknown.stderr.as_str()),
-        (2, "datg: unknown op 'zap'\n")
+        (2, "datg: unknown operation 'zap'\n")
     );
 }
 

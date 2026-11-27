@@ -11253,7 +11253,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11339,7 +11339,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "libc",
  "serde",
@@ -11459,7 +11459,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11529,7 +11529,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.10"
+version = "0.70.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11650,7 +11650,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -11807,7 +11807,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11852,7 +11852,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11902,7 +11902,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.15"
+version = "1.14.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12010,11 +12010,12 @@ dependencies = [
 
 [[package]]
 name = "trusty-publish-guard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "ignore",
  "reqwest 0.12.28",
  "tar",
  "tempfile",

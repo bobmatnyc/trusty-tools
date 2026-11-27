@@ -1,0 +1,5 @@
+crate   trusty-mpm
+version 1.14.16
+reason  accepted under the versioning policy of 2026-09-26, Architect approval 2026-11-27, additive fields from PR 12075 and PR 12078
+accept  constructible_struct_adds_field field RegisterProjectResponse.inactive_reason
+accept  constructible_struct_adds_field field ShutdownTarget.palace_peers
