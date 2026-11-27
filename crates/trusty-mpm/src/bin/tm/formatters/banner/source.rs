@@ -268,6 +268,8 @@ pub(crate) fn load_banner_art_in(env: &BannerEnv) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #11821: the home-relative dir name comes from the shared install_paths constant.
+    use trusty_common::install_paths::MPM_DIR_NAME;
 
     /// #8545: rendering a banner in a test never seeds the operator's home.
     #[test]
@@ -338,7 +340,7 @@ mod tests {
         std::fs::create_dir_all(&fake_home).unwrap();
 
         let art = load_banner_art_in(&BannerEnv::new(Some(&file), Some(&fake_home)));
-        let seeded = std::fs::read_to_string(fake_home.join(".trusty-mpm").join("banner.txt")).ok();
+        let seeded = std::fs::read_to_string(fake_home.join(MPM_DIR_NAME).join("banner.txt")).ok();
 
         assert_eq!(art, DEFAULT_BANNER_ART);
         assert_eq!(
@@ -372,9 +374,9 @@ mod tests {
     fn banner_source_empty_override_value_falls_through_to_home() {
         let dir = tempfile::tempdir().unwrap();
         let fake_home = dir.path().join("home");
-        std::fs::create_dir_all(fake_home.join(".trusty-mpm")).unwrap();
+        std::fs::create_dir_all(fake_home.join(MPM_DIR_NAME)).unwrap();
         std::fs::write(
-            fake_home.join(".trusty-mpm").join("banner.txt"),
+            fake_home.join(MPM_DIR_NAME).join("banner.txt"),
             "HOME ART\n",
         )
         .unwrap();
@@ -396,9 +398,9 @@ mod tests {
 
         // A fake home carrying a DIFFERENT banner, so precedence is observable.
         let fake_home = dir.path().join("home");
-        std::fs::create_dir_all(fake_home.join(".trusty-mpm")).unwrap();
+        std::fs::create_dir_all(fake_home.join(MPM_DIR_NAME)).unwrap();
         std::fs::write(
-            fake_home.join(".trusty-mpm").join("banner.txt"),
+            fake_home.join(MPM_DIR_NAME).join("banner.txt"),
             "HOME ART\n",
         )
         .unwrap();
@@ -417,7 +419,7 @@ mod tests {
 
         write_default_if_absent_in(&home_only(&fake_home));
 
-        let written = std::fs::read_to_string(fake_home.join(".trusty-mpm").join("banner.txt"))
+        let written = std::fs::read_to_string(fake_home.join(MPM_DIR_NAME).join("banner.txt"))
             .expect("default banner.txt should be written on first run");
         assert_eq!(written, DEFAULT_BANNER_ART);
     }
@@ -427,7 +429,7 @@ mod tests {
     fn banner_source_first_run_no_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let fake_home = dir.path().join("existing-home");
-        let banner_dir = fake_home.join(".trusty-mpm");
+        let banner_dir = fake_home.join(MPM_DIR_NAME);
         std::fs::create_dir_all(&banner_dir).unwrap();
         let banner_path = banner_dir.join("banner.txt");
         std::fs::write(&banner_path, "KEEP ME\n").unwrap();

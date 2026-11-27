@@ -219,10 +219,11 @@ fn render_agent_tiers(out: &mut String, paths: &FrameworkPaths, managed: &Path) 
         let note = notes.get(i).copied().unwrap_or("");
         let _ = writeln!(out, "{}. `{}` — {note}", i + 1, dir.display());
     }
-    out.push_str(
-        "\nThere is no `~/.trusty-mpm/agents/` tier. No code reads that path; a \
-         copy placed there is loaded by nothing.\n\n",
-    );
+    // #11821: concat! so the path-naming piece can carry its waiver; bytes unchanged.
+    out.push_str(concat!(
+        "\nThere is no `~/.trusty-mpm/agents/` tier. No code reads that path; a ", // path-literal: allow (display text)
+        "copy placed there is loaded by nothing.\n\n",
+    ));
 }
 
 /// Skill deploy tiers, rendered from the real enumerator.
@@ -237,14 +238,15 @@ fn render_skill_tiers(out: &mut String, paths: &FrameworkPaths) {
     for tier in skill_deploy_tiers(paths, Some(Path::new(PROJECT))) {
         let _ = writeln!(out, "| {} | `{}` |", tier.label, tier.dir.display());
     }
-    out.push_str(
-        "\nSource precedence when the same skill name exists in more than one \
-         source: project-custom, then user-custom (`~/.trusty-mpm/skills/`), then \
-         bundled. A deployed skill you hand-edit is frozen — its checksum no \
+    // #11821: concat! so the path-naming piece can carry its waiver; bytes unchanged.
+    out.push_str(concat!(
+        "\nSource precedence when the same skill name exists in more than one ",
+        "source: project-custom, then user-custom (`~/.trusty-mpm/skills/`), then ", // path-literal: allow (display text)
+        "bundled. A deployed skill you hand-edit is frozen — its checksum no \
          longer matches, so redeploy skips it rather than overwriting your edit. \
          A skill whose slug contains `mcp` is never deployed; it would shadow \
          Claude Code's built-in `/mcp`.\n\n",
-    );
+    ));
 }
 
 /// Per-session on-disk state.
@@ -281,10 +283,11 @@ fn render_docs(out: &mut String, root: &Path) {
 
     // #9012: the bundled docs moved into the instructional content.
     out.push_str("### Ships with the instructional content\n\n");
-    out.push_str(
-        "`tm install` writes these into `~/.trusty-mpm/framework/docs/` from the \
-         content `tm content install` pinned (or from a checkout's `content/`).\n\n",
-    );
+    // #11821: concat! so the path-naming piece can carry its waiver; bytes unchanged.
+    out.push_str(concat!(
+        "`tm install` writes these into `~/.trusty-mpm/framework/docs/` from the ", // path-literal: allow (display text)
+        "content `tm content install` pinned (or from a checkout's `content/`).\n\n",
+    ));
     let content_docs = crate_doc_files(root);
     if content_docs.is_empty() {
         out.push_str("- (none found under `content/instructions/docs/`)\n");
@@ -432,13 +435,13 @@ mod tests {
         // claim and no code reads. It may appear only in the sentence that
         // denies it.
         let rendered = render();
-        let mentions = rendered.matches("~/.trusty-mpm/agents/").count();
+        let mentions = rendered.matches("~/.trusty-mpm/agents/").count(); // path-literal: allow (asserts display text)
         assert_eq!(
             mentions, 1,
             "the phantom tier may appear once, in the sentence refuting it"
         );
         assert!(
-            rendered.contains("There is no `~/.trusty-mpm/agents/` tier"),
+            rendered.contains("There is no `~/.trusty-mpm/agents/` tier"), // path-literal: allow (asserts display text)
             "{rendered}"
         );
     }
