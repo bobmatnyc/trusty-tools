@@ -103,15 +103,18 @@ pub struct PathParams {
 /// write runs before the in-memory insert and the worktree backfill, so a
 /// failed write leaves neither behind.
 ///
+/// #11253: `path` is canonicalized first, so a symlink, a trailing slash or a
+/// case variant of one checkout gives one name, one record and one map key.
+///
 /// #11998: a kept record that is decommissioned or archived stays so, nothing
 /// unparks, and `inactive_reason` names a session start as the way back. The
 /// key is absent for an active project, and the status stays `200`.
 ///
 /// # Errors
 ///
-/// [`DaemonError::InvalidRequest`] when `path` has no readable `origin`
-/// remote; [`DaemonError::Internal`], carrying the store's error text, when
-/// the registry-B write fails.
+/// [`DaemonError::InvalidRequest`] when `path` cannot be canonicalized or has
+/// no readable `origin` remote; [`DaemonError::Internal`], carrying the
+/// store's error text, when the registry-B write fails.
 ///
 /// Test: `post_projects_keeps_a_decommissioned_project_and_names_the_way_back_11998`,
 /// `post_projects_names_the_reason_only_while_the_project_is_inactive_11998`,
@@ -124,11 +127,15 @@ pub struct PathParams {
 /// `project_init_keeps_an_existing_registry_record_10586`,
 /// `project_init_with_ssh_origin_keeps_the_https_record_10586`,
 /// `project_init_registry_write_failure_names_the_cause_10586`,
-/// `project_init_reports_the_kept_record_for_a_different_origin_10586`.
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`,
+/// `project_init_spellings_of_one_checkout_yield_one_record_11253`,
+/// `project_init_unresolvable_path_is_refused_11253`.
 pub async fn register_project_op(
     state: &Arc<DaemonState>,
     path: PathBuf,
 ) -> Result<RegisterProjectResponse, DaemonError> {
+    // #11253: one spelling per checkout for every use below; never the raw path.
+    let path = canonical_checkout(&path)?;
     // #10586: no origin, no registry-B record — refuse before any side effect.
     let repo_url = origin_url_for_init(&path)?;
     // #7171: an explicit registration is the "operator points trusty-mpm at
@@ -166,6 +173,21 @@ pub async fn register_project_op(
         info,
         kept_existing,
         inactive_reason,
+    })
+}
+
+/// The one spelling of a checkout path that registration keys on.
+///
+/// Why: #11253: the in-memory map, the derived name and the registry record
+/// all read the path; a symlink or a trailing slash gave one checkout two of each.
+/// What: [`std::fs::canonicalize`] — absolute, symlinks resolved, and the
+/// on-disk case on a case-insensitive macOS volume. A failure is a 400 naming
+/// the cause, never a fall back to the raw path.
+/// Test: `project_init_spellings_of_one_checkout_yield_one_record_11253`,
+/// `project_init_unresolvable_path_is_refused_11253`.
+fn canonical_checkout(path: &Path) -> Result<PathBuf, DaemonError> {
+    std::fs::canonicalize(path).map_err(|e| {
+        DaemonError::InvalidRequest(format!("could not resolve '{}': {e}", path.display()))
     })
 }
 
@@ -277,12 +299,28 @@ pub fn list_projects_op(state: &Arc<DaemonState>) -> ProjectsResponse {
 /// `projects_current_resolves_an_alias_registration_after_restart_11345`,
 /// `projects_current_unregistered_without_alias_store_is_not_found_11345`,
 /// `projects_current_unreadable_alias_store_is_internal_error_11345`,
-/// `projects_current_unreadable_registry_is_internal_error_11345`.
+/// `projects_current_unreadable_registry_is_internal_error_11345`,
+/// `projects_current_answers_init_spelling_for_an_alias_path_11253`.
 pub async fn current_project_op(
     state: &Arc<DaemonState>,
     path: &Path,
 ) -> Result<ProjectInfo, DaemonError> {
-    if let Some(info) = state.project(path) {
+    // #11253: register keys on the canonical path, so look it up the same way.
+    // A path that no longer exists is looked up as given: an unregistered one
+    // is still a 404, and a removed checkout's entry can still be read.
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) => {
+            return Err(DaemonError::InvalidRequest(format!(
+                "could not resolve '{}': {e}",
+                path.display()
+            )));
+        }
+    };
+    let (raw, path) = (path, canonical.as_path());
+    // Other writers of the map (session start) may hold the raw spelling.
+    if let Some(info) = state.project(path).or_else(|| state.project(raw)) {
         return Ok(info);
     }
     // #11345: the in-memory map holds only paths announced since start; the
@@ -313,7 +351,7 @@ pub async fn current_project_op(
             ..ProjectInfo::new(path.to_path_buf())
         }),
         None => Err(DaemonError::SessionNotFound {
-            id: path.display().to_string(),
+            id: raw.display().to_string(),
         }),
     }
 }
