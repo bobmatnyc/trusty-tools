@@ -27,7 +27,7 @@ path = "src/bin/trusty-architect-il.rs"
 name = "trusty-architect-replay"
 path = "src/bin/trusty-architect-replay.rs"
 
-# #12028: the spec_drift_check.py port, run daily by registry job M0c.
+# #12028: the spec_drift_check.py port.
 [[bin]]
 name = "trusty-architect-spec-drift-check"
 path = "src/bin/trusty-architect-spec-drift-check.rs"

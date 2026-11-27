@@ -56,7 +56,7 @@ fn spec_drift_recordings_replay_clean_against_the_port() {
             "pre-phase-pending.json",
         ]
     );
-    // The daily-job case is the PASS path; the FAIL case files a finding.
+    // The PASS-path case logs a soak line; the FAIL case files a finding.
     let daily = load(&dir.join("daily-pass.json")).unwrap();
     assert_eq!(daily.exit, 0);
     assert!(daily.writes.contains_key("local/soak/spec-drift.jsonl"));

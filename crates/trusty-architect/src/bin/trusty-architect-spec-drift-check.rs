@@ -1,10 +1,10 @@
 //! `trusty-architect-spec-drift-check`: the Rust port of `spec_drift_check.py` (#12028).
 //!
-//! Why: registry job M0c runs the anti-drift check daily; this binary is the
-//! drop-in it moves to once the replay gate passes.
+//! Why: the Architect's anti-drift check moves to Rust; this binary is the
+//! drop-in for the Python script once the replay gate passes.
 //! What: forwards argv to `trusty_architect::spec_drift::run` on the real
-//! clock, with the current directory as the default root (the job runs from
-//! the checkout) and `DASHBOARD_FORMAT` passed through to the store as the
+//! clock, with the current directory as the default root (the script's own
+//! checkout when run from it) and `DASHBOARD_FORMAT` passed through to the store as the
 //! script's store reads it. It reads no clock variable.
 //! Test: `shipped_spec_drift_command_prints_ten_results_and_logs_one_line`.
 

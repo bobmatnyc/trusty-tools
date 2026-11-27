@@ -1,6 +1,6 @@
 //! #12028 P1b: the shipped `trusty-architect-spec-drift-check` binary runs.
 //!
-//! Lays the daily-job recording's input files into a temp root, runs the real
+//! Lays the PASS-path recording's input files into a temp root, runs the real
 //! binary on the live clock, and checks the exit code and the shape of what
 //! it prints and logs; no assertion depends on the time.
 
@@ -25,7 +25,7 @@ fn shipped_spec_drift_command_prints_ten_results_and_logs_one_line() {
     let soak = root.path().join("local/soak/spec-drift.jsonl");
     let before = std::fs::read_to_string(&soak).unwrap().lines().count();
 
-    // The default root is the current directory, as the daily job runs it.
+    // The default root is the current directory.
     let out = Command::new(BIN).current_dir(root.path()).output().unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(out.status.code(), Some(0), "{stdout}");

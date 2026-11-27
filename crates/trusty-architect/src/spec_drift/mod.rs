@@ -1,8 +1,8 @@
 //! Port of the Architect's `spec_drift_check.py`, the anti-drift check for
 //! SPEC-ARCHITECT-COMPONENTS (#12028 P1b).
 //!
-//! Why: registry job M0c runs the script daily; epic #12025 moves it to Rust
-//! once the port reproduces the script's recorded runs byte for byte.
+//! Why: epic #12025 moves the Architect's scripts to Rust, each once its
+//! port reproduces the script's recorded runs byte for byte.
 //! What: [`run`] parses the script's arguments (argparse's messages and exit
 //! code 2 included), reads the manifest under the root, runs the ten checks,
 //! prints one `INV-nn STATUS message` line each, appends one sorted-key JSON
