@@ -1048,3 +1048,54 @@ fn resolves_the_published_content_v0_1_0_bundle() {
     let agents = content.list("agents").expect("agents");
     assert_eq!(agents.len(), 43, "content-v0.1.0 ships 43 agents");
 }
+
+/// #11821: the default cache follows the configured config dir, is
+/// `<home>/.trusty-mpm/content` with no install file, and is `None` (never a
+/// `$HOME` guess) when `install.toml` is broken.
+#[test]
+fn default_cache_dir_follows_the_configured_config_dir() {
+    use crate::install_paths::{CONFIG_DIR_ENV, MPM_DIR_NAME, install_file_path};
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let cfg = tempfile::tempdir().expect("cfg");
+    let saved = [
+        ("HOME", std::env::var_os("HOME")),
+        (CONFIG_DIR_ENV, std::env::var_os(CONFIG_DIR_ENV)),
+    ];
+    // SAFETY: guarded by `ENV_LOCK`; restored below before asserting.
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::remove_var(CONFIG_DIR_ENV);
+    }
+    let plain = default_cache_dir();
+    // SAFETY: as above.
+    unsafe { std::env::set_var(CONFIG_DIR_ENV, cfg.path()) };
+    let configured = default_cache_dir();
+    let install = install_file_path(home.path());
+    std::fs::create_dir_all(install.parent().expect("parent")).expect("tools dir");
+    std::fs::write(&install, "bogus = 1\n").expect("install file");
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(CONFIG_DIR_ENV) };
+    let broken = default_cache_dir();
+    for (name, value) in saved {
+        // SAFETY: as above.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+    assert_eq!(MPM_DIR_NAME, ".trusty-mpm");
+    assert_eq!(plain, Some(home.path().join(MPM_DIR_NAME).join("content")));
+    assert_eq!(
+        configured,
+        Some(cfg.path().join(MPM_DIR_NAME).join("content"))
+    );
+    assert_eq!(
+        broken, None,
+        "a broken install.toml must not yield a cache dir"
+    );
+}
