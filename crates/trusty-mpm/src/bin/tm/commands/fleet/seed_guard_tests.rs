@@ -27,7 +27,8 @@ const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
     ),
     (
         "token_watch.py",
-        "#10571 S1: its data files are named `token-*.json[l]`, read as token files; the Rust watcher shares the names (#11629, #10598)",
+        // #11800: the token-tally fix releases its data files; these two words remain.
+        "its docstring's `local/usage/token-hourly.jsonl.` and the module attribute `token_watch_rules.ScanRules` read as token files (#10598)",
     ),
 ];
 
@@ -110,8 +111,8 @@ const STILL_REFUSED_10570: &[(&str, &str)] = &[
     ),
     (
         "token_watch.py",
-        "#10571 S1: STATE_PATH, HOURLY_PATH and THRESHOLDS_PATH name `token-*.json[l]` files, \
-         read as token files; the Rust watcher shares the names (#11629, #10598)",
+        "#11800: its docstring's `local/usage/token-hourly.jsonl.` and the module attribute \
+         `token_watch_rules.ScanRules` read as token files (#10598)",
     ),
     (
         "il_remind.py",
