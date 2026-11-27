@@ -587,6 +587,8 @@ impl CodeIndexer {
         file_path: &str,
         mode: RedbChunkDelete,
     ) -> Result<usize> {
+        // #12064: recorded for a staged run's carryover copy, on every outcome.
+        let _journal = self.journal_files([file_path.to_string()]);
         #[cfg(test)]
         if TEST_FAIL_REMOVE
             .lock()
@@ -636,6 +638,8 @@ impl CodeIndexer {
         file_path: &str,
         mode: RedbChunkDelete,
     ) -> Result<usize> {
+        // #12064: recorded for a staged run's carryover copy, on every outcome.
+        let _journal = self.journal_files([file_path.to_string()]);
         // #10209: `file_chunk_ids` reads redb when the map is still evicted,
         // so a removal during a long rehydrate still finds the file's ids.
         let ids = self.file_chunk_ids(file_path).await?;

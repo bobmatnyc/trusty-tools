@@ -37,6 +37,8 @@ use crate::core::symbol_graph::SymbolGraph;
 pub(crate) mod archive;
 // #10110: batch removal by path prefix or file list.
 mod batch_remove;
+// #12064: live-corpus writes made during a staged run's carryover copy.
+pub(crate) mod carryover_journal;
 pub(crate) mod corpus_fault;
 // #8167/#8232: closing an index's files when it is deleted.
 mod delete_close;
@@ -296,6 +298,9 @@ pub struct CodeIndexer {
 
     /// #8959: serializes `index_file` writes to one path.
     pub(super) path_write_locks: ingest::supersede::PathWriteLocks,
+
+    /// #12064: keys written to live while a staged run copies it.
+    pub(super) carryover_journal: Arc<carryover_journal::CarryoverJournal>,
 
     /// Optional ONNX NER for `NaturalLanguagePhrase` extraction.
     pub(super) ner: crate::core::ner::NerExtractor,
@@ -818,6 +823,7 @@ impl CodeIndexer {
             symbol_graph: Arc::new(RwLock::new(Arc::new(SymbolGraph::new()))),
             graph_refresh: graph_refresh::GraphRefresh::default(),
             path_write_locks: ingest::supersede::PathWriteLocks::default(),
+            carryover_journal: Arc::default(),
             ner: crate::core::ner::NerExtractor::try_load(),
             persist_state: Arc::new(PersistState::default()),
             domain_terms: Vec::new(),

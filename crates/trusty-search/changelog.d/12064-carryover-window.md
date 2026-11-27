@@ -1,0 +1,2 @@
+Fixed
+- An incremental reindex no longer loses a path write, or brings back a deleted path, that committed to the live corpus while the carryover copy ran. The run records every file, prefix and chunk id written to the live corpus from the start of the copy, and re-copies those rows from live into staging before the swap. If that re-copy fails, the run aborts with the live corpus still attached and the reindex is reported failed (#12064).

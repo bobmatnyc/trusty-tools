@@ -49,6 +49,8 @@ mod checkpoint;
 // #8889: one reindex per index; per-run staging names.
 mod claim;
 mod completion;
+// #12064: re-applies the carryover window's live writes to staging.
+mod carryover_resync;
 mod corpus_swap;
 mod finish;
 mod finish_teardown;

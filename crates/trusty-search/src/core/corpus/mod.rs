@@ -40,6 +40,8 @@ pub(crate) mod open_guard;
 mod refusal_ops;
 // #9169: when a reindex last committed the corpus, read by project.resolve.
 mod reindex_stamp;
+// #12064: re-copy the carryover window's live writes into staging.
+mod resync_ops;
 mod store_impl;
 mod tables;
 // #5357: `_meta` fault injectors for the fail-closed regression tests. Kept out

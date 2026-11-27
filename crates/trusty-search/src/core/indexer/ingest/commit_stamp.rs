@@ -88,6 +88,8 @@ impl CodeIndexer {
         index_id: &IndexId,
         rel: &str,
     ) -> Result<(usize, bool)> {
+        // #12064: recorded for a staged run's carryover copy, on every outcome.
+        let _journal = self.journal_files([rel.to_string()]);
         // #9459: a delete against a corpus closed for shutdown leaves its rows
         // in redb; refuse it so the reconcile delta does not stamp HEAD.
         self.refuse_if_closed_for_shutdown()?;
@@ -113,6 +115,8 @@ impl CodeIndexer {
     /// Test: `remove_file_report_stamps_only_a_committed_delete`,
     /// `remove_file_fault_in_the_hash_delete_keeps_chunks_and_hash_11096`.
     pub(crate) async fn remove_file_committed(&self, file_path: &str) -> Result<(usize, bool)> {
+        // #12064: recorded for a staged run's carryover copy, on every outcome.
+        let _journal = self.journal_files([file_path.to_string()]);
         // #10738: a delete in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back.
         self.refuse_if_corpus_detached()?;
@@ -174,6 +178,8 @@ impl CodeIndexer {
         if ids.is_empty() {
             return Ok(false);
         }
+        // #12064: recorded for a staged run's carryover copy, on every outcome.
+        let _journal = self.journal_chunk_ids(ids);
         // #10738: a removal in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back; refuse before memory
         // changes so the watcher keeps the ids for a retry.
