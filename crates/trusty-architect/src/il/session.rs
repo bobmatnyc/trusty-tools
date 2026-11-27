@@ -64,7 +64,8 @@ fn merge_refs(old: &[Json], new: &Json) -> IlResult<Json> {
     for r in rows(&holder, "refs", REFS_MAX)? {
         let key = match r.get("key") {
             Some(Json::Str(k)) if ref_key_ok(k) => k.clone(),
-            _ => return invalid("refs.key must match ^[a-z0-9][a-z0-9_.-]{0,31}$"),
+            // See #11800
+            _ => return invalid("the refs key must match ^[a-z0-9][a-z0-9_.-]{0,31}$"),
         };
         if r.opt("value").is_none() {
             refs.retain(|(k, _)| *k != key);
