@@ -125,12 +125,31 @@ fn relative(ws: &Path, paths: &[PathBuf]) -> Vec<String> {
     rel
 }
 
-/// Overwrite the provisioning ledger in `ws`'s git admin dir with non-JSON.
-fn corrupt_ledger(ws: &Path) {
+/// The provisioning ledger in `ws`'s git admin dir, which the spawn wrote.
+fn ledger_path(ws: &Path) -> PathBuf {
     let admin = admin_sentinel_path(ws).expect("the admin dir resolves");
     let ledger = admin.parent().expect("admin dir").join(LEDGER_NAME);
     assert!(ledger.is_file(), "premise: the spawn recorded a ledger");
-    std::fs::write(&ledger, "not json").expect("corrupt the ledger");
+    ledger
+}
+
+/// Overwrite the provisioning ledger in `ws`'s git admin dir with non-JSON.
+fn corrupt_ledger(ws: &Path) {
+    std::fs::write(ledger_path(ws), "not json").expect("corrupt the ledger");
+}
+
+/// Drop only the backup records from `ws`'s ledger, as an older ledger has
+/// none, so every other provisioning write stays vouched for.
+fn forget_backups(ws: &Path) {
+    let ledger = ledger_path(ws);
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ledger).expect("read ledger")).expect("parse");
+    let removed = doc["files"].as_object_mut().expect("files").remove(BAK);
+    assert!(removed.is_some(), "premise: the ledger recorded {BAK}");
+    doc.as_object_mut()
+        .expect("ledger object")
+        .remove("settings_snapshots");
+    std::fs::write(&ledger, serde_json::to_vec(&doc).expect("encode")).expect("write");
 }
 
 // ---- `decommission --force` on an in-project worktree ----------------------
@@ -202,6 +221,27 @@ async fn force_decommission_keeps_a_user_backup_beside_tm_s_11267() {
     // Only the user's file is listed; tm's own backups stay excused.
     assert_eq!(listed(&reason), [mine], "{reason}");
     assert!(wt.join(mine).is_file(), "the user backup survives");
+}
+
+/// #11267 failure arm: a ledger with no record of the backups vouches for
+/// none, so `--force` keeps the tree and lists exactly tm's backups.
+#[tokio::test]
+async fn force_decommission_keeps_backups_the_ledger_never_recorded_11267() {
+    let fx = GitWorktreeFixture::new();
+    let (wt, _home) = spawned_worktree(&fx, "decom-force-unrecorded-bak-11267");
+    forget_backups(&wt);
+    let all = backups(&wt);
+
+    let verdict = force(&wt).await;
+
+    assert!(!verdict.removed, "an unrecorded backup must keep the tree");
+    let reason = verdict.kept_reason.expect("a kept tree must say why");
+    let mut named = listed(&reason);
+    named.sort();
+    assert_eq!(named, relative(&wt, &all), "{reason}");
+    for path in &all {
+        assert!(path.is_file(), "{} survives", path.display());
+    }
 }
 
 /// #11267 failure arm: a corrupt ledger vouches for no backup, so `--force`
@@ -330,6 +370,28 @@ async fn owned_decommission_keeps_a_user_backup_beside_tm_s_11267() {
     }
     assert!(!decommission_owned(&fx.repos_root, &ws).await);
     assert!(ws.join(mine).is_file(), "the user backup survives");
+}
+
+/// #11267 failure arm: a ledger with no record of the backups vouches for
+/// none, so the owned clone is kept under both policies and lists exactly
+/// tm's backups.
+#[tokio::test]
+async fn owned_decommission_keeps_backups_the_ledger_never_recorded_11267() {
+    let fx = GitWorktreeFixture::new();
+    let (ws, _home) = spawned_clone(&fx, "owned-unrecorded-bak-11267");
+    forget_backups(&ws);
+    let all = backups(&ws);
+
+    for policy in [ProvisioningDirt::Refuse, ProvisioningDirt::Discard] {
+        let reason = keep(&ws, policy).expect("an unrecorded backup keeps the clone");
+        let mut named = listed(&reason);
+        named.sort();
+        assert_eq!(named, relative(&ws, &all), "{policy:?}: {reason}");
+    }
+    assert!(!decommission_owned(&fx.repos_root, &ws).await);
+    for path in &all {
+        assert!(path.is_file(), "{} survives", path.display());
+    }
 }
 
 /// #11267 failure arm: a corrupt ledger vouches for no backup, so the owned
