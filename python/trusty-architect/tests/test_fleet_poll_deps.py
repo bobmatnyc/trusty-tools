@@ -107,7 +107,9 @@ def _serve_once(path, reply):
 
     def handle():
         conn, _ = srv.accept()
-        conn.recv(65536)
+        # #11951: read to the client's half-close before replying; an early close made it raise ENOTCONN ("io").
+        while conn.recv(65536):
+            pass
         conn.sendall(reply)
         conn.close()
         srv.close()
