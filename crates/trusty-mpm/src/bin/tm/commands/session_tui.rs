@@ -66,6 +66,11 @@ mod tests;
 #[path = "session_tui/new_session_cwd_tests.rs"]
 mod new_session_cwd_tests;
 
+// #11947: the picker's highlight is drawn at every terminal height.
+#[cfg(test)]
+#[path = "session_tui/new_session_window_tests.rs"]
+mod new_session_window_tests;
+
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use trusty_mpm::client::ManagedSessionSummary;
 use trusty_mpm::tui::terminal::{self, TerminalGuard};

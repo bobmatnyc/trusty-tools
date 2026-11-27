@@ -230,6 +230,14 @@ impl TuiState {
         &self.mode
     }
 
+    /// The open new-session flow, for the renderer to fit its window (#11947).
+    pub(crate) fn new_session_mut(&mut self) -> Option<&mut NewSessionFlow> {
+        match &mut self.mode {
+            Mode::New(flow) => Some(flow),
+            _ => None,
+        }
+    }
+
     /// The 0-based index of the selected row.
     pub(crate) fn selected(&self) -> usize {
         self.selected
