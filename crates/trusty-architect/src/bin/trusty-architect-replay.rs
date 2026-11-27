@@ -11,6 +11,8 @@
 //! object of name to answers, each `{"argv": [...], "stdout": "...",
 //! "stderr": "...", "exit": N}` (`argv` omitted matches any call). The stubs
 //! go first on `PATH` on record and on replay; replay diffs their calls.
+//! `record --clock SECS` freezes the run's wall clock at that epoch second
+//! and records it; replay hands it to the target (#12028).
 //! The crate's dependency list (#9171 A1) has no `anyhow`, so errors are
 //! the library's `ReplayError`, printed once.
 //! Test: `cli_records_replays_and_checks_a_fixture`.
@@ -27,10 +29,12 @@ use trusty_architect::replay::{
 const USAGE: &str = "usage:
   trusty-architect-replay record --out FILE [--seed SRC=REL]... [--env NAME[=VALUE]]...
       [--stdin-file F] [--session NAME]... [--timeout SECS] [--fakes FILE]...
-      -- PROGRAM [ARGS...]
+      [--clock SECS] -- PROGRAM [ARGS...]
       --fakes FILE: JSON {NAME: [{\"argv\": [ARG...], \"stdout\": S, \"stderr\": S, \"exit\": N}]};
       stubs first on PATH on record and replay; first matching answer wins,
       no argv matches any call; replay diffs the calls
+      --clock SECS: freeze the wall clock at epoch second SECS (TZ=UTC unless
+      --env TZ=...); replay runs the target at the same instant
   trusty-architect-replay replay [--timeout SECS] FILE... -- PROGRAM [PREFIX_ARGS...]
   trusty-architect-replay check [--session NAME]... FILE...";
 
@@ -42,6 +46,7 @@ struct Opts {
     stdin_file: Option<PathBuf>,
     sessions: Vec<String>,
     fakes: BTreeMap<String, Vec<FakeAnswer>>,
+    clock: Option<i64>,
     timeout: Duration,
     files: Vec<PathBuf>,
     command: Vec<String>,
@@ -78,6 +83,13 @@ fn parse(args: &[String]) -> Result<Opts, ReplayError> {
                         return Err(bad(format!("fake {name} is declared twice")));
                     }
                 }
+            }
+            "--clock" => {
+                // See #12028
+                let secs = value()?
+                    .parse()
+                    .map_err(|_| bad("--clock takes epoch seconds"))?;
+                o.clock = Some(secs);
             }
             "--timeout" => {
                 let secs = value()?
@@ -132,6 +144,7 @@ fn run(cmd: &str, args: &[String]) -> Result<bool, ReplayError> {
                 sessions: o.sessions.clone(),
                 timeout: o.timeout,
                 fakes: o.fakes,
+                clock: o.clock,
             };
             let rec = record(&spec, &parent)?;
             save(&out, &rec, &o.sessions)?;

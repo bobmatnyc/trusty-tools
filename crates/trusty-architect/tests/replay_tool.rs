@@ -49,6 +49,7 @@ fn spec(program: PathBuf, argv: Vec<String>) -> RecordSpec {
         sessions: Vec::new(),
         timeout: T,
         fakes: BTreeMap::new(),
+        clock: None,
     }
 }
 
@@ -282,6 +283,7 @@ fn clean() -> Recording {
         exit: 0,
         writes: BTreeMap::new(),
         fakes: None,
+        clock: None,
     }
 }
 
@@ -489,6 +491,7 @@ fn replay_withholds_a_secret_line_whose_keyword_falls_outside_the_excerpt() {
         exit: 0,
         writes: BTreeMap::new(),
         fakes: None,
+        clock: None,
     };
     let target = Target {
         program: "/bin/sh".into(),

@@ -307,6 +307,7 @@ impl Scrubber {
                 .map(|(k, v)| (t(k), v.as_deref().map(t)))
                 .collect(),
             fakes: rec.fakes.map(|f| f.map(t)), // See #12028
+            clock: rec.clock,
         }
     }
 }
