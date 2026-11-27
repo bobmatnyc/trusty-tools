@@ -1,0 +1,187 @@
+{
+  "version": 3,
+  "argv": [
+    "sample-app",
+    "Does bookedTotal in booking.rs keep the floor? see #56",
+    "--issue",
+    "12",
+    "--pr",
+    "34",
+    "--type",
+    "merge",
+    "--checked",
+    "--symbol",
+    "extraSym",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"duetto\": true,\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "# Ruling pack: sample-app @ 2026-11-27T13:00:00Z\nQuestion: Does bookedTotal in booking.rs keep the floor? see #56\nType: merge. Repo: example-org/sample-app. Palaces: sample-app, supervisor. Index: sample-app-idx (last_indexed 2026-11-26T10:00:00Z).\n\n## Prior rulings (memory)\n- [sample-app] D1 ruling: keep the sample floor\n- [sample-app] {'id': 'm2', 'score': 0.5}\n- [sample-app] multi line spaced\n\n## Facts (search + exact grep)\n- src/booking.rs:1 fn bookedTotal() -> u32 { 0 }\n- docs/b.md:None a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a…\n- c.rs:None from content\n- None:9 \n- e.rs:5 fifth\n- grep `booking.rs`: 0 matches\n- grep `extraSym`: x:1:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy; other/z:2:w; a:1:b\n- grep `bookedTotal`: src/booking.rs:1:fn bookedTotal() -> u32 { 0 }\n\n## Direct read-only check to run\n- env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=$HOME/.config/gh-example gh pr view 12 -R example-org/sample-app --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest\n- env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=$HOME/.config/gh-example gh pr view 34 -R example-org/sample-app --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest\n- env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=$HOME/.config/gh-example gh pr view 56 -R example-org/sample-app --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest\n- git -C {ROOT}/proj fetch origin && git -C {ROOT}/proj log --oneline -5 origin/main\n\nPrior ruling: yes. Fact: yes. Direct check done: yes.\nConfidence: HIGH. Rule: HIGH = prior ruling + fact + direct check agree; MEDIUM = two of three; LOW = PM report only. Downgrade if sources disagree.\nRelay line: `Confidence: <label>. Checked: <items I read>. From PM report: <items>. Prior rulings: <ids or none found>.`\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "rg": [
+        {
+          "argv": [
+            "-nF",
+            "--no-heading",
+            "-m",
+            "2",
+            "-g",
+            "!*.lock",
+            "-g",
+            "!node_modules",
+            "-g",
+            "!CHANGELOG*",
+            "bookedTotal",
+            "{ROOT}/proj"
+          ],
+          "stdout": "{ROOT}/proj/src/booking.rs:1:fn bookedTotal() -> u32 { 0 }\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "-nF",
+            "--no-heading",
+            "-m",
+            "2",
+            "-g",
+            "!*.lock",
+            "-g",
+            "!node_modules",
+            "-g",
+            "!CHANGELOG*",
+            "booking.rs",
+            "{ROOT}/proj"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "stdout": "{ROOT}/proj/x:1:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\nother/z:2:w\na:1:b\nc:1:d\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "trusty-memory": [
+        {
+          "argv": [
+            "serve"
+          ],
+          "stdout": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/message\"}\n{\"id\": 1.0, \"result\": \"x\"}\n",
+          "stderr": "",
+          "exit": 0,
+          "rpc": {
+            "1": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}}}",
+            "2": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"results\\\": [{\\\"content\\\": \\\"D1 ruling: keep the sample floor\\\", \\\"score\\\": 0.9}, {\\\"id\\\": \\\"m2\\\", \\\"score\\\": 0.5}, {\\\"content\\\": \\\"  multi\\\\n line\\\\tspaced  \\\"}, {\\\"content\\\": \\\"fourth is past the top three\\\"}]}\"}]}}",
+            "3": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"results\\\": []}\"}]}}"
+          }
+        }
+      ],
+      "trusty-search": [
+        {
+          "stdout": "warming index\n{\"results\": [{\"path\": \"src/booking.rs\", \"start_line\": 1, \"compact_snippet\": \"fn bookedTotal() -> u32 { 0 }\"}, {\"file\": \"docs/b.md\", \"start_line\": null, \"content\": \"a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line \"}, {\"path\": \"\", \"file\": \"c.rs\", \"compact_snippet\": \"\", \"content\": \"from content\"}, {\"start_line\": 9}, {\"path\": \"e.rs\", \"start_line\": 5, \"compact_snippet\": \"fifth\"}, {\"path\": \"f.rs\", \"start_line\": 6, \"compact_snippet\": \"sixth is cut\"}], \"meta\": {\"last_indexed\": \"2026-11-26T10:00:00Z\"}}\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "trusty-memory",
+        "serve"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"ruling_pack\", \"version\": \"1\"}}}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"memory_recall\", \"arguments\": {\"palace\": \"sample-app\", \"query\": \"Does bookedTotal in booking.rs keep the floor? see #56\", \"top_k\": 3, \"min_score\": 0.4}}}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"memory_recall\", \"arguments\": {\"palace\": \"supervisor\", \"query\": \"Does bookedTotal in booking.rs keep the floor? see #56\", \"top_k\": 3, \"min_score\": 0.4}}}"
+      ],
+      [
+        "trusty-search",
+        "search",
+        "-i",
+        "sample-app-idx",
+        "--json",
+        "-k",
+        "5",
+        "Does bookedTotal in booking.rs keep the floor? see #56"
+      ],
+      [
+        "rg",
+        "-nF",
+        "--no-heading",
+        "-m",
+        "2",
+        "-g",
+        "!*.lock",
+        "-g",
+        "!node_modules",
+        "-g",
+        "!CHANGELOG*",
+        "booking.rs",
+        "{ROOT}/proj"
+      ],
+      [
+        "rg",
+        "-nF",
+        "--no-heading",
+        "-m",
+        "2",
+        "-g",
+        "!*.lock",
+        "-g",
+        "!node_modules",
+        "-g",
+        "!CHANGELOG*",
+        "extraSym",
+        "{ROOT}/proj"
+      ],
+      [
+        "rg",
+        "-nF",
+        "--no-heading",
+        "-m",
+        "2",
+        "-g",
+        "!*.lock",
+        "-g",
+        "!node_modules",
+        "-g",
+        "!CHANGELOG*",
+        "bookedTotal",
+        "{ROOT}/proj"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

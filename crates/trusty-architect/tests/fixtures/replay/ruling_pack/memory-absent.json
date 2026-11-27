@@ -1,0 +1,60 @@
+{
+  "version": 3,
+  "argv": [
+    "two",
+    "check #7 and #8 and #9 and #10",
+    "--file",
+    "a.py",
+    "--type",
+    "merge",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"duetto\": true,\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "# Ruling pack: second-app @ 2026-11-27T13:00:00Z\nQuestion: check #7 and #8 and #9 and #10\nType: merge. Repo: example-two/second. Palaces: second-palace, supervisor, cto. Index: second-idx (last_indexed 2026-11-26T10:00:00Z).\n\n## Prior rulings (memory)\n- none found\n\n## Facts (search + exact grep)\n- src/booking.rs:1 fn bookedTotal() -> u32 { 0 }\n- docs/b.md:None a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a…\n- c.rs:None from content\n- None:9 \n- e.rs:5 fifth\n\n## Direct read-only check to run\n- env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=$HOME/.config/gh-two gh pr view 7 -R example-two/second --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest\n- env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=$HOME/.config/gh-two gh pr view 8 -R example-two/second --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest\n- env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR=$HOME/.config/gh-two gh pr view 9 -R example-two/second --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,autoMergeRequest\n- git -C {ROOT}/missing fetch origin && git -C {ROOT}/missing log --oneline -5 origin/main\n\n## Backend problems (counted as not found)\n- second-palace: memory unavailable: [Errno 2] No such file or directory: 'trusty-memory'\n- supervisor: memory unavailable: [Errno 2] No such file or directory: 'trusty-memory'\n- cto: memory unavailable: [Errno 2] No such file or directory: 'trusty-memory'\n- grep skipped: root missing or rg absent\nMake these MCP calls instead:\n- memory_recall(palace=\"second-palace\", query=\"check #7 and #8 and #9 and #10\", top_k=3, min_score=0.4)\n- memory_recall(palace=\"supervisor\", query=\"check #7 and #8 and #9 and #10\", top_k=3, min_score=0.4)\n- memory_recall(palace=\"cto\", query=\"check #7 and #8 and #9 and #10\", top_k=3, min_score=0.4)\n- grep(index_id=\"second-idx\", pattern=\"<identifier>\", compact=true) / search(index_id=\"second-idx\", query=\"check #7 and #8 and #9 and #10\", mode=\"text\", compact=true, top_k=5)\n\nPrior ruling: no. Fact: yes. Direct check done: NO (run it, then rerun with --checked).\nConfidence: LOW. Rule: HIGH = prior ruling + fact + direct check agree; MEDIUM = two of three; LOW = PM report only. Downgrade if sources disagree.\nRelay line: `Confidence: <label>. Checked: <items I read>. From PM report: <items>. Prior rulings: <ids or none found>.`\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "rg": [
+        {
+          "stdout": "{ROOT}/proj/q.rs:1:hit\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "trusty-search": [
+        {
+          "stdout": "warming index\n{\"results\": [{\"path\": \"src/booking.rs\", \"start_line\": 1, \"compact_snippet\": \"fn bookedTotal() -> u32 { 0 }\"}, {\"file\": \"docs/b.md\", \"start_line\": null, \"content\": \"a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line a doc line \"}, {\"path\": \"\", \"file\": \"c.rs\", \"compact_snippet\": \"\", \"content\": \"from content\"}, {\"start_line\": 9}, {\"path\": \"e.rs\", \"start_line\": 5, \"compact_snippet\": \"fifth\"}, {\"path\": \"f.rs\", \"start_line\": 6, \"compact_snippet\": \"sixth is cut\"}], \"meta\": {\"last_indexed\": \"2026-11-26T10:00:00Z\"}}\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "trusty-search",
+        "search",
+        "-i",
+        "second-idx",
+        "--json",
+        "-k",
+        "5",
+        "check #7 and #8 and #9 and #10"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

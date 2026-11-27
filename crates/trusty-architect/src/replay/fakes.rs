@@ -9,8 +9,10 @@
 //! [`GUARDED`] name the recording does not declare. Every stub appends its
 //! argv to a call log (NUL-separated; an exec argument holds no NUL). A
 //! declared stub answers with the first [`FakeAnswer`] whose `argv` matches
-//! (or that has none); a trap prints an error and exits 127. The sandbox puts
-//! the stub directory first on `PATH`.
+//! (or that has none); a trap prints an error and exits 127. An answer with
+//! `rpc` then serves newline-delimited JSON-RPC on stdin, one reply per
+//! request id, and logs each request line ([`rpc_loop`], #12028 P1i). The
+//! sandbox puts the stub directory first on `PATH`.
 //! Limit: only a `PATH` lookup reaches a stub. A program that runs a binary
 //! by absolute path, or an undeclared name outside [`GUARDED`], reaches the
 //! host binary.
@@ -74,6 +76,11 @@ pub struct FakeAnswer {
     /// The fake's exit code, 0 to 255.
     #[serde(default)]
     pub exit: i32,
+    /// Replies by JSON-RPC request id, for a fake that serves newline-delimited
+    /// JSON-RPC on stdin (an MCP stdio server); absent from the JSON when
+    /// `None`. See [`rpc_loop`] (#12028 P1i).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc: Option<BTreeMap<String, String>>,
 }
 
 /// The fakes a recording declares and every call the recorded run made.
@@ -93,6 +100,10 @@ impl Fakes {
             stdout: f(&a.stdout),
             stderr: f(&a.stderr),
             exit: a.exit,
+            rpc: a
+                .rpc
+                .as_ref()
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), f(v))).collect()),
         };
         Self {
             stubs: self
@@ -117,6 +128,7 @@ impl Fakes {
                 out.extend(a.argv.iter().flatten().map(String::as_str));
                 out.push(&a.stdout);
                 out.push(&a.stderr);
+                out.extend(a.rpc.iter().flatten().flat_map(|(k, v)| [k.as_str(), v]));
             }
         }
         out.extend(self.calls.iter().flatten().map(String::as_str));
@@ -128,7 +140,8 @@ impl Fakes {
 }
 
 /// Refuses a fake name that is not a plain file name, a string a shell
-/// single-quote cannot hold (NUL) or an exit code outside 0 to 255.
+/// single-quote cannot hold (NUL), an RPC id or reply holding a newline, or
+/// an exit code outside 0 to 255.
 pub(super) fn validate(stubs: &BTreeMap<String, Vec<FakeAnswer>>) -> Result<(), ReplayError> {
     let bad = |m: String| Err(ReplayError::BadArg(m));
     for (name, answers) in stubs {
@@ -145,6 +158,13 @@ pub(super) fn validate(stubs: &BTreeMap<String, Vec<FakeAnswer>>) -> Result<(), 
             let strings = a.argv.iter().flatten().chain([&a.stdout, &a.stderr]);
             if strings.into_iter().any(|s| s.contains('\0')) {
                 return bad(format!("fake {name}: a value holds a NUL byte"));
+            }
+            // See #12028 P1i: a request id and a reply are each one line.
+            let mut rpc = a.rpc.iter().flatten().flat_map(|(k, v)| [k, v]);
+            if rpc.any(|s| s.contains(['\0', '\n'])) {
+                return bad(format!(
+                    "fake {name}: an rpc id or reply holds a NUL or a newline"
+                ));
             }
         }
     }
@@ -181,9 +201,12 @@ fn stub(name: &str, answers: &[FakeAnswer], log: &str, expand: &dyn Fn(&str) -> 
             }
         };
         s.push_str(&format!(
-            "if {test}; then\nprintf '%s' {}\nprintf '%s' {} >&2\nexit {}\nfi\n",
+            "if {test}; then\nprintf '%s' {}\nprintf '%s' {} >&2\n{}exit {}\nfi\n",
             quote(&expand(&a.stdout)),
             quote(&expand(&a.stderr)),
+            a.rpc
+                .as_ref()
+                .map_or_else(String::new, |m| rpc_loop(name, m, log, expand)),
             a.exit
         ));
     }
@@ -192,6 +215,46 @@ fn stub(name: &str, answers: &[FakeAnswer], log: &str, expand: &dyn Fn(&str) -> 
         "printf '%s\\n' {} >&2\nexit {MISS}\n",
         quote(&miss)
     ));
+    s
+}
+
+/// The read loop of a fake that serves JSON-RPC on stdin (#12028 P1i).
+///
+/// Why: an MCP stdio client (`trusty-memory serve`) writes a request and
+/// waits for the reply with its id; a fake that printed every reply and
+/// exited would race the client's next write.
+/// What: reads stdin one line at a time until EOF. Each line is logged as a
+/// call `[name, "<stdin>", line]`, so a replay also compares every request
+/// byte for byte. The id is the value after `{"jsonrpc": "2.0", "id": ` at
+/// the start of the line (Python `json.dumps` key order); the reply mapped
+/// to it is printed with a newline, and a line with no mapped id (a
+/// notification) gets none.
+/// Test: `an_rpc_fake_answers_each_request_by_id_and_logs_it`.
+fn rpc_loop(
+    name: &str,
+    replies: &BTreeMap<String, String>,
+    log: &str,
+    expand: &dyn Fn(&str) -> String,
+) -> String {
+    let mut s = String::from("while IFS= read -r line || [ -n \"$line\" ]; do\n");
+    s.push_str(&format!(
+        "{{ printf '%s\\000%s\\000' {} 2; printf '%s\\000%s\\000' '<stdin>' \"$line\"; }} >> {}\n",
+        quote(name),
+        quote(log)
+    ));
+    s.push_str(concat!(
+        "id=$(printf '%s\\n' \"$line\" | ",
+        r#"sed -n 's/^{"jsonrpc": "2.0", "id": \([^,}]*\).*/\1/p')"#,
+        "\ncase $id in\n"
+    ));
+    for (id, reply) in replies {
+        s.push_str(&format!(
+            "{}) printf '%s\\n' {} ;;\n",
+            quote(id),
+            quote(&expand(reply))
+        ));
+    }
+    s.push_str("esac\ndone\n");
     s
 }
 

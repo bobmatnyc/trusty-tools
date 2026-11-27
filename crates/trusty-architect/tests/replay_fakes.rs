@@ -190,3 +190,51 @@ fn a_recorded_path_env_cannot_displace_the_fake_stubs() {
         );
     }
 }
+
+#[test]
+fn an_rpc_fake_answers_each_request_by_id_and_logs_it() {
+    // #12028 P1i: an MCP stdio fake answers by request id, skips a
+    // notification, and logs every request line as a call.
+    let dir = tempfile::tempdir().unwrap();
+    let fakes = json!({"trusty-memory": [{"argv": ["serve"],
+        "rpc": {"1": "{\"id\": 1, \"result\": {}}", "2": "{\"id\": 2, \"result\": \"x\"}"}}]});
+    let f = fakes_file(dir.path(), &fakes);
+    let out = dir.path().join("rpc.json");
+    let o = out.to_str().unwrap();
+    let script = concat!(
+        "printf '%s\\n' '{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"b\"}' ",
+        "'{\"jsonrpc\": \"2.0\", \"method\": \"n\"}' ",
+        "'{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"a\"}' | trusty-memory serve"
+    );
+    let rec = record(&f, o, script);
+    assert_eq!(rec.status.code(), Some(0), "{}", text(&rec.stderr));
+    let fx = fixture(&out);
+    assert_eq!(
+        fx["stdout"],
+        "{\"id\": 2, \"result\": \"x\"}\n{\"id\": 1, \"result\": {}}\n"
+    );
+    let line = |s: &str| json!(["trusty-memory", "<stdin>", s]);
+    assert_eq!(
+        fx["fakes"]["calls"],
+        json!([
+            ["trusty-memory", "serve"],
+            line("{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"b\"}"),
+            line("{\"jsonrpc\": \"2.0\", \"method\": \"n\"}"),
+            line("{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"a\"}"),
+        ])
+    );
+    let rep = run(&["replay", o, "--", "/bin/sh"]);
+    assert_eq!(rep.status.code(), Some(0), "{}", text(&rep.stdout));
+    // A program that sends a different request is a diff on the call list.
+    let mut changed = fx.clone();
+    changed["argv"] = json!(["-c", script.replace("\"b\"", "\"c\"")]);
+    let other = dir.path().join("rpc2.json");
+    std::fs::write(&other, changed.to_string()).unwrap();
+    let rep = run(&["replay", other.to_str().unwrap(), "--", "/bin/sh"]);
+    assert_eq!(rep.status.code(), Some(1), "{}", text(&rep.stdout));
+    assert!(
+        text(&rep.stdout).contains("FakeCalls"),
+        "{}",
+        text(&rep.stdout)
+    );
+}
