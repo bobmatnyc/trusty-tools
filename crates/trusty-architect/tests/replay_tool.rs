@@ -401,3 +401,180 @@ fn cli_records_replays_and_checks_a_fixture() {
     assert_eq!(refused.status.code(), Some(1));
     assert!(!leak.exists(), "a refused record writes no fixture");
 }
+
+// #12026 fix round: one regression test per critic finding.
+
+#[test]
+fn check_refuses_a_secret_named_env_key() {
+    use trusty_architect::replay::RefusalKind::Secret;
+    for (k, v) in [
+        ("GITHUB_TOKEN", "short"),
+        ("AWS_SECRET_ACCESS_KEY", "x"),
+        ("OPENAI_API_KEY", "abc"),
+        ("PGPASSWORD", "pw"),
+    ] {
+        let mut r = clean();
+        r.env.insert(k.into(), v.into());
+        assert_eq!(
+            check(&r, &[]),
+            Err(Refusal {
+                field: "env#0".into(),
+                kind: Secret
+            }),
+            "{k}"
+        );
+    }
+    let mut r = clean();
+    r.env
+        .insert("TOKENIZERS_PARALLELISM".into(), "false".into());
+    assert_eq!(check(&r, &[]), Ok(()), "a TOKEN prefix is not a token key");
+}
+
+#[test]
+fn replay_withholds_a_secret_line_whose_keyword_falls_outside_the_excerpt() {
+    let value = format!("{}Z{}", "q".repeat(60), "q".repeat(60));
+    let line = format!("password: {value}\n");
+    let rec = Recording {
+        version: VERSION,
+        argv: vec!["-c".into(), "printf '%s\\n' \"password: $V\"".into()],
+        stdin: String::new(),
+        env: BTreeMap::from([("V".into(), value.clone())]),
+        files: BTreeMap::new(),
+        reads: None,
+        // One byte differs 70 bytes past the keyword, so the excerpt window
+        // starts inside the value.
+        stdout: flip(&line, 80),
+        stderr: String::new(),
+        exit: 0,
+        writes: BTreeMap::new(),
+    };
+    let target = Target {
+        program: "/bin/sh".into(),
+        prefix: Vec::new(),
+    };
+    let found = replay(&rec, &target, &parent(), T).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        !found[0].detail.contains("qqqqqqqq") && found[0].detail.contains("<withheld>"),
+        "{}",
+        found[0].detail
+    );
+}
+
+#[test]
+fn check_refuses_an_unlisted_tm_session_name_but_not_a_skill_name() {
+    use trusty_architect::replay::RefusalKind::Session;
+    let mut r = clean();
+    r.stdout = "nudged tm-pm-alpha\n".into();
+    assert_eq!(
+        check(&r, &[]),
+        Err(Refusal {
+            field: "stdout".into(),
+            kind: Session
+        })
+    );
+    let mut r = clean();
+    r.stdout = "see tm-workflow, tm-workflow.md, xtm-foo and a bare tm-\n".into();
+    assert_eq!(check(&r, &[]), Ok(()), "skill names and non-tokens pass");
+    // The recorder refuses it too, with no --session given.
+    let (program, argv) = sh("echo ran tm-beta", &[]);
+    let err = record(&spec(program, argv), &parent()).unwrap_err();
+    assert!(
+        matches!(err, ReplayError::Refused(Refusal { kind: Session, .. })),
+        "{err}"
+    );
+}
+
+#[test]
+fn replay_withholds_an_excerpt_naming_a_tm_session() {
+    let mut rec = clean();
+    rec.argv = vec!["-c".into(), "echo ran tm-gamma".into()];
+    rec.files.clear();
+    rec.reads = None;
+    rec.stdout = "ran tm-gammb\n".into();
+    let target = Target {
+        program: "/bin/sh".into(),
+        prefix: Vec::new(),
+    };
+    let found = replay(&rec, &target, &parent(), T).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(!found[0].detail.contains("tm-gam"), "{}", found[0].detail);
+}
+
+#[test]
+fn skill_names_match_the_repo_skill_list() {
+    use trusty_architect::replay::SKILL_NAMES;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/skills");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|n| n.trim_end_matches(".md").to_owned())
+        .filter(|n| n.starts_with("tm-"))
+        .collect();
+    found.sort();
+    found.dedup();
+    assert_eq!(found, SKILL_NAMES.to_vec());
+}
+
+#[test]
+fn scrub_matches_a_path_only_at_a_component_boundary() {
+    let s = Scrubber::new().path(Path::new("/Users/al"), "{HOME}");
+    assert_eq!(
+        s.text("/Users/alice/x /Users/al/y /Users/al"),
+        "/Users/alice/x {HOME}/y {HOME}"
+    );
+}
+
+#[test]
+fn record_counts_an_os_open_write_as_a_write_not_a_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "A\n").unwrap();
+    let script = dir.path().join("truncate.py");
+    std::fs::write(
+        &script,
+        "import os\nos.close(os.open('a.txt', os.O_WRONLY | os.O_TRUNC))\n",
+    )
+    .unwrap();
+    let mut s = spec(script, Vec::new());
+    s.seeds = vec![(dir.path().join("a.txt"), "a.txt".into())];
+    let rec = record(&s, &parent()).unwrap();
+    assert_eq!(rec.reads, Some(Vec::new()), "a write-only open is no read");
+    assert_eq!(rec.writes.get("a.txt"), Some(&Some(String::new())));
+}
+
+#[test]
+fn record_refuses_a_run_whose_probe_log_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("unlog.py");
+    std::fs::write(
+        &script,
+        "import os, sys\nf = sys._getframe()\nwhile f.f_back:\n    f = f.f_back\n\
+         os.unlink(f.f_globals['_log'].name)\n",
+    )
+    .unwrap();
+    let err = record(&spec(script, Vec::new()), &parent()).unwrap_err();
+    assert!(matches!(err, ReplayError::ProbeLog), "{err}");
+}
+
+#[test]
+fn record_refuses_a_symlink_in_a_seed_or_left_by_the_run() {
+    let live = tempfile::tempdir().unwrap();
+    let seed = live.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    std::fs::write(live.path().join("private.txt"), "live\n").unwrap();
+    std::os::unix::fs::symlink(live.path().join("private.txt"), seed.join("link")).unwrap();
+    let (program, argv) = sh("true", &[]);
+    let mut s = spec(program, argv);
+    s.seeds = vec![(seed, "seed".into())];
+    let err = record(&s, &parent()).unwrap_err();
+    assert!(
+        matches!(err, ReplayError::Symlink(ref rel) if rel == "seed/link"),
+        "{err}"
+    );
+    let (program, argv) = sh("ln -s /etc/hosts made", &[]);
+    let err = record(&spec(program, argv), &parent()).unwrap_err();
+    assert!(
+        matches!(err, ReplayError::Symlink(ref rel) if rel == "made"),
+        "{err}"
+    );
+}

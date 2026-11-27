@@ -6,8 +6,10 @@
 //! What: [`Sandbox`] creates and removes the directory, copies seeds in, lays
 //! recorded files out, snapshots it, and runs a command in it with only the
 //! given environment, `HOME` and the fixed [`SANDBOX_PATH`].
+//! A symlink in a seed or left by the run is refused.
 //! Test: `record_captures_argv_stdin_env_files_and_writes`,
-//! `record_keeps_env_outside_the_allowlist_out`, `record_refuses_an_oversized_seed`.
+//! `record_keeps_env_outside_the_allowlist_out`, `record_refuses_an_oversized_seed`,
+//! `record_refuses_a_symlink_in_a_seed_or_left_by_the_run`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -71,8 +73,10 @@ impl Sandbox {
 
     /// Copies file or directory `src` (live state, read only) to `rel`.
     /// Fails once the copied bytes would pass `budget`.
+    /// A symlink inside a seed directory is refused: it can point at live
+    /// state outside the seed, or loop.
     pub(super) fn seed(&self, src: &Path, rel: &str, budget: &mut u64) -> Result<(), ReplayError> {
-        copy_tree(src, &self.join(rel)?, budget)
+        copy_tree(&self.root, src, &self.join(rel)?, budget)
     }
 
     /// Writes `content` (with [`ROOT_TOKEN`] expanded) to `rel`.
@@ -127,13 +131,19 @@ impl Drop for Sandbox {
     }
 }
 
-fn copy_tree(src: &Path, dest: &Path, budget: &mut u64) -> Result<(), ReplayError> {
+fn copy_tree(root: &Path, src: &Path, dest: &Path, budget: &mut u64) -> Result<(), ReplayError> {
     let meta = std::fs::metadata(src).map_err(io("read seed"))?;
     if meta.is_dir() {
         std::fs::create_dir_all(dest).map_err(io("create seed dir"))?;
         for entry in std::fs::read_dir(src).map_err(io("list seed dir"))? {
             let entry = entry.map_err(io("list seed dir"))?;
-            copy_tree(&entry.path(), &dest.join(entry.file_name()), budget)?;
+            let to = dest.join(entry.file_name());
+            // #12026: `metadata` follows a link; refuse it instead of copying
+            // what it points at.
+            if entry.file_type().map_err(io("stat seed"))?.is_symlink() {
+                return Err(ReplayError::Symlink(rel_key(root, &to)));
+            }
+            copy_tree(root, &entry.path(), &to, budget)?;
         }
         return Ok(());
     }
@@ -157,6 +167,10 @@ fn walk(root: &Path, dir: &Path, out: &mut Snapshot) -> Result<(), ReplayError> 
         } else if meta.is_file() {
             let rel = rel_key(root, &path);
             out.insert(rel, std::fs::read(&path).map_err(io("read sandbox file"))?);
+        } else if meta.file_type().is_symlink() {
+            // #12026: a link the run made is a channel the recording cannot
+            // hold; skipping it would hide a write.
+            return Err(ReplayError::Symlink(rel_key(root, &path)));
         }
     }
     Ok(())

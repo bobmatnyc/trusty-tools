@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 pub use diff::{Channel, Mismatch, Target, replay};
 pub use record::{EnvRule, RecordSpec, record};
-pub use scrub::{Refusal, RefusalKind, Scrubber, check};
+pub use scrub::{Refusal, RefusalKind, SKILL_NAMES, Scrubber, check};
 
 /// The recording format version this build reads and writes.
 pub const VERSION: u32 = 1;
@@ -100,6 +100,13 @@ pub enum ReplayError {
         /// The first one, with the home directory shown as `~`.
         first: String,
     },
+    /// The open probe's log is missing or lacks its first line, so the files
+    /// the script opened are unknown (#12026).
+    #[error("the open probe log is missing or damaged; the script's reads are unknown")]
+    ProbeLog,
+    /// A seed or the sandbox holds a symlink at this relative path (#12026).
+    #[error("{0} is a symlink; only regular files and directories are recorded")]
+    Symlink(String),
     /// No `python3` on the parent `PATH` for a `.py` program.
     #[error("no python3 on PATH")]
     NoPython,

@@ -7,11 +7,14 @@
 //! environment holding only the allowlist, and builds a [`Recording`] that is
 //! scrubbed and [`check`]ed before it is returned. A `.py` program runs under
 //! [`PROBE`], a Python audit hook that logs every `open` and directory
-//! listing, so `reads` names the input files the script used and an open
-//! outside the sandbox (live state) is refused.
+//! listing (an `os.open` write flag counts as a write, not a read), so
+//! `reads` names the input files the script used and an open outside the
+//! sandbox (live state) is refused. A missing probe log is an error.
 //! Test: `record_captures_argv_stdin_env_files_and_writes`,
 //! `record_keeps_env_outside_the_allowlist_out`,
-//! `record_refuses_a_read_outside_the_sandbox`.
+//! `record_refuses_a_read_outside_the_sandbox`,
+//! `record_counts_an_os_open_write_as_a_write_not_a_read`,
+//! `record_refuses_a_run_whose_probe_log_is_missing`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -27,11 +30,16 @@ const SEED_LIMIT: u64 = 16 * 1024 * 1024;
 /// script's environment is the allowlist alone.
 const PROBE: &str = r#"import os, runpy, sys
 _log = open(os.environ.pop("TRUSTY_REPLAY_PROBE"), "a", encoding="utf-8")
+_log.write("probe\tstart\n")
+_W = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 for _p in sys.path[1:]:
     _log.write("path\t" + os.path.abspath(_p) + "\n")
 def _hook(ev, args):
     if ev == "open" and isinstance(args[0], (str, bytes)):
-        mode = args[1] if isinstance(args[1], str) else "r"
+        if isinstance(args[1], str):
+            mode = args[1]
+        else:
+            mode = "w" if isinstance(args[2], int) and args[2] & _W else "r"
         _log.write(mode + "\t" + os.path.abspath(os.fsdecode(args[0])) + "\n")
     elif ev in ("os.listdir", "os.scandir") and isinstance(args[0], (str, bytes, type(None))):
         _log.write("list\t" + os.path.abspath(os.fsdecode(args[0] or ".")) + "\n")
@@ -265,7 +273,12 @@ fn probe_reads(
     before: &Snapshot,
     parent_env: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, ReplayError> {
-    let log = std::fs::read_to_string(&py.log).unwrap_or_default();
+    // #12026: no log, or one without the probe's first line, means the reads
+    // are unknown; an empty list would pass an outside read silently.
+    let log = std::fs::read_to_string(&py.log)
+        .ok()
+        .filter(|l| l.starts_with("probe\tstart\n"))
+        .ok_or(ReplayError::ProbeLog)?;
     let script_dir = std::path::absolute(program)
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));
@@ -277,7 +290,7 @@ fn probe_reads(
     let mut reads = BTreeSet::new();
     let mut external = Vec::new();
     for (kind, raw) in log.lines().filter_map(|l| l.split_once('\t')) {
-        if kind == "path" {
+        if kind == "path" || kind == "probe" {
             continue;
         }
         let p = std::fs::canonicalize(raw).unwrap_or_else(|_| PathBuf::from(raw));

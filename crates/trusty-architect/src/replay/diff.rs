@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use super::record::{Python, run_scrubber};
 use super::sandbox::{Sandbox, changes};
+use super::scrub::leaks;
 use super::{Recording, ReplayError};
-use crate::il::ilio::secret::looks_secret;
 
 /// Longest excerpt, in bytes, of a differing line shown in a [`Mismatch`].
 const EXCERPT: usize = 100;
@@ -51,7 +51,7 @@ pub enum Channel {
 pub struct Mismatch {
     /// Which channel.
     pub channel: Channel,
-    /// Where and how it differs; a secret-shaped excerpt is withheld.
+    /// Where and how it differs; an excerpt whose line would leak is withheld.
     pub detail: String,
 }
 
@@ -65,7 +65,8 @@ impl fmt::Display for Mismatch {
 }
 
 /// The text around byte `at` of `s`, within its line, at most [`EXCERPT`]
-/// bytes; a secret-shaped excerpt is withheld.
+/// bytes; withheld when the whole line holds a secret shape, a session token
+/// or a local path.
 fn excerpt(s: &str, at: usize) -> String {
     let floor = |mut i: usize| {
         i = i.min(s.len());
@@ -79,11 +80,12 @@ fn excerpt(s: &str, at: usize) -> String {
     let line_end = s[at..].find('\n').map_or(s.len(), |i| at + i);
     let start = floor(at.saturating_sub(EXCERPT / 2).max(line_start));
     let end = floor((start + EXCERPT).min(line_end));
-    let text = &s[start..end];
-    if looks_secret(text) {
-        return "<withheld: secret-shaped>".into();
+    // #12026: test the whole line, not the window; a window can cut off the
+    // `password:` keyword and show the value alone.
+    if leaks(&s[line_start..line_end]) {
+        return "<withheld>".into();
     }
-    format!("{text:?}")
+    format!("{:?}", &s[start..end])
 }
 
 /// `None` when equal, else the first differing byte, its line, and the text

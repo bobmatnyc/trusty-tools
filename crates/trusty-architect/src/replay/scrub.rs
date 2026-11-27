@@ -6,12 +6,17 @@
 //! What: [`Scrubber`] replaces each registered needle with its token in one
 //! left-to-right pass, longest needle first, so a token is never rescanned and
 //! the same input always gives the same output. Session names match only at a
-//! name boundary and become `session-<n>`, numbered in sorted order. [`check`]
-//! refuses a home or temp path shape, a listed session name or a
-//! secret-shaped value, and names the field, never the value.
+//! name boundary and become `session-<n>`, numbered in sorted order. A path
+//! matches only where a path component ends. [`check`] refuses a home or temp
+//! path shape, a listed session name, any `tm-<x>` token that is not a
+//! [`SKILL_NAMES`] entry, a secret-shaped value or a secret-named env key, and
+//! names the field, never the value.
 //! Test: `scrub_is_deterministic_and_order_independent`,
 //! `scrub_replaces_paths_and_bounded_session_names`,
-//! `check_refuses_an_unscrubbed_home_path_session_and_secret`.
+//! `scrub_matches_a_path_only_at_a_component_boundary`,
+//! `check_refuses_an_unscrubbed_home_path_session_and_secret`,
+//! `check_refuses_an_unlisted_tm_session_name_but_not_a_skill_name`,
+//! `check_refuses_a_secret_named_env_key`.
 
 use std::path::Path;
 
@@ -26,6 +31,55 @@ const LOCAL_SHAPES: [&str; 6] = [
     "\\Users\\",
     "/var/folders/",
     "/private/var/",
+];
+
+/// The `tm-` skill names under the repo's `content/skills/`. Any other
+/// `tm-<x>` token is a session name (Architect ruling, #12026): a skill added
+/// later is refused until it is listed here, so the list fails closed.
+/// Test: `skill_names_match_the_repo_skill_list`.
+pub const SKILL_NAMES: [&str; 28] = [
+    "tm-adr",
+    "tm-agent-architecture",
+    "tm-architect-setup",
+    "tm-bug-reporting",
+    "tm-capabilities",
+    "tm-circuit-breaker",
+    "tm-cli-operations",
+    "tm-delegation-patterns",
+    "tm-doctor",
+    "tm-epic",
+    "tm-estimation",
+    "tm-git-file-tracking",
+    "tm-init",
+    "tm-issues-prune",
+    "tm-memory-import",
+    "tm-owner-scenarios",
+    "tm-postmortem",
+    "tm-prose-style",
+    "tm-secrets",
+    "tm-session-management",
+    "tm-session-pause",
+    "tm-session-resume",
+    "tm-slack",
+    "tm-teaching-templates",
+    "tm-ticketing",
+    "tm-tool-usage-guide",
+    "tm-verification-protocols",
+    "tm-workflow",
+];
+
+/// Env key fragments that name a credential, matched caselessly anywhere in
+/// the key; `TOKEN` is matched as a whole `_` segment so `TOKENIZERS_*` passes.
+const SECRET_KEY_PARTS: [&str; 9] = [
+    "PASSWORD",
+    "PASSWD",
+    "SECRET",
+    "CREDENTIAL",
+    "API_KEY",
+    "APIKEY",
+    "API-KEY",
+    "PRIVATE_KEY",
+    "ACCESS_KEY",
 ];
 
 /// What a refused recording still holds.
@@ -53,7 +107,17 @@ pub struct Refusal {
 struct Rule {
     needle: String,
     token: String,
-    bounded: bool,
+    bound: Bound,
+}
+
+/// Where a [`Rule`] may match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    /// A path: not followed by a name character, so `/Users/al` never
+    /// matches inside `/Users/alice`.
+    Path,
+    /// A session name: a name character on neither side.
+    Name,
 }
 
 /// Replaces local paths and session names with stable tokens.
@@ -66,21 +130,41 @@ fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-/// True when `needle` occurs in `s` at `i` and, for a bounded rule, is not
-/// part of a longer name.
+/// True when `needle` occurs in `s` at `i` and is not part of a longer path
+/// component or name.
 fn matches_at(s: &str, i: usize, rule: &Rule) -> bool {
     if !s[i..].starts_with(&rule.needle) {
         return false;
     }
-    if !rule.bounded {
-        return true;
-    }
-    let before = s[..i].chars().next_back().is_some_and(is_name_char);
+    // #12026: a path needle ends at a component boundary too.
     let after = s[i + rule.needle.len()..]
         .chars()
         .next()
         .is_some_and(is_name_char);
+    let before = rule.bound == Bound::Name && s[..i].chars().next_back().is_some_and(is_name_char);
     !before && !after
+}
+
+/// True when `s` holds a `tm-<x>` token at a name boundary that is not a
+/// [`SKILL_NAMES`] entry.
+fn has_session_token(s: &str) -> bool {
+    s.match_indices("tm-").any(|(i, _)| {
+        if s[..i].chars().next_back().is_some_and(is_name_char) {
+            return false;
+        }
+        let rest = &s[i + 3..];
+        let len = rest.find(|c| !is_name_char(c)).unwrap_or(rest.len());
+        len > 0 && !SKILL_NAMES.contains(&&s[i..i + 3 + len])
+    })
+}
+
+/// True when env key `k` names a credential (see [`SECRET_KEY_PARTS`]).
+fn secret_env_key(k: &str) -> bool {
+    let upper = k.to_ascii_uppercase();
+    SECRET_KEY_PARTS.iter().any(|p| upper.contains(p))
+        || upper
+            .split('_')
+            .any(|seg| seg == "TOKEN" || seg == "TOKENS")
 }
 
 impl Scrubber {
@@ -96,7 +180,7 @@ impl Scrubber {
         for p in std::iter::once(path).chain(canonical.as_deref()) {
             let needle = p.to_string_lossy().trim_end_matches('/').to_owned();
             if !needle.is_empty() {
-                self.push(needle, token.to_owned(), false);
+                self.push(needle, token.to_owned(), Bound::Path);
             }
         }
         self
@@ -109,19 +193,19 @@ impl Scrubber {
         sorted.sort();
         sorted.dedup();
         for (n, name) in sorted.into_iter().enumerate() {
-            self.push(name.clone(), format!("session-{}", n + 1), true);
+            self.push(name.clone(), format!("session-{}", n + 1), Bound::Name);
         }
         self
     }
 
-    fn push(&mut self, needle: String, token: String, bounded: bool) {
+    fn push(&mut self, needle: String, token: String, bound: Bound) {
         if self.rules.iter().any(|r| r.needle == needle) {
             return;
         }
         self.rules.push(Rule {
             needle,
             token,
-            bounded,
+            bound,
         });
         // Longest needle first, then by text: one fixed order for any insertion order.
         self.rules.sort_by(|a, b| {
@@ -217,12 +301,39 @@ fn fields(rec: &Recording) -> Vec<(String, &str)> {
     out
 }
 
+/// True when `s` holds what [`check`] refuses with no listed session: a local
+/// path, an unlisted `tm-<x>` token or a secret shape.
+/// Test: `replay_withholds_a_secret_line_whose_keyword_falls_outside_the_excerpt`.
+pub(super) fn leaks(s: &str) -> bool {
+    leak_kind(s, &[]).is_some()
+}
+
+/// The first [`RefusalKind`] `s` holds, with `sessions` as listed names.
+fn leak_kind(s: &str, sessions: &[Rule]) -> Option<RefusalKind> {
+    if has_local_path(s) {
+        Some(RefusalKind::LocalPath)
+    } else if has_session_token(s)
+        || s.char_indices()
+            .any(|(i, _)| sessions.iter().any(|r| matches_at(s, i, r)))
+    {
+        Some(RefusalKind::Session)
+    } else if looks_secret(s) {
+        Some(RefusalKind::Secret)
+    } else {
+        None
+    }
+}
+
 /// Refuses `rec` when any field still holds a local path shape, one of
-/// `sessions` at a name boundary, or a secret-shaped value.
+/// `sessions` or an unlisted `tm-<x>` token at a name boundary, a
+/// secret-shaped value, or an env entry whose key names a credential.
 ///
 /// Why: the last gate before a public fixture (#12026 AC3).
-/// What: scans every string [`fields`] lists; the first hit is the error.
+/// What: scans every string [`fields`] lists, then each env entry as
+/// `KEY=VALUE` and by key name; the first hit is the error.
 /// Test: `check_refuses_an_unscrubbed_home_path_session_and_secret`,
+/// `check_refuses_an_unlisted_tm_session_name_but_not_a_skill_name`,
+/// `check_refuses_a_secret_named_env_key`,
 /// `committed_replay_fixtures_pass_the_refusal_check`.
 pub fn check(rec: &Recording, sessions: &[String]) -> Result<(), Refusal> {
     let session_rules: Vec<Rule> = sessions
@@ -231,24 +342,22 @@ pub fn check(rec: &Recording, sessions: &[String]) -> Result<(), Refusal> {
         .map(|n| Rule {
             needle: n.clone(),
             token: String::new(),
-            bounded: true,
+            bound: Bound::Name,
         })
         .collect();
     for (field, s) in fields(rec) {
-        let kind = if has_local_path(s) {
-            Some(RefusalKind::LocalPath)
-        } else if s
-            .char_indices()
-            .any(|(i, _)| session_rules.iter().any(|r| matches_at(s, i, r)))
-        {
-            Some(RefusalKind::Session)
-        } else if looks_secret(s) {
-            Some(RefusalKind::Secret)
-        } else {
-            None
-        };
-        if let Some(kind) = kind {
+        if let Some(kind) = leak_kind(s, &session_rules) {
             return Err(Refusal { field, kind });
+        }
+    }
+    // #12026: a key and its value are separate fields, so `GITHUB_TOKEN` and
+    // its value each pass alone; the pair and the key name are checked here.
+    for (i, (k, v)) in rec.env.iter().enumerate() {
+        if secret_env_key(k) || looks_secret(&format!("{k}={v}")) {
+            return Err(Refusal {
+                field: format!("env#{i}"),
+                kind: RefusalKind::Secret,
+            });
         }
     }
     Ok(())
