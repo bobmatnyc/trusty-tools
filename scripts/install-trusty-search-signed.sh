@@ -23,6 +23,8 @@
 # guidance paths without running cargo install or `tctl sign`. Run on a machine
 # without a Developer ID cert to validate the no-cert error path and exit code.
 # Run `shellcheck scripts/install-trusty-search-signed.sh` for lint.
+# scripts/install_signed_tctl_fallback_selftest.sh covers signer resolution
+# and the sign-failure exit with stub cargo and tctl.
 #
 # Usage:
 #   # Standard: build from repo source (default)
@@ -97,18 +99,25 @@ detect_repo_root() {
 # Resolve the `tctl` (or `trusty-installer`) binary to run the sign step.
 # Why: The unified signing logic (#2558) lives in trusty-installer; this
 # script must not duplicate `codesign`/`security find-identity` calls. Prefers
-# an already-installed `tctl`/`trusty-installer` on PATH; falls back to
-# `cargo run -p trusty-installer` from the detected repo root so a fresh
-# checkout with no prior tctl install still works.
+# an already-installed `tctl`/`trusty-installer` on PATH whose `sign` accepts
+# SET; falls back to `cargo run -p trusty-installer --bin tctl` from the
+# detected repo root so a fresh checkout with no prior tctl install still works.
+# #11683: a tctl on PATH whose `sign` does not list SET is stale; say so and
+# skip it rather than let it fail the sign step with a clap usage error.
+# Test: scripts/install_signed_tctl_fallback_selftest.sh.
 resolve_tctl() {
-    if command -v tctl >/dev/null 2>&1; then
-        echo "tctl"
-        return 0
-    fi
-    if command -v trusty-installer >/dev/null 2>&1; then
-        echo "trusty-installer"
-        return 0
-    fi
+    local set="$1" candidate help values
+    for candidate in tctl trusty-installer; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        # #11683: read SET only from clap's `[possible values: ...]` list for
+        # <TARGET> (`-h` prints it; `--help` prints a long form without it).
+        help="$("$candidate" sign -h 2>&1 || true)"
+        values="$(printf '%s\n' "$help" | sed -n 's/^.*<TARGET>.*\[possible values: \([^]]*\)\].*$/\1/p')"
+        case ", $values, " in
+            *", $set, "*) echo "$candidate"; return 0 ;;
+        esac
+        warn "$candidate on PATH is stale: its 'sign' does not accept '$set'; reinstall trusty-installer to refresh it"
+    done
     return 1
 }
 
@@ -163,18 +172,22 @@ run_sign() {
         return 0
     fi
 
-    local tctl_bin
-    if tctl_bin="$(resolve_tctl)"; then
+    local tctl_bin rc=0
+    if tctl_bin="$(resolve_tctl trusty-search)"; then
         info "Using $tctl_bin on PATH"
-        "$tctl_bin" sign trusty-search --dir "$CARGO_BIN_DIR"
-        return $?
+        "$tctl_bin" sign trusty-search --dir "$CARGO_BIN_DIR" || rc=$?
+    else
+        local repo_root
+        repo_root="$(detect_repo_root)"
+        warn "no usable tctl/trusty-installer on PATH — running via 'cargo run -p trusty-installer --bin tctl'"
+        warn "(install trusty-installer once — cargo install --path $repo_root/crates/trusty-installer --locked — to skip this rebuild next time)"
+        # #11683: the crate has two binaries; without `--bin` cargo cannot pick one.
+        (cd "$repo_root" && cargo run --quiet -p trusty-installer --bin tctl -- sign trusty-search --dir "$CARGO_BIN_DIR") || rc=$?
     fi
-
-    local repo_root
-    repo_root="$(detect_repo_root)"
-    warn "tctl/trusty-installer not found on PATH — running via 'cargo run -p trusty-installer'"
-    warn "(install trusty-installer once — cargo install --path $repo_root/crates/trusty-installer --locked — to skip this rebuild next time)"
-    (cd "$repo_root" && cargo run --quiet -p trusty-installer -- sign trusty-search --dir "$CARGO_BIN_DIR")
+    if [[ "$rc" -ne 0 ]]; then
+        error "Signing trusty-search failed (exit $rc); the binaries stay ad-hoc signed."
+        exit 1
+    fi
 }
 
 # ---------------------------------------------------------------------------

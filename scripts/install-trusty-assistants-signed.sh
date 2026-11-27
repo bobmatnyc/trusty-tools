@@ -46,8 +46,15 @@
 #   CARGO_TARGET_DIR, so no earlier rev's build-script output (its commit
 #   stamp) is reused.
 #
-#   Fail-soft signing: a cargo failure exits non-zero; a signing failure (no
-#   certificate, or any codesign error) is a warning and the run exits 0.
+#   Signing (#11683): a cargo failure exits non-zero. Only `tctl sign`'s
+#   no-certificate exit (3) is a warning; the run then ends with the line
+#   `NOT SIGNED` (last line on stdout and on stderr) and exits 0. Any other
+#   non-zero sign exit (a codesign error, a locked keychain, a signature that
+#   reads back ad-hoc or with the wrong Team ID) prints an ERROR line and
+#   exits 1. A signer that cannot be built (no usable tctl on PATH and this
+#   checkout's `tctl` fails to build) exits 1. The no-cert soft-pass is
+#   pending an owner decision; flipping `NO_CERT_SOFT_PASS` to 0 below
+#   makes it fail too.
 #
 # Test: scripts/install_trusty_assistants_signed_selftest.sh (stub cargo and
 # tctl; tagent untouched, refusals, staging, dry run).
@@ -69,7 +76,8 @@
 #   TRUSTY_SIGN_IDENTITY=...   override the identity `tctl sign` selects
 #   TRUSTY_CODESIGN_DRY_RUN=1  same as --dry-run
 #
-# Exit: 0 installed (signed or not); 1 install failed or `tagent` changed;
+# Exit: 0 installed (signed or not); 1 install failed, signer could not be
+# built, or `tagent` changed;
 # 2 usage error or refused argument.
 
 # #7812: re-exec under bash when started from zsh.
@@ -144,14 +152,25 @@ fingerprint() {
 
 # A `tctl`/`trusty-installer` on PATH whose `sign` accepts this crate's set;
 # fails when none does. A tctl older than #11632 knows only `trusty-agents`.
+# #11683: `tctl sign` exits 3 (`EXIT_NO_CERTIFICATE`) when no Developer ID
+# certificate is available; only that exit soft-passes. Set to 0 to make it a
+# hard failure like every other sign exit (pending an owner decision).
+readonly TCTL_SIGN_NO_CERT_RC=3
+readonly NO_CERT_SOFT_PASS=1
+# #11683: set by the no-cert soft-pass; `main` then ends with `NOT SIGNED`.
+NOT_SIGNED=0
+
 resolve_tctl() {
-    local candidate
+    local candidate help values
     for candidate in tctl trusty-installer; do
         command -v "$candidate" >/dev/null 2>&1 || continue
-        if "$candidate" sign --help 2>&1 | grep -q -- "$CRATE"; then
-            echo "$candidate"
-            return 0
-        fi
+        # #11683: read CRATE only from clap's `[possible values: ...]` list for
+        # <TARGET> (`-h` prints it; `--help` prints a long form without it).
+        help="$("$candidate" sign -h 2>&1 || true)"
+        values="$(printf '%s\n' "$help" | sed -n 's/^.*<TARGET>.*\[possible values: \([^]]*\)\].*$/\1/p')"
+        case ", $values, " in
+            *", $CRATE, "*) echo "$candidate"; return 0 ;;
+        esac
         warn "$candidate on PATH does not accept 'sign $CRATE' (installed before #11632)"
     done
     return 1
@@ -288,29 +307,39 @@ run_sign_ta() {
     if ! tctl_bin="$(resolve_tctl)"; then
         tctl_bin=""
         warn "no usable tctl on PATH; building this checkout's trusty-installer"
-        (cd "$(repo_root)" && cargo build --quiet -p trusty-installer --bin tctl) || rc=$?
-    fi
-
-    if [ "$rc" -eq 0 ]; then
-        # Same filesystem as $BIN_DIR, so both moves are renames, never copies.
-        STAGE="$(mktemp -d "$ROOT/.ta-sign.XXXXXX")"
-        mv "$BIN_DIR/$BIN_NAME" "$STAGE/$BIN_NAME"
-        info "staging dir holds only $BIN_NAME: $STAGE"
-        if [ -n "$tctl_bin" ]; then
-            info "signing with $tctl_bin on PATH"
-            "$tctl_bin" sign "$CRATE" --dir "$STAGE" || rc=$?
-        else
-            info "signing with 'cargo run -p trusty-installer' from $(repo_root)"
-            (cd "$(repo_root)" && cargo run --quiet -p trusty-installer --bin tctl -- sign "$CRATE" --dir "$STAGE") || rc=$?
+        # #11683: a signer that cannot be built is a broken install, not the
+        # missing-certificate case fail-soft covers.
+        if ! (cd "$(repo_root)" && cargo build --quiet -p trusty-installer --bin tctl); then
+            error "could not build this checkout's tctl in $(repo_root); $BIN_NAME was not signed"
+            exit 1
         fi
-        restore_staged
     fi
 
-    if [ "$rc" -ne 0 ]; then
-        warn "signing $BIN_NAME failed (exit $rc); it stays ad-hoc signed and macOS will"
-        warn "re-prompt for TCC-gated access after each rebuild. Expected on a machine"
-        warn "without a Developer ID Application cert: docs/reference/release-workflow.md."
+    # Same filesystem as $BIN_DIR, so both moves are renames, never copies.
+    STAGE="$(mktemp -d "$ROOT/.ta-sign.XXXXXX")"
+    mv "$BIN_DIR/$BIN_NAME" "$STAGE/$BIN_NAME"
+    info "staging dir holds only $BIN_NAME: $STAGE"
+    if [ -n "$tctl_bin" ]; then
+        info "signing with $tctl_bin on PATH"
+        "$tctl_bin" sign "$CRATE" --dir "$STAGE" || rc=$?
+    else
+        info "signing with 'cargo run -p trusty-installer' from $(repo_root)"
+        (cd "$(repo_root)" && cargo run --quiet -p trusty-installer --bin tctl -- sign "$CRATE" --dir "$STAGE") || rc=$?
+    fi
+    restore_staged
+
+    # #11683: the one soft-pass — no Developer ID certificate.
+    if [ "$rc" -eq "$TCTL_SIGN_NO_CERT_RC" ] && [ "$NO_CERT_SOFT_PASS" = "1" ]; then
+        warn "signing $BIN_NAME failed (exit $rc: no Developer ID certificate); it stays"
+        warn "ad-hoc signed and macOS will re-prompt for TCC-gated access after each rebuild."
+        warn "Expected on a machine without a Developer ID Application cert:"
+        warn "docs/reference/release-workflow.md."
+        NOT_SIGNED=1
         return 0
+    fi
+    if [ "$rc" -ne 0 ]; then
+        error "signing $BIN_NAME failed (exit $rc); see the tctl output above."
+        exit 1
     fi
     info "$BIN_NAME signed (identifier=$TA_IDENTIFIER)"
 }
@@ -345,6 +374,12 @@ main() {
     fi
     info "$GUARDED_BIN guard: $guarded unchanged ($after)"
     info "Restart any running $BIN_NAME process to pick up the new binary."
+    # #11683 (Architect ruling on AC3): an unsigned run's last line, on stdout
+    # and on stderr, where the other final status lines go.
+    if [ "$NOT_SIGNED" = "1" ]; then
+        printf 'NOT SIGNED\n'
+        printf 'NOT SIGNED\n' >&2
+    fi
 }
 
 main "$@"
