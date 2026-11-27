@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::{
-    DENIED_ENV_VARS, SandboxInputs, SandboxRole, SandboxSettingsError, project_policy, user_policy,
-    verify_sandbox_settings, write_sandbox_settings,
+    ALLOWED_DOMAINS, DENIED_ENV_VARS, SandboxInputs, SandboxRole, SandboxSettingsError,
+    apply_launch_sandbox, project_policy, user_policy, verify_sandbox_settings,
+    write_sandbox_settings,
 };
 
 /// A scratch workspace, home and user config dir.
@@ -140,6 +141,11 @@ fn the_user_policy_carries_strict_allowlist_and_credentials() {
         policy.pointer("/sandbox/network/strictAllowlist"),
         Some(&json!(true))
     );
+    // #12042: the hosts sit in the tier `strictAllowlist` reads them from.
+    let domains = strings(&policy, "/sandbox/network/allowedDomains");
+    assert!(domains.iter().any(|d| d == "github.com"), "{domains:?}");
+    assert!(domains.iter().any(|d| d == "api.github.com"), "{domains:?}");
+    assert_eq!(domains, ALLOWED_DOMAINS);
     let env = policy
         .pointer("/sandbox/credentials/envVars")
         .and_then(Value::as_array)
@@ -170,6 +176,11 @@ fn writing_preserves_unrelated_keys_and_verifies() {
     assert_eq!(
         user.pointer("/sandbox/network/strictAllowlist"),
         Some(&json!(true))
+    );
+    // #12042: the written user tier carries tm's hosts, from the one constant.
+    assert_eq!(
+        strings(&user, "/sandbox/network/allowedDomains"),
+        ALLOWED_DOMAINS
     );
     // A second write adds no duplicate deny entry.
     write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("rewrite");
@@ -842,12 +853,6 @@ fn type_matched_empty_user_keys_still_verify() {
             json!([]),
         ),
         case(
-            "user allowedDomains: []",
-            User,
-            "/sandbox/network/allowedDomains",
-            json!([]),
-        ),
-        case(
             "user filesystem: {}",
             User,
             "/sandbox/filesystem",
@@ -1074,4 +1079,115 @@ fn null_sandbox_values_refuse_the_launch() {
         std::fs::write(fx.file("settings.json"), "{}").expect("reset");
         write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("rewrite");
     }
+}
+
+/// #12042: the user file 1.14.14 wrote — `strictAllowlist` and no hosts.
+fn hostless_user_file(fx: &Fx) -> Value {
+    let user = json!({
+        "theme": "dark",
+        "sandbox": { "network": { "strictAllowlist": true } },
+    });
+    std::fs::write(fx.user.join("settings.json"), user.to_string()).expect("seed 1.14.14 user");
+    user
+}
+
+/// #12042: `strictAllowlist` with no usable `allowedDomains` denies every
+/// host, so verify refuses it — absent, empty, or `null`.
+#[test]
+fn a_strict_allowlist_with_no_domains_refuses_the_launch() {
+    let fx = Fx::new();
+    write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("baseline");
+    hostless_user_file(&fx);
+    refused(
+        verify(&fx, SandboxRole::Pm),
+        "strictAllowlist with no allowedDomains",
+    );
+    let net = "/sandbox/network/allowedDomains";
+    let cases = vec![
+        case("user allowedDomains: []", Tier::User, net, json!([])),
+        case("user allowedDomains: null", Tier::User, net, json!(null)),
+    ];
+    let wrong = misses(cases, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+}
+
+/// #12042: verify accepts user-tier hosts only from `ALLOWED_DOMAINS` — tm's
+/// whole list and a subset pass; a foreign host, a wildcard and a non-text
+/// entry refuse.
+#[test]
+fn a_foreign_user_domain_refuses_the_launch() {
+    let net = "/sandbox/network/allowedDomains";
+    let mut wider: Vec<&str> = ALLOWED_DOMAINS.to_vec();
+    wider.push("evil.example");
+    let foreign = vec![
+        case("a foreign host", Tier::User, net, json!(["evil.example"])),
+        case(
+            "tm's hosts plus a foreign one",
+            Tier::User,
+            net,
+            json!(wider),
+        ),
+        case("a wildcard host", Tier::User, net, json!(["*.github.com"])),
+        case("a non-text host", Tier::User, net, json!([42])),
+    ];
+    let wrong = misses(foreign, true, None);
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+    let tms = vec![
+        case("tm's hosts", Tier::User, net, json!(ALLOWED_DOMAINS)),
+        case("a subset", Tier::User, net, json!(["github.com"])),
+    ];
+    let wrong = misses(tms, false, None);
+    assert!(wrong.is_empty(), "wrongly refused:\n{}", wrong.join("\n"));
+}
+
+/// #12042: a launch over the 1.14.14 user file adds tm's hosts, keeps the
+/// operator's key, and verifies — the broken file never locks the launch out.
+#[test]
+fn a_launch_write_repairs_a_strict_allowlist_with_no_domains() {
+    let fx = Fx::new();
+    apply_launch_sandbox(SandboxRole::Pm, &fx.inputs, Some(&fx.user)).expect("first launch");
+    hostless_user_file(&fx);
+    refused(verify(&fx, SandboxRole::Pm), "the 1.14.14 user file");
+    apply_launch_sandbox(SandboxRole::Pm, &fx.inputs, Some(&fx.user)).expect("repairing launch");
+    let user = read(&fx.user.join("settings.json"));
+    assert_eq!(user["theme"], json!("dark"), "operator key kept: {user}");
+    assert_eq!(
+        user.pointer("/sandbox/network/strictAllowlist"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        strings(&user, "/sandbox/network/allowedDomains"),
+        ALLOWED_DOMAINS
+    );
+    verify(&fx, SandboxRole::Pm).expect("the repaired file verifies");
+}
+
+/// #12042: when the repairing write cannot land, the launch errors and the
+/// hostless file on disk still refuses — no path starts a session on it.
+#[test]
+fn a_failed_user_write_leaves_a_hostless_file_refused() {
+    let fx = Fx::new();
+    write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("baseline");
+    let before = hostless_user_file(&fx);
+    // A directory on the lock sidecar's name cannot be opened, as root too.
+    // The baseline write left the sidecar as a file; replace it.
+    let sidecar = fx.user.join("settings.json.lock");
+    if sidecar.exists() {
+        std::fs::remove_file(&sidecar).expect("drop the baseline sidecar");
+    }
+    std::fs::create_dir(&sidecar).expect("occupy the sidecar");
+    let result = write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user);
+    assert!(
+        matches!(&result, Err(SandboxSettingsError::User { .. })),
+        "the write must surface its failure: {result:?}"
+    );
+    assert_eq!(
+        read(&fx.user.join("settings.json")),
+        before,
+        "file untouched"
+    );
+    refused(
+        verify(&fx, SandboxRole::Pm),
+        "the unrepaired 1.14.14 user file",
+    );
 }
