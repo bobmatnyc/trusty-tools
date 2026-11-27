@@ -11,6 +11,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
+
 /// Join `word` to `cwd` when relative and drop `.`/`..` lexically.
 pub(crate) fn resolve(cwd: &Path, word: &str) -> PathBuf {
     let joined = cwd.join(word);
@@ -73,11 +75,12 @@ pub(crate) fn is_trust_anchor(path: &Path, home: &Path, no_guard_entry: bool) ->
     // #11821 P3: the configured config dir's anchors too, and install.toml,
     // which relocates that dir; the `$HOME` anchors stay for a broken file.
     let cfg = canon(&trusty_mpm::core::config_base::config_base_under(&home));
+    // #11821: the dir names come from the shared install_paths constants.
     (parent == cargo_bin && matches!(name, "tm" | "trusty-mpm"))
-        || path == home.join(".trusty-mpm/config.toml")
-        || path == home.join(".trusty-tools/trusty-mpm/config.yaml")
-        || path == cfg.join(".trusty-mpm/config.toml")
-        || path == cfg.join(".trusty-tools/trusty-mpm/config.yaml")
+        || path == home.join(MPM_DIR_NAME).join("config.toml")
+        || path == home.join(TOOLS_DIR_NAME).join("trusty-mpm/config.yaml")
+        || path == cfg.join(MPM_DIR_NAME).join("config.toml")
+        || path == cfg.join(TOOLS_DIR_NAME).join("trusty-mpm/config.yaml")
         || path == trusty_common::install_paths::install_file_path(&home)
         || parent == home.join("Library/LaunchAgents")
         || (path.starts_with(home.join("Library")) && name.ends_with(".plist"))

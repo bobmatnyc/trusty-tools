@@ -121,9 +121,11 @@ pub(super) fn questions_verdict(
 
 /// The deny text for a write that could reach the question table.
 fn questions_reason(what: &str) -> String {
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const LOG: &str = "`~/.trusty-tools/trusty-mpm/channels/questions.jsonl`"; // path-literal: allow (display text)
     format!(
         "Trust-anchor write denied (#9815): {what} could change \
-         `~/.trusty-tools/trusty-mpm/channels/questions.jsonl`, its `.lock` or its `.torn` file, \
+         {LOG}, its `.lock` or its `.torn` file, \
          or `inbound_claims.jsonl` and its `.lock`, `.torn` or `.prune` file (#9923), \
          which decide which channel answer resolves an owner question. No session may write, \
          move or delete them — the Architect included, with or without a live taint, and \

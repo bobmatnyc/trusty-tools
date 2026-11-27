@@ -17,7 +17,8 @@ chain trusty-common's resolver applies per key: env (`TRUSTY_MPM_WORKSPACE_ROOT`
 A broken, unreadable or unknown-key install.toml raises `ConfigError`, never a
 `$HOME` fallback; it is read only when env, the file and the env overrides above
 leave a key undecided. The managed claude-config dir is
-`<config_dir>/.trusty-tools/trusty-mpm/claude-config`, as tm derives it.
+`<config_dir>/.trusty-tools/trusty-mpm/claude-config`, as tm derives it, and tm's root
+`install_mpm_root()` is `<config_dir>/.trusty-mpm` (#11821 P7).
 `poll_interval_s` is the poller's cycle length in whole seconds (default 60): the one
 cadence every start path reads (#11369).
 What: `load()` reads `<root>/local/architect.json`, where `root` is the parent
@@ -56,6 +57,9 @@ PROJECTS_ROOT_ENV = "TRUSTY_MPM_WORKSPACE_ROOT"
 CONFIG_DIR_ENV = "TRUSTY_MPM_CONFIG_DIR"
 INSTALL_KEYS = ("projects_root", "config_dir", "claude_config_dir", "codex_home")
 _TOOLS_DIR = ".trusty-tools"
+# #11821: the default projects-root and tm-root names; callers join them through the functions below.
+_PROJECTS_DIR = "trusty-mpm-projects"
+_MPM_DIR = ".trusty-mpm"
 _MANAGED_CLAUDE = (_TOOLS_DIR, "trusty-mpm", "claude-config")
 _REPO_FIELDS = ("slug", "gh_config_dir", "checkout")
 _EMPTY: Mapping[str, Any] = types.MappingProxyType({})
@@ -192,7 +196,12 @@ def install_projects_root(environ: Optional[Mapping[str, str]] = None, home: Opt
     """The install's projects root: `TRUSTY_MPM_WORKSPACE_ROOT`, install.toml, else `<home>/trusty-mpm-projects`."""
     env = os.environ if environ is None else environ
     home = home or _home(env)
-    return _install_path("projects_root", PROJECTS_ROOT_ENV, os.path.join(home, "trusty-mpm-projects"), env, home)
+    return _install_path("projects_root", PROJECTS_ROOT_ENV, os.path.join(home, _PROJECTS_DIR), env, home)
+
+
+def install_mpm_root(environ: Optional[Mapping[str, str]] = None, home: Optional[str] = None) -> str:
+    """`<config_dir>/.trusty-mpm`, tm's root directory (#11821 P7); raises ConfigError as install_config_dir does."""
+    return os.path.join(install_config_dir(environ, home), _MPM_DIR)
 
 
 def managed_claude_config_dir(environ: Optional[Mapping[str, str]] = None, home: Optional[str] = None) -> str:

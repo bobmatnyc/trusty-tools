@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "engineer",
+    "--file",
+    "note.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "note.md": "Ran cargo test on src/lib.rs:12 with --no-fail-fast.\nSet RUST_LOG first, then see `poll_once`.\n"
+  },
+  "reads": [
+    "note.md"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

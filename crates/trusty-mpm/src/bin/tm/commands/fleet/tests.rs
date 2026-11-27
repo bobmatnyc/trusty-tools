@@ -13,6 +13,8 @@ use super::launch::PaneState;
 use super::session_name::SessionNames;
 use super::*;
 use crate::cli::{Cli, Command};
+use trusty_common::install_paths::MPM_DIR_NAME;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_skill_tier::architect_seed::ArchitectSeed;
 use trusty_mpm::core::project_skill_tier::architect_skills::SHIPPED;
@@ -190,7 +192,7 @@ fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     // Ruling Q7: no twin grant.
     assert!(!fx.config().contains("twin"), "{}", fx.config());
     // With these files, a launch in the directory resolves to the supervisor.
-    let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(".trusty-mpm"));
+    let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(MPM_DIR_NAME));
     assert!(trusty_mpm::core::session_profile::resolve(&dir, &cfg).is_architect());
 }
 
@@ -270,7 +272,7 @@ fn an_unrelated_key_and_comment_survive_the_allowlist_write() {
     let after = fx.config();
     assert!(after.starts_with(original), "the prefix changed:\n{after}");
     assert!(after.contains("[supervisor]"), "{after}");
-    let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(".trusty-mpm"));
+    let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(MPM_DIR_NAME));
     assert_eq!(
         cfg.architect_grant().projects,
         vec![PathBuf::from(canonical(&fx.dir()))]
@@ -341,7 +343,10 @@ fn a_second_add_is_unchanged() {
 #[test]
 fn dir_overrides_the_default() {
     let fx = Fixture::new();
-    assert_eq!(fx.dir(), fx.home().join("trusty-mpm-projects/architect"));
+    assert_eq!(
+        fx.dir(),
+        fx.home().join(DEFAULT_WORKSPACE_DIR).join("architect")
+    );
     let other = fx.home().join("elsewhere/arch");
     assert_eq!(
         resolve_dir(Some(other.to_str().unwrap()), fx.home()).unwrap(),

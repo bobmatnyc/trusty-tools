@@ -48,6 +48,8 @@ mod process;
 mod pyjson;
 mod pystr;
 pub mod quiet;
+// #12026: record-then-replay parity tool for the script ports.
+pub mod replay;
 mod scripted;
 // MB1595: the Architect's one job scheduler and its binary.
 pub mod sched;

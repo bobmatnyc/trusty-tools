@@ -565,6 +565,17 @@ fn parse_sign() {
         }
         other => panic!("expected Sign, got {other:?}"),
     }
+
+    // #11587: `trusty-secrets` is a valid `tctl sign` target.
+    let secrets = Cli::try_parse_from(["trusty-installer", "sign", "trusty-secrets"])
+        .expect("sign trusty-secrets parses");
+    match secrets.command {
+        Commands::Sign { target, .. } => {
+            assert_eq!(target, SignTargetArg::Secrets);
+            assert_eq!(target.as_set_name(), "trusty-secrets");
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
 }
 
 /// `trusty-installer sign trusty-search --verbose` parses via the existing

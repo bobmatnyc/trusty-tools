@@ -70,10 +70,12 @@ pub(crate) fn slot_dir_check(
     } = assess(slots, config.0, config.1, ceiling, sampler);
     let mut warnings = config.0.deprecation_warnings();
     if let Some(why) = slots.fallback_reason() {
+        // #11821: the path-naming repair is its own waived literal; bytes unchanged.
+        const REPAIR: &str =
+            "(`mkdir -p ~/.trusty-mpm/build-slots && chmod 700 ~/.trusty-mpm/build-slots`)"; // path-literal: allow (display text)
         warnings.push(format!(
             "the lease store is the per-uid FALLBACK {} because {why}; repair the canonical \
-             store (`mkdir -p ~/.trusty-mpm/build-slots && chmod 700 \
-             ~/.trusty-mpm/build-slots`) so every build on this machine shares it",
+             store {REPAIR} so every build on this machine shares it",
             slots.path().display()
         ));
     }
@@ -107,9 +109,11 @@ fn render_check(
                 .join("; ")
         )
     };
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const CONFIG: &str = "~/.trusty-mpm/config.toml"; // path-literal: allow (display text)
     let body = format!(
         "{held}. {} effective slot(s) of ceiling {} (`builders.max_concurrent` in \
-         ~/.trusty-mpm/config.toml). Readings: {}. Slot files: {slot_dir}.",
+         {CONFIG}). Readings: {}. Slot files: {slot_dir}.",
         decision.n_effective, decision.ceiling, decision.readings
     );
     let mut concerns: Vec<String> = decision.withheld.clone();

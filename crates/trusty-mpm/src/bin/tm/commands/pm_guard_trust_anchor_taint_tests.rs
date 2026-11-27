@@ -3,6 +3,7 @@
 use super::super::tests::{Fixture, allowlist, architect_env, fixture, payload, pm_env};
 use super::super::{HookEnv, evaluate};
 use serde_json::{Value, json};
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 use trusty_mpm::core::channels_taint::{TaintMark, taint_dir, taint_managed_session};
 use trusty_mpm::core::config::MpmConfig;
 
@@ -28,7 +29,7 @@ fn bash(fx: &Fixture, env: &HookEnv, command: &str) -> Option<String> {
     verdict(fx, env, "Bash", json!({ "command": command }))
 }
 
-const FILE: &str = "~/.trusty-tools/trusty-mpm/channels/taint/s-1.json";
+const FILE: &str = "~/.trusty-tools/trusty-mpm/channels/taint/s-1.json"; // path-literal: allow (guard input)
 
 /// 🔴 #8433: `rm`, `unlink` and a glob delete of a taint file are denied.
 #[test]
@@ -39,9 +40,9 @@ fn anchor_denies_rm_of_taint_file() {
         format!("rm {FILE}"),
         format!("rm -f {FILE}"),
         format!("unlink {FILE}"),
-        "rm -rf ~/.trusty-tools/trusty-mpm/channels/taint/*".to_owned(),
-        "rm ~/.trusty-tools/trusty-mpm/channels/taint/managed/m-1.json".to_owned(),
-        "cd ~/.trusty-tools/trusty-mpm/channels/taint && rm s-1.json".to_owned(),
+        "rm -rf ~/.trusty-tools/trusty-mpm/channels/taint/*".to_owned(), // path-literal: allow (guard input)
+        "rm ~/.trusty-tools/trusty-mpm/channels/taint/managed/m-1.json".to_owned(), // path-literal: allow (guard input)
+        "cd ~/.trusty-tools/trusty-mpm/channels/taint && rm s-1.json".to_owned(), // path-literal: allow (guard input)
     ] {
         assert!(bash(&fx, &env, &command).is_some(), "allowed: {command}");
     }
@@ -62,10 +63,10 @@ fn anchor_denies_write_and_mv_of_taint_dir() {
         format!("echo x > {FILE}"),
         format!("cp /dev/null {FILE}"),
         format!("mv {FILE} /tmp/away.json"),
-        "mv ~/.trusty-tools/trusty-mpm/channels/taint /tmp/away".to_owned(),
-        "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away".to_owned(),
-        "rm -rf ~/.trusty-tools/trusty-mpm/channels".to_owned(),
-        "ln -sf /tmp/x ~/.trusty-tools/trusty-mpm/channels/taint/s-2.json".to_owned(),
+        "mv ~/.trusty-tools/trusty-mpm/channels/taint /tmp/away".to_owned(), // path-literal: allow (guard input)
+        "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away".to_owned(), // path-literal: allow (guard input)
+        "rm -rf ~/.trusty-tools/trusty-mpm/channels".to_owned(), // path-literal: allow (guard input)
+        "ln -sf /tmp/x ~/.trusty-tools/trusty-mpm/channels/taint/s-2.json".to_owned(), // path-literal: allow (guard input)
     ] {
         assert!(bash(&fx, &env, &command).is_some(), "allowed: {command}");
     }
@@ -107,7 +108,7 @@ fn the_architect_cannot_write_a_live_taint() {
         bash(
             &clean,
             &env,
-            "rm -rf ~/.trusty-tools/trusty-mpm/channels/taint"
+            "rm -rf ~/.trusty-tools/trusty-mpm/channels/taint" // path-literal: allow (guard input)
         ),
         None
     );
@@ -145,14 +146,14 @@ fn the_architect_cannot_untaint_through_an_unplaceable_write() {
 #[test]
 fn an_unresolvable_taint_dir_still_guards_the_dirs_above_it() {
     let fx = fixture();
-    let channels = fx.home.join(".trusty-tools/trusty-mpm/channels");
+    let channels = fx.home.join(TOOLS_DIR_NAME).join("trusty-mpm/channels");
     std::fs::create_dir_all(&channels).expect("mkdir");
     std::os::unix::fs::symlink("taint", channels.join("taint")).expect("loop");
     let env = architect_env(&fx);
     for command in [
-        "rm -rf ~/.trusty-tools/trusty-mpm/channels",
-        "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away",
-        "echo x > ~/.trusty-tools/trusty-mpm/channels/taint/s.json",
+        "rm -rf ~/.trusty-tools/trusty-mpm/channels", // path-literal: allow (guard input)
+        "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away", // path-literal: allow (guard input)
+        "echo x > ~/.trusty-tools/trusty-mpm/channels/taint/s.json", // path-literal: allow (guard input)
     ] {
         assert!(bash(&fx, &env, command).is_some(), "allowed: {command}");
     }
@@ -170,7 +171,7 @@ fn anchor_denies_rm_of_the_reapply_failures_record() {
         "{}\n",
     )
     .expect("record");
-    let command = "rm ~/.trusty-tools/trusty-mpm/channels/taint/reapply-failures.jsonl";
+    let command = "rm ~/.trusty-tools/trusty-mpm/channels/taint/reapply-failures.jsonl"; // path-literal: allow (guard input)
     assert!(bash(&fx, &pm_env(&fx), command).is_some(), "a PM");
     assert!(
         bash(&fx, &architect_env(&fx), command).is_some(),

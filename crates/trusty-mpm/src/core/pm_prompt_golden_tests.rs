@@ -157,6 +157,26 @@ fn the_bundled_fallback_prompt_stays_within_its_resident_budget() {
 }
 
 #[test]
+fn the_bundled_fallback_prompt_keeps_headroom_under_its_cap_11624() {
+    // #11624 (Architect ruling): KEEP the 23,200-byte cap and stay under it
+    // with margin. At 1 byte under, any wording change turned main red.
+    // 500 bytes is room for one short rule; past it, move text to a skill.
+    const BUDGET_BYTES: usize = 23_200;
+    const HEADROOM_BYTES: usize = 500;
+    let composed =
+        compose_bundled_fallback_with_overrides(rc(), FIXED_STACK, FIXED_ROSTER, None, &[])
+            .0
+            .expect("package composes");
+    assert!(
+        composed.len() + HEADROOM_BYTES <= BUDGET_BYTES,
+        "the bundled-fallback PM prompt is {} bytes, inside the last \
+         {HEADROOM_BYTES} bytes of its {BUDGET_BYTES}-byte cap — move detail \
+         behind a skill pointer (docs/reference/agent-cost-controls.md §5)",
+        composed.len()
+    );
+}
+
+#[test]
 fn golden_roster_absent_assembly_prompt() {
     // Configuration 2, REPLACING the retired `.trusty-mpm/AGENT_DELEGATION.md`
     // snapshot (#4286). That configuration no longer exists — no file can force

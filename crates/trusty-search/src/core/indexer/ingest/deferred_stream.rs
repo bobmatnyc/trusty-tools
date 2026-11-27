@@ -121,7 +121,8 @@ where
     Fut: Future<Output = G>,
     G: Deref<Target = CodeIndexer>,
 {
-    let mut pass = access().await.plan_deferred_pass().await;
+    // #12064: an unreadable corpus id set fails the pass; it never settles ready.
+    let mut pass = access().await.plan_deferred_pass().await?;
     let mut out = EmbedCatchUp::finished(0, pass.total);
     let wave = resolve_embed_inflight() * embed_batch_size();
     let mut cadence = Cadence::from_env();

@@ -130,8 +130,8 @@ fn remote_gate_anchor_directory_writes_are_denied() {
         "mv ~/.ssh /tmp/ssh-old",
         "rm ~/.ssh/*",
         "chmod 777 ~/.ssh/*",
-        "rm -rf $HOME/.trusty-tools/trusty-common",
-        "mv ~/.trusty-tools /tmp/tt-old",
+        "rm -rf $HOME/.trusty-tools/trusty-common", // path-literal: allow (guard input)
+        "mv ~/.trusty-tools /tmp/tt-old",           // path-literal: allow (guard input)
     ] {
         assert!(
             bash(&fx, &pm_env(&fx), command).is_some(),
@@ -148,7 +148,7 @@ fn remote_gate_unplaceable_or_unresolvable_writes_are_denied() {
     for command in [
         "cd ~/.ssh && echo k >> authorized_keys",
         "echo k >> \"$D/authorized_keys\"",
-        "cd ~/.trusty-tools/trusty-common && cp a.txt config.yaml",
+        "cd ~/.trusty-tools/trusty-common && cp a.txt config.yaml", // path-literal: allow (guard input)
     ] {
         assert!(
             bash(&fx, &pm_env(&fx), command).is_some(),
@@ -171,7 +171,7 @@ fn remote_gate_reads_and_siblings_stay_allowed() {
         "cat ~/.ssh/authorized_keys",
         "grep ssh-ed25519 $HOME/.ssh/authorized_keys",
         "cp ~/.ssh/authorized_keys copy.txt",
-        "head ~/.trusty-tools/trusty-common/config.yaml",
+        "head ~/.trusty-tools/trusty-common/config.yaml", // path-literal: allow (guard input)
         "chmod +x scripts/*.sh",
     ] {
         assert_eq!(bash(&fx, &env, command), None, "`{command}`");

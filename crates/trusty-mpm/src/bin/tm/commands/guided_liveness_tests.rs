@@ -68,7 +68,12 @@ fn write_lock(path: &std::path::Path, addr: &str, pid: u32) {
 }
 
 /// The restart command the stop message must name.
-const RESTART_CMD: &str = "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm";
+// #11809: the shape `daemon_restart_command_for` now returns — bootout, wait
+// until the job is gone, then bootstrap.
+const RESTART_CMD: &str = "launchctl bootout gui/$(id -u)/com.trusty.mpm; \
+     for i in $(seq 30); do launchctl print gui/$(id -u)/com.trusty.mpm >/dev/null 2>&1 \
+     || break; sleep 1; done; \
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist";
 
 /// [`run_flow_with`] where every live pid counts as a daemon.
 async fn run_flow(
@@ -246,6 +251,12 @@ async fn slow_listing_stops_without_autostart() {
         msg.contains(RESTART_CMD),
         "message must name the restart command: {msg}"
     );
+    // #11809: the fixture is the shared helper's output, wait step included.
+    assert_eq!(
+        RESTART_CMD,
+        crate::commands::launchd_probe::daemon_restart_command_for(Some("com.trusty.mpm"))
+    );
+    crate::commands::launchd_probe::assert_restart_order(&msg, "com.trusty.mpm");
 }
 
 #[tokio::test]
@@ -338,7 +349,7 @@ fn unverified_lock_pid_is_evidence_not_absence() {
         let evidence = lock_evidence_for("http://127.0.0.1:47001", &lock, &identify)
             .expect("a live unverified pid is evidence");
         assert!(
-            evidence.contains("remove ~/.trusty-mpm/daemon.lock if no tm daemon is running"),
+            evidence.contains("remove ~/.trusty-mpm/daemon.lock if no tm daemon is running"), // path-literal: allow (display text)
             "the recovery must be named: {evidence}"
         );
     }

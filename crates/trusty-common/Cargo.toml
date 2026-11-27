@@ -169,7 +169,7 @@ name = "trusty-common"
 # 0.69.1: patch — 0.69.0 is live on crates.io (release #11028); post-release bump so pending `src/**` PRs clear the #4421 check.
 # 0.70.5 (Refs #11519): patch — 0.70.4 is live on crates.io; this PR edits src/**.
 # 0.70.9 (Refs #11821): patch — additive `install_paths` module; `thiserror` and `toml` become unconditional; 0.70.8 is live on crates.io.
-version = "0.70.9"
+version = "0.70.11"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

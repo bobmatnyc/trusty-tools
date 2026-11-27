@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.2] — 2026-11-27
+
+### Changed
+
+- The project-picker tests name the projects root through `trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR` instead of a copied literal, and the two MCP remedy messages that name `servers.toml` carry a `path-literal: allow` waiver; no resolved path or message text changes (#11821).
+
 ## [0.8.1] — 2026-11-27
 
 ### Added

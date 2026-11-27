@@ -12,6 +12,7 @@ use super::*;
 use crate::core::project_skill_tier::architect_seed::test_support::shipped;
 use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 /// A shipped table of one skill with `contents`.
 fn one(contents: &'static str) -> [ArchitectSkill; 1] {
@@ -476,7 +477,7 @@ fn a_tier_resolving_onto_a_reserved_dir_is_refused() {
     use crate::core::paths::FrameworkPaths;
 
     let home = tempdir().unwrap();
-    let root = home.path().join(".trusty-mpm");
+    let root = home.path().join(MPM_DIR_NAME);
     let fw = FrameworkPaths::from_root(&root);
     for reserved in [fw.claude_skills_dir(), fw.skill_deploy_dir()] {
         let project = tempdir().unwrap();

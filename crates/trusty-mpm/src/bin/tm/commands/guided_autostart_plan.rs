@@ -158,10 +158,12 @@ pub(crate) fn lock_verdict(lock_path: &std::path::Path, identify: IdentifyPid<'_
 /// Test: `prepare_awaits_a_live_daemon_lock_pid`,
 /// `prepare_never_deletes_an_unverified_lock`.
 pub(crate) fn lock_evidence(verdict: LockVerdict) -> Option<String> {
+    // #11821: the path is its own waived literal; bytes unchanged.
+    const LOCK: &str = "~/.trusty-mpm/daemon.lock"; // path-literal: allow (display text)
     match verdict {
         LockVerdict::LiveDaemon(pid) => Some(format!(
             "daemon.lock names live daemon pid {pid}; if that process is not serving, \
-             stop it or remove ~/.trusty-mpm/daemon.lock, then run `tm start`"
+             stop it or remove {LOCK}, then run `tm start`"
         )),
         LockVerdict::Unverified(pid, identity) => {
             let what = if identity == PidIdentity::NotDaemon {
@@ -171,7 +173,7 @@ pub(crate) fn lock_evidence(verdict: LockVerdict) -> Option<String> {
             };
             Some(format!(
                 "daemon.lock names live pid {pid}, not confirmed as a tm daemon ({what}); \
-                 remove ~/.trusty-mpm/daemon.lock if no tm daemon is running, then run `tm start`"
+                 remove {LOCK} if no tm daemon is running, then run `tm start`"
             ))
         }
         LockVerdict::Absent | LockVerdict::Stale(_) => None,

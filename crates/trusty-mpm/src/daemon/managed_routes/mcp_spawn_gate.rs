@@ -313,9 +313,10 @@ pub async fn ensure_mcp_spawn_allowed(
     if !mcp_spawn_enabled(config) {
         return Err(format!(
             "managed spawning via MCP is disabled; enable it with `allow_mcp_spawn: true` \
-             under `daemon:` in ~/.trusty-tools/trusty-mpm/config.yaml, or set \
+             under `daemon:` in {cfg}, or set \
              {ALLOW_MCP_SPAWN_ENV}=1 — or run `tm launch` directly from the CLI, which is \
-             never gated"
+             never gated",
+            cfg = "~/.trusty-tools/trusty-mpm/config.yaml", // path-literal: allow (#11821: message text)
         ));
     }
 
@@ -331,7 +332,7 @@ pub async fn ensure_mcp_spawn_allowed(
             "refusing MCP-initiated spawn for unregistered repo `{shown}`; register it \
              first with the `project_register` MCP tool (name=\"{name_hint}\", \
              repo_url=\"{shown}\") or add it under `projects:` in \
-             ~/.trusty-tools/trusty-mpm/config.yaml, then retry"
+             ~/.trusty-tools/trusty-mpm/config.yaml, then retry" // path-literal: allow
         ));
     }
     Ok(())

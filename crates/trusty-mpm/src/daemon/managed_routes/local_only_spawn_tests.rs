@@ -8,6 +8,7 @@ use std::path::Path;
 
 use super::*;
 use crate::session_manager::ManagedSessionId;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 /// Restores `$HOME` on drop; callers are `#[serial_test::serial]`.
 struct HomeGuard(Option<String>);
@@ -25,7 +26,7 @@ impl Drop for HomeGuard {
 /// test does not depend on how full the host volume is.
 fn scratch_home() -> (tempfile::TempDir, HomeGuard) {
     let home = tempfile::TempDir::new().expect("tmp home");
-    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    let dir = home.path().join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&dir).expect("config dir");
     std::fs::write(dir.join("config.yaml"), "disk:\n  max_usage_pct: 100\n").expect("config");
     let prior = std::env::var("HOME").ok();

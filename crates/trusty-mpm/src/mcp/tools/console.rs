@@ -60,11 +60,14 @@ pub(super) fn console_tools() -> Vec<Value> {
         ),
         tool(
             "auto_resume_set",
-            "Enable or disable supervisor auto-resume by persisting the operator's \
-             desired flag to `~/.trusty-mpm/auto_resume`. The 24/7 supervisor reads \
-             this on its next sweep; the env var the supervisor booted with stays \
+            // #11821: the paths in these descriptions are text only; bytes unchanged.
+            concat!(
+                "Enable or disable supervisor auto-resume by persisting the operator's \
+                 desired flag to `~/.trusty-mpm/auto_resume`. The 24/7 supervisor reads ", // path-literal: allow
+                "this on its next sweep; the env var the supervisor booted with stays \
              in force until then (the response's `pending_restart` flags the \
              difference). This is the console's non-CLI auto-resume control.",
+            ),
             json!({
                 "type": "object",
                 "properties": {
@@ -80,8 +83,9 @@ pub(super) fn console_tools() -> Vec<Value> {
         // #11821: config_read also returns the read-only install paths.
         tool(
             "config_read",
-            "Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 \
-             cross-crate config convention) and return its current settings as JSON: \
+            concat!(
+                "Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 ", // path-literal: allow
+                "cross-crate config convention) and return its current settings as JSON: \
              `workspace_root_template`, `auto_resume`, `default_model`, the global \
              `github` GitHub-identity binding, the global `untracked_sync` \
              untracked/secret-file sync allowlist (#2196), and the full `projects` \
@@ -91,6 +95,7 @@ pub(super) fn console_tools() -> Vec<Value> {
              resolved `projects_root` and `config_dir`, each `{path, source}`, or \
              `error` naming a broken `install.toml` with both paths null. Backs the \
              trusty-console Config tab.",
+            ),
             json!({
                 "type": "object",
                 "properties": {},
@@ -99,8 +104,9 @@ pub(super) fn console_tools() -> Vec<Value> {
         ),
         tool(
             "config_write",
-            "Write trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (#1220, \
-             #2184). Supplied fields replace the corresponding settings; omitted \
+            concat!(
+                "Write trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (#1220, ", // path-literal: allow
+                "#2184). Supplied fields replace the corresponding settings; omitted \
              fields are left unchanged. `workspace_root_template` sets the \
              managed-session workspace root (a leading `~` is expanded); \
              `auto_resume` sets the supervisor default; `default_model` sets the \
@@ -119,12 +125,13 @@ pub(super) fn console_tools() -> Vec<Value> {
              (and unlike commit identity) these DO have a global tier — omit `project_name` to \
              set it, or supply an ALREADY-REGISTERED `project_name` to override it for that \
              project only. Returns the merged config that was persisted.",
+            ),
             json!({
                 "type": "object",
                 "properties": {
                     "workspace_root_template": {
                         "type": "string",
-                        "description": "Template dir for session workspaces (e.g. `~/trusty-mpm-projects`)."
+                        "description": "Template dir for session workspaces (e.g. `~/trusty-mpm-projects`)." // path-literal: allow
                     },
                     "auto_resume": {
                         "type": "boolean",

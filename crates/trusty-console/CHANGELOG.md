@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.2] — 2026-11-27
+
+### Breaking
+
+- trusty-console 0.14.1 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-console-0.14.1.txt` (Refs #8699).
+
+### Changed
+
+- The secrets project picker's fallback tm dir, used when `install.toml` does not parse, takes its name from `trusty_common::install_paths::MPM_DIR_NAME` instead of a copied literal; the path is unchanged (#11821).
+
 ## [0.14.1] — 2026-11-27
 
 ### Added

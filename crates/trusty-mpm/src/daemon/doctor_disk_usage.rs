@@ -15,7 +15,8 @@
 //!
 //! Test: the `tests` module in `doctor_disk_usage_tests.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::disk_usage_guard::{
     MAX_USAGE_PCT_KEY, MeasuredMount, ResolvedThreshold, active_threshold_at, fmt_pct,
@@ -92,15 +93,60 @@ fn build_disk_usage_check(
 /// What: measures `repos_root` (falling back to `home` when no repos root is
 /// resolved) and classifies it against the operator's `disk.max_usage_pct`, or
 /// the built-in default when the key is absent.
+/// The measurement runs through [`measure_bounded`], so it never blocks the
+/// tokio worker serving `GET /api/v1/doctor` (#5111).
 /// Test: the pure branches are covered by `build_disk_usage_check`'s tests;
-/// this wrapper is exercised by `tm doctor` itself.
-pub(super) fn check_disk_usage(repos_root: Option<&Path>, home: &Path) -> DoctorCheck {
-    let target = repos_root.unwrap_or(home);
+/// the bound by `a_slow_mount_listing_is_unknown_within_the_deadline`.
+pub(super) async fn check_disk_usage(repos_root: Option<&Path>, home: &Path) -> DoctorCheck {
+    let target = repos_root.unwrap_or(home).to_path_buf();
     let threshold = active_threshold_at(home);
-    build_disk_usage_check(
-        crate::core::disk_usage_guard::measure(target).as_ref(),
-        &threshold,
+    let measured = measure_bounded(
+        target,
+        MEASURE_DEADLINE,
+        crate::core::disk_usage_guard::measure,
     )
+    .await;
+    build_disk_usage_check(measured.as_ref(), &threshold)
+}
+
+/// How long the doctor waits for the mount listing before it reports `Unknown`.
+pub(super) const MEASURE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Run `measure` on the blocking pool, bounded by `deadline`.
+///
+/// Why: `mount_for_path` enumerates every mount through `sysinfo`, which can
+/// stall on a loaded host or a slow network mount. Run inline it blocked the
+/// daemon's tokio worker, and a loaded test run then saw the doctor request
+/// time out as "daemon unreachable" (#5111).
+/// What: `spawn_blocking` plus `tokio::time::timeout`. A deadline miss or a
+/// panicked task answers `None`, the same UNMEASURABLE result as a mount the
+/// OS does not list, with a `warn!`. The blocking task is left to finish.
+/// Test: `a_slow_mount_listing_is_unknown_within_the_deadline`,
+/// `a_fast_mount_listing_passes_through_the_bound`.
+pub(super) async fn measure_bounded<F>(
+    target: PathBuf,
+    deadline: Duration,
+    measure: F,
+) -> Option<MeasuredMount>
+where
+    F: FnOnce(&Path) -> Option<MeasuredMount> + Send + 'static,
+{
+    // #5111: off the async worker, and bounded, so the doctor always answers.
+    let task = tokio::task::spawn_blocking(move || measure(&target));
+    match tokio::time::timeout(deadline, task).await {
+        Ok(Ok(measured)) => measured,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "disk_usage: the mount measurement task failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                deadline_secs = deadline.as_secs(),
+                "disk_usage: the mount listing missed its deadline"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

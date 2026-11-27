@@ -245,6 +245,7 @@ fn spawn_and_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trusty_common::install_paths::MPM_DIR_NAME;
 
     /// This launch's id — #8233 keys the sentinel on the LAUNCH, not the
     /// session, so a marker from an earlier launch cannot satisfy a later one.
@@ -256,7 +257,7 @@ mod tests {
         home: &std::path::Path,
         spec: &std::path::Path,
     ) -> anyhow::Result<(i32, Option<i32>)> {
-        launch_from_spec(spec, Some(&home.join(".trusty-mpm")), None)
+        launch_from_spec(spec, Some(&home.join(MPM_DIR_NAME)), None)
     }
 
     /// Write a spec naming `program` into `dir`, and return its path.

@@ -284,15 +284,51 @@ pub(crate) fn launchd_may_own_daemon() -> bool {
 /// most visibly `tm doctor`, which printed "run `tm restart`" two lines above the
 /// new orphan check. One resolver keeps the remediation correct per host instead
 /// of hardcoding a verb that is wrong half the time.
-/// What: the `launchctl kickstart -k` recipe for `label` when a daemon unit is
-/// registered; plain `tm restart` otherwise.
-/// Test: `restart_command_names_kickstart_when_launchd_owns_the_daemon`,
+/// What: when a daemon unit is registered, the release-workflow.md sequence for
+/// `label` ("launchd domain and restart sequence"): `launchctl bootout`, a wait
+/// capped at 30 s until `launchctl print` no longer finds the job, then one
+/// `launchctl bootstrap` of its plist. Plain `tm restart` otherwise. Never
+/// `kickstart -k`: it SIGKILLs and skips request draining
+/// (release-workflow.md, "Connection-Safe Daemon Restart").
+/// Test: `restart_command_names_bootout_then_bootstrap_when_launchd_owns_the_daemon`,
 /// `restart_command_names_tm_restart_without_a_unit`.
 pub(crate) fn daemon_restart_command_for(label: Option<&str>) -> String {
     match label {
-        Some(l) => format!("launchctl kickstart -k gui/$(id -u)/{l}"),
+        // #11809: bootout sends SIGTERM, so the daemon drains in-flight requests.
+        // The wait matters: a bootstrap sent while the old process is still
+        // exiting fails with error 5 and leaves the daemon unloaded.
+        Some(l) => format!(
+            "launchctl bootout gui/$(id -u)/{l}; \
+             for i in $(seq 30); do launchctl print gui/$(id -u)/{l} >/dev/null 2>&1 || break; \
+             sleep 1; done; \
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{l}.plist"
+        ),
         None => "tm restart".to_string(),
     }
+}
+
+/// Test helper: `msg` carries `label`'s bootout, then the wait, then its
+/// bootstrap, in that order, and never `kickstart`.
+///
+/// Why (#11809): every restart-hint test pins the same order, so one assertion
+/// keeps a hint that drops the wait from passing anywhere.
+/// What: finds the three steps by position and asserts they ascend.
+/// Test: called by every test that pins restart-hint text.
+#[cfg(test)]
+pub(crate) fn assert_restart_order(msg: &str, label: &str) {
+    let steps = [
+        format!("launchctl bootout gui/$(id -u)/{label};"),
+        format!("do launchctl print gui/$(id -u)/{label} >/dev/null 2>&1 || break; sleep 1; done;"),
+        format!("launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist"),
+    ];
+    let mut last = 0;
+    for step in &steps {
+        let at = msg[last..]
+            .find(step.as_str())
+            .unwrap_or_else(|| panic!("no `{step}` after byte {last}; message was: {msg}"));
+        last += at + step.len();
+    }
+    assert!(!msg.contains("kickstart"), "message was: {msg}");
 }
 
 /// Resolve [`daemon_restart_command_for`] against this host.
@@ -367,7 +403,7 @@ pub(crate) fn compute_no_spawn(plist_exists: bool) -> bool {
 /// Taking the label as a parameter is the #4230-review fix for a hint that
 /// previously hardcoded `com.trusty.mpm` and so prescribed a nonexistent unit on
 /// a host whose label had drifted.
-/// Test: `cli_spawn_refusal_names_kickstart_and_force`,
+/// Test: `cli_spawn_refusal_names_bootout_bootstrap_and_force`,
 /// `cli_spawn_refusal_names_the_resolved_label`.
 pub(crate) fn cli_spawn_refusal_hint(label: &str) -> String {
     format!(
@@ -649,24 +685,27 @@ mod tests {
     /// actually works and the `--force` opt-in, so an operator hitting it has
     /// an immediate next step either way.
     #[test]
-    fn cli_spawn_refusal_names_kickstart_and_force() {
+    fn cli_spawn_refusal_names_bootout_bootstrap_and_force() {
         let msg = cli_spawn_refusal_hint(DAEMON_LAUNCHD_LABEL);
-        assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
-        assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
+        // #11809: bootout, wait, then bootstrap of the registered plist; no kickstart.
+        assert_restart_order(&msg, "com.trusty.mpm");
         assert!(msg.contains("tm daemon --force"), "message was: {msg}");
         assert!(msg.contains("#4230"), "message was: {msg}");
     }
 
     /// #4230 review: the hint must name the label actually registered on this
     /// host. Hardcoding `com.trusty.mpm` prescribed a nonexistent unit —
-    /// `launchctl kickstart` on it fails with "Could not find service".
+    /// `launchctl` on it fails with "Could not find service".
     #[test]
     fn cli_spawn_refusal_names_the_resolved_label() {
         let msg = cli_spawn_refusal_hint("com.trusty.mpm.dogfood");
-        assert!(msg.contains("com.trusty.mpm.dogfood"), "message was: {msg}");
+        // #11809: every step names the resolved label, not the default one.
+        assert_restart_order(&msg, "com.trusty.mpm.dogfood");
         assert!(
-            msg.contains("gui/$(id -u)/com.trusty.mpm.dogfood"),
-            "message was: {msg}"
+            !msg.contains("LaunchAgents/com.trusty.mpm.plist")
+                && !msg.contains("gui/$(id -u)/com.trusty.mpm;")
+                && !msg.contains("gui/$(id -u)/com.trusty.mpm >"),
+            "the default label leaked into the hint: {msg}"
         );
     }
 
@@ -931,11 +970,19 @@ mod tests {
     }
 
     #[test]
-    fn restart_command_names_kickstart_when_launchd_owns_the_daemon() {
+    fn restart_command_names_bootout_then_bootstrap_when_launchd_owns_the_daemon() {
+        // #11809: the doctor suggestion matches release-workflow.md — bootout,
+        // wait until the job is gone, then bootstrap exactly once.
+        let cmd = daemon_restart_command_for(Some("com.trusty.mpm"));
         assert_eq!(
-            daemon_restart_command_for(Some("com.trusty.mpm")),
-            "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm"
+            cmd,
+            "launchctl bootout gui/$(id -u)/com.trusty.mpm; \
+             for i in $(seq 30); do launchctl print gui/$(id -u)/com.trusty.mpm >/dev/null 2>&1 \
+             || break; sleep 1; done; \
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist"
         );
+        assert_restart_order(&cmd, "com.trusty.mpm");
+        assert_eq!(cmd.matches("launchctl bootstrap").count(), 1, "{cmd}");
     }
 
     #[test]
