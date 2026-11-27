@@ -9,7 +9,7 @@
 
 **Revision choice (2026-11-12).** v1 is an in-place revision of this file, not a superseding file. The Architect ruled at 17:05Z to merge into DOC-89 and not create a second spec. The file has no frontmatter and every section is still `~draft`, so nothing was accepted and nothing needs a `Superseded` marker; DOC-38 section 4.4 reserves `~v1` for acceptance, so the sections keep `~draft`. v1 adds sections 6 to 13. Sections 1 to 5 stay as the v0 record and the phase-1 fixtures' second input format. The filename keeps `-v0` so existing links hold. Ticket: [#11133](https://github.com/bobmatnyc/trusty-tools/issues/11133) (the Architect task, tracked on #11133). Owner instruction: 2026-11-12 17:01Z and 17:03Z (Architect brief `2026-11-12-structured-response-instruction.md`).
 
-Source of v0: agent-comm POC Track 1, plan step 3 (`/Users/masa/trusty-mpm-projects/reviews/agent-comm-poc/plan.md`), owner ruling D0e. This spec proposes a schema for the POC replay. It changes no existing file and is not adopted until the POC verdict is GO.
+Source of v0: agent-comm POC Track 1, plan step 3 (`~/trusty-mpm-projects/reviews/agent-comm-poc/plan.md`), owner ruling D0e. This spec proposes a schema for the POC replay. It changes no existing file and is not adopted until the POC verdict is GO.
 
 ## 1. Scope {#SPEC-HANDBACK-01~draft}
 
@@ -56,7 +56,7 @@ That is 6 lines. Two weaknesses the example shows. The source prose gives the ga
 
 **ID:** SPEC-HANDBACK-04~draft
 
-Existing formats: BASE-AGENT "Required completion format" (`content/agents/BASE-AGENT.md`, section "Verification Before Completion"); SPEC-IL-01 (`/Users/masa/trusty-mpm-projects/architect/docs/specs/SPEC-IL-01.md`, sections 2.2, 11.1, 15) with the IL handback tail.
+Existing formats: BASE-AGENT "Required completion format" (`content/agents/BASE-AGENT.md`, section "Verification Before Completion"); SPEC-IL-01 (`~/trusty-mpm-projects/architect/docs/specs/SPEC-IL-01.md`, sections 2.2, 11.1, 15) with the IL handback tail.
 
 **Placement.** v0 wraps. For an agent handback the order is: the v0 block, then the BASE-AGENT sections (`## Verification Results`) as the long form, then the IL tail. The PM reads the block and opens the long form only when `open` or `delta` says `[NEEDS-ATTENTION]`. For the POC, arm P keeps today's handback unchanged and arm C replaces the long form with the block. Nothing is adopted before GO (OQ1).
 

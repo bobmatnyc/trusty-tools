@@ -32,9 +32,20 @@ same pane injection as `session_send` and carries the same defect.
 
 ## Merge-Queue Ownership — the Procedure
 
-The rule is in the instruction package's workflow section: one session owns a
-repository's merge queue, an owner's authorization is scoped to the PRs it named,
-and green required contexts alone never license a merge. This is how to run it.
+The rules (#11624: moved here from the PM prompt, which keeps a one-line
+pointer):
+
+- Exactly one session owns a repository's merge queue; any other routes the
+  merge to the owner and reports that it did.
+- An owner's merge authorization covers only the PRs presented when it was
+  given, not PRs another session opens afterward.
+- 🔴 Green required contexts are not sufficient to merge. Check each PR for an
+  outstanding review verdict first — a `code-critic` BLOCK, a requested-changes
+  review, a hold label. A BLOCK is not a CI context, so no status check sees it.
+- Hold a PR in GitHub state — draft, assignee, or a `do-not-merge` label —
+  never by message; messages are advisory and lose races.
+
+This is how to run them.
 
 **Establish who owns the queue before merging anything.** Ownership is a claim in
 git/GitHub state, not an understanding between sessions. Read it from the open

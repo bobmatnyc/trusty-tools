@@ -790,7 +790,10 @@ directory holds only `ta`. A `tctl` on PATH that does not accept
 
 **No Developer ID certificate present is never a hard failure** — `ta` stays
 ad-hoc signed with a clear warning and remains fully functional; it simply
-re-prompts for TCC access on the next rebuild.
+re-prompts for TCC access on the next rebuild. The script reads that case from
+`tctl sign`'s exit code 3, exits 0, and ends with the line `NOT SIGNED`. Any
+other sign failure, such as a locked keychain or a signature with the wrong
+Team ID, is an ERROR and exits 1 (#11683).
 
 Already have `ta` installed and just want to (re-)sign it? Re-run the script
 with the same source. Do not point a bare `tctl sign trusty-assistants` (or
@@ -861,7 +864,9 @@ tctl sign trusty-memory
 
 Like `install-trusty-assistants-signed.sh`, the script delegates the signing step
 to `tctl sign` rather than duplicating `codesign` flags, and a missing
-Developer ID certificate is a warning, not a hard failure.
+Developer ID certificate (`tctl sign` exit 3) is a warning, not a hard failure:
+the script exits 0 and its last line is `NOT SIGNED`. Any other sign failure
+exits 1 (#11683).
 
 🟡 **Hardened Runtime is applied on explicit signing only** — the same split
 trusty-search gets, and for the same reason. `trusty-memory` links

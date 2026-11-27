@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.1] — 2026-11-27
+
+### Changed
+
+- The kuzu-review masked export root stays fixed under `$HOME`, and the path-literal checker now carries an explicit waiver citing ruling Q4 of #8624 (comment-only, no behaviour change) (#11821).
+
 ## [1.1.0] — 2026-11-27
 
 ### Fixed

@@ -32,6 +32,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 use anyhow::{Context, Result};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
@@ -144,8 +145,89 @@ pub fn extract_published_src(
     Ok(out)
 }
 
-/// Reads every regular file under `<crate_root>/src/` from disk into an
-/// in-memory `path -> bytes` map, keyed by path relative to `src/`.
+/// Why: #12092 — a file the manifest's `exclude` drops never reaches the
+/// tarball, so comparing it reported false "added" drift.
+/// What: mirrors cargo's `PathSource` rule: with a non-empty `include`, a file
+/// ships only if an `include` pattern matches it or a parent; otherwise it
+/// ships unless an `exclude` pattern does. Both lists use gitignore syntax,
+/// rooted at the package root.
+/// Test: `excluded_src_files_are_not_reported_as_added`,
+/// `include_list_limits_the_compared_files`.
+struct PackageFilter {
+    exclude: Gitignore,
+    include: Option<Gitignore>,
+}
+
+impl PackageFilter {
+    /// Builds the filter from `<crate_root>/Cargo.toml`; no manifest means no patterns.
+    fn from_manifest(crate_root: &Path) -> Result<Self> {
+        let manifest = crate_root.join("Cargo.toml");
+        let package = if manifest.is_file() {
+            let text = std::fs::read_to_string(&manifest)
+                .with_context(|| format!("reading {}", manifest.display()))?;
+            let value: toml::Value = text
+                .parse()
+                .with_context(|| format!("parsing {}", manifest.display()))?;
+            value.get("package").cloned()
+        } else {
+            None
+        };
+        let exclude = manifest_patterns(package.as_ref(), "exclude")?;
+        let include = manifest_patterns(package.as_ref(), "include")?;
+        Ok(Self {
+            exclude: build_matcher(crate_root, &exclude)?,
+            include: if include.is_empty() {
+                None
+            } else {
+                Some(build_matcher(crate_root, &include)?)
+            },
+        })
+    }
+
+    /// `true` when `cargo package` would ship `rel` (a file path relative to the package root).
+    fn ships(&self, rel: &Path) -> bool {
+        match &self.include {
+            Some(include) => include.matched_path_or_any_parents(rel, false).is_ignore(),
+            None => !self
+                .exclude
+                .matched_path_or_any_parents(rel, false)
+                .is_ignore(),
+        }
+    }
+}
+
+/// Reads `package.<key>` as a list of strings; absent means empty, any other shape is an error.
+fn manifest_patterns(package: Option<&toml::Value>, key: &str) -> Result<Vec<String>> {
+    let Some(value) = package.and_then(|p| p.get(key)) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .with_context(|| format!("package.{key} is not an array of strings"))?;
+    array
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .with_context(|| format!("package.{key} holds a non-string entry"))
+        })
+        .collect()
+}
+
+/// Compiles gitignore-syntax `patterns` rooted at `root`, as cargo does.
+fn build_matcher(root: &Path, patterns: &[String]) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new(root);
+    for pattern in patterns {
+        builder
+            .add_line(None, pattern)
+            .with_context(|| format!("invalid manifest pattern {pattern:?}"))?;
+    }
+    builder.build().context("compiling manifest patterns")
+}
+
+/// Reads every regular file under `<crate_root>/src/` that `cargo package`
+/// would ship into an in-memory `path -> bytes` map, keyed by path relative
+/// to `src/`. Files dropped by the manifest's `exclude`/`include` are skipped.
 ///
 /// Returns an empty map (not an error) if the crate has no `src/` directory —
 /// callers decide what that means; this function only reports what exists.
@@ -155,6 +237,8 @@ pub fn local_src(crate_root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     if !src_dir.exists() {
         return Ok(out);
     }
+    // #12092: compare only what `cargo package` ships, per the manifest patterns.
+    let filter = PackageFilter::from_manifest(crate_root)?;
     for entry in walkdir::WalkDir::new(&src_dir) {
         let entry = entry.with_context(|| format!("walking {}", src_dir.display()))?;
         if !entry.file_type().is_file() {
@@ -166,6 +250,9 @@ pub fn local_src(crate_root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
             .expect("walkdir entries are always under src_dir")
             .to_string_lossy()
             .replace('\\', "/");
+        if !filter.ships(&Path::new("src").join(&rel)) {
+            continue;
+        }
         let content = std::fs::read(entry.path())
             .with_context(|| format!("reading {}", entry.path().display()))?;
         out.insert(rel, content);
@@ -417,6 +504,103 @@ mod tests {
             "a registry lookup failure must fail closed (Err), never be coerced into \
              NotYetPublished or Parity"
         );
+    }
+
+    /// #12092: writes a fixture manifest whose `[package]` carries `extra`.
+    fn write_manifest(crate_root: &Path, extra: &str) {
+        let text = format!("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n{extra}\n");
+        std::fs::write(crate_root.join("Cargo.toml"), text).unwrap();
+    }
+
+    /// #12092: a file the manifest excludes never ships, so it is not "added".
+    #[test]
+    fn excluded_src_files_are_not_reported_as_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), r#"exclude = ["/src/**/*_tests.rs"]"#);
+        write_local_src(
+            tmp.path(),
+            &[
+                ("lib.rs", "pub fn x() {}"),
+                ("lib_tests.rs", "#[test] fn t() {}"),
+                ("deep/mod_tests.rs", "#[test] fn t() {}"),
+            ],
+        );
+        let tarball = build_tarball("demo-0.1.0", &[("lib.rs", "pub fn x() {}")]);
+        let fetcher = FakeFetcher::with_published("demo", "0.1.0", tarball);
+
+        let status = check_crate(&fetcher, tmp.path(), "demo", "0.1.0").unwrap();
+
+        assert_eq!(status, ParityStatus::Parity);
+    }
+
+    /// #12092: the exclude filter must not hide drift in files that do ship.
+    #[test]
+    fn real_drift_in_non_excluded_files_is_still_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), r#"exclude = ["/src/**/*_tests.rs"]"#);
+        write_local_src(
+            tmp.path(),
+            &[
+                ("lib.rs", "pub fn x() { 2 }"),
+                ("new_module.rs", "pub fn y() {}"),
+                ("lib_tests.rs", "#[test] fn t() {}"),
+            ],
+        );
+        let tarball = build_tarball(
+            "demo-0.1.0",
+            &[
+                ("lib.rs", "pub fn x() { 1 }"),
+                ("legacy.rs", "pub fn old() {}"),
+            ],
+        );
+        let fetcher = FakeFetcher::with_published("demo", "0.1.0", tarball);
+
+        let status = check_crate(&fetcher, tmp.path(), "demo", "0.1.0").unwrap();
+
+        assert_eq!(
+            status,
+            ParityStatus::Drift(vec![
+                DriftEntry::Removed("legacy.rs".to_string()),
+                DriftEntry::Modified("lib.rs".to_string()),
+                DriftEntry::Added("new_module.rs".to_string()),
+            ])
+        );
+    }
+
+    /// #12092: a non-empty `include` list is the whole shipped set; `exclude` is ignored.
+    #[test]
+    fn include_list_limits_the_compared_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(
+            tmp.path(),
+            "include = [\"/Cargo.toml\", \"/src/lib.rs\"]\nexclude = [\"/src/lib.rs\"]",
+        );
+        write_local_src(
+            tmp.path(),
+            &[
+                ("lib.rs", "pub fn x() { 2 }"),
+                ("extra.rs", "pub fn e() {}"),
+            ],
+        );
+        let tarball = build_tarball("demo-0.1.0", &[("lib.rs", "pub fn x() { 1 }")]);
+        let fetcher = FakeFetcher::with_published("demo", "0.1.0", tarball);
+
+        let status = check_crate(&fetcher, tmp.path(), "demo", "0.1.0").unwrap();
+
+        assert_eq!(
+            status,
+            ParityStatus::Drift(vec![DriftEntry::Modified("lib.rs".to_string())])
+        );
+    }
+
+    /// #12092: a malformed pattern list fails closed instead of comparing everything.
+    #[test]
+    fn non_array_exclude_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), r#"exclude = "/src/""#);
+        write_local_src(tmp.path(), &[("lib.rs", "pub fn x() {}")]);
+
+        assert!(local_src(tmp.path()).is_err());
     }
 
     #[test]

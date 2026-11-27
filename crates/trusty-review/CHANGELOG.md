@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.42.2] — 2026-11-27
+
+### Breaking
+
+- trusty-review 0.42.1 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-review-0.42.1.txt` (Refs #8699).
+
+### Fixed
+
+- Two `cargo test -p trusty-review` hangs no longer occur: a test that read from an inherited stdin, and a deadlock at the dedup barrier (Refs [#12040](https://github.com/bobmatnyc/trusty-tools/issues/12040))
+
 ## [0.42.1] — 2026-11-27
 
 ### Added

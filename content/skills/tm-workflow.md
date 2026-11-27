@@ -3,7 +3,7 @@ name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
 metadata:
-  version: "2.3.0"
+  version: "2.4.0"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium
@@ -134,7 +134,7 @@ resolves here: find the section name in the middle column.
 
 | Task | Sections | File |
 |---|---|---|
-| Pick the phases a task runs, brief each phase, honour an override | "The 5-Phase Model and Its Dispatch Briefs", "Sprint, then Harden — the Rest of the Doctrine" | [references/phases.md](references/phases.md) |
+| Pick the phases a task runs, brief each phase, honour an override | "The 5-Phase Model and Its Dispatch Briefs", "Sprint, then Harden — the Rest of the Doctrine", "Layout ADRs Are Defaults, Not Mandates", "Source Citations" | [references/phases.md](references/phases.md) |
 | Decide whether work is done and which findings block it; judge a non-code deliverable (quoted criteria, evidence map, no proxy targets); do deterministic work deterministically; test declared demo/POC work | "Completion Standard — the Full Text", "Demo and POC Work — Minimal Tests, Named Intentions", "Non-Code Deliverables — Quoted Criteria, Evidence Map, No Proxy Targets", "Deterministic Work" | [references/completion-standard.md](references/completion-standard.md) |
 | Choose how wide a test gate runs at each stage | "Test Scope Widens by Stage" | [references/test-scope.md](references/test-scope.md) |
 | Provision a worktree, keep the main checkout fresh, isolate a dispatch, clean up after merge | "Worktree Discipline (Mandatory Before Any Source Edit)", including "Keep the main checkout fresh"; "Task-Owned Cleanup" | [references/worktree-discipline.md](references/worktree-discipline.md) |

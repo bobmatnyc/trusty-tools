@@ -1321,6 +1321,22 @@ fn gone_within(pid: libc::pid_t, bound: std::time::Duration) -> bool {
     gone
 }
 
+/// How long a shim whose gh is already reaped gets to exit, before the test
+/// KILLs it (#11988). Not the grace under test: that is the 7 s gh bound.
+#[cfg(unix)]
+const SHIM_EXIT_AFTER_REAP: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 🔴 #11988: the shim-exit bound must leave a loaded host room for the
+/// trap's tail; 1 s did not (`unix_wait_status(9)` on a loaded Linux runner).
+#[cfg(unix)]
+#[test]
+fn the_shim_exit_bound_leaves_room_for_a_loaded_host() {
+    assert!(
+        SHIM_EXIT_AFTER_REAP >= std::time::Duration::from_secs(10),
+        "{SHIM_EXIT_AFTER_REAP:?}"
+    );
+}
+
 /// 🔴 #10550: a gh that ignores TERM is KILLed once the shim's 5 s grace
 /// passes, so TERM to the shim pid alone still leaves no gh, exit 143 and no
 /// buffer dir.
@@ -1349,7 +1365,10 @@ fn a_gh_that_ignores_term_is_killed_within_the_grace() {
     unsafe { libc::kill(shim_pid, libc::SIGTERM) };
     // The grace is 5 s; 2 s of slack.
     let gh_gone = gone_within(gh, Duration::from_secs(7));
-    if !holds_within(Duration::from_secs(1), || {
+    // #11988: gh is reaped by now; the shim still has to stop the watchdog,
+    // run its EXIT trap and exit 143. Under full-suite load that tail took
+    // over 1 s and this test KILLed a shim that was about to exit 143.
+    if !holds_within(SHIM_EXIT_AFTER_REAP, || {
         shim.try_wait().expect("try_wait").is_some()
     }) {
         shim.kill().expect("KILL the shim");
