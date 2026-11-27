@@ -105,6 +105,8 @@ mod branch_and_corpus;
 mod chunk_cap;
 mod corpus_fault;
 mod deferred_commit_8761;
+// #12064: the deferred-embed plan owes what the corpus holds.
+mod deferred_corpus_12064;
 mod embed_pool_routing;
 // #9284: chunks cut at the embedder window are counted and warned on.
 mod embed_window_9284;

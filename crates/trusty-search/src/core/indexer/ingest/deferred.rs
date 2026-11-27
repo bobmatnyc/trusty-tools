@@ -14,7 +14,7 @@
 //! Test: `status_answers_during_an_embed_pass_with_a_writer_queued`, plus the
 //! #6524 pause tests through `embed_deferred_chunks_gated`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -62,6 +62,9 @@ pub(crate) struct DeferredEmbedPlan {
     to_embed: Vec<RawChunk>,
     /// Embed-only headers, 1:1 with `to_embed`; an empty one means none (#10504).
     headers: Option<Vec<String>>,
+    /// #12064: ids read from redb because the chunk map lacked them; the
+    /// commit confirms these against their rows, not the map.
+    from_corpus: HashSet<String>,
     embed: EmbedContext,
 }
 
@@ -127,13 +130,14 @@ impl CodeIndexer {
     /// Why: issue #2984 Phase 1 HIGH finding 3 — catch-up is incremental, so
     /// chunks that already carry a vector are skipped (`contains_many`).
     /// #10294: only ids are kept, so the plan is not a second copy of the corpus.
-    /// What: the read-only first phase; see [`DeferredEmbedPass`].
-    /// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-    pub(crate) async fn plan_deferred_pass(&self) -> DeferredEmbedPass {
-        let ids: Vec<String> = {
-            self.ensure_chunks_loaded().await;
-            self.chunks.read().await.keys().cloned().collect()
-        };
+    /// What: the read-only first phase; see [`DeferredEmbedPass`]. #12064: the
+    /// ids are the durable corpus keys, the set the settle measures; errors
+    /// when they cannot be read.
+    /// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`,
+    /// `a_corpus_row_missing_from_the_chunk_map_gets_a_vector_12064`.
+    pub(crate) async fn plan_deferred_pass(&self) -> Result<DeferredEmbedPass> {
+        // #12064: plan from the corpus, not the chunk map.
+        let ids = self.deferred_candidate_ids().await?;
         let total = ids.len();
         let embed = self.embed_context().await;
         let mut owed: Vec<String> = match (&self.store, self.embedder.is_some()) {
@@ -147,12 +151,12 @@ impl CodeIndexer {
             _ => Vec::new(),
         };
         owed.sort_unstable();
-        DeferredEmbedPass {
+        Ok(DeferredEmbedPass {
             owed,
             next: 0,
             total,
             embed,
-        }
+        })
     }
 
     /// Load the next `wave` owed chunks of `pass` (#10294).
@@ -160,36 +164,55 @@ impl CodeIndexer {
     /// Why: one wave of chunks in memory at a time, not the corpus.
     /// What: takes ids from `pass` until `wave` chunks are loaded or the ids
     /// run out, cloning each chunk from the map once it is a view of the whole
-    /// corpus. An id the corpus no longer holds is skipped. `None` when no id
-    /// is left. Errors when the map cannot be read within
-    /// [`BACKGROUND_REHYDRATE_CEILING`].
+    /// corpus. #12064: an id the map lacks is read from redb with the rest of
+    /// the wave's absent ids; one redb no longer holds is skipped. `None` when
+    /// no id is left. Errors when the map cannot be read within
+    /// [`BACKGROUND_REHYDRATE_CEILING`] or the absent rows cannot be read.
     /// #10504: also builds the wave's embed headers (see [`CodeIndexer::catch_up_headers`]).
-    /// Test: `a_finished_wave_is_searchable_and_on_disk_before_the_next_wave_starts`.
+    /// Test: `a_finished_wave_is_searchable_and_on_disk_before_the_next_wave_starts`,
+    /// `a_failed_row_load_fails_the_wave_12064`.
     pub(crate) async fn plan_deferred_group(
         &self,
         pass: &mut DeferredEmbedPass,
         wave: usize,
     ) -> Result<Option<DeferredEmbedPlan>> {
         let wave = wave.max(1);
-        let corpus = self
-            .read_corpus_view(BACKGROUND_REHYDRATE_CEILING)
-            .await
-            .context("load the next wave of owed chunks")?;
-        let mut to_embed = Vec::with_capacity(wave.min(pass.owed.len() - pass.next));
-        while to_embed.len() < wave && pass.next < pass.owed.len() {
-            if let Some(chunk) = corpus.get(&pass.owed[pass.next]) {
-                to_embed.push(chunk.clone());
+        let (to_embed, from_corpus) = loop {
+            if pass.next >= pass.owed.len() {
+                return Ok(None);
             }
-            pass.next += 1;
-        }
-        if to_embed.is_empty() {
-            return Ok(None);
-        }
+            let (mut to_embed, absent) = {
+                let corpus = self
+                    .read_corpus_view(BACKGROUND_REHYDRATE_CEILING)
+                    .await
+                    .context("load the next wave of owed chunks")?;
+                let mut to_embed = Vec::with_capacity(wave.min(pass.owed.len() - pass.next));
+                let mut absent = Vec::new();
+                while to_embed.len() + absent.len() < wave && pass.next < pass.owed.len() {
+                    let id = &pass.owed[pass.next];
+                    match corpus.get(id) {
+                        Some(chunk) => to_embed.push(chunk.clone()),
+                        None => absent.push(id.clone()),
+                    }
+                    pass.next += 1;
+                }
+                (to_embed, absent)
+            };
+            // #12064: a corpus row the map lacks is still owed; read it from redb.
+            let loaded = self.load_owed_rows(absent).await?;
+            let from_corpus: HashSet<String> = loaded.iter().map(|c| c.id.clone()).collect();
+            to_embed.extend(loaded);
+            // A wave whose every id was removed meanwhile is skipped, not the end.
+            if !to_embed.is_empty() {
+                break (to_embed, from_corpus);
+            }
+        };
         // #10504: head each owed chunk that fits; stored text is never touched.
         let headers = self.catch_up_headers(&to_embed).await;
         Ok(Some(DeferredEmbedPlan {
             to_embed,
             headers,
+            from_corpus,
             embed: pass.embed.clone(),
         }))
     }
@@ -217,7 +240,8 @@ impl CodeIndexer {
     /// `a_stalled_wave_commits_the_waves_before_it`,
     /// `a_file_removed_or_edited_during_the_embed_phase_gets_no_vector`,
     /// `a_file_removed_during_the_upsert_has_its_vector_evicted`,
-    /// `a_rehydrate_slower_than_the_query_budget_is_waited_out`.
+    /// `a_rehydrate_slower_than_the_query_budget_is_waited_out`,
+    /// `a_corpus_row_missing_from_the_chunk_map_gets_a_vector_12064`.
     pub(crate) async fn commit_deferred_embed(
         &self,
         plan: DeferredEmbedPlan,
@@ -226,6 +250,7 @@ impl CodeIndexer {
         let DeferredEmbedPlan {
             mut to_embed,
             headers: _,
+            from_corpus,
             embed: _,
         } = plan;
         // #10294: `total` is this wave; the pass driver reports the corpus.
@@ -242,10 +267,14 @@ impl CodeIndexer {
         embeddings.truncate(done);
         to_embed.truncate(done);
         // #8761: the snapshot may name chunks removed or edited while it embedded.
-        let (live, embeddings) = self.retain_live_snapshot(to_embed, embeddings).await?;
+        let (live, embeddings) = self
+            .retain_live_snapshot(to_embed, embeddings, &from_corpus)
+            .await?;
         let rejected = self.commit_vectors_batch(&live, &embeddings).await?;
         self.commit_embeddings_cache(&live, embeddings).await;
-        let evicted = self.evict_vectors_removed_during_commit(&live).await?;
+        let evicted = self
+            .evict_vectors_removed_during_commit(&live, &from_corpus)
+            .await?;
         if let Some(stall) = stalled {
             // #8600: the completed waves are committed; #10294: the pass
             // driver checkpoints them before the pass settles `Failed`.
@@ -387,27 +416,35 @@ impl CodeIndexer {
     /// vector of its current content with the pre-edit one.
     /// What: keeps each chunk whose id the corpus holds with identical
     /// content, with its embedding. Errors when the map cannot be read as the
-    /// whole corpus within [`BACKGROUND_REHYDRATE_CEILING`].
+    /// whole corpus within [`BACKGROUND_REHYDRATE_CEILING`]. #12064: a chunk
+    /// in `from_corpus` the map still lacks is checked against its redb row.
     /// Test: `a_file_removed_or_edited_during_the_embed_phase_gets_no_vector`,
     /// `commit_refuses_when_the_chunk_map_cannot_be_rehydrated`.
     async fn retain_live_snapshot(
         &self,
         snapshot: Vec<RawChunk>,
         embeddings: Vec<Option<Vec<f32>>>,
+        from_corpus: &HashSet<String>,
     ) -> Result<(Vec<RawChunk>, Vec<Option<Vec<f32>>>)> {
-        let corpus = self
-            .read_corpus_view(BACKGROUND_REHYDRATE_CEILING)
-            .await
-            .context("confirm the embedded chunks are still in the corpus")?;
-        Ok(snapshot
-            .into_iter()
-            .zip(embeddings)
-            .filter(|(chunk, _)| {
-                corpus
-                    .get(&chunk.id)
-                    .is_some_and(|now| now.content == chunk.content)
-            })
-            .unzip())
+        let mut kept = Vec::with_capacity(snapshot.len());
+        let mut unmapped = Vec::new();
+        {
+            let corpus = self
+                .read_corpus_view(BACKGROUND_REHYDRATE_CEILING)
+                .await
+                .context("confirm the embedded chunks are still in the corpus")?;
+            for pair in snapshot.into_iter().zip(embeddings) {
+                match corpus.get(&pair.0.id) {
+                    Some(now) if now.content == pair.0.content => kept.push(pair),
+                    Some(_) => {}
+                    // #12064: the row, not the map, says whether it is live.
+                    None if from_corpus.contains(&pair.0.id) => unmapped.push(pair),
+                    None => {}
+                }
+            }
+        }
+        kept.extend(self.retain_live_corpus_rows(unmapped).await?);
+        Ok(kept.into_iter().unzip())
     }
 
     /// Evict the vectors of chunks removed while they were being upserted (#8761).
@@ -421,16 +458,21 @@ impl CodeIndexer {
     /// What: removes the vector and cached embedding of every committed chunk
     /// the corpus no longer holds, and returns how many it removed. Every id
     /// is attempted; the failures come back as one error. Errors too when the
-    /// map cannot be read as the whole corpus.
+    /// map cannot be read as the whole corpus. #12064: a chunk in
+    /// `from_corpus` the map lacks is removed only when its redb row is gone.
     /// Test: `a_file_removed_during_the_upsert_has_its_vector_evicted`,
     /// `a_failed_eviction_after_the_upsert_is_an_error`,
     /// `one_failed_eviction_does_not_stop_the_others`,
     /// `post_upsert_check_refuses_when_the_chunk_map_cannot_be_rehydrated`.
-    async fn evict_vectors_removed_during_commit(&self, committed: &[RawChunk]) -> Result<usize> {
+    async fn evict_vectors_removed_during_commit(
+        &self,
+        committed: &[RawChunk],
+        from_corpus: &HashSet<String>,
+    ) -> Result<usize> {
         let Some(store) = &self.store else {
             return Ok(0);
         };
-        let removed: Vec<&str> = {
+        let (mut removed, unmapped): (Vec<String>, Vec<String>) = {
             let corpus = self
                 .read_corpus_view(BACKGROUND_REHYDRATE_CEILING)
                 .await
@@ -438,13 +480,15 @@ impl CodeIndexer {
             committed
                 .iter()
                 .filter(|chunk| !corpus.contains_key(&chunk.id))
-                .map(|chunk| chunk.id.as_str())
-                .collect()
+                .map(|chunk| chunk.id.clone())
+                .partition(|id| !from_corpus.contains(id))
         };
+        // #12064: a chunk read from redb is removed only once its row is gone.
+        removed.extend(self.corpus_rows_gone(unmapped).await?);
         // #8761: one failed removal must not leave the rest as orphans.
         let mut failures = Vec::new();
         for id in &removed {
-            self.chunk_embeddings.write().await.pop(*id);
+            self.chunk_embeddings.write().await.pop(id);
             if let Err(e) = store.remove(id).await {
                 failures.push(format!("evict the vector of removed chunk {id}: {e:#}"));
             }
