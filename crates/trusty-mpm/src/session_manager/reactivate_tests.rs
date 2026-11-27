@@ -459,3 +459,95 @@ async fn mark_reactivated_still_revives_an_approved_front_gate_record() {
 
     assert_eq!(revived.state, ManagedSessionState::Active);
 }
+
+/// A session with a conversation id, in `workspace`, for the #12012 rollback tests.
+async fn session_with_conversation(
+    mgr: &super::SessionManager,
+    workspace: &std::path::Path,
+) -> ManagedSessionId {
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(workspace.to_owned()),
+            None,
+            Some(workspace.to_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_claude_session_id(&record.id, "uuid-before")
+        .await
+        .expect("set_claude_session_id");
+    record.id
+}
+
+/// #12012: rolling a reactivate back restores the Stopped record's
+/// conversation id and stop cause, so the next relaunch resumes it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn revert_reactivation_restores_the_conversation_and_stop_cause() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = session_with_conversation(&mgr, workspace.path()).await;
+    mgr.stop(&id).await.expect("stop");
+    let prior = mgr.get(&id).await.expect("prior");
+    assert!(prior.stop_cause.is_some(), "premise: stop records a cause");
+    mgr.mark_reactivated(&id).await.expect("reactivate");
+
+    let after = mgr.revert_reactivation(&prior).await.expect("revert");
+
+    assert_eq!(after.state, ManagedSessionState::Stopped);
+    assert_eq!(after.claude_session_id.as_deref(), Some("uuid-before"));
+    assert_eq!(after.stop_cause, prior.stop_cause);
+    let stored = mgr.get(&id).await.expect("stored");
+    assert_eq!(stored.state, ManagedSessionState::Stopped, "persisted");
+    assert_eq!(stored.claude_session_id.as_deref(), Some("uuid-before"));
+}
+
+/// #12012 (critic MEDIUM): an `Active` prior (the stale-Active reconcile
+/// shape) rolls back to `Stopped` and still keeps the conversation id.
+/// Test: this function IS the test. Fails if the id is restored only when
+/// the target state equals `prior.state`.
+#[tokio::test]
+async fn revert_reactivation_from_an_active_prior_keeps_the_conversation() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = session_with_conversation(&mgr, workspace.path()).await;
+    let prior = mgr.get(&id).await.expect("prior");
+    assert_eq!(prior.state, ManagedSessionState::Active, "premise");
+    mgr.stop(&id).await.expect("stop");
+    mgr.mark_reactivated(&id).await.expect("reactivate");
+
+    let after = mgr.revert_reactivation(&prior).await.expect("revert");
+
+    assert_eq!(after.state, ManagedSessionState::Stopped);
+    assert_eq!(after.claude_session_id.as_deref(), Some("uuid-before"));
+}
+
+/// #12012: a record that already left `Active` (here, decommissioned) is
+/// never overwritten by the rollback.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn revert_reactivation_leaves_a_record_that_left_active_alone() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = session_with_conversation(&mgr, workspace.path()).await;
+    mgr.stop(&id).await.expect("stop");
+    let prior = mgr.get(&id).await.expect("prior");
+    mgr.mark_reactivated(&id).await.expect("reactivate");
+    mgr.set_workspace(
+        &id,
+        workspace.path().to_owned(),
+        ManagedSessionState::Decommissioned,
+    )
+    .await
+    .expect("decommission");
+
+    let after = mgr.revert_reactivation(&prior).await.expect("revert");
+
+    assert_eq!(after.state, ManagedSessionState::Decommissioned);
+}

@@ -11,6 +11,7 @@
 //! Test: this file.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::super::resume_restore_tests::{bound_session, decommission};
 use super::{ReactivateQuery, reactivate_core};
@@ -50,7 +51,7 @@ async fn session_state(state: &Arc<DaemonState>, id: &ManagedSessionId) -> Manag
         .state
 }
 
-/// #12012 criterion 1+2: a successful in-place reactivate of a session bound
+/// #12012 AC1+AC2: a successful in-place reactivate of a session bound
 /// to a decommissioned project clears the project's retired stamps and
 /// unparks its index.
 /// Test: this function IS the test. Fails if `reactivate_core` only flips the
@@ -87,7 +88,7 @@ async fn an_inplace_reactivate_reactivates_the_bound_project_and_unparks_its_ind
     assert!(rig.methods().contains(&format!("search:{METHOD_UNPARK}")));
 }
 
-/// #12012 criterion 1: a decommissioned project the session does not bind
+/// #12012 AC1: a decommissioned project the session does not bind
 /// to stays decommissioned.
 /// Test: this function IS the test. Fails if the reactivate clears every
 /// decommissioned project rather than the bound one.
@@ -157,8 +158,8 @@ async fn rig_for_unbound(state: &Arc<DaemonState>) -> Rig {
     rig
 }
 
-/// #12012 criterion 2+3 (Fail-Open Check): an unpark the search daemon
-/// refuses is the route's error, and the record is rolled back off `Active`
+/// #12012 AC2 plus the rollback ruling (Fail-Open Check): an unpark the
+/// search daemon refuses is the route's error, and the record is rolled back off `Active`
 /// so the client never execs into a ghost.
 /// Test: this function IS the test. Fails if the restore error is dropped, or
 /// the route answers an error with the record still `Active`.
@@ -197,8 +198,8 @@ async fn a_failed_unpark_rolls_the_reactivate_back_to_stopped() {
     );
 }
 
-/// #12012 criterion 3: a project-registry failure is the route's error, the
-/// index step never runs, and the record is rolled back.
+/// #12012 AC2 plus the rollback ruling: a project-registry failure is the
+/// route's error, the index step never runs, and the record is rolled back.
 /// Test: this function IS the test. Fails if a registry failure is dropped or
 /// leaves the record `Active`.
 #[tokio::test]
@@ -231,7 +232,7 @@ async fn a_failed_project_reactivation_rolls_the_reactivate_back() {
     );
 }
 
-/// #12012 criterion 4: a refused reactivate (workspace gone) leaves the
+/// #12012 AC3: a refused reactivate (workspace gone) leaves the
 /// project decommissioned and the index parked.
 /// Test: this function IS the test. Fails if the project steps run before the
 /// reactivate's own refusal.
@@ -268,4 +269,73 @@ async fn a_refused_inplace_reactivate_leaves_the_project_and_index_alone() {
     let unknown = reactivate(&state, &ManagedSessionId::new()).await;
     assert_eq!(unknown.status, 404, "{unknown:?}");
     assert!(retired(&state, "widget").await);
+}
+
+/// How long the stub trusty-search takes to confirm an unpark: past the
+/// pre-fix client budget (`bin/tm`'s 2 s `PROBE_TIMEOUT`).
+const SLOW_UNPARK: Duration = Duration::from_secs(3);
+
+/// A trusty-search whose map lists `widget-idx` as decommission-parked and
+/// whose unpark answers only after [`SLOW_UNPARK`] (an index reload).
+async fn slow_unpark_search() -> crate::uds_mock::MockUdsDaemon {
+    crate::uds_mock::spawn(|method, _params| {
+        let method = method.to_string();
+        Box::pin(async move {
+            match method.as_str() {
+                METHOD_MAP => Ok(serde_json::json!({
+                    "parked": [row("widget-idx", "acme/widget", "decommissioned")]
+                })),
+                METHOD_UNPARK => {
+                    tokio::time::sleep(SLOW_UNPARK).await;
+                    Ok(serde_json::json!({ "unparked": true }))
+                }
+                _ => Ok(serde_json::json!({})),
+            }
+        })
+    })
+    .await
+}
+
+/// Wait up to `bound` for `id`'s record to leave `Active`; answers its state.
+async fn state_after_settling(
+    state: &Arc<DaemonState>,
+    id: &ManagedSessionId,
+    bound: Duration,
+) -> ManagedSessionState {
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        let now = session_state(state, id).await;
+        if now != ManagedSessionState::Active || tokio::time::Instant::now() >= deadline {
+            return now;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// #12012 (critic HIGH): a client that gives up on a slow unpark drops the
+/// route mid-step. The record must still end up off `Active`, since that
+/// client never execs.
+/// Test: this function IS the test. Fails if the post-mark steps run inside
+/// the route future, where the drop skips the rollback.
+#[tokio::test]
+async fn a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session(dir.path()).await;
+    let parked: Parked = Arc::default();
+    let _decommission_rig = decommission(&state, &id, &parked).await;
+    let search = slow_unpark_search().await;
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(search.socket().to_path_buf());
+
+    let gave_up = tokio::time::timeout(Duration::from_secs(2), reactivate(&state, &id)).await;
+    assert!(gave_up.is_err(), "premise: the 2 s client budget expires first");
+
+    assert_eq!(
+        state_after_settling(&state, &id, SLOW_UNPARK * 4).await,
+        ManagedSessionState::Stopped,
+        "an abandoned reactivate left the session record Active"
+    );
 }
