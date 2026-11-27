@@ -76,6 +76,11 @@
 #                                       No reference -> NO crates.
 #                                       Direct only: a build.rs failure shows
 #                                       in the owning crate's own test run.
+#      Plus (#12023): a path SCRIPT_READERS declares as read or run by a
+#      crate's tests -> that crate, direct only. Covers a script a test
+#      reaches through a computed path (`.join(name)`), which the literal scan
+#      cannot see. Declared once, in SCRIPT_READERS; a script no test reads
+#      still selects nothing.
 #      Plus: a `scripts/<name>.sh` directly in `scripts/` (no subdirectory,
 #      extension exactly `sh`) whose content contains the substring
 #      `codesign` — on disk, or at the diff's base for a deleted, renamed or
@@ -282,6 +287,36 @@ declare -A CARGO_ARGS_FEATURE_OVERRIDES=(
 CANARY_CRATES="trusty-common trusty-mpm"
 # The crate whose test scans every codesign script (rule 4, codesign_script).
 CODESIGN_CRATE="trusty-common"
+# #12023: the ONE declaration of which scripts a crate's tests read or run
+# WITHOUT a `scripts/<name>` literal in Rust source (rule 4's scan cannot see
+# a path built with `.join(name)`). One `<crate> <path>` pair per line.
+# trusty-mpm's `the_repo_gate_scripts_allow_8879` runs the five gates below
+# through the pm-guard, which reads each script and every script it sources
+# or runs: check_line_cap -> lib/sloc_awk.sh; check_changelog_fragment ->
+# lib/source_class.sh, assemble-changelog.sh, check-changelog-assembled.sh;
+# check_sld -> lib/run_or_cargo.sh -> lib/install_paths.py; release-gate ->
+# sandbox_daemon.sh (-> lib/bin_fresh.sh, lib/sandbox_install_paths.sh ->
+# .py, lib/sandbox_exec.sh), lib/install_paths.py. Add a line when a test starts
+# reading another script; ci-affected-test-plan-selftest.sh fails when a gate
+# that test names, or a lib file a gate sources, is missing here.
+SCRIPT_READERS="
+trusty-mpm scripts/check_line_cap.sh
+trusty-mpm scripts/check_test_pointers.sh
+trusty-mpm scripts/check_changelog_fragment.sh
+trusty-mpm scripts/check_sld.sh
+trusty-mpm scripts/release-gate.sh
+trusty-mpm scripts/assemble-changelog.sh
+trusty-mpm scripts/check-changelog-assembled.sh
+trusty-mpm scripts/sandbox_daemon.sh
+trusty-mpm scripts/lib/sloc_awk.sh
+trusty-mpm scripts/lib/source_class.sh
+trusty-mpm scripts/lib/run_or_cargo.sh
+trusty-mpm scripts/lib/install_paths.py
+trusty-mpm scripts/lib/bin_fresh.sh
+trusty-mpm scripts/lib/sandbox_install_paths.sh
+trusty-mpm scripts/lib/sandbox_install_paths.py
+trusty-mpm scripts/lib/sandbox_exec.sh
+"
 # The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
 # list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.
 RELEVANCE_CRATES="trusty-code-gui"
@@ -600,6 +635,17 @@ codesign_script() {
   [[ "$base_body" == *codesign* ]]
 }
 
+# declared_readers <path> — rule 4b (#12023): prints each crate SCRIPT_READERS
+# declares as reading <path>. Matches by name, so a deleted or renamed script
+# still selects its reader.
+declared_readers() {
+  local path="$1" crate declared
+  while read -r crate declared; do
+    [ -n "$crate" ] && [ "$declared" = "$path" ] && printf '%s\n' "$crate"
+  done <<<"$SCRIPT_READERS"
+  return 0
+}
+
 # relevant_ui_crates — rule 3's union: each RELEVANCE_CRATES member that
 # ci-crate-relevance.sh answers `true` for over this change set. That script
 # fails closed (`true`); a missing copy of it counts the same way.
@@ -632,6 +678,11 @@ while IFS= read -r path; do
     CANARY) CANARY_HIT=1 ;;
     SCRIPTREF)
       codesign_script "$path" && CODESIGN_HIT=1
+      while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        [ -n "${IS_MEMBER[$c]:-}" ] || fail_open "script-reader crate '${c}' is not a workspace member"
+        EXTRA_SET["$c"]=1
+      done < <(declared_readers "$path")
       if ! refs="$(crates_referencing "$path")"; then
         echo "select-test-crates: WARNING: git grep failed scanning crates for '${path}' — printing ALL crates" >&2
         ANY_ALL=1

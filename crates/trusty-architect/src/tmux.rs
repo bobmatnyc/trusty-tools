@@ -404,7 +404,23 @@ mod tests {
             "{result:?}"
         );
         assert!(elapsed < timeout + Duration::from_secs(1), "{elapsed:?}");
-        let pid: i32 = std::fs::read_to_string(&pid_file)?.trim().parse()?;
+        // #12089: the shell creates the file before it writes the pid, so a
+        // loaded host can show it missing or empty; poll for content, bounded.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let pid: i32 = loop {
+            match std::fs::read_to_string(&pid_file) {
+                Ok(text) if !text.trim().is_empty() => break text.trim().parse()?,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pid file {} still missing or empty after 5s",
+                pid_file.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         // SAFETY: kill with signal 0 only probes; a reaped pid is ESRCH, while
         // an unreaped zombie would still answer 0.
         let alive = unsafe { libc::kill(pid, 0) } == 0;

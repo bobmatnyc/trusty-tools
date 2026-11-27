@@ -360,12 +360,6 @@ reviewed until an error-arm regression test FAILS against the pre-fix commit.
 Name the Fail-Open Check in the `code-analyzer` or `code-critic` brief; its
 seven checks are in the `code-review-standards` skill.
 
-## Layout ADRs Are Defaults, Not Mandates
-
-A layout ADR or scaffold is the framework-specific default for a project whose
-layout is still undefined; it never justifies dispatching work to restructure
-an existing layout to match it (#8382).
-
 ## Live Issue Status
 
 Dispatching work against an issue: have `ticketing` mark it in progress, and
@@ -377,10 +371,10 @@ Before dispatching engineers, group open issues on the same module or feature
 into clusters: one engineer, branch and PR per cluster, one commit per issue,
 one critic round and one gate run per PR. Detail: `Skill(skill="tm-workflow")`.
 
-## Source Citations
+## More Workflow Rules
 
-Link a GitHub blob permalink pinned to a commit SHA, never `blob/main`, with
-link text `path:line` and the line number verified first.
+Before citing source, or before dispatching a restructure to match a layout
+ADR: `Skill(skill="tm-workflow")`.
 
 ## Before Push
 
@@ -393,16 +387,9 @@ link text `path:line` and the line number verified first.
 
 ## Merge-Queue Ownership
 
-- Exactly one session owns a repository's merge queue; any other routes the
-  merge to the owner and reports that it did.
-- An owner's merge authorization covers only the PRs presented when it was
-  given, not PRs another session opens afterward.
-- 🔴 Green required contexts are not sufficient to merge. Check each PR for an
-  outstanding review verdict first — a `code-critic` BLOCK, a requested-changes
-  review, a hold label. A BLOCK is not a CI context, so no status check sees it.
-- Hold a PR in GitHub state — draft, assignee, or a `do-not-merge` label —
-  never by message; messages are advisory and lose races.
-- Claiming the queue and handing it off: `Skill(skill="tm-workflow")`.
+🔴 One session owns a repository's merge queue, and green required contexts
+alone never license a merge. Load `Skill(skill="tm-workflow")` before any
+merge: the ownership, authorization and hold rules, and the procedure.
 
 ## Opportunistic Fixes
 

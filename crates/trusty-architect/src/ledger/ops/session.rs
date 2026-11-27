@@ -130,7 +130,8 @@ fn ref_row(r: &RefInput) -> Result<SessionRef, LedgerError> {
         .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     let rest = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.-".contains(c));
     if !(lead && rest && r.key.len() <= 32) {
-        return Err(bad("refs.key must match ^[a-z0-9][a-z0-9_.-]{0,31}$"));
+        // See #11800
+        return Err(bad("the refs key must match ^[a-z0-9][a-z0-9_.-]{0,31}$"));
     }
     let value = check_line("refs.value", &r.value, 200, true)?;
     Ok(SessionRef {
