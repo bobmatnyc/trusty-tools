@@ -36,6 +36,7 @@
 //! real developer `$HOME`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 // #9526: the refusing-port fixture lives beside its own regression test.
 use crate::tm_hook_pm_guard_refusing_daemon_9526::RefusingDaemon;
 
@@ -419,7 +420,10 @@ fn pm_guard_readonly_heredoc_turn_never_touches_the_file_change_budget() {
             "call {n} reads a file and writes none — it must be allowed"
         );
     }
-    let counter = home.path().join(".trusty-mpm/state/pm_guard_turn_budget");
+    let counter = home
+        .path()
+        .join(MPM_DIR_NAME)
+        .join("state/pm_guard_turn_budget");
     assert!(
         !counter.exists(),
         "a read-only turn must not record a file change at {}",

@@ -5,14 +5,15 @@
 //! the binary proves that `init` starts `tm-architect` detached with the
 //! supervisor stamp, and that `status` exits 1 until it does.
 //! What: each test owns a scratch HOME and its own tmux server directory
-//! (`TMUX_TMPDIR`, with `TMUX_SOCKET` removed), and puts a fake `claude`
-//! first on `PATH`; the server is
+//! (`TMUX_TMPDIR`, with `TMUX_SOCKET` removed), and puts a fake `claude` and
+//! a fake `launchctl` (#11961) first on `PATH`; the server is
 //! killed when the test ends. Nothing reaches the operator's home or tmux.
 //! Test: `cargo test -p trusty-mpm --test integration tm_fleet::`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use crate::common;
 
@@ -60,6 +61,18 @@ impl FleetEnv {
             ),
         )
         .expect("fake claude");
+        // #11961: a `launchctl` that logs its argv and reaches no launchd.
+        // `print` answers 0 ("loaded"), so a missing guard goes on to a
+        // logged `kickstart`; `probe` is the harness's own PATH check.
+        trusty_common::exec_stub::write_executable(
+            &bin.path().join("launchctl"),
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {:?}\ncase \"$1\" in print|kickstart|probe) exit 0;; \
+                 esac\nexit 1\n",
+                bin.path().join(LAUNCHCTL_LOG).display().to_string(),
+            ),
+        )
+        .expect("fake launchctl");
         Self {
             home: tempfile::tempdir().expect("scratch home"),
             // Short path: tmux refuses a socket path over `sun_path` (104 bytes).
@@ -119,11 +132,7 @@ impl FleetEnv {
 
     /// Run `cmd` with `args` on this environment's tmux server and `PATH`.
     fn confine(&self, mut cmd: Command, args: &[&str]) -> Output {
-        let path = format!(
-            "{}:{}",
-            self.bin.path().display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = self.path();
         cmd.args(args)
             .env("TMUX_TMPDIR", self.tmux_dir.path())
             // #8436 P4 fix: the fleet scripts read TMUX_SOCKET, which would
@@ -144,6 +153,40 @@ impl FleetEnv {
 
     fn dir(&self) -> PathBuf {
         self.home.path().join("arch")
+    }
+
+    /// The `PATH` every confined `tm` runs with: the fake `bin` dir first.
+    fn path(&self) -> String {
+        format!(
+            "{}:{}",
+            self.bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    /// #11961: the fake `launchctl` is what `tm`'s `PATH` resolves, and it
+    /// never ran `kickstart`.
+    ///
+    /// The probe runs `launchctl` through [`Self::path`], so a stub that is
+    /// missing or shadowed leaves no `probe` line and fails here, instead of
+    /// passing on an empty log.
+    fn assert_no_kickstart(&self) {
+        let probe = Command::new("sh")
+            .args(["-c", "launchctl probe"])
+            .env("PATH", self.path())
+            .output()
+            .expect("spawn the launchctl probe");
+        let log_path = self.bin.path().join(LAUNCHCTL_LOG);
+        let log = std::fs::read_to_string(&log_path)
+            .unwrap_or_else(|e| panic!("no fake launchctl log at {}: {e}", log_path.display()));
+        assert!(
+            probe.status.success() && log.lines().any(|l| l == "probe"),
+            "the fake launchctl is not first on PATH: {log}"
+        );
+        assert!(
+            !log.lines().any(|l| l.starts_with("kickstart")),
+            "tm ran launchctl kickstart: {log}"
+        );
     }
 
     /// The fake `claude`'s argv, one entry per Architect launch (a `--model`
@@ -251,7 +294,7 @@ impl FleetEnv {
 
     /// The PIDs of the `<pid>.architect` launch records, sorted.
     fn recorded_pids(&self) -> Vec<u32> {
-        let dir = self.home.path().join(".trusty-mpm/architect-launch");
+        let dir = self.home.path().join(MPM_DIR_NAME).join("architect-launch");
         let mut pids: Vec<u32> = std::fs::read_dir(dir)
             .map(|entries| {
                 entries
@@ -338,6 +381,9 @@ fn launch_flags(argv: &[String]) -> Vec<&str> {
 
 /// The file, in the fake `bin` dir, where the fake `claude` logs its argv.
 const ARGV_LOG: &str = "claude-argv.log";
+
+/// The file, in the fake `bin` dir, where the fake `launchctl` logs its argv (#11961).
+const LAUNCHCTL_LOG: &str = "launchctl-argv.log";
 
 /// The file, in the fake `bin` dir, where the fake `claude` logs its PID and
 /// argv, one line per start.
@@ -433,7 +479,7 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         "{}",
         text(&out)
     );
-    let root = env.home.path().join(".trusty-mpm");
+    let root = env.home.path().join(MPM_DIR_NAME);
     let records: Vec<_> = std::fs::read_dir(root.join("architect-launch"))
         .expect("the launch record directory")
         .map(|entry| entry.expect("entry").path())
@@ -897,7 +943,7 @@ fn fleet_init_with_a_session_override_names_every_session() {
     assert!(has("tm-sup-x") && has("tm-sup-x-poll"));
     assert!(!has("tm-architect") && !has("tm-architect-poll"));
 
-    let root = env.home.path().join(".trusty-mpm");
+    let root = env.home.path().join(MPM_DIR_NAME);
     let pid: u32 = std::fs::read_dir(root.join("architect-launch"))
         .expect("record dir")
         .filter_map(|e| {
@@ -952,7 +998,13 @@ fn fleet_init_refuses_an_invalid_session_name_before_writing() {
             text(&out)
         );
         assert!(!env.dir().exists(), "{bad:?}: {}", text(&out));
-        assert!(!env.home.path().join(".trusty-mpm/config.toml").exists());
+        assert!(
+            !env.home
+                .path()
+                .join(MPM_DIR_NAME)
+                .join("config.toml")
+                .exists()
+        );
     }
 }
 
@@ -1074,7 +1126,7 @@ impl Drop for ReadOnlyRecords {
 fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() {
     let env = FleetEnv::new();
     let dir = env.dir();
-    let root = env.home.path().join(".trusty-mpm");
+    let root = env.home.path().join(MPM_DIR_NAME);
     let _records = ReadOnlyRecords::new(&root);
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
@@ -1119,7 +1171,7 @@ fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() 
 fn fleet_init_fails_and_stops_the_architect_when_its_grant_cannot_be_written_11270() {
     let env = FleetEnv::new();
     let dir = env.dir();
-    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    let records = env.home.path().join(MPM_DIR_NAME).join("architect-launch");
     std::fs::create_dir_all(&records).unwrap();
     std::fs::write(records.join("launch-grants"), "not a directory\n").unwrap();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
@@ -1158,7 +1210,7 @@ fn fleet_init_refuses_the_home_directory_before_writing() {
         text(&out)
     );
     assert!(
-        !home.join(".trusty-mpm/config.toml").exists(),
+        !home.join(MPM_DIR_NAME).join("config.toml").exists(),
         "the grant was written: {}",
         text(&out)
     );
@@ -1375,7 +1427,7 @@ fn fleet_relaunch_binds_when_no_prior_record_exists() {
     let dir = env.dir();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
-    std::fs::remove_dir_all(env.home.path().join(".trusty-mpm/architect-launch")).unwrap();
+    std::fs::remove_dir_all(env.home.path().join(MPM_DIR_NAME).join("architect-launch")).unwrap();
     assert_eq!(env.status_json()["binding"]["ok"], false);
 
     let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
@@ -1509,9 +1561,9 @@ fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
     let dir = env.dir();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
-    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    let records = env.home.path().join(MPM_DIR_NAME).join("architect-launch");
     std::fs::remove_dir_all(&records).unwrap();
-    let _records = ReadOnlyRecords::new(&env.home.path().join(".trusty-mpm"));
+    let _records = ReadOnlyRecords::new(&env.home.path().join(MPM_DIR_NAME));
 
     let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
@@ -1995,6 +2047,22 @@ fn architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op() {
         text(&out)
     );
     assert_eq!(env.launches(2).len(), 1, "a second up launched again");
+    env.assert_no_kickstart();
+}
+
+/// #11961: `up` under a scratch HOME never reaches the login user's launchd
+/// job: the dashboard restart is a reported skip and no `kickstart` runs.
+#[test]
+fn architect_up_in_a_scratch_home_skips_the_dashboard_restart_11961() {
+    let env = FleetEnv::new();
+    let out = up(&env, &env.dir());
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("dashboard restart: skipped, because"),
+        "{}",
+        text(&out)
+    );
+    env.assert_no_kickstart();
 }
 
 /// #11364 closure: two concurrent `up` calls leave one session and one launch.
@@ -2013,6 +2081,7 @@ fn architect_up_racing_a_second_up_yields_one_architect() {
     }
     assert_eq!(env.launches(2).len(), 1, "two launches: {}", text(&outs[1]));
     assert_eq!(env.recorded_pids().len(), 1);
+    env.assert_no_kickstart();
 }
 
 /// #11364: a pane at a shell gets a bound `claude`.
@@ -2029,6 +2098,7 @@ fn architect_up_launches_bound_into_a_pane_at_a_shell() {
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(env.launches(2).len(), 2, "{}", text(&out));
     assert_eq!(env.status_json()["binding"]["ok"], true, "{}", text(&out));
+    env.assert_no_kickstart();
 }
 
 /// #11364 closure: a live unbound `claude` is reported and never killed.
@@ -2055,6 +2125,7 @@ fn architect_up_reports_and_never_kills_an_unbound_claude() {
         trusty_mpm::core::process::is_process_alive(replaced),
         "up killed it"
     );
+    env.assert_no_kickstart();
 }
 
 /// #11364 closure: from inside Claude Code, `up` neither starts nor stops `claude`.
@@ -2066,6 +2137,7 @@ fn architect_up_inside_claude_code_starts_nothing() {
     let out = env.tm_in_session(&args, None, &[("CLAUDECODE", OsStr::new("1"))]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     assert!(!env.has_session("tm-architect"), "{}", text(&out));
+    env.assert_no_kickstart();
 }
 
 // --- #11365: `tm architect restart` gates against the private tmux server ---

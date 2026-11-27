@@ -14,6 +14,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_egress_anchor_8454`.
 
 use crate::common;
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -54,14 +55,14 @@ impl Fixture {
         let home = root.join("home");
         let project = root.join("project");
         let data = root.join("data");
-        std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir root");
+        std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir root");
         std::fs::write(
-            home.join(".trusty-mpm/config.toml"),
+            home.join(MPM_DIR_NAME).join("config.toml"),
             "[pm_guard]\nenabled = false\n",
         )
         .expect("write config.toml");
         common::write_disk_threshold(&home, 100);
-        let managed = home.join(".trusty-tools/trusty-mpm/claude-config");
+        let managed = home.join(TOOLS_DIR_NAME).join("trusty-mpm/claude-config");
         std::fs::create_dir_all(&managed).expect("mkdir managed");
         std::fs::write(managed.join("settings.json"), "{}").expect("write managed");
         std::fs::create_dir_all(project.join(".claude")).expect("mkdir project");
@@ -84,7 +85,9 @@ impl Fixture {
     }
 
     fn yaml(&self) -> PathBuf {
-        self.home.join(".trusty-tools/trusty-mpm/config.yaml")
+        self.home
+            .join(TOOLS_DIR_NAME)
+            .join("trusty-mpm/config.yaml")
     }
 
     fn managed_settings(&self) -> PathBuf {
@@ -186,7 +189,7 @@ fn egress_anchor_holds_with_pm_guard_off_under_bypasses_and_subagents() {
     let rm = payload(
         &fx,
         "Bash",
-        serde_json::json!({ "command": "rm -rf ~/.trusty-tools/trusty-mpm" }),
+        serde_json::json!({ "command": format!("rm -rf ~/{TOOLS_DIR_NAME}/trusty-mpm") }),
     );
     assert_denied(&run(&fx, &rm, &[]), "rm -rf of the config dir");
 }
@@ -231,9 +234,9 @@ fn egress_anchor_guards_the_project_settings_entry() {
 fn egress_anchor_denies_deletes_through_an_expansion() {
     let fx = Fixture::new();
     for command in [
-        "rm ~/.trusty-tools/trusty-mpm/$F",
-        "rm ~/.trusty-mpm/$X",
-        "rm \"$D/config.yaml\"",
+        format!("rm ~/{TOOLS_DIR_NAME}/trusty-mpm/$F"),
+        format!("rm ~/{MPM_DIR_NAME}/$X"),
+        "rm \"$D/config.yaml\"".to_string(),
     ] {
         for env in ENVS {
             let main = payload(&fx, "Bash", serde_json::json!({ "command": command }));

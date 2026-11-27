@@ -1,2 +1,0 @@
-Added
-- `GET /api/console/assistants` lists the Trusty Assistants instances that `ta list` names, and `GET /api/console/assistants/{id}/turns?limit=N` returns an instance's newest turns oldest first, with counts of good records and skipped malformed lines. An unknown id answers 404 naming the available instances; an invalid id answers 400 before any file is read. The new `assistants_uds` module mirrors the ask daemon's wire structs and socket path for the ask route that follows ([#11747](https://github.com/bobmatnyc/trusty-tools/issues/11747)).

@@ -54,6 +54,15 @@ CTX_USE_RE = re.compile(r"CTX-USE:\s*active\s*~(\d{1,2})%\s*·\s*stale\s*~(\d{1,
                         r"(?:\s*·\s*keep:\s*(.*))?")
 
 
+def _claude_dir():
+    """tm's managed claude-config dir from the install paths; ConfigError on a broken install.toml."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:     # python3 -I drops the script directory
+        sys.path.insert(0, here)
+    import architect_config
+    return architect_config.managed_claude_config_dir()
+
+
 def paths():
     inbox = (os.environ.get("ARCHITECT_INBOX_DIR") or os.environ.get("SUPERVISOR_INBOX_DIR")
              or os.path.join(ROOT, "inbox"))  # #10571: the poller's inbox first
@@ -63,10 +72,9 @@ def paths():
         "proxy": os.environ.get("CTX_PROXY_LOG") or os.path.join(ROOT, "local", "usage", "ctx-proxy.jsonl"),
         "cycle_jsonl": os.environ.get("CTX_CYCLE_JSONL")
         or os.path.join(ROOT, "local", "usage", "ctx-cycle.jsonl"),
-        "sessions_dir": os.environ.get("SESSIONS_DIR") or os.path.expanduser(
-            "~/.trusty-tools/trusty-mpm/claude-config/sessions"),
-        "transcripts": os.environ.get("TRANSCRIPT_BASE") or os.path.expanduser(
-            "~/.trusty-tools/trusty-mpm/claude-config/projects"),
+        # #11821 P6b: unset, both sit under the install's managed claude-config dir.
+        "sessions_dir": os.environ.get("SESSIONS_DIR") or os.path.join(_claude_dir(), "sessions"),
+        "transcripts": os.environ.get("TRANSCRIPT_BASE") or os.path.join(_claude_dir(), "projects"),
     }
 
 

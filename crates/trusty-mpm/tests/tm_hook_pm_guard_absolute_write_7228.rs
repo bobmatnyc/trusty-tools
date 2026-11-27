@@ -14,6 +14,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_absolute_write_7228::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ fn fixture() -> Fixture {
     std::fs::write(worktree.join(".git"), "gitdir: /elsewhere").expect("write .git");
     std::fs::create_dir_all(root.join("repo-other/src")).expect("mkdir sibling");
     let home = root.join("home");
-    std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir home");
+    std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir home");
     common::write_disk_threshold(&home, 100);
     Fixture {
         _dir: dir,
@@ -191,7 +192,7 @@ fn pm_guard_allows_tier_a_verbs_that_write_outside_main_checkout_source() {
         format!("cp {main}/src/lib.rs {tmp}/src/lib.rs"),
         format!("rsync -a {main}/src/ {private}/src/"),
         format!("cp src/lib.rs {root}/repo-other/src/lib.rs"),
-        format!("cp src/lib.rs {home}/.trusty-mpm/probe.rs"),
+        format!("cp src/lib.rs {home}/{MPM_DIR_NAME}/probe.rs"),
         "sed -i '' 's/a/b/' src/lib.rs".to_string(),
     ] {
         let stdout = run(&fx, &command, &fx.worktree, AGENT);
@@ -225,7 +226,7 @@ fn scratch_clone(base: &str) -> (tempfile::TempDir, PathBuf) {
 fn pm_guard_allows_a_copy_into_a_listed_documents_repo() {
     let fx = fixture();
     std::fs::write(
-        fx.home.join(".trusty-mpm/config.toml"),
+        fx.home.join(MPM_DIR_NAME).join("config.toml"),
         format!(
             "[pm_guard]\ndocuments_repos = [{:?}]\n",
             fx.main.display().to_string()

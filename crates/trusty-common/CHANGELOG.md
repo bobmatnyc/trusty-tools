@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.9] — 2026-11-27
+
+### Breaking
+
+- `InferenceError` gains a `Bedrock(BedrockError)` variant: a failed Bedrock `Converse`/`ConverseStream` send now arrives as this variant instead of `Provider(String)`. Its display text and its `is_retryable`/`is_alarm` answers are unchanged; an exhaustive `match` on `InferenceError` needs one more arm (#10892).
+
+### Added
+
+- `inference::BedrockError`: the typed cause of a failed Bedrock send — `Api { status, code, message }`, `Transport`, `MissingCredential`, `Timeout`, `Other`. A missing AWS credential is `MissingCredential` whichever SDK phase reports it (#10892).
+- `inference::bedrock::arn`: the Bedrock model-ARN parser (`parse`, `BedrockArn`, `ArnKind`, `is_unpriced`) and `mask_account_ids`, moved unchanged from trusty-review so every Bedrock consumer shares them (#10892).
+- `install_paths` module: `InstallPaths::resolve()` returns the absolute projects root, config dir (holding `.trusty-tools` and `.trusty-mpm`), Claude config dir and Codex home, with the winning source per key (flag, env, install file or default). Reads the new `TRUSTY_MPM_CONFIG_DIR` env var and `~/.trusty-tools/install.toml`; a relative, empty or unknown value is a typed error. `write_install_file` is the one writer (#11821).
+- `workspace_layout::resolve_workspace_root` and `crate_config::crate_config_dir` / `crate_config_path` now read those sources too; with no new env var or install file their results are unchanged. `thiserror` and `toml` become unconditional dependencies.
+- A malformed or unreadable `install.toml` that no env var overrides makes `crate_config::save` and `crate_config::load` return a typed `InvalidData` error and `crate_config_dir` / `crate_config_path` return `None`; they never fall back to writing under `$HOME`. Env values are resolved before the file is read, so a valid env value still wins over a broken file.
+- `workspace_layout::try_resolve_workspace_root` returns an `InstallPathsError` when `~/.trusty-tools/install.toml` is broken and neither `TRUSTY_MPM_WORKSPACE_ROOT` nor the template decides the root. Callers that clone, delete or write under the root use it; `resolve_workspace_root` keeps its logged default for readers (#11821).
+- `codex_config::codex_config_path_in` and `codex_config::resolve_codex_config_path`: the Codex config file under the configured Codex home (`CODEX_HOME` or `codex_home` in `install.toml`), else `~/.codex/config.toml`. The resolver form returns the `InstallPathsError` on a broken `install.toml` and never falls back to `~/.codex` (#11821).
+- `palace_resolve::plan_palace_create` decides, from a project directory and a caller-supplied palace-existence lookup, whether its resolved palace exists, should be aliased to an existing palace stored under the project folder name, or should be created. A malformed pin is an error, a start outside any project directory is rejected, and a failed lookup refuses the plan (`PalaceCreatePlanError::Lookup`) instead of planning a create. `plan_palace_create_for_project` and `resolve_palace_for_project` are the same decision without this process's `TRUSTY_MEMORY_PALACE`, for a daemon serving a client's project; `folder_palace_slug` is the shared folder-name rule. Additive API behind the `palace-resolve` feature (#11823).
+
+### Fixed
+
+- `derive_github_path` and `derive_remote_repo` now ignore an inherited `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE` or other repository-redirecting variable, so they always read the directory's own `origin`. The redirect list and its scrub, `git::GIT_ENV_REDIRECTS` and `git::remove_redirects`, are now public in trusty-common (#11217).
+- A failed Bedrock send or mid-stream error no longer exposes an AWS account id: `BedrockError` and `ConverseStream` mid-stream error messages mask the 12-digit account id of every ARN, in the model id and in the AWS error text (#11865).
+- `credentials::test_sandbox::CredentialSandbox` removes `GIT_CONFIG_COUNT` before its `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` pairs and restores it after them. A git run by a concurrent, unserialized test no longer fails with "missing config value GIT_CONFIG_VALUE_0" while a sandbox enters or drops (#11877).
+
+### Changed
+
+- The projects root has one precedence rule for every caller: `TRUSTY_MPM_WORKSPACE_ROOT` env, then `install.toml` `projects_root`, then the `config.yaml` `workspace_root_template`, then `~/trusty-mpm-projects`. `workspace_layout::resolve_workspace_root` and `try_resolve_workspace_root` now wrap the `install_paths` chain, so the install file outranks the template and a relative env or template value is refused (`InstallPathsError::Relative`); the reader logs it and answers the default. `PathSource::Template` labels the template rung and `PathOverrides::projects_root_template` carries it (#11821).
+- `try_resolve_workspace_root` with no home directory now returns `InstallPathsError::NoHome` instead of `/tmp/trusty-mpm-projects` (#11821).
+- New `install_paths::try_config_dir` and `try_config_dir_under(home)` resolve the config dir for one process or one home, failing closed on a broken install file (#11821).
+
 ## [0.70.8] — 2026-11-24
 
 ### Fixed

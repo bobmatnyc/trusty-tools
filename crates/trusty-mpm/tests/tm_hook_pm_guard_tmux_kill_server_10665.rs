@@ -16,6 +16,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_tmux_kill_server_10665::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::Path;
@@ -36,7 +37,7 @@ const CALLERS: [Option<&str>; 2] = [None, Some("engineer")];
 fn guard(root: &Path, command: &str, env: &[(&str, &str)], agent: Option<&str>) -> String {
     let home = root.join("home");
     let project = root.join("project");
-    std::fs::create_dir_all(home.join(".trusty-mpm")).expect("mkdir root");
+    std::fs::create_dir_all(home.join(MPM_DIR_NAME)).expect("mkdir root");
     std::fs::create_dir_all(&project).expect("mkdir project");
     common::write_disk_threshold(&home, 100);
     let tmux = format!("{},4242,0", root.join("tmux-0/default").display());

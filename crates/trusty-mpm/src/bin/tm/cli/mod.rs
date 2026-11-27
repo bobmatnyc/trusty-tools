@@ -1503,7 +1503,9 @@ pub(crate) enum Command {
     /// open the project directory without running a session.
     /// What: prints the absolute path to `<root>/projects/<alias>/repo/`
     /// when the alias is loaded.
-    /// Test: `cli_parses_path_standalone`.
+    /// Test: `cli_parses_path_standalone`, `cli_pat_prefix_resolves_to_path_11821`.
+    // #11821: `paths` made `pat` ambiguous; the alias keeps `tm pat <alias>`.
+    #[command(alias = "pat")]
     Path {
         /// Registered and loaded alias.
         alias: String,

@@ -1,2 +1,0 @@
-Fixed
-- `tm doctor` prints its header before the check battery runs, and the two phases that scale with the host are bounded at 20 s each: the worktree inventory behind the `worktrees` row and the home-wide settings walk behind `hook-interpreter`. A phase past its bound reports an `Unknown` timeout row naming the check, the rest of the report still prints, and the command exits without waiting on the abandoned work (#11885).

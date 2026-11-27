@@ -31,7 +31,8 @@ use crate::daemon::state::DaemonState;
 /// What: extracts `cwd` from `payload["cwd"]`; canonicalizes it and each record's
 /// `workspace_path`/`cwd` (falling back to raw path on error so macOS
 /// `/private/tmp` ↔ `/tmp` symlinks resolve); finds Active managed sessions whose
-/// path matches. If more than one Active session matches the cwd (ambiguous) the
+/// path matches, leaving out Architect helpers (#10751), which run no `claude`.
+/// If more than one Active session matches the cwd (ambiguous) the
 /// correlation is skipped with a warning to avoid mis-attribution. Single match →
 /// `SessionManager::set_claude_session_id`. Best-effort — failures are logged and
 /// silently swallowed so a missing correlation never blocks the hook response.
@@ -73,7 +74,9 @@ use crate::daemon::state::DaemonState;
 /// `session_start_hook_reasserting_same_id_is_a_noop`,
 /// `session_start_hook_re_correlates_a_stale_id` in `api_tests.rs`;
 /// `session_start_same_id_reapply_failure_still_fails`;
-/// `architect_clear_moves_the_conversation_record_to_the_new_id` (#10594).
+/// `architect_clear_moves_the_conversation_record_to_the_new_id` (#10594);
+/// `session_start_links_the_architect_beside_its_poller_without_error`,
+/// `session_start_still_refuses_two_claude_sessions_in_one_cwd` (#10751).
 pub(crate) async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
@@ -121,9 +124,13 @@ pub(crate) async fn correlate_session_start(
     // stop retires it), so it is re-applied too, not only an `Active` one.
     let taint = reapply_channel_taint(state.user_home().as_deref(), &at_cwd, claude_session_id);
     // Collect ALL matching Active sessions to detect ambiguous cwd.
+    // #10751: an Architect helper (`-poll`, `-collector`) runs no `claude` of
+    // its own (registration refuses a helper pane that does), so it can never
+    // own this id; counting it made every Architect start a false collision.
     let matched: Vec<_> = at_cwd
         .into_iter()
         .filter(|r| matches!(r.state, crate::session_manager::ManagedSessionState::Active))
+        .filter(|r| r.kind != crate::session_manager::SessionKind::ArchitectAux)
         .collect();
     link_claude_session(state, &mgr, &matched, &hook_cwd, cwd_str, claude_session_id).await;
     taint
@@ -547,6 +554,9 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
 #[cfg(test)]
 #[path = "session_start_clear_tests.rs"]
 mod clear_tests;
+#[cfg(test)]
+#[path = "session_start_helper_tests.rs"]
+mod helper_tests;
 #[cfg(test)]
 #[path = "session_start_taint_tests.rs"]
 mod taint_tests;

@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::{
     GH_SHIM_ENV, LaunchSeams, PinnedCredential, RATE_LIMIT_REFUSAL_MARKER,
-    RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER, REAP_FN, find_real_gh,
-    launch_pinned_login, prefixed_path, shim_dir, shim_root, shim_script, write_gh_shim,
+    RATE_LIMIT_RESET_EPOCH_OPEN, RATE_LIMIT_SHORT_WINDOW_MARKER, RATE_LIMIT_UNKNOWN_KIND_MARKER,
+    REAP_FN, find_real_gh, launch_pinned_login, prefixed_path, shim_dir, shim_root, shim_script,
+    write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_dir::AccountDirSources;
@@ -900,8 +901,8 @@ fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
     assert_eq!(ran, "call\n", "the refused call was retried");
 }
 
-/// 🔴 #10550: a reset lookup that fails still names the primary GraphQL limit,
-/// says the reset is unknown, and exits 1.
+/// 🔴 #10550: a reset lookup that fails still names a GraphQL limit and exits
+/// 1. #11803: with `remaining` unread it does not call the limit primary.
 #[cfg(unix)]
 #[test]
 fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
@@ -911,8 +912,12 @@ fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
     assert!(out.stdout.is_empty(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr.lines().count(), 1, "{stderr}");
-    assert!(stderr.contains("primary GraphQL rate limit"), "{stderr}");
-    assert!(stderr.contains("reset time is unknown"), "{stderr}");
+    assert!(
+        stderr.starts_with(RATE_LIMIT_UNKNOWN_KIND_MARKER),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("primary GraphQL rate limit"), "{stderr}");
+    assert!(stderr.contains("did not answer"), "{stderr}");
     // #11233: gh's own limit line is kept on the fallback path too.
     assert!(stderr.contains(GH_LIMIT_LINE), "{stderr}");
 }
@@ -955,6 +960,79 @@ fn a_refusal_with_quota_left_names_a_short_window_limit_not_the_primary() {
     );
     let ran = std::fs::read_to_string(calls.path()).expect("call log");
     assert_eq!(ran, "call\nlookup\n", "one call, one REST lookup");
+}
+
+/// 🔴 #11803: "primary … resets at" prints only when the lookup reads
+/// `remaining` as 0. The live case: 4999 of 5000 left while gh refused, and the
+/// window reset 01:58:14Z. An unreadable `remaining` beside a readable reset
+/// is not a primary claim either.
+#[cfg(unix)]
+#[test]
+fn the_primary_reset_line_needs_remaining_zero_and_a_secondary_limit_is_never_primary() {
+    const RESET: u64 = 1_795_744_694; // 2026-11-27 01:58:14 UTC
+    let cases = [
+        ("remaining 4999", rate_limit_answer(4999, RESET), false),
+        ("remaining 0", rate_limit_answer(0, RESET), true),
+        (
+            "remaining null",
+            format!("echo null; echo {RESET}; exit 0"),
+            false,
+        ),
+        ("reset only", format!("echo {RESET}; exit 0"), false),
+    ];
+    for (name, lookup, primary) in cases {
+        let (_tmp, dir) = rate_limit_shim(&lookup, GRAPHQL_REFUSAL);
+        let out = run_shim_args(&dir, &["issue", "list"]);
+        assert_eq!(out.status.code(), Some(1), "{name}: {out:?}");
+        assert!(out.stdout.is_empty(), "{name}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{name}: {stderr}");
+        assert!(stderr.contains(GH_LIMIT_LINE), "{name}: {stderr}");
+        let claims = [
+            stderr.contains("primary GraphQL rate limit"),
+            stderr.contains("resets at"),
+            stderr.contains("2026-11-27 01:58:14 UTC"),
+            stderr.contains(RATE_LIMIT_RESET_EPOCH_OPEN),
+        ];
+        assert_eq!(claims, [primary; 4], "{name}: {stderr}");
+        assert_eq!(
+            stderr.starts_with(RATE_LIMIT_REFUSAL_MARKER),
+            primary,
+            "{name}: {stderr}"
+        );
+    }
+}
+
+/// 🔴 #11803: a `retry-after` gh printed (here on stdout, as `gh api -i`
+/// does) is stated on the secondary and unknown-kind lines; with none, the
+/// line names no retry-after.
+#[cfg(unix)]
+#[test]
+fn a_non_primary_refusal_states_the_retry_after_gh_printed() {
+    let headers = format!("printf 'HTTP/2.0 200 OK\\nRetry-After: 60\\n\\n'; {GRAPHQL_REFUSAL}");
+    for (name, lookup) in [
+        ("secondary", rate_limit_answer(4999, 1_795_744_694)),
+        ("unknown kind", "exit 1".to_string()),
+    ] {
+        let (_tmp, dir) = rate_limit_shim(&lookup, &headers);
+        let out = run_shim_args(&dir, &["api", "-i", "graphql", "-f", "query=x"]);
+        assert_eq!(out.status.code(), Some(1), "{name}: {out:?}");
+        assert!(out.stdout.is_empty(), "{name}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{name}: {stderr}");
+        assert!(
+            !stderr.contains("primary GraphQL rate limit"),
+            "{name}: {stderr}"
+        );
+        assert!(
+            stderr.contains("retry after 60 seconds (retry-after)"),
+            "{name}: {stderr}"
+        );
+    }
+    let (_tmp, dir) = rate_limit_shim(&rate_limit_answer(4999, 1_795_744_694), GRAPHQL_REFUSAL);
+    let out = run_shim_args(&dir, &["issue", "list"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("retry-after"), "{stderr}");
 }
 
 /// 🔴 #11233: the shim's own two lines, as the classifiers read them: quota

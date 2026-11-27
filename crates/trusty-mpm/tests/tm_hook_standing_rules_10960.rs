@@ -11,6 +11,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_standing_rules_10960::`.
 
 use crate::common;
+use trusty_common::install_paths::MPM_DIR_NAME;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -48,7 +49,7 @@ fn session(architect: bool, rules: Option<&[u8]>) -> Session {
         std::fs::write(project.join("local/standing-rules.md"), rules).expect("write rules");
     }
     let home = tempfile::tempdir().expect("home");
-    let root = home.path().join(".trusty-mpm");
+    let root = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&root).expect("mkdir root");
     if architect {
         std::fs::write(

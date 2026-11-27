@@ -14,6 +14,7 @@
 
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 use crate::tm_hook_pm_guard_trust_anchor_8878::{
     Fixture, bash_payload, run, run_under_claude, run_under_claude_with,
@@ -37,7 +38,7 @@ fn fixture() -> (Fixture, PathBuf) {
     let cpython = root.join("uv/cpython/bin");
     std::fs::create_dir_all(&cpython).expect("mkdir cpython");
     std::fs::write(cpython.join("python3.13"), "#!").expect("cpython");
-    let bin = fx.home.join(".trusty-tools/kuzu-import-venv/bin");
+    let bin = fx.home.join(TOOLS_DIR_NAME).join("kuzu-import-venv/bin");
     std::fs::create_dir_all(&bin).expect("mkdir venv");
     symlink(cpython.join("python3.13"), bin.join("python")).expect("python");
     symlink("python", bin.join("python3")).expect("python3");
@@ -170,7 +171,7 @@ fn the_architect_is_bound_by_the_kuzu_store_deny() {
 fn the_formerly_sanctioned_import_denies_end_to_end() {
     let (fx, _root) = fixture();
     let store = fx.project.join(".kuzu-memory/memories.db");
-    let venv = fx.home.join(".trusty-tools/kuzu-import-venv/bin");
+    let venv = fx.home.join(TOOLS_DIR_NAME).join("kuzu-import-venv/bin");
     let mut commands = vec![(
         format!(
             "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --dry-run --from {} --palace x",
@@ -206,12 +207,16 @@ fn the_formerly_sanctioned_import_denies_end_to_end() {
 fn allowed_commands(fx: &Fixture) -> Vec<String> {
     vec![
         "trusty-memory import kuzu --discover --dry-run".to_string(),
-        "trusty-memory import kuzu --dry-run --discover 2>&1 | tee \
-         ~/.trusty-tools/kuzu-review/r.txt"
-            .to_string(),
+        format!(
+            "trusty-memory import kuzu --dry-run --discover 2>&1 | tee \
+             ~/{TOOLS_DIR_NAME}/kuzu-review/r.txt"
+        ),
         format!(
             "trusty-memory import kuzu --dry-run --discover 2>&1 | tee {}",
-            fx.home.join(".trusty-tools/kuzu-review/r.txt").display()
+            fx.home
+                .join(TOOLS_DIR_NAME)
+                .join("kuzu-review/r.txt")
+                .display()
         ),
     ]
 }
@@ -228,13 +233,13 @@ fn the_kuzu_import_exception_allows_for_every_caller_and_bypass() {
 #[test]
 fn the_kuzu_import_apply_forms_allow_for_every_caller_and_bypass() {
     let (fx, _root) = fixture();
-    let ledger = "--review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl";
+    let ledger = format!("--review-ledger ~/{TOOLS_DIR_NAME}/kuzu-review/R/ledger.jsonl");
     let apply = [
         "trusty-memory import kuzu --discover".to_string(),
         format!("env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover {ledger}"),
         format!(
             "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover {ledger} 2>&1 \
-             | tee ~/.trusty-tools/kuzu-review/R/import.txt"
+             | tee ~/{TOOLS_DIR_NAME}/kuzu-review/R/import.txt"
         ),
     ];
     assert_allowed_for_every_caller(&fx, &apply);

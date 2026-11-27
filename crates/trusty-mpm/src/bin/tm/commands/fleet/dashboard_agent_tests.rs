@@ -500,6 +500,24 @@ fn a_non_login_home_gets_one_skipped_line_and_no_files() {
     assert!(!agent::log_dir(&dir).exists());
 }
 
+/// #11961: the shared rule — the passwd home only; another, an absent or a
+/// missing directory is never the login home.
+#[test]
+fn login_home_is_the_passwd_home_and_nothing_else_11961() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    assert!(agent::same_home(Some(a.path()), a.path()));
+    assert!(!agent::same_home(Some(a.path()), b.path()));
+    assert!(!agent::same_home(None, a.path()));
+    assert!(!agent::same_home(
+        Some(&a.path().join("gone")),
+        &a.path().join("gone")
+    ));
+    assert!(
+        !agent::is_login_home(b.path()),
+        "a temp dir is no login home"
+    );
+}
+
 /// A fake `python3` in `dir` that prints `version`, as the probe expects.
 #[cfg(unix)]
 fn fake_python(dir: &Path, version: &str) -> PathBuf {

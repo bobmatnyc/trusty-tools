@@ -299,6 +299,9 @@ fn scan_flat_layout(home: &Path) -> Vec<ProjectCandidate> {
 
 #[cfg(test)]
 mod tests {
+    // #11821: the projects-root dir name comes from the shared resolver's default.
+    use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
+
     use super::*;
 
     fn mkdir(p: &Path) {
@@ -316,12 +319,12 @@ mod tests {
     #[test]
     fn trusty_mpm_projects_layout_is_scanned_two_levels_deep() {
         let home = tempfile::tempdir().expect("tempdir");
-        let root = home.path().join("trusty-mpm-projects");
+        let root = home.path().join(DEFAULT_WORKSPACE_DIR);
         mk_git_repo(&root.join("bobmatnyc").join("trusty-tools"));
         mkdir(&root.join("bobmatnyc").join("scratch")); // not a git repo
         mk_git_repo(&root.join("acme").join("widgets"));
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         assert_eq!(roster.entries.len(), 2);
         let names: Vec<&str> = roster.entries.iter().map(|e| e.name.as_str()).collect();
@@ -343,7 +346,7 @@ mod tests {
         mk_git_repo(&home.path().join("acme-api"));
         mkdir(&home.path().join("Downloads")); // not a git repo
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         assert_eq!(roster.entries.len(), 1);
         assert_eq!(roster.entries[0].name, "acme-api");
@@ -356,10 +359,10 @@ mod tests {
     #[test]
     fn non_git_directories_are_excluded() {
         let home = tempfile::tempdir().expect("tempdir");
-        let root = home.path().join("trusty-mpm-projects");
+        let root = home.path().join(DEFAULT_WORKSPACE_DIR);
         mkdir(&root.join("bobmatnyc").join("not-a-repo"));
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         assert!(roster.entries.is_empty());
     }
@@ -370,14 +373,14 @@ mod tests {
     #[test]
     fn unreadable_owner_dir_is_skipped_not_fatal() {
         let home = tempfile::tempdir().expect("tempdir");
-        let root = home.path().join("trusty-mpm-projects");
+        let root = home.path().join(DEFAULT_WORKSPACE_DIR);
         // A file named like an owner dir (not a directory) is simply
         // skipped by the `owner_path.is_dir()` guard rather than erroring.
         mkdir(&root);
         std::fs::write(root.join("not-a-dir-owner"), "x").expect("write");
         mk_git_repo(&root.join("realowner").join("repo"));
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         assert_eq!(roster.entries.len(), 1);
         assert_eq!(roster.entries[0].owner.as_deref(), Some("realowner"));
@@ -390,7 +393,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         mkdir(&home.path().join("Documents"));
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         assert!(roster.entries.is_empty());
     }
@@ -401,12 +404,12 @@ mod tests {
     #[test]
     fn scan_is_capped_at_max_entries() {
         let home = tempfile::tempdir().expect("tempdir");
-        let owner = home.path().join("trusty-mpm-projects").join("owner");
+        let owner = home.path().join(DEFAULT_WORKSPACE_DIR).join("owner");
         for i in 0..(MAX_ENTRIES + 25) {
             mk_git_repo(&owner.join(format!("repo-{i:04}")));
         }
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         assert_eq!(roster.entries.len(), MAX_ENTRIES);
     }
@@ -416,12 +419,12 @@ mod tests {
     #[test]
     fn results_are_sorted_case_insensitively_by_name() {
         let home = tempfile::tempdir().expect("tempdir");
-        let root = home.path().join("trusty-mpm-projects");
+        let root = home.path().join(DEFAULT_WORKSPACE_DIR);
         mk_git_repo(&root.join("owner").join("Zebra"));
         mk_git_repo(&root.join("owner").join("apple"));
         mk_git_repo(&root.join("owner").join("Banana"));
 
-        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
+        let roster = list_projects_in(home.path(), &home.path().join(DEFAULT_WORKSPACE_DIR));
 
         let names: Vec<&str> = roster.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["apple", "Banana", "Zebra"]);
@@ -431,7 +434,7 @@ mod tests {
     /// picker scans — not the hardcoded `~/trusty-mpm-projects`.
     ///
     /// Why: this is the defect itself. Before the fix, [`list_projects`] built
-    /// its scan root as `home.join("trusty-mpm-projects")` and never read
+    /// its scan root as `home.join(DEFAULT_WORKSPACE_DIR)` and never read
     /// `TRUSTY_MPM_WORKSPACE_ROOT`, so an operator who retargeted the managed
     /// root got a picker that reported every real checkout as missing. This
     /// test drives the PRODUCTION entry point (not the injectable core) so it
@@ -503,7 +506,10 @@ mod tests {
         }
         let root = trusty_common::workspace_layout::resolve_workspace_root(None);
         let home = dirs::home_dir().expect("home");
-        assert_eq!(root, home.join("trusty-mpm-projects"));
+        // #11821: pin the default's value apart from the join, so the
+        // constant cannot drift unseen.
+        assert_eq!(DEFAULT_WORKSPACE_DIR, "trusty-mpm-projects");
+        assert_eq!(root, home.join(DEFAULT_WORKSPACE_DIR));
     }
 
     /// Serialise the env-mutating tests in this module.

@@ -14,7 +14,8 @@ use super::super::launch_backup::{self, ROOT};
 use super::super::seed;
 use super::super::session_name::SessionNames;
 use super::{
-    Ctx, DASHBOARD_SCRIPTS, Mode, POLLER_SCRIPTS, Restarter, loaded_from, pane_running, run,
+    Ctx, DASHBOARD_SCRIPTS, Mode, POLLER_SCRIPTS, Restarter, failed_text, foreign_home_of,
+    home_from_env, loaded_from, pane_running, run,
 };
 
 /// The poller's entry script.
@@ -85,6 +86,8 @@ pub(crate) struct FakeHost {
     pub(crate) restarts: Cell<usize>,
     /// Dashboard kickstarts so far.
     pub(crate) kickstarts: Cell<usize>,
+    /// #11961: `Some(home)` when the run's HOME is not the login home.
+    pub(crate) foreign_home: Option<String>,
 }
 
 impl Restarter for FakeHost {
@@ -108,6 +111,9 @@ impl Restarter for FakeHost {
     fn kickstart_dashboard(&self) -> anyhow::Result<()> {
         self.kickstarts.set(self.kickstarts.get() + 1);
         Ok(())
+    }
+    fn foreign_home(&self) -> Option<String> {
+        self.foreign_home.clone()
     }
 }
 
@@ -589,4 +595,85 @@ fn a_poller_session_of_another_dir_is_an_error_11368() {
             .any(|s| matches!(s, Step::Failed(t) if t.contains("/b/other"))),
         "{steps:?}"
     );
+}
+
+/// #11961: a HOME that is not the passwd home skips the dashboard restart,
+/// says so, and never reads launchd (`unreadable` would fail the step).
+#[test]
+fn a_scratch_home_skips_the_dashboard_restart_and_says_so_11961() {
+    let tmp = seeded_dir();
+    let real = tempfile::tempdir().expect("the login home");
+    std::fs::write(tmp.path().join(DASH), OLD_DASH).unwrap();
+    let host = FakeHost {
+        loaded: true,
+        unreadable: true,
+        foreign_home: foreign_home_of(Some(tmp.path()), Some(real.path())),
+        ..FakeHost::default()
+    };
+    let steps = deploy(tmp.path(), &host, LIVE, VERSION).expect("deploy");
+    assert_eq!(host.kickstarts.get(), 0, "{steps:?}");
+    assert!(
+        steps.iter().any(|s| matches!(s, Step::Skipped(t)
+            if t.starts_with("dashboard restart: skipped") && t.contains("not this user's home")
+                && t.contains("launchctl kickstart -k gui/")
+                && t.contains("from the login shell"))),
+        "{steps:?}"
+    );
+    assert!(failed_text(&steps).is_none(), "{steps:?}");
+}
+
+/// #11961 critic: an unset or empty `$HOME` is foreign, never a passwd
+/// fallback, even when the passwd home is a real directory.
+#[test]
+fn an_unset_or_empty_home_is_foreign_11961() {
+    let real = tempfile::tempdir().expect("the login home");
+    for env in [None, Some(std::ffi::OsString::new())] {
+        let home = home_from_env(env.clone());
+        assert_eq!(home, None, "{env:?}");
+        assert_eq!(
+            foreign_home_of(home.as_deref(), Some(real.path())).as_deref(),
+            Some("an unset HOME"),
+            "{env:?}"
+        );
+    }
+    let set = home_from_env(Some(real.path().as_os_str().to_owned()));
+    assert_eq!(set.as_deref(), Some(real.path()));
+    assert_eq!(foreign_home_of(set.as_deref(), Some(real.path())), None);
+}
+
+/// #11961: with HOME the passwd home, the same deploy still plans and runs
+/// the kickstart (on the fake, never the real launchctl).
+#[test]
+fn the_login_home_still_kickstarts_the_dashboard_11961() {
+    let tmp = seeded_dir();
+    let home = tempfile::tempdir().expect("the login home");
+    std::fs::write(tmp.path().join(DASH), OLD_DASH).unwrap();
+    let host = FakeHost {
+        loaded: true,
+        foreign_home: foreign_home_of(Some(home.path()), Some(home.path())),
+        ..FakeHost::default()
+    };
+    let steps = deploy(tmp.path(), &host, LIVE, VERSION).expect("deploy");
+    assert_eq!(host.kickstarts.get(), 1, "{steps:?}");
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::Changed(t) if t.starts_with("kickstarted the dashboard"))),
+        "{steps:?}"
+    );
+}
+
+/// #11961: the failed steps' own text, joined; none failed is `None`.
+#[test]
+fn a_failed_deploy_names_the_failed_step_11961() {
+    let steps = [
+        Step::Changed("wrote scripts/a.py".into()),
+        Step::Failed("dashboard restart: launchctl kickstart failed".into()),
+        Step::Failed("poller restart: tmux died".into()),
+    ];
+    assert_eq!(
+        failed_text(&steps).as_deref(),
+        Some("dashboard restart: launchctl kickstart failed; poller restart: tmux died")
+    );
+    assert_eq!(failed_text(&steps[..1]), None);
 }

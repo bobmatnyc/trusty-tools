@@ -94,11 +94,7 @@ impl Serialize for DedupState {
 }
 
 fn reemit_interval(kind: &str) -> Option<f64> {
-    // #11474: fleet-classify.py re-emits `owner_answer` every 1800 s while
-    // it stays pending; kept out of `REEMIT` so its public type is unchanged.
-    if kind == "owner_answer" {
-        return Some(1800.0);
-    }
+    // #11826: no `owner_answer` re-raise; fleet-poll.py's dedup never re-raises it.
     REEMIT.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
 }
 

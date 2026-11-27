@@ -405,9 +405,12 @@ pub fn register_configured_tools(registry: &mut ToolRegistry, set: &McpToolSet) 
                 tier: McpTier::Global,
                 path: std::path::PathBuf::from(&name),
                 detail: format!("the tool {name:?} collides with one already registered"),
-                remedy: "Rename the server in ~/.trusty-tools/mcp/servers.toml so its tools \
-                         compose to a free name."
-                    .to_string(),
+                // #11821: message text only, never read as a path.
+                remedy: concat!(
+                    "Rename the server in ~/.trusty-tools/mcp/servers.toml so its tools ", // path-literal: allow
+                    "compose to a free name.",
+                )
+                .to_string(),
             });
             continue;
         }

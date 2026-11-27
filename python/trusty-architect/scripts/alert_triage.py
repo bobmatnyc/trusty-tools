@@ -25,8 +25,9 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MODEL = "claude-haiku-5-5"
-# The poller has no CLAUDE_CONFIG_DIR; ~/.claude's login expired, this dir's is live.
-CLAUDE_CONFIG_DIR = os.path.expanduser("~/.trusty-tools/trusty-mpm/claude-config")
+if HERE not in sys.path:     # python3 -I drops the script directory
+    sys.path.insert(0, HERE)
+import architect_config  # noqa: E402
 HAIKU_TIMEOUT = 90  # seconds one batched call may take before it fails open
 PANE_LINES = 30
 CTX_BAR_PCT = 25           # ruling b7 2026-10-07: refresh at 25% of a 1M window
@@ -321,7 +322,10 @@ def haiku_argv():
 def run_haiku(prompt):
     """One `claude -p` call on the plan login (no API key). Raises on timeout or non-zero exit."""
     env = dict(os.environ)
-    env.setdefault("CLAUDE_CONFIG_DIR", CLAUDE_CONFIG_DIR)
+    # The poller has no CLAUDE_CONFIG_DIR; ~/.claude's login expired, tm's managed dir's is live.
+    # #11821 P6b: that dir comes from the install paths; a broken install.toml raises ConfigError.
+    if not env.get("CLAUDE_CONFIG_DIR"):
+        env["CLAUDE_CONFIG_DIR"] = architect_config.managed_claude_config_dir(env)
     r = subprocess.run(
         haiku_argv(),
         input=prompt, capture_output=True, text=True, timeout=HAIKU_TIMEOUT,

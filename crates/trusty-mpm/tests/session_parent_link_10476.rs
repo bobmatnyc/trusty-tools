@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use trusty_common::install_paths::TOOLS_DIR_NAME;
 
 use serde_json::{Value, json};
 use serial_test::serial;
@@ -46,7 +47,7 @@ impl Drop for HomeGuard {
 /// A scratch `$HOME` whose config enables MCP spawning and lifts the disk gate.
 fn scratch_home() -> HomeGuard {
     let home = TempDir::new().expect("scratch home");
-    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    let dir = home.path().join(TOOLS_DIR_NAME).join("trusty-mpm");
     std::fs::create_dir_all(&dir).expect("config dir");
     std::fs::write(
         dir.join("config.yaml"),

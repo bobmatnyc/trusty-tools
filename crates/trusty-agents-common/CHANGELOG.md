@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.11.3] — 2026-11-27
+
+### Changed
+
+- The batch-2 test-audit findings in trusty-agents-common are acted on: tests that only exercised a derive or a literal are removed, and weak tests now pin the behaviour their names claim; no behaviour change (#11268).
+
 ## [0.11.2] — 2026-11-24
 
 ### Fixed

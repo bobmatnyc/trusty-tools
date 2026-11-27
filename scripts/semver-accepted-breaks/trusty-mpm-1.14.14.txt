@@ -2,4 +2,17 @@ crate   trusty-mpm
 version 1.14.14
 reason  The #10161 D3c Architect agents add the pub field agents to the non-#[non_exhaustive] ArchitectSeed struct (break vs 1.14.13); under the 2026-09-26 versioning ruling a public-API break never forces a major version, and the Architect declared this break. Refs #10161.
 # #10161 D3c: ArchitectSeed now carries the five shipped Architect agents; tm fleet init reads seed.agents to deploy them.
+accept  auto_trait_impl_removed type GhPrReader is no longer RefUnwindSafe
+accept  auto_trait_impl_removed type GhPrReader is no longer UnwindSafe
 accept  constructible_struct_adds_field field ArchitectSeed.agents
+accept  constructible_struct_adds_field field ProjectRow.decommissioned
+accept  constructible_struct_adds_field field SendInputResponse.error
+accept  constructible_struct_adds_field field SendInputResponse.reason
+accept  constructible_struct_adds_field field SendInputResponse.submit_state
+accept  constructible_struct_adds_field field TickReport.identity_failed
+accept  enum_struct_variant_field_added field dim of variant TreeRowKind::Project
+accept  enum_variant_added variant ArchiveMoveError:ConfigDir
+accept  enum_variant_added variant LedgerError:InstallPaths
+accept  enum_variant_added variant SessionRegistrationError:MainCheckoutUnresolved
+accept  enum_variant_missing variant SessionRegistration::LinkedWorktree
+accept  method_parameter_count_changed trusty_mpm::core::pr_watch::gh::GhPrReader::new takes 3 parameters, but now takes 2 parameters

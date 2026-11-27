@@ -397,8 +397,16 @@ fn a_failed_deploy_launches_nothing_and_exits_1_11368() {
             );
             assert_eq!((r.action, r.exit), (want, 1), "{:?}", r.steps);
             assert!(runs().is_empty(), "{want:?} ran after a failed deploy");
+            // #11961: the verdict line names the failed step's own text.
+            let why = if fails {
+                "(cannot write scripts/fleet-poll.py)"
+            } else {
+                "(poller restart: tmux died)"
+            };
             assert!(
-                r.steps.iter().any(|s| s.contains("nothing was launched")),
+                r.steps
+                    .iter()
+                    .any(|s| s.contains("nothing was launched") && s.contains(why)),
                 "{:?}",
                 r.steps
             );

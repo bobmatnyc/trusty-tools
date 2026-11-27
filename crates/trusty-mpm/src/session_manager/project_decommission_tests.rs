@@ -736,3 +736,62 @@ async fn decommission_scratch_project_palace_lookup_error_refuses() {
             .is_decommissioned()
     );
 }
+
+/// #11643 criterion 2: two scratch projects with the same last two path parts
+/// under different roots (`<a>/code/app`, `<b>/code/app`) derive the same
+/// palace id. Decommissioning one skips the unload, reports the skip naming
+/// the other, and still completes.
+/// Test: this function IS the test. Fails if the decommission unloads (or
+/// looks up) the shared palace id.
+#[tokio::test]
+async fn decommission_skips_the_unload_when_another_project_shares_the_palace_id() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (root_a, root_b) = (
+        crate::test_support::hermetic_temp_dir(),
+        crate::test_support::hermetic_temp_dir(),
+    );
+    for (name, root) in [("app-a", &root_a), ("app-b", &root_b)] {
+        let mut project = registry.get("widget").await.expect("row");
+        project.name = name.into();
+        let path = root.path().join("code").join("app");
+        assert!(!path.exists(), "premise: no checkout on disk");
+        project.repo_url = path.to_string_lossy().into_owned();
+        project.project_key = Some(format!("local:{name}"));
+        registry.register(project).await.expect("register");
+    }
+    let rig = rig(search_not_found(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "app-a", Ok(rig.capability()))
+        .await
+        .expect("a skipped unload must not refuse the decommission");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    match &shutdown.palace {
+        ShutdownState::Skipped { reason } => {
+            assert!(
+                reason.contains("app-b") && reason.contains("code-app"),
+                "{reason}"
+            )
+        }
+        other => panic!("expected a reported skip, got {other:?}"),
+    }
+    assert!(rig.params_of("memory.palace_get").is_none(), "no lookup");
+    assert!(rig.params_of("memory.palace_unload").is_none(), "no unload");
+    assert!(
+        registry
+            .get("app-a")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+    assert!(
+        !registry
+            .get("app-b")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}

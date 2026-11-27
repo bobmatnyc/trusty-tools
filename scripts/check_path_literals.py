@@ -9,22 +9,31 @@ What: scans tracked source files (EXTENSIONS) line by line, skipping comment-onl
 lines and lines that carry the waiver `path-literal: allow`. A line is a hit when
 it matches one of PATTERNS:
   tilde       `~/`, `$HOME/` or `${HOME}/` followed by one of the three names;
-  home-join   a word containing `home` followed, within 60 characters on the
-              same line, by one of the three names as a quoted path segment
-              (`Path.home() / ".trusty-tools"`, `home_dir().join(".trusty-mpm")`).
+  home-join   a `home` word followed, within 60 characters on the same line,
+              by one of the three names as a quoted path segment
+              (`Path.home() / ".trusty-tools"`, `home_dir().join(".trusty-mpm")`);
+  brace-join  a `{...home...}/` interpolation joined to a name
+              (`f"{home}/.trusty-tools"`);
+  format-join `{}/<name>` with a `home` word later on the line
+              (`format!("{}/.trusty-mpm", home)`);
+  tilde-call  `expanduser("~")` concatenated with a quoted name
+              (`expanduser("~") + "/.trusty-tools"`).
+  #11821 P6b: a `home` word is `home`, `HOME` or a camelCase `Home`, optionally
+  with `dir`/`_dir`, and not followed by a lower-case letter, so `homepage`
+  and `homebrew` are not one.
 A per-project `<project>/.trusty-mpm` is not home-rooted and does not match.
 ALLOW lists the resolvers themselves. The existing hits are counted per file in
 BASELINE. A file whose hit count exceeds its baseline count fails (FAIL NEW; every
 hit in the file is printed, since a count cannot say which line is new). A file
-below its baseline is a NOTE, never a failure, so the P3 and P4 migrations need
-not edit the baseline in the same PR.
+below its baseline fails too (FAIL STALE, #11821 P6b): the headroom would admit
+a new hit unseen, so a migration lowers the baseline in the same PR (`--shrink`).
 Shrinking the baseline: after a migration, `--shrink` lowers each row to the
 current count and drops rows at zero. It never raises a count. `--seed` writes
 the baseline from scratch; it exists for #11821 P6a and a count it raises
 needs review.
 Test: scripts/tests/test_check_path_literals.py.
 Usage: scripts/check_path_literals.py [--root DIR] [--baseline FILE] [--shrink | --seed]
-  Exit 0: no file over its baseline. Exit 1: FAIL lines. Exit 2: usage or read error.
+  Exit 0: every file at its baseline. Exit 1: FAIL lines. Exit 2: usage or read error.
 """
 from __future__ import annotations
 
@@ -35,9 +44,15 @@ import subprocess
 import sys
 
 NAMES = r"(?:trusty-mpm-projects|\.trusty-tools|\.trusty-mpm)"
+# #11821 P6b: a `home` word, never a prefix of `homepage` or `homebrew`.
+HOME_WORD = r"(?:(?<![A-Za-z])(?i:home)|(?<=[a-z])Home)(?:_?(?i:dirs?))?(?![a-z])"
 PATTERNS = (
     ("tilde", re.compile(r"(?:~|\$HOME|\$\{HOME\})/" + NAMES + r"(?![\w.-])")),
-    ("home-join", re.compile(r"(?i:home)[^\n]{0,60}?[\"']/?" + NAMES + r"(?=[\"'/])")),
+    ("home-join", re.compile(HOME_WORD + r"[^\n]{0,60}?[\"']/?" + NAMES + r"(?=[\"'/])")),
+    # #11821 P6b: the home-joined forms the P6a review found unmatched.
+    ("brace-join", re.compile(r"\{[^{}\n]*" + HOME_WORD + r"[^{}\n]*\}/" + NAMES + r"(?![\w.-])")),
+    ("format-join", re.compile(r"\{\}/" + NAMES + r"(?![\w.-])[^\n]{0,80}?" + HOME_WORD)),
+    ("tilde-call", re.compile(r"expanduser\(\s*[\"']~[\"']\s*\)[^\n]{0,20}?[\"']/?" + NAMES + r"(?=[\"'/])")),
 )
 EXTENSIONS = (".py", ".sh", ".bash", ".rs", ".ts", ".js", ".mjs", ".cjs", ".svelte")
 COMMENT = re.compile(r"^\s*(?:#|//|/\*|\*|--)")
@@ -134,6 +149,12 @@ def main(argv: list[str]) -> int:
         write_baseline(baseline_path, {rel: n for rel, n in shrunk.items() if n})
         print(f"shrunk {baseline_path}: {sum(base.values())} -> {sum(shrunk.values())} hits")
     failed = 0
+    if not a.shrink:
+        # #11821 P6b: headroom under a baseline would admit a new hit unseen.
+        for rel, n in sorted(base.items()):
+            if counts.get(rel, 0) < n:
+                failed += 1
+                print(f"FAIL STALE: {rel}: {counts.get(rel, 0)} hits, baseline {n}; run `--shrink` to lower it")
     for rel, found in current.items():
         if len(found) > base.get(rel, 0):
             failed += 1
@@ -141,10 +162,6 @@ def main(argv: list[str]) -> int:
                   f"install_paths, or waive a non-path line with `{WAIVER}`")
             for n, name, line in found:
                 print(f"  {rel}:{n}: [{name}] {line[:160]}")
-    if not a.shrink:
-        for rel, n in sorted(base.items()):
-            if counts.get(rel, 0) < n:
-                print(f"NOTE: {rel}: {counts.get(rel, 0)} hits, baseline {n}; `--shrink` can lower it")
     if failed:
         return 1
     print(f"check_path_literals: ok ({sum(counts.values())} baselined hits in {len(counts)} files)")

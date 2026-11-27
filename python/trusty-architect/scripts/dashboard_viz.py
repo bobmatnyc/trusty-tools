@@ -36,7 +36,6 @@ GOAL_ID = re.compile(r"^(G[0-9a-f]{2})\b")
 WORKTREE = re.compile(r"--claude-worktrees-.*$")
 MAX_ARCHIVE = 8 << 20
 MAX_TITLE = 140
-PROJECTS_ROOT = os.path.expanduser(architect_config.DEFAULT_PROJECTS_ROOT)   # #10571: build() reads local/architect.json projects_root
 SCRATCH = re.compile(r"^-private-tmp-claude-\d+-(-.+?)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-scratchpad")
 TEMP_PREFIXES = (("-private-var-folders-", "var/folders/"), ("-var-folders-", "var/folders/"), ("-private-tmp-", ""), ("-tmp-", ""))
 
@@ -255,10 +254,11 @@ def _temp(d, real):
     return "temp: " + d.strip("-")
 
 
-def resolve_dir(d, registry, sessions, goals, projects_root=PROJECTS_ROOT, _top=True):
+def resolve_dir(d, registry, sessions, goals, projects_root=None, _top=True):
     """{name, goal, sessions, basis} for a Claude project directory not in the allowlist. name is never "".
     Order: scratchpad -> its parent project "(scratch)"; the tm registry by path; ~/trusty-mpm-projects/<owner>/<repo>
-    ("path, not registered"); OS temp dirs ("temp: ..."); else the directory text, flagged unresolved."""
+    ("path, not registered"); OS temp dirs ("temp: ..."); else the directory text, flagged unresolved.
+    #11821 P6b: projects_root None (the install paths did not resolve) skips the two projects-root rules."""
     m = SCRATCH.match(d) if _top else None
     if m:
         par = resolve_dir(m.group(1), registry, sessions, goals, projects_root, _top=False)
@@ -278,14 +278,14 @@ def resolve_dir(d, registry, sessions, goals, projects_root=PROJECTS_ROOT, _top=
         r = best[1]
         owner, repo = r.get("owner"), r.get("repo")
         return _row("%s/%s" % (owner, repo) if owner and repo else r["name"], owner, repo or r["name"], r["name"], "tm registry (path match)", sessions, goals)
-    if real:
+    if real and projects_root:
         root = os.path.realpath(projects_root)
         if _inside(root, real) and real != root:
             parts = os.path.relpath(real, root).split(os.sep)
             if len(parts) >= 2:
                 return _row("%s/%s" % (parts[0], parts[1]), parts[0], parts[1], "", "path, not registered", sessions, goals)
             return {"name": parts[0], "goal": "", "sessions": [], "basis": "path, not registered; no session found"}
-    if real is None:   # checkout gone from disk: split owner/repo from the text under the projects root
+    if real is None and projects_root:   # checkout gone from disk: split owner/repo from the text under the projects root
         pre = enc(projects_root) + "-"
         if d.startswith(pre):
             rest = d[len(pre):]
@@ -383,7 +383,7 @@ def build(store, token_file, projects, il_schedule, architect_il, now, days=7, r
         try:
             projects_root = architect_config.load().projects_root
         except architect_config.ConfigError:
-            projects_root = PROJECTS_ROOT
+            projects_root = None   # #11821 P6b: no guessed $HOME root; resolve_dir skips the projects-root rules
     if registry is None:
         try:
             registry = dashboard_projects.registered_projects()

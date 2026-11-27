@@ -13,6 +13,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_seed_scripts_10599::`.
 
 use crate::common;
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -61,7 +62,7 @@ fn seed(custom: bool) -> Arch {
     let dir = if custom {
         outer.path().join("ops/arch-x")
     } else {
-        home.path().join("trusty-mpm-projects/architect")
+        home.path().join(DEFAULT_WORKSPACE_DIR).join("architect")
     };
     assert!(dir.join("scripts/self-clear.sh").is_file(), "seeded");
     Arch {
@@ -242,8 +243,8 @@ const RESIDUALS: &[Residual] = &[
     // #10571 S2: the `{"op": "remind_fire"}` and `{"op": "remind_done"}` ledger ops it writes
     // read as a 1Password `op` call, as datg_ops.py's `unknown op` does (#10598).
     residual("il_remind.py", CRED, GUARD_FP_10598),
-    // #10571 S1: its state, rollup and threshold files are named `token-*.json[l]`, which
-    // the guard reads as token files; the Rust watcher shares those names (#11629).
+    // #11800: the docstring's `local/usage/token-hourly.jsonl.` and the module attribute
+    // `token_watch_rules.ScanRules` read as token files; its data files pass now.
     residual("token_watch.py", FILE, GUARD_FP_10598),
 ];
 

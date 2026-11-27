@@ -13,6 +13,8 @@
 //! machine's real `/tmp` store.
 
 use crate::common;
+use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
+use trusty_common::workspace_layout::DEFAULT_WORKSPACE_DIR;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -24,7 +26,7 @@ fn home_with_ceiling(ceiling: u32, extra: &str) -> tempfile::TempDir {
         .prefix("tm-test-build-lease-")
         .tempdir_in("/tmp")
         .expect("scratch home");
-    let dir = home.path().join(".trusty-mpm");
+    let dir = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&dir).expect("config dir");
     std::fs::write(
         dir.join("config.toml"),
@@ -71,7 +73,7 @@ fn git_repo(dir: &Path, origin: Option<&str>) {
 
 /// Append `line` to the scratch home's `config.toml`.
 fn append_config(home: &Path, line: &str) {
-    let config = home.join(".trusty-mpm/config.toml");
+    let config = home.join(MPM_DIR_NAME).join("config.toml");
     let body = std::fs::read_to_string(&config).expect("config");
     std::fs::write(&config, format!("{body}{line}\n")).expect("config");
 }
@@ -87,7 +89,7 @@ fn spawn_holder(home: &Path, secs: &str) -> Child {
 
 /// The slot files' holder records, once `n` holders have written a child pid.
 fn wait_for_holders(home: &Path, n: usize) -> Vec<serde_json::Value> {
-    wait_for_holders_in(&home.join(".trusty-mpm/build-slots"), n)
+    wait_for_holders_in(&home.join(MPM_DIR_NAME).join("build-slots"), n)
 }
 
 /// How many `slot-K.lock` files `dir` holds.
@@ -327,7 +329,7 @@ fn touching_build(ran: &Path) -> Vec<String> {
 #[serial_test::serial(lease_processes)]
 fn an_unusable_store_runs_unleased_up_to_the_cap() {
     let home = home_with_ceiling(64, "");
-    std::fs::write(home.path().join(".trusty-mpm/build-slots"), "a file").expect("file");
+    std::fs::write(home.path().join(MPM_DIR_NAME).join("build-slots"), "a file").expect("file");
     let blocker = home.path().join("tmp-is-a-file");
     std::fs::write(&blocker, "x").expect("file");
     let ran = home.path().join("the-build-ran");
@@ -349,7 +351,7 @@ fn an_unusable_store_runs_unleased_up_to_the_cap() {
 #[serial_test::serial(lease_processes)]
 fn an_admission_lock_directory_runs_unleased_up_to_the_cap() {
     let home = home_with_ceiling(64, "");
-    let store = home.path().join(".trusty-mpm/build-slots");
+    let store = home.path().join(MPM_DIR_NAME).join("build-slots");
     std::fs::create_dir_all(store.join("admission.lock")).expect("mkdir");
     let ran = home.path().join("the-build-ran");
     let out = build_lease(home.path())
@@ -373,7 +375,7 @@ fn an_admission_lock_directory_runs_unleased_up_to_the_cap() {
 fn every_unlockable_slot_file_runs_unleased_up_to_the_cap() {
     use std::os::unix::fs::PermissionsExt;
     let home = home_with_ceiling(64, "");
-    let store = home.path().join(".trusty-mpm/build-slots");
+    let store = home.path().join(MPM_DIR_NAME).join("build-slots");
     std::fs::create_dir_all(store.join("slot-0.lock")).expect("mkdir");
     std::fs::write(store.join("admission.lock"), "").expect("admission");
     std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o555)).expect("chmod");
@@ -398,8 +400,12 @@ fn unleased_is_refused_once_the_census_reaches_the_cap() {
     let roomy = home_with_ceiling(64, "");
     let tight = home_with_ceiling(1, "");
     for home in [&roomy, &tight] {
-        std::fs::create_dir_all(home.path().join(".trusty-mpm/build-slots/admission.lock"))
-            .expect("mkdir");
+        std::fs::create_dir_all(
+            home.path()
+                .join(MPM_DIR_NAME)
+                .join("build-slots/admission.lock"),
+        )
+        .expect("mkdir");
     }
     let first = build_lease(roomy.path())
         .args(["--", "sleep", "30"])
@@ -433,7 +439,7 @@ fn unleased_is_refused_once_the_census_reaches_the_cap() {
 #[test]
 fn two_sessions_with_different_tmpdirs_share_one_store() {
     let home = home_with_ceiling(1, "");
-    std::fs::write(home.path().join(".trusty-mpm/build-slots"), "a file").expect("file");
+    std::fs::write(home.path().join(MPM_DIR_NAME).join("build-slots"), "a file").expect("file");
     let (tmp_a, tmp_b) = (home.path().join("a"), home.path().join("b"));
     std::fs::create_dir_all(&tmp_a).expect("a");
     std::fs::create_dir_all(&tmp_b).expect("b");
@@ -483,7 +489,7 @@ fn an_unusable_slot_directory_refuses_instead_of_sharing() {
     let home = home_with_ceiling(1, "");
     let pool_blocker = home.path().join("pool-is-a-file");
     std::fs::write(&pool_blocker, "x").expect("file");
-    let config = home.path().join(".trusty-mpm/config.toml");
+    let config = home.path().join(MPM_DIR_NAME).join("config.toml");
     let body = std::fs::read_to_string(&config).expect("config");
     std::fs::write(
         &config,
@@ -509,7 +515,10 @@ fn an_unusable_slot_directory_refuses_instead_of_sharing() {
             .expect("git");
         assert!(status.success(), "git {args:?}");
     }
-    let shared = home.path().join(".trusty-tools/cargo-target/acme/widget");
+    let shared = home
+        .path()
+        .join(TOOLS_DIR_NAME)
+        .join("cargo-target/acme/widget");
     let ran = home.path().join("the-build-ran");
     let out = build_lease(home.path())
         .current_dir(&repo)
@@ -619,7 +628,10 @@ fn a_waiter_never_sees_a_holders_argument_values() {
         .spawn()
         .expect("holder");
     wait_for_holders(home.path(), 1);
-    let slot = home.path().join(".trusty-mpm/build-slots/slot-0.lock");
+    let slot = home
+        .path()
+        .join(MPM_DIR_NAME)
+        .join("build-slots/slot-0.lock");
     let mode = std::fs::metadata(&slot)
         .expect("slot file")
         .permissions()
@@ -710,7 +722,7 @@ fn widget_repo(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     append_config(home, &format!("slot_pool_root = \"{}\"", pool.display()));
     let repo = home.join("repo");
     git_repo(&repo, Some("https://github.com/acme/widget.git"));
-    let shared = home.join(".trusty-tools/cargo-target/acme/widget");
+    let shared = home.join(TOOLS_DIR_NAME).join("cargo-target/acme/widget");
     (repo, pool, shared)
 }
 
@@ -767,7 +779,10 @@ fn a_shared_target_without_a_repo_identity_refuses() {
     let home = home_with_ceiling(2, "");
     let repo = home.path().join("no-origin");
     git_repo(&repo, None);
-    let shared = home.path().join(".trusty-tools/cargo-target/acme/widget");
+    let shared = home
+        .path()
+        .join(TOOLS_DIR_NAME)
+        .join("cargo-target/acme/widget");
     let ran = home.path().join("the-build-ran");
     let out = build_lease(home.path())
         .current_dir(&repo)
@@ -886,7 +901,7 @@ fn home_with_ceiling_and_cargo(ceiling: u32) -> tempfile::TempDir {
         .prefix("tm-test-build-lease-")
         .tempdir_in("/tmp")
         .expect("scratch home");
-    let dir = home.path().join(".trusty-mpm");
+    let dir = home.path().join(MPM_DIR_NAME);
     std::fs::create_dir_all(&dir).expect("config dir");
     std::fs::write(
         dir.join("config.toml"),
@@ -1006,7 +1021,7 @@ fn daemon_socket(home: &Path) -> PathBuf {
 /// secret (#9121) — plus the data-dir override [`daemon_socket`] names.
 fn spawn_daemon(home: &Path) -> Child {
     let socket = daemon_socket(home);
-    let child = common::daemon_command(home, &home.join("trusty-mpm-projects"))
+    let child = common::daemon_command(home, &home.join(DEFAULT_WORKSPACE_DIR))
         .env("TRUSTY_DATA_DIR_OVERRIDE", home.join("data"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1265,7 +1280,9 @@ fn waiting_bin_crate(dir: &Path) {
 
 /// Whether slot `slot`'s record reads `"phase": "run"` within `secs` (#8692).
 fn wait_for_run_phase(home: &Path, slot: u32, secs: u64) -> bool {
-    let lock = home.join(format!(".trusty-mpm/build-slots/slot-{slot}.lock"));
+    let lock = home
+        .join(MPM_DIR_NAME)
+        .join(format!("build-slots/slot-{slot}.lock"));
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
         let phase = std::fs::read_to_string(&lock)
@@ -1282,7 +1299,11 @@ fn wait_for_run_phase(home: &Path, slot: u32, secs: u64) -> bool {
 
 /// The checkout a lease last recorded for slot `slot`, if any.
 fn slot_checkout(home: &Path, slot: u32) -> Option<String> {
-    std::fs::read_to_string(home.join(format!(".trusty-mpm/build-slots/slot-{slot}.last"))).ok()
+    std::fs::read_to_string(
+        home.join(MPM_DIR_NAME)
+            .join(format!("build-slots/slot-{slot}.last")),
+    )
+    .ok()
 }
 
 /// [`waiting_test_crate`] with [`slow_compile`]'s build script.
@@ -1476,9 +1497,12 @@ fn a_sigkilled_run_phase_holder_keeps_its_slot_but_frees_capacity_8692() {
         .args(["--wait-secs", "5", "--", "true"])
         .output()
         .expect("a second build");
-    let orphan_record =
-        std::fs::read_to_string(home.path().join(".trusty-mpm/build-slots/slot-0.lock"))
-            .unwrap_or_default();
+    let orphan_record = std::fs::read_to_string(
+        home.path()
+            .join(MPM_DIR_NAME)
+            .join("build-slots/slot-0.lock"),
+    )
+    .unwrap_or_default();
     std::fs::write(home.path().join("release"), "").expect("release");
     wait_until_dead(build);
     let got = home.path().join("next-target-dir");
@@ -1691,7 +1715,7 @@ fn build_lease_where_prints_the_newest_slot_binary_10835() {
     assert_eq!(json["source"], "slot-1", "{json}");
     assert!(json["mtime_unix"].is_u64(), "{json}");
     assert!(
-        !home.path().join(".trusty-mpm/build-slots").exists()
+        !home.path().join(MPM_DIR_NAME).join("build-slots").exists()
             && !home.path().join("fallback-store").exists(),
         "where opens no lease store"
     );

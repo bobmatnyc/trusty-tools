@@ -20,7 +20,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use super::architect::{ProtectedVerb, refusal, refuses_verbs};
-use super::index_shutdown::{IndexShutdown, IndexShutdownReport, ShutdownTarget};
+use super::index_shutdown::{IndexShutdown, IndexShutdownReport, ShutdownTarget, palace_for};
 use super::manager::SessionManager;
 use super::record::{ManagedSessionState, SessionRecord};
 use crate::project::{Project, ProjectRegistry, ProjectStoreError, resolve_session_project};
@@ -151,6 +151,13 @@ impl SessionManager {
         shutdown: Result<IndexShutdown, String>,
     ) -> Result<ProjectDecommissionReport, ProjectDecommissionError> {
         let project = registry.get(name).await?;
+        // #11643: every other active project, to refuse a shared palace id.
+        let others: Vec<Project> = registry
+            .list()
+            .await?
+            .into_iter()
+            .filter(|p| p.name != project.name && !p.is_decommissioned())
+            .collect();
         let all: Vec<SessionRecord> = self
             .list()
             .await
@@ -202,9 +209,10 @@ impl SessionManager {
             Ok(cap) => {
                 // Palace resolution reads the checkout's pin and git config.
                 let held = project.clone();
-                let target = tokio::task::spawn_blocking(move || shutdown_target(&held, &all))
-                    .await
-                    .map_err(|e| format!("shutdown target task failed: {e}"));
+                let target =
+                    tokio::task::spawn_blocking(move || shutdown_target(&held, &all, &others))
+                        .await
+                        .map_err(|e| format!("shutdown target task failed: {e}"));
                 match target {
                     Ok(target) => cap.shut_down(&target).await,
                     Err(e) => IndexShutdownReport::failed(&e),
@@ -250,9 +258,17 @@ impl SessionManager {
 /// is on disk supplies the path, else the project's own
 /// [`crate::project::local_checkout_for`] when that is on disk (#10989 F2: a
 /// project with no records still resolves its palace); see
-/// [`ShutdownTarget::for_project`].
-/// Test: `decommission_project_without_records_unloads_by_its_checkout`.
-fn shutdown_target(project: &Project, records: &[SessionRecord]) -> ShutdownTarget {
+/// [`ShutdownTarget::for_project`]. #11643: each of `others` (the other
+/// active projects) derives its palace id from its own checkout or record,
+/// and the target refuses an id any of them may own
+/// ([`ShutdownTarget::refuse_shared_palace`]).
+/// Test: `decommission_project_without_records_unloads_by_its_checkout`,
+/// `decommission_skips_the_unload_when_another_project_shares_the_palace_id`.
+fn shutdown_target(
+    project: &Project,
+    records: &[SessionRecord],
+    others: &[Project],
+) -> ShutdownTarget {
     let root = records
         .iter()
         .map(|r| r.workspace_path.clone().unwrap_or_else(|| r.cwd.clone()))
@@ -262,6 +278,15 @@ fn shutdown_target(project: &Project, records: &[SessionRecord]) -> ShutdownTarg
         project.project_key.as_deref(),
         &project.repo_url,
         root.as_deref(),
+    )
+    .refuse_shared_palace(
+        &others
+            .iter()
+            .map(|o| {
+                let root = crate::project::local_checkout_for(o).filter(|p| p.is_dir());
+                (o.name.clone(), palace_for(&o.repo_url, root.as_deref()))
+            })
+            .collect::<Vec<_>>(),
     )
 }
 

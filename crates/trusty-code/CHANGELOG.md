@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.1] — 2026-11-27
+
+### Added
+
+- tcode serves `tm-prose-style/SKILL.md`, so the BASE-AGENT pointer to it resolves for tcode agents (#11481).
+- `McpToolSet::load_only` and `McpToolSet::load_at_only` take a server-name filter and never spawn a server the filter rejects; skipped servers are left out of the diagnostics and named in one debug line (#11650).
+
+### Fixed
+
+- MCP servers are spawned in their own process group, so a wrapper command's grandchild (`npx`, `uvx`) is killed when the server's client is dropped instead of being left running (#11650).
+- `tcode tui` no longer ends a failed turn in silence: the run's error-level log line (for example `PM config error: ...`) shows in the chat, and a run that ends with status `failed` adds a visible error line (#11788).
+
+### Changed
+
+- Test stubs that are written and then exec'd now go through `trusty_common::exec_stub::write_executable`, which removes the ETXTBSY race on Linux CI (#10248). Test-only; no runtime change.
+- The agent loop labels a typed Bedrock send failure (`InferenceError::Bedrock`) `provider`, the label the same failure had before (#10892).
+- The shared MCP server file is read from `<config_dir>/.trusty-tools/mcp/servers.toml`, following the install paths; a broken `install.toml` loads no servers (#11821).
+
+### Documentation
+
+- The project-picker call sites note why they keep the defaulting workspace-root resolver: they only list projects (#11821).
+
 ## [0.8.0] — 2026-11-07
 
 ### Breaking

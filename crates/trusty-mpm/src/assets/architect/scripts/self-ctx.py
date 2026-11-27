@@ -24,18 +24,20 @@ Returns None when the directory is missing or empty, no candidate is an
 interactive ("cli") transcript, or the chosen one carries no assistant usage
 line — this module never raises for that case; the caller (fleet-poll.py)
 decides what a None means. `default_dir()` resolves the transcript directory
-from CLAUDE_CONFIG_DIR and ARCHITECT_PROJECT_DIR, each with a documented
-default, so no operator path is baked in.
+from CLAUDE_CONFIG_DIR and ARCHITECT_PROJECT_DIR; unset, each defaults through
+architect_config's install paths (#11821 P6b: the managed claude-config dir and
+<projects_root>/architect), so no operator path is baked in and a broken
+install.toml raises architect_config.ConfigError.
 Test: tests/test_self_ctx.py
 """
 import json
 import os
 import re
+import sys
 
-# `tm fleet init`'s default Architect project (#8436 ruling Q4).
-DEFAULT_PROJECT_DIR = "~/trusty-mpm-projects/architect"
-# The Claude Code config dir trusty-mpm launches sessions under.
-DEFAULT_CLAUDE_CONFIG_DIR = "~/.trusty-tools/trusty-mpm/claude-config"
+HERE = os.path.dirname(os.path.abspath(__file__))
+# `tm fleet init`'s default Architect project (#8436 ruling Q4), under the projects root.
+DEFAULT_PROJECT_NAME = "architect"
 USAGE_TAIL_START = 65536       # first tail read for usage; grows if not found in it
 ENTRYPOINT_TAIL_START = 4096   # entrypoint is on nearly every line; a small tail suffices
 CANDIDATE_LIMIT = 20           # only this many newest-by-mtime files are considered
@@ -48,13 +50,17 @@ def project_slug(path):
 
 
 def default_dir(environ=None):
-    """<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>, with
-    DEFAULT_CLAUDE_CONFIG_DIR and DEFAULT_PROJECT_DIR standing in for an
-    unset variable. `~` expands; the project path is made absolute first."""
+    """<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>, with the
+    install's managed claude-config dir and <projects_root>/architect standing in
+    for an unset variable (#11821 P6b). `~` expands; the project path is made
+    absolute first. Raises architect_config.ConfigError on a broken install.toml."""
     env = os.environ if environ is None else environ
-    config = os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or DEFAULT_CLAUDE_CONFIG_DIR)
-    project = os.path.abspath(os.path.expanduser(
-        env.get("ARCHITECT_PROJECT_DIR") or DEFAULT_PROJECT_DIR))
+    if HERE not in sys.path:     # python3 -I drops the script directory
+        sys.path.insert(0, HERE)
+    import architect_config
+    config = os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "") or architect_config.managed_claude_config_dir(env)
+    project = os.path.abspath(os.path.expanduser(env.get("ARCHITECT_PROJECT_DIR") or "") or os.path.join(
+        architect_config.install_projects_root(env), DEFAULT_PROJECT_NAME))
     return os.path.join(config, "projects", project_slug(project))
 
 

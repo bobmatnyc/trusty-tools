@@ -1,3 +1,0 @@
-Added
-- `run --author-intent TEXT` and the optional `author_intent` review-request field carry the author's intent into a review. The reviewer prompt gets an `## Author Intent` section with the grading rule. When the intent declares an as-is migration, a low or medium finding whose quoted code is moved unchanged from removed lines is withheld as `as_is_carryover`; bugs on code the change wrote, and high or critical findings, are still reported. A review without intent is unchanged.
-- Map-reduce reviews apply the author-intent prompt rule only; the as-is carry-over gate runs on single-pass reviews, and it withholds a quote only when every line is moved unchanged (present on both diff sides), the quote is non-trivial, and the severity is explicitly low or medium.

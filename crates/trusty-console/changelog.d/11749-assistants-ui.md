@@ -1,3 +1,0 @@
-Added
-- The Trusty Assistants page at `/tools/assistants/`: an instance list, each instance's history oldest first (with notes when lines could not be read or only the newest part was read), and an ask box that shows a pending state while an ask runs. A 503 shows the `ta ask-daemon` hint, a 429 says the assistants are busy, and other failures show the console's error text. Answers render as text, never as HTML. The page is served on the loopback and tailnet-gated listeners alike ([#11749](https://github.com/bobmatnyc/trusty-tools/issues/11749)).
-- `scripts/sandbox_assistants_console.sh` starts an isolated console and a seeded assistant's ask daemon on the offline echo model for a live check of the page ([#11749](https://github.com/bobmatnyc/trusty-tools/issues/11749)).

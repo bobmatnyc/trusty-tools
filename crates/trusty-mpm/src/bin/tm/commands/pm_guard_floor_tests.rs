@@ -215,6 +215,39 @@ fn paths_set_binds_every_caller_on_every_path() {
     }
 }
 
+/// #11821 P6b: `tm pat set` is `tm path set` (alias `set`), so no `pat`
+/// prefix form reaches the owner-only `tm paths set`; the guard, reading argv
+/// with the `tm` clap definition, sees no `paths set` in any of them.
+#[test]
+fn pat_prefix_never_reaches_paths_set_11821() {
+    use clap::Parser;
+    let fx = fixture();
+    for command in [
+        "tm pat set",
+        "tm pat set --root /tmp/r",
+        "tm path set",
+        "sh -c 'tm pat set'",
+    ] {
+        let call = bash(&fx, command);
+        let gate = ArchitectGate::new(&call, pm_env(&fx), || allowlist(&fx));
+        let verdict = evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), false);
+        assert!(
+            verdict.is_none(),
+            "{command} reads as `tm path`: {verdict:?}"
+        );
+    }
+    let parsed = crate::cli::Cli::try_parse_from(["tm", "pat", "set"]).map(|c| c.command);
+    assert!(
+        matches!(parsed, Ok(Some(crate::cli::Command::Path { ref alias, .. })) if alias == "set"),
+        "`tm pat set` must run `tm path set`, got {parsed:?}"
+    );
+    // The owner-only verb itself still denies.
+    let call = bash(&fx, "tm paths set --projects-root /tmp/p");
+    let gate = ArchitectGate::new(&call, pm_env(&fx), || allowlist(&fx));
+    let deny = evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), false);
+    assert!(deny.is_some(), "tm paths set must still deny");
+}
+
 /// #8878 PR2a spoof: a PM or an agent calling `tm presence local` or `tm
 /// fleet bind` is denied on both paths; the Architect's main thread runs
 /// them, bound or not (an unbound one must reach `tm fleet bind`).

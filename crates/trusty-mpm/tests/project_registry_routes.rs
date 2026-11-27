@@ -966,3 +966,52 @@ async fn milestone_crud_round_trip() {
     let got = client.get_milestone("widget", &id).await.unwrap();
     assert_eq!(got, created);
 }
+
+/// #11969: `tm projects register` on a decommissioned project receives the
+/// daemon's `inactive_reason` through the REAL client and route, and the
+/// project stays decommissioned; an active project's register has no reason.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn register_with_reason_reports_a_decommissioned_project_11969() {
+    let (client, state) = serve_with_state().await;
+    let args = RegisterProjectArgs {
+        name: "widget".into(),
+        repo_url: "https://github.com/acme/widget".into(),
+        default_branch: None,
+        description: None,
+        tags: None,
+        stack_hint: None,
+        gh_user: None,
+        gh_account: None,
+        gh_config_dir: None,
+        worktree: None,
+    };
+    let active = client
+        .registry_register_project_with_reason(&args)
+        .await
+        .expect("register an active project");
+    assert_eq!(active.project.name, "widget");
+    assert_eq!(
+        active.inactive_reason, None,
+        "an active project has no reason"
+    );
+
+    state
+        .project_registry()
+        .await
+        .mark_decommissioned("widget", chrono::Utc::now())
+        .await
+        .expect("decommission widget");
+    let again = client
+        .registry_register_project_with_reason(&args)
+        .await
+        .expect("re-register the decommissioned project");
+    let reason = again
+        .inactive_reason
+        .expect("the daemon names the way back");
+    assert!(reason.contains("start a session"), "{reason}");
+    assert!(
+        again.project.is_decommissioned(),
+        "re-registering must not reactivate the project"
+    );
+}

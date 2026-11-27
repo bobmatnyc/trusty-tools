@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.17.2] — 2026-11-27
+
+### Fixed
+
+- The member health probe reads a body with `alive: true` and `status: "degraded"` (trusty-mpm while trusty-memory or trusty-search is down) as serving, so `tctl up` does not restart a live trusty-mpm for another daemon's outage.
+- `tctl stack health` and `tctl stack doctor` no longer report healthy over a deployment that differs from what install placed. `tctl install`, `tctl upgrade` and `tctl self-update` now record each placed binary's path, version and sha256 in `deployment.json`. The rollups compare that record with the disk, the running daemons and the installed content: a missing binary, a wrong version, a changed build, a daemon running another version, or content that fails its check is `degraded` (exit 2). A check that cannot run, or a machine with no record yet, is `undetermined` (exit 4); run `tctl install` once to write the record (#10607).
+- `tctl install` and `tctl upgrade` no longer exit 0 when that comparison finds the deployed set stale or mixed, or when the record cannot be written (#10607).
+- A member binary that hangs on `--version` or on its content check no longer stalls `tctl stack health`, `tctl install` or `tctl upgrade`: each probe is killed after 10 seconds and reported as a check that could not run. `tm content update` during an install or upgrade is killed after 300 seconds (#10607).
+- A daemon running a build other than the placed one now names `tctl restart <member>` as the remedy, not `tctl install` (#10607).
+- `tctl upgrade` and `tctl install` no longer read a daemon whose probe timed out or returned an unreadable answer as matching the record; that daemon is `undetermined` and the command does not exit 0 (#10607).
+- `tctl start`, `stop` and `restart` with no member named skip a member that is not installed on the host (no binary, no plist, no loaded label) with `skipped (not installed)`, instead of failing with launchd's `Bootstrap failed: 5` or reporting a bootout of a unit that never existed ([#10975](https://github.com/bobmatnyc/trusty-tools/issues/10975))
+- Naming a member that is not installed exits 2 with `<member>: not installed` and acts on no member
+- A loaded launchd label whose plist is gone is refused before any bootout on `stop` and `restart`, so the running daemon is left alone; a member with no plist and no loaded label is skipped with a clear note on `stop`, `restart` and the `tctl upgrade` restart
+- `tctl` health probes of trusty-console send the console token when `TRUSTY_CONSOLE_TOKEN_FILE` is set, so a console with its token on reads as healthy instead of as an HTTP `401` (#11074).
+- `tctl restart` on Linux restarts trusty-search, trusty-memory, trusty-console and trusty-mpm through each daemon's own `restart` verb, run as the absolute `<install dir>/<binary>` (`tm` for trusty-mpm), never a copy found on `PATH` ([#11086](https://github.com/bobmatnyc/trusty-tools/issues/11086))
+- After each restart on Linux, `tctl restart` compares the version the daemon's health reply reports with the install-dir binary's `--version`; a different version, a refused probe, or a binary that rejects `restart` marks the member FAILED with both versions named and exits 2, and the remaining members are still restarted
+- On Linux, `tctl start`, `stop` and `restart` of a member without Linux lifecycle verbs say `<verb> the <member> daemon manually (launchd is macOS-only)` instead of "only supported on macOS"; macOS behaviour is unchanged
+- `tctl ensure` now names the project palace through the shared trusty-common resolver, so a project with a git remote gets the same `owner-repo` palace that `tm` and the memory hook read, instead of the folder name. Like the daemon, it ignores an exported `TRUSTY_MEMORY_PALACE`, so the name it sends is the one the daemon accepts (#11823).
+- `tctl ensure` reports a malformed, empty or invalid palace pin as a failed `palace-create` step naming the pin file, instead of silently creating a palace under the folder name (#11823).
+
+### Changed
+
+- Test stubs that are written and then exec'd now go through `trusty_common::exec_stub::write_executable`, which removes the ETXTBSY race on Linux CI (#10248). Test-only; no runtime change.
+- The 17 batch-1 test-audit findings in trusty-installer are acted on: weak tests strengthened, constant-pin and duplicate tests removed; no behaviour change (#11268).
+- `tctl sign trusty-assistants` signs `ta` (`com.trusty.ta`) and its one-release `tagent` alias (`com.trusty.tagent`, unchanged). `tctl sign trusty-agents` still parses for one release (#11632).
+- The boot config and boot lock live under `<config_dir>/.trusty-tools/trusty-installer/`, following the install paths. A broken `install.toml` fails `up` and the lock instead of using `~/.trusty-tools` (#11821).
+
+### Documentation
+
+- The macOS signing notes no longer describe the `Trusty Agents.app` desktop shell, which was deleted with the trusty-agents HTTP API; `tctl sign trusty-agents` signs `tagent` alone, as before (#11632).
+
 ## [0.17.1] — 2026-11-07
 
 ### Fixed

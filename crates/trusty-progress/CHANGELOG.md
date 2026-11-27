@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.3] — 2026-11-27
+
+### Added
+
+- `relay` — a one-line-per-event wire format for carrying progress out of a
+  child process and back into a parent's display. `StageEvent::encode` /
+  `StageEvent::decode`, the `TRUSTY_PROGRESS_RELAY` opt-in variable, and the
+  escaping that keeps a multi-line failure reason from breaking the framing or
+  forging a second event. Both ends name this module rather than each spelling
+  the grammar ([#5823](https://github.com/bobmatnyc/trusty-tools/issues/5823))
+
+### Changed
+
+- The batch-3 test-audit findings in trusty-progress are acted on: a test of the thiserror-derived Display text is removed, and the finish tests now assert the handle stops, keeps its closing message, and writes nothing in plain mode; no behaviour change (#11268).
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+
 ## [0.3.0] — 2026-08-10
 
 ### Changed

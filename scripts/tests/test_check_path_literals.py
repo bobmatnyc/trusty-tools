@@ -31,7 +31,12 @@ class Patterns(unittest.TestCase):
                      'cfg = Path.home() / ".trusty-tools" / "x"',
                      'let d = dirs::home_dir()?.join(".trusty-mpm");',
                      'DIR="$HOME/.trusty-tools/cache"',
-                     'DIR="${HOME}/trusty-mpm-projects"'):
+                     'DIR="${HOME}/trusty-mpm-projects"',
+                     # #11821 P6b: the home-joined forms the P6a review found unmatched.
+                     'x = f"{home}/.trusty-tools"',
+                     'let p = format!("{}/.trusty-mpm", home);',
+                     'p = os.path.expanduser("~") + "/.trusty-tools"',
+                     'let d = userHome.join(".trusty-mpm")'):
             self.assertEqual(len(lint.hits_in(line)), 1, line)
 
     def test_non_paths_comments_and_waivers_do_not_hit(self):
@@ -39,7 +44,11 @@ class Patterns(unittest.TestCase):
                      '# default ~/trusty-mpm-projects',
                      '/// `~/.trusty-tools/<crate>`',
                      'x = "~/.trusty-mpm-owner.toml"',
-                     'msg = "see ~/.trusty-tools"  # path-literal: allow'):
+                     'msg = "see ~/.trusty-tools"  # path-literal: allow',
+                     # #11821 P6b: `homepage` and `homebrew` are not a home word.
+                     'url = homepage + "/.trusty-tools"',
+                     'brew = homebrew_prefix + "/.trusty-mpm"',
+                     'x = f"{root}/.trusty-mpm"'):
             self.assertEqual(lint.hits_in(line), [], line)
 
 
@@ -74,16 +83,19 @@ class Gate(unittest.TestCase):
         self.assertIn("FAIL NEW: b.rs: 1 hits, baseline 0", out)
         self.assertIn("b.rs:1: [home-join]", out)
 
-    def test_migration_notes_and_shrink_only_lowers(self):
+    def test_migration_fails_stale_until_shrink_lowers(self):
         self.put("a.py", 'X = "~/.trusty-tools/x"\nY = "~/.trusty-mpm/y"\n')
         self.put("c.py", 'Z = "~/.trusty-mpm/z"\n')
         self.gate("--seed")
         self.put("a.py", 'X = "~/.trusty-tools/x"\n')
         self.put("c.py", "Z = resolved\n")
+        # #11821 P6b: headroom under the baseline fails, so a new hit cannot hide in it.
         code, out = self.gate()
-        self.assertEqual(code, 0)
-        self.assertIn("NOTE: a.py: 1 hits, baseline 2", out)
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL STALE: a.py: 1 hits, baseline 2", out)
+        self.assertIn("FAIL STALE: c.py: 0 hits, baseline 1", out)
         self.assertEqual(self.gate("--shrink")[0], 0)
+        self.assertEqual(self.gate()[0], 0)
         self.assertEqual(lint.read_baseline(self.base), {"a.py": 1})
         self.put("a.py", 'X = "~/.trusty-tools/x"\nY = "~/.trusty-mpm/y"\n')
         code, _ = self.gate("--shrink")

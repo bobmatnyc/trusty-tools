@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.1] — 2026-11-27
+
+### Breaking
+
+- `WalkDiagnostics` gains the public field `walk_refused` (#11732). Code that builds the struct with a struct literal must set it.
+
+### Added
+
+- `trusty-search similar`, `call-chain`, `grep` (`--all` for every index) and `typeahead`: CLI verbs for the MCP `search_similar`, `get_call_chain`, `grep` and `typeahead` tools. Each sends the same socket method and params as its tool, and `--json` prints the method result (#11625).
+- `trusty-search list --details` sends `details: true`, so `list --details --json` matches the MCP `list_indexes` tool. `query --indexes "*"` is documented as the CLI form of `search_all` (#11625).
+- `trusty-search lexical`, `semantic` and `kg`: CLI verbs for the MCP `search_lexical`, `search_semantic` and `search_kg` tools. Each sends `search.query` with the same `stage` and `expand_graph` as its tool, and takes `-k`, `--path-prefix`, `--mode`, `--exclude-archived`, `--lexical-limit` and (for `kg`) `--refine-query`. `semantic` and `kg` refuse with a stage-not-ready error, and send no query, when the index status lacks the `vector` or `kg` capability or carries no `search_capabilities` at all (#11625).
+- `source_file_max_bytes` and `office_file_max_bytes` set an index's size caps in `.trusty-search.yaml` or per index in `trusty-search.yaml`. Defaults stay 1 MiB for source files and 10 MiB for pdf/docx/pptx/xls/xlsx/xlsm; each cap accepts 1 byte up to a hard ceiling of 256 MiB, and 0 or a value over the ceiling fails config loading. The walk, single-file admission, pushed writes, the watcher and office extraction all apply the configured cap, and a file over it is still recorded in `skipped_files` as `exceeds_size_limit`. The caps are set when the index is registered: re-registering an existing index with other caps leaves them unchanged and answers `size_caps_applied: false` with the registered and requested caps, and `trusty-search index` prints a warning to delete the index and re-index. `search.index.create` / `POST /indexes` take the same two optional fields and refuse an out-of-range value with `400 invalid_size_cap` (#11655).
+
+### Fixed
+
+- Watcher tests that start a real OS file watcher retry a start that overruns the 5 s `WATCHER_START_BOUND` on a loaded host, instead of failing on host timing (#9466). Test code only; the production bound and watcher behaviour are unchanged.
+- A reindex refused for exceeding the file or byte budget no longer marks the index's Ready lexical, semantic and graph stages `failed`. Those lanes keep serving, so search stays on the vector path; the refusal is still recorded in `last_walk_error` and sent as the reindex's fatal error event (#10692).
+- After a refused walk, `GET /indexes/:id/status` reads `status: "degraded"` and adds `walk_refused` and `degraded_reason`; `/health` reads `degraded` and adds `indexes_walk_refused` (index id to reason). The next walk clears both (#10692).
+- The `candle` embedder's first-use model download no longer fails with `RelativeUrlWithoutBase`: hf-hub moves to the workspace 0.5 pin, which follows HuggingFace's relative 307 redirect. `HF_HOME` is still honoured (#10866). Candle-only builds now verify TLS against bundled Mozilla roots instead of the system trust store, so custom or corporate CAs are not trusted on that path.
+- Test suite only: corpus-attaching unit tests now join the `serial_test` group, so they no longer write `index-identity/` into the data dir a serial test points `TRUSTY_DATA_DIR` at; the env ratchet enforces it (#11445).
+- The live-corpus promotion guard now unlocks on drop instead of relying on close (#11872). A child process forked at the same moment held a copy of the descriptor until it ran its program, which kept the live `index.redb` locked after the guard was gone.
+- The MCP `create_index` tool accepts `source_file_max_bytes` and `office_file_max_bytes` and forwards them to `search.index.create`. Before, the schema listed neither field and the tool dropped both, so the index got the default caps without a warning. An out-of-range cap is refused with `invalid_size_cap`, and re-registering an existing index with other caps answers `size_caps_applied: false` with the message, as over the socket. Omitting both fields keeps the defaults (#11903).
+
+### Changed
+
+- Removing chunks from an index served from its mmap view no longer copies the vector index to the heap. The removal writes the removed keys to `hnsw.tombstones.json` beside `hnsw.usearch`; `hnsw.keys.json` and the binary stay unchanged until the next save of a promoted index, which deletes the file. Search, `len` and membership checks skip tombstoned keys (#10303).
+- A batch removal (`search.index.files.remove`) writes one tombstone file per slice instead of promoting the index. Its memory bound drops the "one copy of the vector index" for a view-mode index (#10303).
+- A present but unreadable or corrupt `hnsw.tombstones.json` fails the snapshot load instead of reading as empty. A tombstone file written against another key sidecar is ignored. The reindex swap clears or carries the file, `migrate-storage` moves it, and the staging reaper removes its orphaned temp files. Older binaries ignore the file (#10303).
+- `trusty-search setup` writes the Codex registration under the configured Codex home and refuses the write on a broken `install.toml`; `doctor` reads the same file and reports a broken `install.toml` as a warning (#11821).
+- The allowlist reads the tm project registry from `<config_dir>/.trusty-mpm/project-paths.json` when the install paths move the config dir; `TRUSTY_MPM_ROOT` still wins (#11821).
+
 ## [1.1.0] — 2026-11-23
 
 ### Added

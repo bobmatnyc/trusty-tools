@@ -1,2 +1,0 @@
-Fixed
-- The daemon's PR watch now runs every `gh` read under the GitHub identity bound for that PR's repository, resolved on each read the same way worktree reclaim resolves it (registry pin, then the `github:` binding). Under launchd it used to run `gh` with no identity, so every read exited 4 ("gh auth login") and startup logged nothing. A read with no usable identity now spawns no `gh` when resolution refuses, and every such failure in a tick is reported in one error line that says what to configure.
