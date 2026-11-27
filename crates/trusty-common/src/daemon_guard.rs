@@ -226,13 +226,16 @@ pub fn spawn_detached_forwarding_parent_link(
 ///
 /// Why it is separate: the env decision is the whole of #7085's review finding,
 /// and a `Command` can be inspected in a unit test where a spawned daemon
-/// cannot.
-/// What: null stdio, a new session ([`start_in_new_session`]), plus
-/// [`crate::parent_death::ENV_EXIT_WITH_PARENT`] either removed (`stamp` is
-/// `None`, the default) or set to `stamp`.
+/// cannot. #11904: a detached daemon outlives the CLI that started it, so the
+/// CLI's cwd must not become the daemon's — a daemon auto-started from an agent
+/// worktree held that worktree as its cwd and blocked `tm pr cleanup`.
+/// What: null stdio, cwd set to [`neutral_cwd`], a new session
+/// ([`start_in_new_session`]), plus [`crate::parent_death::ENV_EXIT_WITH_PARENT`]
+/// either removed (`stamp` is `None`, the default) or set to `stamp`.
 /// Test: `detached_command_scrubs_the_parent_stamp`,
 /// `detached_command_forwards_an_explicit_parent_stamp`,
-/// `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`.
+/// `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`,
+/// `a_detached_daemon_starts_in_home_not_the_spawners_cwd`.
 fn detached_command(
     program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
@@ -243,6 +246,11 @@ fn detached_command(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // #11904: never the spawner's cwd, which can be a checkout. A daemon that
+    // walks up from cwd for a project-tier `.env.local` (credentials::dotenv)
+    // no longer finds one; `$HOME/.env.local`, the secure store and the process
+    // env still apply. Callers resolve relative path arguments before this.
+    cmd.current_dir(neutral_cwd());
     // #8783: out of the spawner's process group, so a group kill aimed at the
     // spawner (trusty-audit's budget kill, a terminal Ctrl-C) spares the daemon.
     start_in_new_session(&mut cmd);
@@ -255,6 +263,27 @@ fn detached_command(
         None => cmd.env_remove(crate::parent_death::ENV_EXIT_WITH_PARENT),
     };
     cmd
+}
+
+/// The working directory a detached daemon starts in: `$HOME`, else `/`.
+///
+/// Why (#11904): a daemon's cwd pins that directory for the daemon's whole
+/// life; inherited from a CLI run inside a worktree, it keeps the worktree
+/// "in use" long after the agent finished.
+/// What: [`neutral_cwd_from`] applied to `dirs::home_dir()`.
+/// Test: `a_detached_daemon_starts_in_home_not_the_spawners_cwd`.
+fn neutral_cwd() -> std::path::PathBuf {
+    neutral_cwd_from(dirs::home_dir())
+}
+
+/// `home` when it names an existing directory, else the filesystem root.
+///
+/// Why: a spawn whose `current_dir` does not exist fails outright, so an unset
+/// or stale `HOME` must degrade to `/` rather than fail the daemon start.
+/// Test: `neutral_cwd_falls_back_to_root_without_a_usable_home`.
+fn neutral_cwd_from(home: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    home.filter(|h| h.is_dir())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
 }
 
 /// Make the process `cmd` spawns lead a new session: its own process group and
@@ -410,6 +439,10 @@ pub async fn spin_until_ready(config: &DaemonGuardConfig) -> Result<()> {
 #[cfg(all(test, unix))]
 #[path = "daemon_guard_session_tests.rs"]
 mod session_tests;
+
+#[cfg(all(test, unix))]
+#[path = "daemon_guard_cwd_tests.rs"]
+mod cwd_tests;
 
 #[cfg(test)]
 mod addr_tests {
