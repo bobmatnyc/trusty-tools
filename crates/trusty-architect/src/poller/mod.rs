@@ -66,6 +66,7 @@ pub mod steps;
 pub mod token;
 mod triage;
 pub mod triage_rules;
+pub mod user_state;
 mod wake;
 pub mod watchdog;
 mod windows;
