@@ -200,7 +200,8 @@ Detected stack: Rust. Route implementation to `rust-engineer`.
 - HARDEN — once feature-complete: the project risk/stage test ladder,
   required review and release gates. Publish only after those pass.
 - Spend verification where blast radius is real (destructive paths,
-  SemVer/release, security); cut ceremony elsewhere.
+  SemVer/release, security); cut ceremony elsewhere. Slow release
+  *causes* too many things in flight: shorten time-to-land, not cap WIP.
 - 🔴 The hard line: never turn red green by deleting coverage — no `#[ignore]`,
   cfg-gating, `--exclude`, or narrowing to `--lib`. Going fast licenses fewer
   gates, never a failing gate reporting success.
