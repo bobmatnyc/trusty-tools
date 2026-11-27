@@ -97,3 +97,42 @@ fn disk_usage_is_unknown_when_the_mount_cannot_be_measured() {
     assert!(check.message.contains("undetermined"), "{}", check.message);
     assert!(check.message.contains("90%"), "{}", check.message);
 }
+
+/// Why (#5111): a mount listing that stalls must not hold the doctor request
+/// past its deadline, or a loaded host reads "daemon unreachable".
+/// What: a measurer sleeping 5 s against a 100 ms deadline answers `None`
+/// (which the verdict reports as `Unknown`) well before the sleep ends.
+/// Test: this test.
+#[tokio::test]
+async fn a_slow_mount_listing_is_unknown_within_the_deadline() {
+    let started = std::time::Instant::now();
+    let got = measure_bounded(
+        std::path::PathBuf::from("/"),
+        Duration::from_millis(100),
+        |_| {
+            std::thread::sleep(Duration::from_secs(5));
+            Some(measured(10.0))
+        },
+    )
+    .await;
+    assert!(got.is_none(), "a missed deadline must be unmeasurable");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the bound did not cut the wait: {:?}",
+        started.elapsed()
+    );
+    let check = build_disk_usage_check(got.as_ref(), &threshold(90));
+    assert_eq!(check.status, CheckStatus::Unknown);
+}
+
+/// Why (#5111): the bound must not change a measurement that answers in time.
+/// What: an instant measurer's result passes through unchanged.
+/// Test: this test.
+#[tokio::test]
+async fn a_fast_mount_listing_passes_through_the_bound() {
+    let got = measure_bounded(std::path::PathBuf::from("/"), MEASURE_DEADLINE, |_| {
+        Some(measured(42.0))
+    })
+    .await;
+    assert_eq!(got.map(|m| m.usage_pct), Some(42.0));
+}

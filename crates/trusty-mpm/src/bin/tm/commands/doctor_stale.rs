@@ -31,7 +31,7 @@ use trusty_mpm::core::version_staleness::{BuildIdentity, check_daemon_version_st
 /// daemon rather than several probes that could straddle a restart.
 /// What: compares the snapshot's `version` against this process's own
 /// `env!("CARGO_PKG_VERSION")` and resolves the remediation verb via
-/// `restart_hint` — which is `launchctl kickstart …` on a host where launchd
+/// `restart_hint` — which is `launchctl bootout …` on a host where launchd
 /// owns the daemon, because #4230 makes `tm restart` refuse there. There is no
 /// unreachable-daemon branch: #6336 made the caller skip this check when no
 /// daemon answered, so the parameter is a snapshot rather than an `Option`.
