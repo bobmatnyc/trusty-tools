@@ -339,3 +339,38 @@ async fn a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active(
         "an abandoned reactivate left the session record Active"
     );
 }
+
+/// #12012 (critic HIGH): steps slower than the daemon's own budget fail the
+/// route with a named timeout, and the record is rolled back.
+/// Test: this function IS the test. Fails if the steps are unbounded or a
+/// timeout leaves the record `Active`.
+#[tokio::test]
+async fn an_unpark_slower_than_the_daemon_budget_fails_and_rolls_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, id) = bound_session(dir.path()).await;
+    let parked: Parked = Arc::default();
+    let _decommission_rig = decommission(&state, &id, &parked).await;
+    let search = slow_unpark_search().await;
+    let _ = state
+        .session_manager()
+        .await
+        .index_restore_socket
+        .set(search.socket().to_path_buf());
+
+    let got = super::reactivate_core_within(
+        &state,
+        &id.to_string(),
+        &ReactivateQuery::default(),
+        Duration::from_millis(300),
+    )
+    .await;
+
+    assert_eq!(got.status, 500, "{got:?}");
+    let body = format!("{:?}", got.body);
+    assert!(body.contains("did not come back within"), "{body}");
+    assert!(body.contains("rolled back to stopped"), "{body}");
+    assert_eq!(
+        session_state(&state, &id).await,
+        ManagedSessionState::Stopped
+    );
+}
