@@ -20,6 +20,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - `trusty-architect-replay` refuses more of what must not reach a public fixture. An env entry whose key names a credential (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `*_API_KEY`, `*PASSWORD`, a `PASS`, `KEY`, `PAT` or `COOKIE` segment, a final `AUTH` segment, camelCase `githubToken`) is refused, as is an env value holding a URL password (`scheme://user:pw@host`), and so is any `tm-<x>` token that is not one of the repo's skill names, with or without `--session`. A replay mismatch withholds its excerpt when the whole line holds a secret shape, a session token or a local path. A path is scrubbed only at a component boundary, so a `<home>/al` path no longer rewrites `<home>/alice`. The open probe counts an `os.open` with a write flag as a write, not a read, and a missing probe log is an error rather than an empty read list. A symlink inside a seed directory, or one the run leaves in the sandbox, is refused (Refs [#12026](https://github.com/bobmatnyc/trusty-tools/issues/12026))
+- `trusty-architect-replay` no longer refuses a Python script's own reads as outside the sandbox when its directory sits behind a symlink, as macOS temp dirs do (`/var` is `/private/var`). The open probe now compares canonical paths with a canonical sandbox root, script dir and `sys.path`, and a script dir that cannot be resolved is an error (Refs [#12026](https://github.com/bobmatnyc/trusty-tools/issues/12026))
 
 ## [0.4.4] — 2026-11-27
 
