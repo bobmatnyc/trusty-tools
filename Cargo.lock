@@ -11404,7 +11404,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-browser"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
