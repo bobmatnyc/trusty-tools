@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "--x",
+    "check",
+    "--y"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: aliases.py [-h] {resolve,list,check,add} ...\naliases.py: error: unrecognized arguments: --x --y\n",
+  "exit": 2,
+  "writes": {}
+}

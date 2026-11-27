@@ -10,13 +10,14 @@
 //! `--root`, so the default root is the current directory. `technical_level`
 //! and `architect_config` are libraries: their entries mirror the recording
 //! drivers `tests/fixtures/replay/<script>/driver.py` line for line, as do
-//! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d).
+//! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d), and
+//! `brief-id` (#12028 P1e).
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
 //! `technical_level_recordings_replay_clean_against_the_port`,
 //! `architect_config_recordings_replay_clean_against_the_port`,
-//! `stale_tasks_recordings_replay_clean_against_the_port` and the three
-//! other `tests/replay_tasks.rs` tests.
+//! `stale_tasks_recordings_replay_clean_against_the_port`, the three
+//! other `tests/replay_tasks.rs` tests and the `tests/replay_writers.rs` tests.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use std::process::ExitCode;
 use trusty_architect::replay::CLOCK_ENV;
 use trusty_architect::spec_drift::{self, Outcome};
 use trusty_architect::tasks::{stale, stalled, timeline::Timeline, wait_check};
+use trusty_architect::writers::{aliases, brief_ids, state_archive};
 use trusty_architect::{Clock, FakeClock, SystemClock};
 use trusty_architect::{architect_config as ac, level_lint, technical_level as tl};
 
@@ -250,13 +252,36 @@ fn main() -> ExitCode {
             )
         }
         "il_timeline" => il_timeline(&rest),
+        // See #12028 P1e: the sandbox root stands for the checkout here too;
+        // `brief-id` is its `driver.py`, which sets `REPO` to the working directory.
+        "state-archive" => state_archive::run(
+            &rest,
+            &state_archive::Options {
+                prog: "state-archive.py".into(),
+                default_state: Some(PathBuf::from("local/state.md")),
+                default_archive: Some(PathBuf::from("local/state-archive.md")),
+            },
+        ),
+        "aliases" => aliases::run(
+            &rest,
+            &mut aliases::Options {
+                default_path: PathBuf::from("local/aliases.json"),
+                aliases_file: std::env::var("ALIASES_FILE").ok(),
+                stdin: &mut std::io::stdin(),
+            },
+        ),
+        "brief-id" => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let paths = brief_ids::Paths { repo: cwd.clone() };
+            brief_ids::cli::run(&rest, &paths, &cwd, clock.as_ref())
+        }
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
             eprintln!(
                 "replay_port: no port named {other:?}; known: spec_drift_check, level_lint, \
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
-                 il_timeline"
+                 il_timeline, state-archive, aliases, brief-id"
             );
             return ExitCode::from(2);
         }

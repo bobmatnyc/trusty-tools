@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "add",
+    "host",
+    "h"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": ""
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "error: Expecting value: line 1 column 1 (char 0)\n",
+  "exit": 1,
+  "writes": {}
+}

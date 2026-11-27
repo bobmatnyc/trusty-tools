@@ -159,3 +159,51 @@ $R record --clock 1795784400 --out $D/stale-tasks/happy-text.json --seed $S/q=q 
 $R record --clock 1795784400 --out $D/stalled_tasks/cli-stalled.json --seed $S/local=local -- $P/st_driver.py
 $R replay $D/stale-tasks/*.json -- <target>/debug/examples/replay_port stale-tasks
 ```
+
+## state-archive, aliases and brief-id (#12028 P1e)
+
+Eighty-six runs of the frozen Python reference, recorded on 2026-11-27 and
+replayed in `tests/replay_writers.rs` against `examples/replay_port.rs`. These
+scripts write files, so each recording's `writes` holds the bytes the run
+wrote, and a clean replay proves them. Every input is a sample built with
+sample names only.
+
+- `state-archive/`: the script itself, nineteen recordings, always with
+  `--state local/state.md --archive local/state-archive.md`: a move into a
+  new archive, an archive with and without its head line, CRLF and
+  `\u2028` line ends, `--dry-run` (a heading past 100 characters, non-ASCII
+  byte counts), nothing to move, an empty file, no sections, the `NEXT IDS`
+  refusal (with and without `--dry-run`), `--keep` negative, zero, past 64
+  bits and abbreviated, and the argparse paths.
+- `aliases/`: the script itself with `ALIASES_FILE=aliases.json`,
+  forty-one recordings: `resolve` (longest alias, quiet aliases with and
+  without `--all`, a `quiet` dict, an ambiguous alias, stdin with CRLF, the
+  eight-match cap, blank text, a missing or unreadable table, a bad command
+  line that still exits 0), `list`, `check` (every schema error, an email,
+  same-kind and cross-kind sharing), `add` (a new file, a merge, a project, a
+  host given `--github`, the check refusal, a `KeyError` that prints the
+  help, a bad table, a `.tmp` path that is a directory) and the argparse
+  paths.
+- `brief-id/`: `driver.py`, twenty-six recordings with `--clock 1795784400`.
+  `brief_ids.py` takes `REPO` from its own location, outside a sandbox; the
+  driver points the module paths and the function defaults bound at import
+  at the working directory and runs `brief-id.py` unchanged. Recorded:
+  `next` (empty, mixed legacy and media ids), `assign` (new id with
+  frontmatter, no H1, a marker the registry lacks or has, a path the
+  registry knows, a fenced H1, CRLF), `find`, `list`, `check` and the
+  argparse paths.
+
+Not recorded: a run that ends in a traceback (a missing state or brief
+file, a bad registry line, ids exhausted past `MBffff`, a table whose lists
+are not lists); the port prints the traceback's last line and exits 1. A
+run with the default paths reads beside the script, outside the sandbox;
+`tests/writers_smoke.rs` covers those on the shipped binaries. Regenerate
+with the scripts copied to a sandbox directory `P` and the driver copied
+there as `bi_driver.py`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --out $D/aliases/list.json --env ALIASES_FILE=aliases.json --seed $S/aliases.json=aliases.json -- $P/aliases.py list
+$R record --clock 1795784400 --out $D/brief-id/check-clean.json --seed $S/local=local -- $P/bi_driver.py check
+$R replay $D/brief-id/*.json -- <target>/debug/examples/replay_port brief-id
+```

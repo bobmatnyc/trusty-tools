@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "local/state.md": ""
+  },
+  "reads": [
+    "local/state.md"
+  ],
+  "stdout": "moved 0 sections to local/state-archive.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

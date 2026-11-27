@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md",
+    "--keep",
+    "x"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: state-archive.py [-h] [--state STATE] [--archive ARCHIVE] [--keep KEEP]\n                        [--dry-run]\nstate-archive.py: error: argument --keep: invalid int value: 'x'\n",
+  "exit": 2,
+  "writes": {}
+}

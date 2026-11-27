@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "argv": [
+    "check"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/.keep": ""
+  },
+  "reads": [
+    "local/briefs/.keep"
+  ],
+  "stdout": "0 problem(s)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

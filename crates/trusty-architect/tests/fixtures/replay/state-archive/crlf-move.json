@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md",
+    "--keep",
+    "1"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "local/state-archive.md": "# State archive (handoff sections moved out of state.md by scripts/state-archive.py; newest first)\nold\r\n",
+    "local/state.md": "pre\r\n## ids\r\nNEXT IDS: P 1b\r\n## a handoff\r\none\r\n## b handoff\rtwo ## c handoff line sep\r\n## e handoff no newline"
+  },
+  "reads": [
+    "local/state-archive.md",
+    "local/state.md"
+  ],
+  "stdout": "moved 3 sections to local/state-archive.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/state-archive.md": "# State archive (handoff sections moved out of state.md by scripts/state-archive.py; newest first)\n## b handoff\ntwo ## c handoff line sep\n## e handoff no newlineold\n",
+    "local/state.md": "pre\n## ids\nNEXT IDS: P 1b\n## a handoff\none\n"
+  }
+}

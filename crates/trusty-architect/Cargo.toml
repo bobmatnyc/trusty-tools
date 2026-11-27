@@ -50,6 +50,19 @@ path = "src/bin/trusty-architect-stalled-tasks.rs"
 name = "trusty-architect-task-wait-check"
 path = "src/bin/trusty-architect-task-wait-check.rs"
 
+# #12028 P1e: the state writer ports (state-archive.py, brief-id.py, aliases.py).
+[[bin]]
+name = "trusty-architect-state-archive"
+path = "src/bin/trusty-architect-state-archive.rs"
+
+[[bin]]
+name = "trusty-architect-brief-id"
+path = "src/bin/trusty-architect-brief-id.rs"
+
+[[bin]]
+name = "trusty-architect-aliases"
+path = "src/bin/trusty-architect-aliases.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

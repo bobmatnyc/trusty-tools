@@ -27,6 +27,8 @@
 //! #12028 P1c adds [`technical_level`], [`level_lint`] (and its
 //! `trusty-architect-level-lint` binary) and [`architect_config`], ports of
 //! the Architect's level and config readers.
+//! #12028 P1e adds [`writers`], ports of the Architect's state writers
+//! (`state-archive.py`, `brief-id.py`, `aliases.py`) and their binaries.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
@@ -35,6 +37,7 @@
 
 pub mod architect_config;
 mod argparse;
+mod argparse_sub; // See #12028 P1e
 pub mod classify;
 mod clock;
 pub mod dashboard;
@@ -74,6 +77,7 @@ pub mod tasks; // See #12028 P1d
 pub mod technical_level;
 mod tmux;
 pub mod verbs;
+pub mod writers; // See #12028 P1e
 
 pub use classify::input_state_for_send;
 pub use clock::{Clock, FakeClock, SystemClock};

@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "--project",
+    "p"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: brief-id.py assign [-h] [--project PROJECT] path\nbrief-id.py assign: error: the following arguments are required: path\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

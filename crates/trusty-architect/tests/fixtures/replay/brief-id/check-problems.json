@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "argv": [
+    "check"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/a.md": "<!-- brief-id: MB0001 -->\n# A without prefix\n",
+    "local/briefs/b.md": "# no marker\n",
+    "local/briefs/c.md": "<!-- brief-id: MB0001 -->\n# MB0001: dup in files\n",
+    "local/briefs/d.md": "---\nk: v\n---\n<!-- brief-id: MB0003 -->\n```\n# MB0003: fenced\n```\n",
+    "local/briefs/e.md": "<!-- brief-id: MB0004 -->\n# MB0004: Unregistered\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0001\", \"path\": \"local/briefs/a.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0001\", \"path\": \"local/briefs/a2.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0002\", \"path\": \"local/briefs/a.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0003\", \"path\": \"local/briefs/elsewhere.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "reads": [
+    "local/briefs/a.md",
+    "local/briefs/b.md",
+    "local/briefs/c.md",
+    "local/briefs/d.md",
+    "local/briefs/e.md",
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "duplicate registry id MB0001\npath local/briefs/a.md has two ids MB0001 and MB0002\nMB0001 registry path local/briefs/a2.md != file local/briefs/a.md\nMB0001 (local/briefs/a.md) H1 does not start with 'MB0001: '\nno brief id: local/briefs/b.md\nduplicate id MB0001: local/briefs/a.md and local/briefs/c.md\nMB0001 registry path local/briefs/a2.md != file local/briefs/c.md\nMB0003 registry path local/briefs/elsewhere.md != file local/briefs/d.md\nMB0003 (local/briefs/d.md) H1 does not start with 'MB0003: '\nMB0004 (local/briefs/e.md) not in registry\n10 problem(s)\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

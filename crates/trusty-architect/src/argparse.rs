@@ -56,6 +56,60 @@ pub(crate) struct Args {
     pub(crate) values: Vec<Option<String>>,
     /// The positional's arguments (empty when none or when it has none).
     pub(crate) positionals: Vec<String>,
+    /// Per positional of [`parse_known`], its arguments once consumed
+    /// (`Some(vec![])` for a `?` or `*` that matched nothing).
+    pub(crate) pos: Vec<Option<Vec<String>>>,
+    /// Every value a value option took, in order (`action="append"`).
+    pub(crate) all: Vec<Vec<String>>,
+    /// The unrecognized arguments ([`parse_known`] only; [`parse`] errors).
+    pub(crate) extras: Vec<String>,
+}
+
+/// A positional's `nargs` (#12028 P1e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nargs {
+    /// `nargs=None`: exactly one, required.
+    One,
+    /// `nargs="?"`.
+    Optional,
+    /// `nargs="*"`.
+    Star,
+    /// A subparsers action (`A...`): the command and everything after it.
+    Parser,
+}
+
+/// One positional of a parser, in `add_argument` order (#12028 P1e).
+///
+/// Precondition: only the last positional is [`Nargs::Star`] or
+/// [`Nargs::Parser`]; the left-to-right greedy match then equals argparse's
+/// regex match, which never has to give an argument back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pos {
+    /// The dest (or metavar) argparse names in its messages.
+    pub(crate) name: &'static str,
+    /// Its `nargs`.
+    pub(crate) nargs: Nargs,
+    /// `choices`, checked on the first argument; empty for none.
+    pub(crate) choices: &'static [&'static str],
+    /// `required` (a [`Nargs::One`] is always required).
+    pub(crate) required: bool,
+}
+
+const STAR: Pos = Pos {
+    name: "",
+    nargs: Nargs::Star,
+    choices: &[],
+    required: false,
+};
+
+/// argparse's `invalid choice` message for `value` against `choices`.
+pub(crate) fn invalid_choice(name: &str, value: &str, choices: &[&str]) -> String {
+    let list: Vec<String> = choices.iter().map(|c| py_repr(c)).collect();
+    format!(
+        "argument {name}: invalid choice: {} (choose from {})",
+        py_repr(value),
+        list.join(", ")
+    )
 }
 
 /// One classified argument: plain (`A`), `--` (`-`), or an option (`O`).
@@ -178,6 +232,28 @@ pub(crate) fn parse_checked(
     positional: bool,
     check: &dyn Fn(usize, &str) -> Result<(), String>,
 ) -> Parsed {
+    let pos: &[Pos] = if positional { &[STAR] } else { &[] };
+    match parse_known(args, opts, pos, check) {
+        Parsed::Run(a) if !a.extras.is_empty() => {
+            Parsed::Error(format!("unrecognized arguments: {}", a.extras.join(" ")))
+        }
+        Parsed::Run(mut a) => {
+            a.positionals = a.pos.first().cloned().flatten().unwrap_or_default();
+            Parsed::Run(a)
+        }
+        other => other,
+    }
+}
+
+/// `parse_known_args` for a parser with `opts` and the positionals `pos`:
+/// the extras come back in [`Args::extras`], a missing required positional
+/// is the `the following arguments are required` error (#12028 P1e).
+pub(crate) fn parse_known(
+    args: &[String],
+    opts: &[Opt],
+    pos: &[Pos],
+    check: &dyn Fn(usize, &str) -> Result<(), String>,
+) -> Parsed {
     let mut kinds = Vec::with_capacity(args.len());
     let mut rest = false;
     for a in args {
@@ -198,15 +274,31 @@ pub(crate) fn parse_checked(
             flags: vec![false; opts.len()],
             values: vec![None; opts.len()],
             positionals: Vec::new(),
+            pos: vec![None; pos.len()],
+            all: vec![Vec::new(); opts.len()],
+            extras: Vec::new(),
         },
-        positional_left: positional,
+        pos,
+        next_pos: 0,
         extras: Vec::new(),
         check,
     };
     match st.run() {
         Ok(true) => Parsed::Help,
-        Ok(false) if st.extras.is_empty() => Parsed::Run(st.out),
-        Ok(false) => Parsed::Error(format!("unrecognized arguments: {}", st.extras.join(" "))),
+        Ok(false) => {
+            let missing: Vec<&str> = pos
+                .iter()
+                .zip(&st.out.pos)
+                .filter(|(p, v)| v.is_none() && (p.required || p.nargs == Nargs::One))
+                .map(|(p, _)| p.name)
+                .collect();
+            if !missing.is_empty() {
+                let names = missing.join(", ");
+                return Parsed::Error(format!("the following arguments are required: {names}"));
+            }
+            st.out.extras = std::mem::take(&mut st.extras);
+            Parsed::Run(st.out)
+        }
         Err(msg) => Parsed::Error(msg),
     }
 }
@@ -216,7 +308,8 @@ struct State<'a> {
     kinds: &'a [Kind],
     opts: &'a [Opt],
     out: Args,
-    positional_left: bool,
+    pos: &'a [Pos],
+    next_pos: usize,
     extras: Vec<String>,
     check: &'a dyn Fn(usize, &str) -> Result<(), String>,
 }
@@ -236,7 +329,7 @@ impl State<'_> {
             while start <= max {
                 let next = (start..=max).find(|i| self.is_opt(*i)).unwrap_or(max + 1);
                 if start != next {
-                    let end = self.consume_positionals(start);
+                    let end = self.consume_positionals(start)?;
                     if end > start {
                         start = end;
                         continue;
@@ -255,27 +348,74 @@ impl State<'_> {
                 }
             }
         }
-        let stop = self.consume_positionals(start);
+        let stop = self.consume_positionals(start)?;
         self.extras.extend(self.args[stop..].iter().cloned());
         Ok(false)
     }
 
-    /// The positional's greedy match of plain and `--` arguments at `start`.
-    fn consume_positionals(&mut self, start: usize) -> usize {
-        if !self.positional_left {
-            return start;
+    /// `consume_positionals`: `_match_arguments_partial` over the positionals
+    /// left, then each takes its arguments (the first `--` dropped) and its
+    /// `choices` are checked. A trailing zero-length match is left for later
+    /// when an option follows, as argparse does (#12028 P1e).
+    fn consume_positionals(&mut self, start: usize) -> Result<usize, String> {
+        let plain = |i: usize| matches!(self.kinds.get(i), Some(Kind::Plain));
+        let dashes = |mut i: usize| {
+            while matches!(self.kinds.get(i), Some(Kind::Dashes)) {
+                i += 1;
+            }
+            i
+        };
+        let mut counts = Vec::new();
+        let mut i = start;
+        for p in &self.pos[self.next_pos..] {
+            let j = dashes(i);
+            let end = match p.nargs {
+                Nargs::One if plain(j) => dashes(j + 1),
+                Nargs::One => break,
+                Nargs::Optional => dashes(if plain(j) { j + 1 } else { j }),
+                Nargs::Star => {
+                    let mut k = j;
+                    while matches!(self.kinds.get(k), Some(Kind::Plain | Kind::Dashes)) {
+                        k += 1;
+                    }
+                    k
+                }
+                Nargs::Parser if plain(j) => self.kinds.len(),
+                Nargs::Parser => break,
+            };
+            counts.push(end - i);
+            i = end;
         }
-        self.positional_left = false;
-        let mut end = start;
-        while matches!(self.kinds.get(end), Some(Kind::Plain | Kind::Dashes)) {
-            end += 1;
+        if self.is_opt(i) {
+            while counts.last() == Some(&0) {
+                counts.pop();
+            }
         }
-        let mut taken: Vec<String> = self.args[start..end].to_vec();
-        if let Some(i) = (start..end).find(|i| matches!(self.kinds[*i], Kind::Dashes)) {
-            taken.remove(i - start);
+        let mut s = start;
+        for n in counts {
+            let p = self.pos[self.next_pos];
+            let mut taken: Vec<String> = self.args[s..s + n].to_vec();
+            // A subparsers action drops a leading `--` only; the rest is the
+            // subparser's to read.
+            let last = if p.nargs == Nargs::Parser {
+                (s + 1).min(s + n)
+            } else {
+                s + n
+            };
+            if let Some(d) = (s..last).find(|d| matches!(self.kinds[*d], Kind::Dashes)) {
+                taken.remove(d - s);
+            }
+            if let Some(v) = taken.first()
+                && !p.choices.is_empty()
+                && !p.choices.contains(&v.as_str())
+            {
+                return Err(invalid_choice(p.name, v, p.choices));
+            }
+            self.out.pos[self.next_pos] = Some(taken);
+            self.next_pos += 1;
+            s += n;
         }
-        self.out.positionals = taken;
-        end
+        Ok(s)
     }
 
     fn consume_optional(&mut self, start: usize) -> Result<Step, String> {
@@ -350,6 +490,7 @@ impl State<'_> {
             match v {
                 Some(v) => {
                     (self.check)(i, &v)?;
+                    self.out.all[i].push(v.clone());
                     self.out.values[i] = Some(v);
                 }
                 None => self.out.flags[i] = true,

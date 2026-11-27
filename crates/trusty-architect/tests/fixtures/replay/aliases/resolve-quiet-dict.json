@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "resolve",
+    "bb or build-box"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{\"version\": 1, \"people\": [{\"name\": \"Sam Sample\", \"aliases\": [\"Sam\", \"S-P\", \"the writer\"], \"source\": \"sample\", \"confirmed\": true, \"github\": [\"sample-gh\"], \"slack_user_id\": null, \"email_location\": \"directory\", \"role\": \"owner\", \"quiet\": [\"the writer\"]}, {\"name\": \"Zo\\u00eb Example\", \"aliases\": [\"Zo\"], \"source\": \"sample\", \"confirmed\": false, \"github\": [], \"slack_user_id\": \"U000\", \"email_location\": \"directory\", \"role\": \"engineer\"}, {\"name\": \"Kit\", \"aliases\": [\"box\"], \"source\": \"sample\", \"confirmed\": true, \"github\": [], \"slack_user_id\": null, \"email_location\": \"directory\", \"role\": \"engineer\", \"display\": \"Kit (on call)\"}], \"projects\": [{\"name\": \"demo-api\", \"aliases\": [\"demo api\", \"dapi\"], \"source\": \"sample\", \"confirmed\": true, \"sessions\": [\"demo-pm\", \"demo-two\", \"demo-three\"], \"repo_path\": null, \"github_repo\": \"sample/demo-api\", \"palace\": null, \"index_id\": null}, {\"name\": \"widgets\", \"aliases\": [\"wid\"], \"source\": \"sample\", \"confirmed\": false, \"sessions\": [], \"repo_path\": \"/opt/sample/widget-repo/\", \"github_repo\": null, \"palace\": \"w\", \"index_id\": \"w1\"}], \"hosts\": [{\"name\": \"build-box\", \"aliases\": [\"box\", \"bb\"], \"source\": \"s\", \"confirmed\": true, \"hostname\": null, \"role\": \"ci\", \"quiet\": {\"bb\": 1}}]}"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}
