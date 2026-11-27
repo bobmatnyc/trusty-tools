@@ -1,3 +1,0 @@
-Added
-- `tm fleet init` seeds the Architect's usage ledger and token watcher: `usage.py` (with `usage_calc.py`), `token_watch.py` (with `token_watch_rules.py`), `effort-governor.py`, `ctx_bar.py`, `usage-probe.sh`, `effort-send.sh`, `statusline-tee.sh` and the `rc-lib.sh` helper `usage-probe.sh` sources, from prototype tag `architect-target-2026-11-24`. The Architect session name comes from `ARCHITECT_SESSION` instead of a built-in list (#10571).
-- The seeded `effort-send.sh`, `rc-lib.sh` and `usage-probe.sh` address tmux by exact target only: `effort-send.sh` sends to `=<session>:`, and `rc-lib.sh` refuses any target that is not a `%N` pane id or `=<session>:`, so a key never reaches a session whose name only shares a prefix (#10571, #8443).

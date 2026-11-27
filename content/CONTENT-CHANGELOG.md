@@ -9,6 +9,88 @@ Sections are rolled up from `content/changelog.d/` by
 
 ---
 
+## [2.7.1] — 2026-11-27
+
+### Added
+
+- BASE-AGENT and the research agent tell an agent to outline a document over about 2,000 tokens with `trusty-summarizer summarize`, read only the needed parts with `find` and `read --lines`, read shorter documents directly, and log an outline that missed with `trusty-summarizer miss`.
+- `tm-estimation` skill: estimates give engineer-hours, agent wall-clock hours derived by task class from measured ratios, and a separate human-wait line; carries the overrun checklist, the per-phase time-tracking table, and the measured rows in `references/estimation-data.md`.
+- Architect agents: five agents ship under `instructions/architect/agents/` in trusty-tools form (`runner`, `event-extractor`, `improver`, `improvement-curator`, `drift-guard`), with the `architect-drift-guard` and `architect-improver` skills that run two of them. The operating manual indexes the skills and lists the agents, and `architect-improvements` now dispatches the `improvement-curator` agent for its daily consolidation (#10161).
+- The `tm-delegation-patterns` brief template gains `Sources (path @ revision, role)`, `Preserve` and a `Hand-back` line; the agent reports `Read`, `Not found` and `Not read` per source, and the PM checks them before accepting a hand-back (#10573). The optional dispatch lint is not part of this change.
+- The tm-verification-protocols skill adds the steps for revising a document the owner edits: a `git merge-file` three-way compare against the sent copy, a pre-publish recheck, and a diff before sending (#10574).
+- The `tm-workflow` Completion Standard gains "Non-Code Deliverables": criteria for a document, scenario set, plan or brief quote the request; the completion report ends with an `Evidence map` (verified / helper-reported / unfinished / untested); invented size targets are banned unless the owner's words are quoted. `INVENTED_TARGET` and `OWNER-REQUESTED-LIMIT` are documented as WARNING codes (owner ruling Dr8). `phases.md` states that a docs-only skip drops the agent, never the evidence, and the CORE Done bar names both rules (#10575). The warn-only `Stop` hook is a separate change.
+- New `owner-plain` output style: the default PM style with a plain-word response format and an owner reporting section (update at a plan-changing finding and at least hourly, none when nothing changed; correct an overclaim in the next message and every handoff; verified versus reported). New `tm-owner-scenarios` skill: intent, situation, observable result and a trace to test IDs, no numbered UI steps, the owner's cost in review minutes. `scripts/check_owner_scenarios.py` lints scenario files for CI, with `scripts/check_owner_scenarios_selftest.sh` (#10576).
+- The Bug Fix chain in `tm-delegation-patterns` gains a related-path sweep (callers via trusty-search `get_call_chain`, plus a list of data states) and a `Shared-behaviour paths` brief field; `code-review-standards` adds a Related-Path Check, skipped for Low-risk text edits (#10577).
+- The `tm-capabilities` CLI reference lists `tm project unadopt`.
+- Web-QA agents can use a named Trusty Browser workflow to claim a tab in an enrolled Chrome profile and verify its site account.
+- The `tm-capabilities` CLI reference lists `tm il config show|enroll|remove|set|reset` (#11001).
+- The `tm-capabilities` CLI reference lists `tm il config diff` and `tm il config update` (#11002).
+- The `tm-secrets` skill documents `tm secrets assign` and how it uses `secrets.copy`, and the generated `tm-capabilities` CLI reference lists the verb (#11015).
+- `architect.md` and the skills `architect-operating-rules`, `architect-dashboard` and `architect-strategy` carry the six technical levels from DOC-91 (`non-technical`, `vibe-coder`, `pm`, `engineer`, `senior-engineer`, `cto`). The Architect reads the level from the `TECH LEVEL:` hook line, writes chat, dashboard items, briefs, the morning brief and Slack at that level, and answers a secondary user at their own level (#11064).
+- A detail request on one item rewrites that item one level up and sets its `level_override`; the setting does not change. The override is cleared when the item closes by writing the item back without the key, never by an update with a null value. Items below `senior-engineer` link a full technical brief, and relays and records stay technical (#11064).
+- The `tm-capabilities` CLI reference lists the new `tm architect up`, `attach` and `restart` commands (#11364, #11365).
+- The `tm-capabilities` CLI reference lists `tm architect restore`.
+- `BASE-OPS.md` tells every ops agent to name the account and run the CLI's whoami before any permission request, and to stop and report a mismatch instead of logging in or switching accounts (#11390).
+- The `tm-workflow` merge-queue procedure requires a trusty-review `review_pr` verdict at the final head SHA before every PR merge (owner instruction 2026-11-16).
+- One acceptance-criteria rule: every bug, feature, task and epic issue states one to four testable criteria; the issue closes on evidence for each; anything beyond the bar is a follow-up issue filed at close with its own criteria and the `stretch` label; the closing note lists every criterion with its evidence and the follow-up numbers. `tm-ticketing` (and `ticket-content.md`) carry the full rule; the `ticketing` agent, the CORE and Architect prompts and `tm-workflow`'s `completion-standard.md` carry a short form or pointer (#11469).
+- `tm-prose-style` gains a "Shared Documents" section with rules (a)–(f): no process or internal history unless asked, no reference to the author, only the current best estimate of truth, no reference to Architect or other internal docs, no confidential commercial detail, and read a shared document before replacing it. The `documentation` agent carries the same text; `BASE-AGENT.md` and the Architect core carry a pointer to it (#11481).
+- Declared demo and POC work ships a smoke run plus the core happy path and records deferred coverage as named `intent(demo):` test intentions; promotion to production converts every intention into a real test. The rule lives in the `tm-workflow` completion standard, with pointers from the PM core, the test ladder, `tm-verification-protocols`, `prototype-then-port` and the output styles (#11489).
+- The demo/POC declaration is recorded on the issue or brief and cited in the PR body. `scripts/check_demo_intentions.sh` fails CI on an `intent(demo):` marker outside the paths in `scripts/demo-intention-paths.txt`, and `scripts/check_ignored_tests.sh` lists Rust intentions without counting them against the ignored-test baseline (#11489).
+- The `tm-capabilities` CLI reference lists `tm architect drift`.
+- The tm-capabilities MCP tool reference (`references/mcp-tools.md`) now documents the `install_paths` field (#11821).
+- The `tm-capabilities` CLI reference lists `tm paths show|set` (#11821).
+
+### Fixed
+
+- The research agent no longer gives up on a file the PM asks it to save. Its instructions now name the real Claude Code rule, which refuses a subagent `Write` to `REPORT*.md`, `SUMMARY*.md`, `FINDINGS*.md` or `ANALYSIS*.md`, and tell it to save such a file as `research-<name>` and report the path.
+- The architect-dashboard skill's "New installation" section now lists when `tm fleet init` starts the dashboard server on macOS and when it reports `skipped` or `failed`, and says to start it by hand then (#9457).
+- `code-review-standards` 1.2.1 trims wording so `code-critic`'s resident skills fit the 24,000-byte dispatch budget again; the Related-Path Check and its rule marker are unchanged (#10577).
+- The architect-dashboard skill (r-183) tells the Architect to read a saved owner answer back with `pending-answers.py --read-back` before acting on it, to relay the stored text, to stop on any non-zero exit, to pass the printed version integer to `--if-version`, and to set `done` only after the `relayed` write succeeds (#10680).
+- The Architect's r-183 close rule now records a relayed owner answer in `relayed` and never changes `answer` or `answer_note`, so the owner's typed note survives the close (#10711).
+- The PM output styles take the session identity from the tmux session of `$TMUX_PANE`, never the folder name, and use it for the Intent Ledger `--session`, relay senders and claims; several PMs can share one folder (#11685).
+
+### Changed
+
+- mpm sessions (PM, Architect, supervisor, agents) now use the native `tm memory recall|remember|note` and `trusty-search search|query` commands for memory and search; MCP adapters are for non-mpm callers only. Verbs with no native command (`get_prompt_context`, `memory_recall_deep`, `kg_*`, `task_*`, `search_health`, `search_kg`, and the rest) stay on MCP. The `memory-manager` agent gains `Bash`.
+- BASE-AGENT moves its changelog-fragment and doc-comment gate detail into the git-workflow skill and keeps a one-line pointer, which frees resident bytes for the long-document rule.
+- Browser work routes through the trusty-browser MCP tools (`browser_*`, `page_*` from `trusty-browser-mcp`), not the Claude in Chrome extension. The PM routing row, both `web-qa` agents and the delegation, tool-usage and circuit-breaker skills say so; `web-qa` drops `mcp__claude-in-chrome` from its tools and points at the trusty-browser README for registration (`tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`) and the extension Connect grant. Ships in the first content release after merge, alongside trusty-browser 0.7.0.
+- Both `web-qa` agents state that trusty-browser 0.7.0 gives `page_read` state and visible text but no console, network or screenshot evidence: report that as a named gap, never "console clean", and use Playwright for that evidence only. The registration text notes that the shell expands `~` so the absolute path is written, and the `claude mcp add` fallback uses `-s user`.
+- `tm-workflow`: `code-critic` runs on the committed branch before a PR opens and posts `## Verdict: <V> pinned to <headsha>`; `tm pr queue-check` now refuses a PR with no `rung:N` label and a rung 5-6 PR with no pinned verdict (owner ruling Dr4).
+- `tm-issues-prune` 1.3.0: a factory session takes its next issue with `tm issue next`, which lists only ready issues with acceptance criteria and no other assignee, ranked by goal, priority and age. Suggest Next ranks from that list. The agent re-reads the one issue it picks (state, assignee, Status) before claiming it.
+- The Architect's operating manual (`architect.md`) is cut from about 33k to about 9k characters: the role, the two overriding goals, one line per every-turn rule and a short skill index. The name, mandate and virtual-twin rule, evidence labels, question ids, trusty tool priority, builder bands, single-account mode, "What you own", machine ownership, the morning brief, the monitoring and heartbeat rules, the reports rule, the Architect-duties rule and the hang rule moved into the `architect-operating-rules`, `architect-strategy`, `architect-host-admin`, `architect-workflow`, `architect-completion-standard`, `architect-project-provision` and `architect-tmux-ops` skills. No rule id was dropped. The manual picks up r-190 (morning brief), r-191 (single-account mode), r-086 and the "Two overriding goals" section from the project copy.
+- `BASE-AGENT` tells every agent to stop and report a guard refusal, or a push that lands via a ruleset bypass, with its raw message, and never to set an override variable such as `TM_ALLOW_CROSS_BRANCH_PUSH=1` unless the brief grants it by name.
+- The generated `tm-capabilities` skill lists `tm presence request`, `tm presence wait` and `tm presence devices add|list|revoke` (#8878).
+- The generated `tm-capabilities` CLI reference lists `tm secrets unlock`, `tm secrets lock` and `tm secrets migrate` (#10524).
+- The generated `tm-capabilities` CLI reference describes `tm secrets copy` as copying keys into this project's scope from a backend (#10998).
+- The `tm-secrets` skill says an agent may copy a key with no deny to a sync target such as GitHub Actions or Vercel, and that a denied key fails with `agent_key_denied` (#10999).
+- The `secrets-manager` agent no longer lists a copy to a sync target as refused: an agent may push a key with no deny, including a push-only key, and a denied key still fails with `agent_key_denied` (#10999).
+- The `tm-secrets` skill (1.7.0) and the `secrets-manager` agent (0.5.0) allow a copy between stores with `tm secrets copy`, from a named Keychain item or trusty vault key (#10998), while `security -w`/`-g` stay forbidden. They say an agent's copy of a Keychain item lands push-only, that a named copy cannot name a sync target, that a key denied to agents stays blocked, and that each copied key leaves one value-free audit record. The agent drops the stale claim that the `tm secrets` CLI and `exec` do not ship (#11000).
+- The generated `tm-capabilities` skill lists `tm whats-new` (#11003).
+- `tm-architect-setup` says `tm fleet init` creates `local/watch.json` from the live `tm-*` sessions when it is absent, never changes an existing list, and seeds an older Architect's missing list when re-run (#11012).
+- tm-capabilities lists the `tm savings status` command and the `compress_rows_per_day` doctor check (#11033).
+- `architect/core.md` lets the Architect edit its own `AGENTS.md` on its own initiative: the owner-order limit, the show-the-diff step and the log-the-owner's-words step are gone, and each edit is still committed locally. The `architect-workflow` skill and the `CLAUDE.md` template drop the same limit (#11117).
+- The PM prompt and the version-control agent now state the issue-cluster rule: related open issues ship as one branch and one PR per cluster, with one commit per issue (`Refs #N`), one critic round and one gate run per PR, and every listed issue moved on merge.
+- The Architect and supervisor hard limits, `tm-secrets`, and the secret-handling lines in the Architect skills, `secrets-manager` and `local-ops` carry one exception (#11433): a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. All other secrets keep the rule.
+- The Architect instructions name the `local/state.md` hold formats `tm fleet init` reads: `- HOLD: …`, `- usage state: HOLD …` and `- On hold (<who>): no merge …`.
+- The generated `tm-capabilities` CLI reference lists `tm architect serve` (#11543).
+- The skills, agents and instructions no longer carve out an MCP exception for the verbs with a released native command. `tm memory recall-deep|recall-all|list|prompt-context|task|kg` and `trusty-search health|index-status|list` replace the `mcp__trusty-memory__*` and `mcp__trusty-search__*` names, and `memory-manager` drops its stale `memory_forget`/`memory_list` examples. The search verbs no `trusty-search` release ships yet (`search_semantic`, `search_lexical`, `search_kg`, `search_similar`, `get_call_chain`, `grep`, `typeahead`, `list_indexes`) keep their MCP names (#11625).
+- The generated `tm-capabilities` CLI reference lists the ten new `tm memory` verbs (#11625).
+- The generated `tm-capabilities` CLI reference lists the new PR watch verbs (#11673).
+- The `tm-capabilities` MCP reference lists every `session_send` `submit_state` that answers `sent: false`, `input_not_empty` and `not_echoed` included (#11796).
+- The `tm-capabilities` MCP reference says a `session_send` `unverified` result covers a busy receiver still showing the paste, and that the sender must not resend (#11798).
+- The `architect-drift-guard` and `architect-improver` skills are gone: their steps now sit in the `drift-guard` and `improver` Architect agents, under each file's "For the Architect" section, and the operating manual's agent list points there (ruling D2f, #11896).
+
+### Removed
+
+- The `cto-assistant` persona and its Slack event binding, and the org-derived trusty-review voice, are removed; trusty-review ships the neutral `voices/house/voice.toml` instead, and for one release the retired voice path is a byte-for-byte copy of it so older trusty-review binaries still pass `content check`. The izzie, personal-assistant and writing-assistant personas no longer reference the removed `cto-bob-voice` skill or route org questions to the removed persona.
+
+### Documentation
+
+- The `tm-capabilities` doctor reference describes the `events` row's INFO line for a host without the trusty-events bus, its warning for a stopped bus with no plist, and a version-skew warning that names no install command (#10975).
+- The tm-capabilities catalog lists the new `project_decommission` MCP tool and the `tm projects decommission` command (tool count 40 to 41).
+- The tm-capabilities catalog lists the new `session_archive` MCP tool and the `tm session archive` command (tool count 41 to 42).
+- The `cto-assistant` agent's comment on its four CTO database tools now names the "cto-db" Python skill that backs them, not a removed Rust file (#11244).
+
 ## [2.4.0] — 2026-11-10
 
 ### Added

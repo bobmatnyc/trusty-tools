@@ -1,2 +1,0 @@
-Changed
-- `tm fleet init` and the Architect launch deploy no longer ship the `architect-drift-guard` and `architect-improver` skills; their steps ship inside the `drift-guard` and `improver` agents. An installed copy of either old skill is left on disk, not deleted, and `tm architect drift` lists it as `extra`. An untouched older `drift-guard` or `improver` agent file is refreshed; an edited one is kept (Refs #11896)

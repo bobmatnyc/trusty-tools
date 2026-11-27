@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.1] — 2026-11-27
+
+### Added
+
+- The console socket now serves `console.console_metrics` (#10907), a `ConsoleMetricsReport` of the console's own traffic since start. Its `metrics` hold `totals` and three `by_*` breakdowns: `by_route` (matched route template), `by_upstream` (the proxied or UDS-bridged service: search, memory, analyze, secrets, review, agents) and `by_source` (webhook deliveries per source). Each entry carries `requests`, `by_status`, `by_method` and `latency_ms` (`mean`, `max`). Every key comes from a closed set: an unmatched request counts as `unmatched`, a non-standard method as `OTHER`, an unknown webhook source as `unknown`.
+- `GET /api/console/assistants` lists the Trusty Assistants instances that `ta list` names, and `GET /api/console/assistants/{id}/turns?limit=N` returns an instance's newest turns oldest first, with counts of good records and skipped malformed lines. An unknown id answers 404 naming the available instances; an invalid id answers 400 before any file is read. The new `assistants_uds` module mirrors the ask daemon's wire structs and socket path for the ask route that follows ([#11747](https://github.com/bobmatnyc/trusty-tools/issues/11747)).
+- `POST /api/console/assistants/{id}/ask` sends `{"question": "…"}` to the instance's running ask daemon over its Unix socket and answers `{"instance","answer"}`. The console never starts a daemon: a missing or stale socket answers 503 with a hint to run `ta ask-daemon <id>` in a terminal and leave it running. At most four asks run at once; one more answers 429 with `kind: busy`. A timeout answers 504, a daemon error or bad reply 502 with its `kind`, an oversize question 413, an unknown id 404 and an invalid id 400; no error body names a path. The POST needs the console's own `Origin`, and each ask logs the instance, the tailnet peer, the question length, the outcome and the duration, never the question or answer text. All three assistants routes now answer only on the loopback or tailnet-gated listener ([#11748](https://github.com/bobmatnyc/trusty-tools/issues/11748)).
+- The Trusty Assistants page at `/tools/assistants/`: an instance list, each instance's history oldest first (with notes when lines could not be read or only the newest part was read), and an ask box that shows a pending state while an ask runs. A 503 shows the `ta ask-daemon` hint, a 429 says the assistants are busy, and other failures show the console's error text. Answers render as text, never as HTML. The page is served on the loopback and tailnet-gated listeners alike ([#11749](https://github.com/bobmatnyc/trusty-tools/issues/11749)).
+- `scripts/sandbox_assistants_console.sh` starts an isolated console and a seeded assistant's ask daemon on the offline echo model for a live check of the page ([#11749](https://github.com/bobmatnyc/trusty-tools/issues/11749)).
+- The console Config tab shows the project home and config dir as read-only rows, each with the source that set it. A broken `install.toml` shows an error banner naming the file and hides both rows and the effective root. The paths have no edit control (#11821).
+
+### Fixed
+
+- The console's upstream error table and the secrets page's kind text list `keychain_no_session`, the new trusty-secrets kind for a server started outside a macOS GUI login session, so the table stays closed over the server's kinds and the page names the cause ([#10589](https://github.com/bobmatnyc/trusty-tools/issues/10589)).
+- The console's upstream error table and the secrets page's kind text list `keychain_access_prompt`, the new trusty-secrets kind for a Keychain call that timed out, so the table stays closed over the server's kinds and the page says the outcome is unknown ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+- With `--tailscale`, the console's write routes accept a same-origin write from the page loaded by this node's MagicDNS name (`https://<node>.ts.net` through `tailscale serve`, or `http://<node>.ts.net:<port>` on the tailnet listener), so Ask Assistant on `/tools/assistants/` works from a tailnet device instead of failing with `cross-origin write requests are not allowed`. The name is learned at runtime; lookalike hosts, other schemes and ports, and every name origin without `--tailscale` are still refused ([#11749](https://github.com/bobmatnyc/trusty-tools/issues/11749)).
+- `POST /api/console/assistants/{id}/ask` reads the request body only after the request is admitted, so a request no gated listener admitted is refused with 403 before any of its body is read. The handler enforces the 64 KiB body cap itself: a larger body is still 413 and an unreadable body still 400 ([#11754](https://github.com/bobmatnyc/trusty-tools/issues/11754)).
+- The Secrets page at `/tools/secrets/` renders again. A comment in its shell quoted the head-close tag, so the built page carried its script, its stylesheet and the console's API base inside that comment and showed a blank page. The console now also injects the API base before the first head-close tag outside a comment ([#11758](https://github.com/bobmatnyc/trusty-tools/issues/11758)).
+
+### Changed
+
+- The batch-3 test-audit findings in trusty-console are acted on: cache and helper tests that duplicated other coverage are removed, the real-envelope memory health test now runs against a stub socket with no trusty-memory install, and the launchd serve-args test parses the args with the console CLI; no behaviour change (#11268).
+- The secrets project picker reads the tm registry from `<config_dir>/.trusty-mpm/project-paths.json` when the install paths move the config dir; `TRUSTY_MPM_ROOT` still wins (#11821).
+
+### Removed
+
+- The Overview no longer lists trusty-agents and `/api/agents/*` no longer proxies: the trusty-agents HTTP API it reached was cut. The daemon-served dashboard row shape and the `http_addr`/TCP probe helpers that only it used are gone too (#11632).
+
 ## [0.14.0] — 2026-11-16
 
 ### Added

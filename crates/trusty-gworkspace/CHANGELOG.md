@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.1] — 2026-11-27
+
+### Added
+
+- `manage_tasks` action `list` accepts optional `show_hidden`, `show_deleted`, `max_results` and `page_token`, sent to Google Tasks as `showHidden`, `showDeleted`, `maxResults` and `pageToken` only when supplied (#10709). A `list` without them sends the same request as before. A param of the wrong JSON type (for example `show_hidden: "true"`) fails the call with an error naming the param and the expected type, and sends no request.
+- The `list` response adds `next_page_token` beside the API's `nextPageToken` when another page exists, so a caller can page through a list (#10709).
+- `api::bulk`: Gmail and Drive bulk acquisition moved from trusty-agents (#10746 S13): `gmail_list_page` and `DriveWalk::next_page` list one page and return the page token they did not follow, `gmail_list_ids` and `drive_list_files` list to a ceiling, `message_bodies`, `message_header` and `message_attachments` read a `format=full` message, and `drive_file` and `drive_export` read one Drive file. `DRIVE_FIELDS` now asks for `createdTime`.
+- `BaseClient::with_storage`: a client over exactly the given `TokenStorage`, so a caller can read the user-tier store only and never `./.gworkspace-mcp/tokens.json`.
+- `BaseClient::with_loopback_root`, behind the new non-default `loopback-seam` feature: sends every Google API request to a loopback `http://127.0.0.1:<port>` root instead, for tests against a stubbed Google; any other root is refused.
+- `setup --scopes readonly` and the `add_account` tool's `scopes: "readonly"` request only `openid`, `userinfo.email`, `gmail.readonly`, `drive.readonly` and `documents.readonly` (#10746 ok-T20). Omitting the option keeps the full default scope set. Any other preset name is refused; free-form scope strings are never accepted. `api::auth::oauth::ScopePreset` names the preset, and `run_consent` / `run_consent_with` take it as a parameter.
+- A tool call on a read-only profile that needs a write scope now fails before any request, with an error naming the missing scope (`scope_guard::readonly_refusal`). Google's own 403 names no scope. Full and legacy profiles are unaffected.
+
+### Fixed
+
+- `api::bulk` Drive walk (#10746): it checks its root folder before it lists the first page. An unknown, trashed or non-folder root is refused with an error, and nothing is listed or tombstoned.
+- `api::bulk::parents_query` escapes `\` and `'` in the folder ID, so a crafted ID cannot close the Drive query literal and widen the listing.
+- `list_drive_contents` escapes `folder_id` as a Drive query literal through `api::bulk::parents_query` (#10879), so a crafted ID cannot add a clause that lists another folder's files.
+- The Drive walk's root check (#10746) applies to every `DriveWalk`, trusty-agents' okg drive ingest included; the `root` alias passes it (#10879).
+
+### Security
+
+- A read-only consent (`setup --scopes readonly`, `add_account {scopes:"readonly"}`) now checks the scopes Google granted against the read-only preset. A grant with any other scope is refused, nothing is stored, and the error names the extra scopes. A token response with an absent or empty `scope` is refused too (#10873). Full-scope consent is unchanged.
+- A read-only consent now requires a `--profile` (`add_account`: `profile`) other than the default `gworkspace-mcp`. Without one, or with the default, it is refused before any side effect, so the default profile keeps its full-scope token (#10873).
+
 ## [0.3.0] — 2026-09-25
 
 ### Fixed

@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.4] — 2026-11-27
+
+### Fixed
+
+- The poller reads the claude-config dir under the install's config dir (`TRUSTY_MPM_CONFIG_DIR`, then `install.toml` `config_dir`, then `$HOME`), as tm does, through a new local reader `trusty_architect::install_paths`. A broken, unreadable or relative `install.toml` now fails `Config::from_env` and `tm architect poll` closed instead of falling back to `$HOME`; `Config::from_env` returns `install_paths::InstallPathsError` in place of `ConfigError` (Refs [#11821](https://github.com/bobmatnyc/trusty-tools/issues/11821))
+- The Rust poller no longer raises a still-pending `owner_answer` again every 30 minutes; it raises it once, as `fleet-poll.py`'s dedup does (Refs [#11826](https://github.com/bobmatnyc/trusty-tools/issues/11826))
+- The Rust poll cycle now raises `owner_wont_do`: one alert per dashboard item the owner marked Won't do and the Architect has not yet relayed, fingerprinted `<id>@<wont_do.at>`, as `fleet-poll.py`'s `owner_wont_do_alerts` does. A failed item read keeps the won't-do dedup keys, as it already did for answers (Refs [#11826](https://github.com/bobmatnyc/trusty-tools/issues/11826))
+- The owner-answer and won't-do steps now skip the ILIO trial's items (`refs` holding `arch:ilio`), and keep only those under `DASHBOARD_ACTOR=architect-ilio`, as `owner_answers.pending` does (Refs [#11826](https://github.com/bobmatnyc/trusty-tools/issues/11826))
+- The Rust poll cycle now raises `user_state`: one alert per change of the owner's presence state in the dashboard's `meta/settings`, fingerprinted by `user_state_at`, as `fleet-poll.py`'s `user_state_alerts` does. An unreadable settings document raises one `user_state_error` alert and keeps the `user_state` dedup keys, instead of saying nothing (Refs [#11826](https://github.com/bobmatnyc/trusty-tools/issues/11826))
+
+### Changed
+
+- The crate's two ports of `ilio.py`'s `SECRET` pattern are now one, `il::ilio::secret::looks_secret`, used by both `ilio check` and the IL packet path. It catches the union of what the two ports caught, so each path now also refuses the few control-character and Unicode-case-folding inputs only the other port caught before (Refs [#10571](https://github.com/bobmatnyc/trusty-tools/issues/10571))
+- `trusty_architect::FakeTmux` is now a `ScriptedTmux` that answers every verb with an empty stdout. Its type name, `new`, `Default`, `calls` and `Tmux` impl are unchanged; only its `Debug` text differs (Refs [#10571](https://github.com/bobmatnyc/trusty-tools/issues/10571))
+- The batch-3 test-audit findings in trusty-architect are acted on: a test that repeated a threshold pin is removed, and the DOC-82 method-row check now builds the row from the methods the daemon registers; no behaviour change (#11268).
+
 ## [0.4.3] — 2026-11-25
 
 ### Added

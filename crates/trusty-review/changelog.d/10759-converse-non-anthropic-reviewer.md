@@ -1,2 +1,0 @@
-Added
-- A non-Anthropic Bedrock model (for example `qwen.qwen3-coder-480b-a35b-v1:0`) can run as the reviewer through Bedrock Converse, for offline evaluation. Opt in with `--reviewer-model`, `TRUSTY_REVIEW_REVIEWER_MODEL` or the config file; the default reviewer is unchanged. Such a model gets `toolChoice = auto`, and its reply goes through the same review parser. It has no price entry, so its cost reads 0.

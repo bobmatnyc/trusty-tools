@@ -7,6 +7,14 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.13.1] — 2026-11-27
+
+### Changed
+
+- Bus events set the new `HarnessEvent.project` field to `None`; no producer here names a project yet (#10906).
+- The batch-3 test-audit findings in trusty-analyze are acted on: tests that only exercised a derive or another crate's registry are removed, and serde round-trip tests now compare against a JSON literal so a renamed field, tag or variant fails; no behaviour change (#11268).
+- The default facts store is `<config_dir>/.trusty-tools/analyze/facts.redb`, following the install paths; a broken `install.toml` is an error, not the `$HOME` default (#11821).
+
 ## [0.13.0] — 2026-11-07
 
 ### Breaking
