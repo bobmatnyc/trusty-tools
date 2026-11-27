@@ -7,7 +7,7 @@
 **Spec ID:** `SPEC-HANDBACK-01~draft` … `SPEC-HANDBACK-05~draft` (DOC-89, v0); `SPEC-HANDBACK-06~draft` … `SPEC-HANDBACK-13~draft` (DOC-89, v1)
 **DOC-N claim:** `DOC-89`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). Highest on `origin/main` at 2026-11-11 was `DOC-88`.
 
-**Revision choice (2026-11-12).** v1 is an in-place revision of this file, not a superseding file. The Architect ruled at 17:05Z to merge into DOC-89 and not create a second spec. The file has no frontmatter and every section is still `~draft`, so nothing was accepted and nothing needs a `Superseded` marker; DOC-38 section 4.4 reserves `~v1` for acceptance, so the sections keep `~draft`. v1 adds sections 6 to 13. Sections 1 to 5 stay as the v0 record and the phase-1 fixtures' second input format. The filename keeps `-v0` so existing links hold. Ticket: [#11133](https://github.com/bobmatnyc/trusty-tools/issues/11133) (Architect task ar-T2f). Owner instruction: 2026-11-12 17:01Z and 17:03Z (Architect brief `2026-11-12-structured-response-instruction.md`).
+**Revision choice (2026-11-12).** v1 is an in-place revision of this file, not a superseding file. The Architect ruled at 17:05Z to merge into DOC-89 and not create a second spec. The file has no frontmatter and every section is still `~draft`, so nothing was accepted and nothing needs a `Superseded` marker; DOC-38 section 4.4 reserves `~v1` for acceptance, so the sections keep `~draft`. v1 adds sections 6 to 13. Sections 1 to 5 stay as the v0 record and the phase-1 fixtures' second input format. The filename keeps `-v0` so existing links hold. Ticket: [#11133](https://github.com/bobmatnyc/trusty-tools/issues/11133) (the Architect task, tracked on #11133). Owner instruction: 2026-11-12 17:01Z and 17:03Z (Architect brief `2026-11-12-structured-response-instruction.md`).
 
 Source of v0: agent-comm POC Track 1, plan step 3 (`/Users/masa/trusty-mpm-projects/reviews/agent-comm-poc/plan.md`), owner ruling D0e. This spec proposes a schema for the POC replay. It changes no existing file and is not adopted until the POC verdict is GO.
 
@@ -66,7 +66,7 @@ Existing formats: BASE-AGENT "Required completion format" (`content/agents/BASE-
 | C2 | BASE-AGENT requires `[command]: [actual output]` and "show raw output"; v0 caps at 10 lines. | The block carries only the verbatim final result line and exit status per gate. The raw output goes to a file named by `refs` `log:`. Failing gates also quote the first failing test name in `delta`. The rule "never summarise results in your own words" stays satisfied: the final line is verbatim. OQ2 asks whether the owner accepts file-held raw output. |
 | C3 | BASE-AGENT "What changed" lists `file:line — change`; v0 `refs` lists `path@sha:lines` without the change text. | `delta` holds the change in words; `refs` holds locations. The long form keeps the per-line list. |
 | C4 | IL tail `Task: <id>@MMDD \| done \| est \| remaining \| pct` and `CTX-USE:` are not in v0. | Both stay unchanged, after the block and outside the 10-line cap. The extractor must not drop them. |
-| C5 | IL ids (`abc-T22`, `D0e`) are ephemeral; v0 `decided` must be readable later. | `decided` cites `pr#N`, `issue#N`, `commit:<sha12>` or `comment:<url>` and never an IL id alone. An IL id may follow the cite as a hint, `(il:<S id>:<id>)`, qualified per SPEC-IL-01 section 15 (for example `il:S14:Ddb`). A decision with no PR, issue, commit or comment yet uses `@ none` and the receiver treats it as unreferenced. |
+| C5 | IL ids (`<prefix>-T22`, `D0e`) are ephemeral; v0 `decided` must be readable later. | `decided` cites `pr#N`, `issue#N`, `commit:<sha12>` or `comment:<url>` and never an IL id alone. An IL id may follow the cite as a hint, `(il:<S id>:<id>)`, qualified per SPEC-IL-01 section 15 (for example `il:S14:Ddb`). A decision with no PR, issue, commit or comment yet uses `@ none` and the receiver treats it as unreferenced. |
 | C6 | The brief handback shape has `Next: <action>`; v0 has `next`. | `next` is the sender's action for the receiver, inside the block. The IL `Next:` line is the PM's session next. Both may appear; neither replaces the other. |
 | C7 | `Goals:` and `Open D/A:` lines (PM handbacks) overlap `open`. | `open` lists questions with owners. `Open D/A` lists Architect/owner decision ids and stays outside the block. |
 | C8 | Plan says `decided` is "verbatim, dated, attributed" so the IL "reads the same". SPEC-IL-01 `owed` entries are `check`/`expect`/`ref` (80 characters each), not prose. | `decided` is not an `owed` entry. A check the receiver owes is a `next` or an `open ... owner=` line; the PM copies it to `session set --owe` itself. |
@@ -115,14 +115,14 @@ Every PM turn and every agent handback carries one fenced block with info string
 
 ````
 ```il
-goal: tt-G01
-task: tt-T2f@1112
+goal: <prefix>-G01
+task: <prefix>-T2f@1112
 done: wrote the v1 grammar into DOC-89
 pct: 60
 next: run check_sld.sh
 est: 20m
 remaining: validators, fixtures
-open: tt-D4e tt-A1c
+open: <prefix>-D4e <prefix>-A1c
 new: D Which session is exempt? | opts: Architect*; none
 evidence: head=docs/11133-il-block-spec@b59075b7b4
 evidence: log:/tmp/il133-gates.log
@@ -174,7 +174,7 @@ A parser rejects the block on any of: a line inside the fence that is not a know
 
 **ID:** SPEC-HANDBACK-09~draft
 
-When a response carries both, the block wins over the legacy `Task:` last line. The legacy line stays valid, and the DATG hook rules for it stay in force, until phase 5. Where `Task:` and `Card:` disagree, `Task:` wins (Architect ruling). The Architect's dashboard ingester (ar-T63) keeps its per-source parser for the legacy line; the block is added beside it.
+When a response carries both, the block wins over the legacy `Task:` last line. The legacy line stays valid, and the DATG hook rules for it stay in force, until phase 5. Where `Task:` and `Card:` disagree, `Task:` wins (Architect ruling). The Architect's dashboard ingester (an Architect task, tracked on #11133) keeps its per-source parser for the legacy line; the block is added beside it.
 
 ## 10. Validation {#SPEC-HANDBACK-10~draft}
 
@@ -251,4 +251,4 @@ Sample size: three brief texts and one digest. They are Architect briefs, not ha
 
 - Stale cache: a loaded id points at text changed after load. The versioned table detects it only if the validator compares versions, not just presence.
 - Misread id: an id with no text beside it cannot be caught by a reader or reviewer; a wrong but valid id passes the unknown-id validator.
-- Owner reading raw ids: the owner sees `tt-D4e`, not the decision. The expand-on-receipt hook must cover owner-facing output, or the owner reads ids only.
+- Owner reading raw ids: the owner sees `<prefix>-D4e`, not the decision. The expand-on-receipt hook must cover owner-facing output, or the owner reads ids only.
