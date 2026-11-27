@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 // #8638: one rollup entry shape and one latest-run rule, shared with queue-check.
-use crate::commands::pr::rollup::{RollupEntry, deciding_per_check};
+use crate::commands::pr::rollup::{RollupEntry, deciding_per_check, deciding_runs};
 use trusty_mpm::core::pr_watch::verdict::{Verdict, judge};
 
 /// One poll's verdict.
@@ -380,6 +380,40 @@ pub(crate) struct PrView {
     head_ref_oid: Option<String>,
 }
 
+/// The pending detail of a `--required-only` wait: the unsettled names only.
+///
+/// Why: naming every required context read as "all N pending" while
+/// `gh pr checks --required` showed most of them passed (#11948).
+/// What: a required name with no deciding run is listed as `(not
+/// registered)`; one whose deciding run is unfinished is listed bare. An
+/// unprotected base (`required` empty) has no names and keeps a generic line.
+/// Test: `check_condition_required_only_names_only_unsettled_contexts_11948`.
+fn unsettled_required(entries: &[RollupEntry], required: &[String]) -> String {
+    // #11948: list only what keeps the wait pending, not every required name.
+    let unsettled: Vec<String> = required
+        .iter()
+        .filter_map(|name| {
+            let runs = deciding_runs(entries, name);
+            if runs.is_empty() {
+                Some(format!("{name} (not registered)"))
+            } else if runs.iter().any(|e| e.is_unfinished()) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if unsettled.is_empty() {
+        return "required context(s) not yet settled".to_string();
+    }
+    format!(
+        "{} of {} required unsettled: {}",
+        unsettled.len(),
+        required.len(),
+        unsettled.join(", ")
+    )
+}
+
 /// Decide whether a parsed PR view counts as settled.
 ///
 /// Why: separating the decision from the `gh` call is what makes the
@@ -406,10 +440,7 @@ fn settle(view: &PrView, allow_empty: bool, required: Option<&[String]>) -> Poll
     let entries = view.status_check_rollup.as_deref().unwrap_or(&[]);
     if let Some(required) = required {
         return match judge(entries, required) {
-            Verdict::Pending => Poll::Pending(format!(
-                "required context(s) not yet settled: {}",
-                required.join(", ")
-            )),
+            Verdict::Pending => Poll::Pending(unsettled_required(entries, required)),
             v => Poll::Met(format!(
                 "{} required context(s) settled: {} (state={pr_state})",
                 required.len(),
