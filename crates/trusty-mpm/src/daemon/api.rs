@@ -1251,18 +1251,22 @@ pub struct RegisterProject {
 /// resolved directory here.
 /// What: delegates to `register_project_op`; `200` with the info, plus a
 /// `kept_existing` record (absent after a write). #10586: `400` for no origin,
-/// `500` with the store's error text when the registry write fails.
+/// `500` with the store's error text when the registry write fails. #11998:
+/// a kept decommissioned or archived record stays so, nothing unparks, and the
+/// `200` carries `inactive_reason` naming a session start as the way back.
 /// Test: `register_and_list_projects`,
 /// `project_init_without_origin_is_refused_and_persists_nothing_10586`,
 /// `project_init_registry_write_failure_names_the_cause_10586`,
-/// `project_init_reports_the_kept_record_for_a_different_origin_10586`.
+/// `project_init_reports_the_kept_record_for_a_different_origin_10586`,
+/// `post_projects_keeps_a_decommissioned_project_and_names_the_way_back_11998`,
+/// `post_projects_names_the_reason_only_while_the_project_is_inactive_11998`.
 #[utoipa::path(
     post,
     path = "/projects",
     tag = "projects",
     request_body = RegisterProject,
     responses(
-        (status = 200, description = "Registered; `kept_existing` (absent after a write) names a record kept instead", body = crate::core::project::RegisterProjectResponse),
+        (status = 200, description = "Registered; `kept_existing` (absent after a write) names a record kept instead; `inactive_reason` (absent for an active project) names how to reactivate a decommissioned or archived one", body = crate::core::project::RegisterProjectResponse),
         (status = 400, description = "The directory has no readable `origin` remote"),
         (status = 500, description = "The project registry write failed"),
     )

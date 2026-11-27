@@ -68,27 +68,38 @@ impl RegisterProjectResponse {
     /// `http_project_register_keeps_a_decommissioned_project_and_names_the_way_back`,
     /// `register_of_an_active_project_omits_the_inactive_reason`.
     pub fn new(project: Project, adoption: BackfillReport) -> Self {
-        // #11969: one place names the way back, so the transports cannot drift.
-        let state = match (project.is_decommissioned(), project.is_archived()) {
-            (true, true) => Some("decommissioned and archived"),
-            (true, false) => Some("decommissioned"),
-            (false, true) => Some("archived"),
-            (false, false) => None,
-        };
-        let inactive_reason = state.map(|s| {
-            format!(
-                "project {} is {s}; registering it does not reactivate it — start a \
-                 session for it (`tm session new`) to reactivate it and reload its \
-                 search index",
-                project.name
-            )
-        });
+        let inactive_reason = inactive_reason(&project);
         Self {
             project,
             adoption,
             inactive_reason,
         }
     }
+}
+
+/// Why a registered project is still inactive, and how to reactivate it.
+///
+/// Why: #11969 and #11998 — every register surface (MCP `project_register`,
+/// `POST /api/v1/projects`, `POST /projects`) must name the same way back, so
+/// one function words it and the transports cannot drift.
+/// What: `Some` when `project` is decommissioned or archived, naming a session
+/// start as the way back; `None` for an active project.
+/// Test: `register_of_an_active_project_omits_the_inactive_reason`,
+/// `post_projects_keeps_a_decommissioned_project_and_names_the_way_back_11998`,
+/// `post_projects_names_the_reason_only_while_the_project_is_inactive_11998`.
+pub fn inactive_reason(project: &Project) -> Option<String> {
+    let state = match (project.is_decommissioned(), project.is_archived()) {
+        (true, true) => "decommissioned and archived",
+        (true, false) => "decommissioned",
+        (false, true) => "archived",
+        (false, false) => return None,
+    };
+    Some(format!(
+        "project {} is {state}; registering it does not reactivate it — start a \
+         session for it (`tm session new`) to reactivate it and reload its \
+         search index",
+        project.name
+    ))
 }
 
 /// Adopt the worktrees a project's checkout ALREADY has (#7357).

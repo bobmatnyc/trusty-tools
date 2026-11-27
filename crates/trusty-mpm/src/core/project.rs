@@ -59,11 +59,17 @@ impl ProjectInfo {
 /// Why: init writes a registry-B record unless one already covers the
 /// directory's name or `owner/repo`. That match can be a different repo (the
 /// key drops the host), so a bare `200` hid that nothing was written.
+/// #11998: a kept record can be decommissioned or archived, and init does not
+/// reactivate it, so the caller must also learn how to.
 /// What: the [`ProjectInfo`] fields, flattened so the wire stays a superset of
-/// the old body, plus `kept_existing`. The field is ABSENT when the record was
-/// written, and present when an existing record was kept instead.
+/// the old body, plus `kept_existing` and `inactive_reason`. `kept_existing` is
+/// ABSENT when the record was written, and present when an existing record was
+/// kept instead. `inactive_reason` is present only when that kept record is
+/// decommissioned or archived, and names a session start as the way back.
 /// Test: `project_init_reports_the_kept_record_for_a_different_origin_10586`,
-/// `project_init_kept_record_url_carries_no_userinfo_10586`.
+/// `project_init_kept_record_url_carries_no_userinfo_10586`,
+/// `post_projects_keeps_a_decommissioned_project_and_names_the_way_back_11998`,
+/// `post_projects_names_the_reason_only_while_the_project_is_inactive_11998`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RegisterProjectResponse {
     /// The announced project.
@@ -74,6 +80,11 @@ pub struct RegisterProjectResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub kept_existing: Option<KeptRegistryRecord>,
+    /// Why the registered project is still inactive and how to reactivate it
+    /// (#11998). Absent (never `null`) for an active project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub inactive_reason: Option<String>,
 }
 
 /// The registry-B record `tm project init` kept rather than wrote (#10586).
@@ -193,10 +204,12 @@ mod tests {
         let resp = RegisterProjectResponse {
             info: ProjectInfo::new("/work/demo"),
             kept_existing: None,
+            inactive_reason: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["name"], "demo");
         assert!(v.get("kept_existing").is_none(), "{v}");
+        assert!(v.get("inactive_reason").is_none(), "{v}");
         let back: RegisterProjectResponse = serde_json::from_value(v).unwrap();
         assert_eq!(back, resp);
     }

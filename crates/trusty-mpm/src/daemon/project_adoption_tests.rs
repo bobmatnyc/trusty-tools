@@ -316,3 +316,100 @@ async fn register_of_an_active_project_omits_the_inactive_reason() {
     let body = serde_json::to_value(&response).expect("serialize the response");
     assert!(body.get("inactive_reason").is_none(), "{body:#}");
 }
+
+// ── #11998: `POST /projects` (`tm project init`) names the way back too ──
+
+/// A git checkout at `<tmp>/widget` whose `origin` is [`WIDGET_URL`], so
+/// `POST /projects` derives the name `widget` and accepts the directory.
+/// `None` when git is not on this runner.
+fn widget_checkout() -> Option<std::path::PathBuf> {
+    let repo = tempfile::tempdir().expect("tempdir").keep().join("widget");
+    std::fs::create_dir_all(&repo).expect("mkdir widget");
+    let git_ok = |args: &[&str]| {
+        trusty_common::git::command_in(&repo)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git_ok(&["init", "-q", "."]) {
+        return None;
+    }
+    assert!(
+        git_ok(&["remote", "add", "origin", WIDGET_URL]),
+        "add origin"
+    );
+    Some(repo)
+}
+
+/// Drive `POST /projects` through the real daemon router; answer status and
+/// decoded body, so a test sees the route's status code, not the op's.
+async fn post_projects(
+    state: &Arc<DaemonState>,
+    path: &std::path::Path,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/projects")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&serde_json::json!({ "path": path })).expect("encode"),
+        ))
+        .expect("build request");
+    let response = crate::daemon::api::router(Arc::clone(state))
+        .oneshot(request)
+        .await
+        .expect("the router must answer");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// #11998 criteria 1–2: `POST /projects` on a decommissioned and archived
+/// project answers `200`, keeps both flags, unparks nothing, and carries an
+/// `inactive_reason` naming a session start.
+/// Test: this function IS the test. Fails if the route clears a flag,
+/// unparks, changes its status, or answers without `inactive_reason`.
+#[tokio::test]
+async fn post_projects_keeps_a_decommissioned_project_and_names_the_way_back_11998() {
+    let Some(repo) = widget_checkout() else {
+        return; // no git on this runner
+    };
+    let (state, parked, search) = decommissioned_widget().await;
+    let (status, body) = post_projects(&state, &repo).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+    assert_register_kept_it_decommissioned(&state, &parked, &search, &body).await;
+}
+
+/// #11998 criterion 2: the key is absent while the project is active, and
+/// appears, with the status still `200`, once the same project is archived.
+/// Test: this function IS the test. Fails if an active project carries the
+/// key, or an archived one answers without it.
+#[tokio::test]
+async fn post_projects_names_the_reason_only_while_the_project_is_inactive_11998() {
+    let Some(repo) = widget_checkout() else {
+        return; // no git on this runner
+    };
+    let state = isolated_state().await;
+    let (status, active) = post_projects(&state, &repo).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{active:#}");
+    assert_eq!(active["name"], "widget", "{active:#}");
+    assert!(active.get("inactive_reason").is_none(), "{active:#}");
+
+    state
+        .project_registry()
+        .await
+        .mark_archived("widget", chrono::Utc::now())
+        .await
+        .expect("archive widget");
+    let (status, archived) = post_projects(&state, &repo).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{archived:#}");
+    let reason = archived["inactive_reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("widget is archived") && reason.contains("start a session"),
+        "{archived:#}"
+    );
+}
