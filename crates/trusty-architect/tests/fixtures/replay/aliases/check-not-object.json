@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "check"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "\"text\""
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "ERROR: cannot read table: alias table is not an object\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {}
+}

@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "argv": [
+    "check"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/a.md": "<!-- brief-id: MB0001 -->\n# MB0001: A\n",
+    "local/briefs/notes.txt": "not a brief",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0001\", \"path\": \"local/briefs/a.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "reads": [
+    "local/briefs/a.md",
+    "local/briefs/notes.txt",
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "0 problem(s)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

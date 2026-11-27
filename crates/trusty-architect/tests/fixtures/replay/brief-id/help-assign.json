@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "-h"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "usage: brief-id.py assign [-h] [--project PROJECT] path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help         show this help message and exit\n  --project PROJECT\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

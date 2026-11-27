@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "bogus"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: brief-id.py [-h] {next,assign,find,list,check} ...\nbrief-id.py: error: argument cmd: invalid choice: 'bogus' (choose from 'next', 'assign', 'find', 'list', 'check')\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

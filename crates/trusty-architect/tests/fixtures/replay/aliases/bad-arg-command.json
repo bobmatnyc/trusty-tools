@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "bogus"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: aliases.py [-h] {resolve,list,check,add} ...\naliases.py: error: argument cmd: invalid choice: 'bogus' (choose from 'resolve', 'list', 'check', 'add')\n",
+  "exit": 2,
+  "writes": {}
+}

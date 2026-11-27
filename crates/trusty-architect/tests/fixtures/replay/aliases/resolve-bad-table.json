@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "resolve",
+    "sam"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{\"people\": 5}"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

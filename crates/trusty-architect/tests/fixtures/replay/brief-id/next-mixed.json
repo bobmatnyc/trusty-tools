@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "argv": [
+    "next"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/registry.jsonl": "{\"id\": \"B0003\", \"path\": \"a.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n\n  \n{\"id\": \"MB0010\", \"path\": \"b.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"X1\", \"path\": \"c.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n",
+    "local/owner-queue/media/B0020.json": "{}",
+    "local/owner-queue/media/B00zz.json": "{}",
+    "local/owner-queue/media/MB0030.json": "{}"
+  },
+  "reads": [
+    "local/briefs/registry.jsonl",
+    "local/owner-queue/media/B0020.json",
+    "local/owner-queue/media/B00zz.json",
+    "local/owner-queue/media/MB0030.json"
+  ],
+  "stdout": "MB0021\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}
