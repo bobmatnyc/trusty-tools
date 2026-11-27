@@ -159,6 +159,40 @@ fn record_refuses_a_read_outside_the_sandbox() {
     );
 }
 
+/// #12026: a script dir reached through a symlink (macOS `/var` ->
+/// `/private/var`) holds the script's own code, not outside state.
+#[test]
+fn record_resolves_a_script_dir_reached_through_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+    std::fs::write(real.join("a.txt"), "A\n").unwrap();
+    std::fs::write(
+        real.join("reader.py"),
+        "print(open('a.txt').read().strip())\n",
+    )
+    .unwrap();
+    let mut s = spec(dir.path().join("link").join("reader.py"), Vec::new());
+    s.seeds = vec![(real.join("a.txt"), "a.txt".into())];
+    let rec = record(&s, &parent()).unwrap();
+    assert_eq!(rec.stdout, "A\n");
+    assert_eq!(rec.reads, Some(vec!["a.txt".to_owned()]));
+}
+
+/// #12026: a script dir that cannot be canonicalized is an error, never a
+/// silent "inside" verdict for the paths beneath it.
+#[test]
+fn record_refuses_a_python_script_whose_dir_does_not_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("missing").join("gone.py");
+    let err = record(&spec(script, Vec::new()), &parent()).unwrap_err();
+    assert!(
+        matches!(err, ReplayError::Io { ref what, .. } if what == "canonicalize script dir"),
+        "{err}"
+    );
+}
+
 #[test]
 fn record_refuses_an_oversized_seed() {
     let dir = tempfile::tempdir().unwrap();
