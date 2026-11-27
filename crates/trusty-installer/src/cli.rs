@@ -135,7 +135,8 @@ pub enum AnalyzeCoreArg {
 /// → the `trusty-assistants` set, i.e. `ta` and its `tagent` alias
 /// (owner-authorized scope extension, #4277; renamed in #11632); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
 /// `trusty-memory-mcp-bridge`; `Analyze` → the
-/// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06).
+/// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06);
+/// `Secrets` → the `trusty-secrets` set, a single binary (#11587).
 ///
 /// Test: `cli_tests::parse_sign` round-trips each value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -157,6 +158,9 @@ pub enum SignTargetArg {
     /// `trusty-analyze` (single binary). (owner ruling 2026-08-06)
     #[value(name = "trusty-analyze")]
     Analyze,
+    /// `trusty-secrets` (single binary), signed after a registry install. (#11587)
+    #[value(name = "trusty-secrets")]
+    Secrets,
 }
 
 impl SignTargetArg {
@@ -167,7 +171,7 @@ impl SignTargetArg {
     /// has no clap dependency.
     /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`, `Assistants` →
     /// `"trusty-assistants"`, `Memory` → `"trusty-memory"`, `Analyze` →
-    /// `"trusty-analyze"`.
+    /// `"trusty-analyze"`, `Secrets` → `"trusty-secrets"`.
     /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip),
     /// `macos_signing::tests::every_sign_target_arg_resolves_to_a_real_set`
     /// (every variant maps onto a non-empty `SIGNABLE_BINARIES` set).
@@ -178,6 +182,8 @@ impl SignTargetArg {
             SignTargetArg::Assistants => "trusty-assistants",
             SignTargetArg::Memory => "trusty-memory",
             SignTargetArg::Analyze => "trusty-analyze",
+            // #11587: the trusty-secrets set.
+            SignTargetArg::Secrets => "trusty-secrets",
         }
     }
 }

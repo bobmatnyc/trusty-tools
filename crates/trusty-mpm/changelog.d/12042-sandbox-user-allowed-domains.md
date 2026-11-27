@@ -1,4 +1,0 @@
-Fixed
-
-- Sandboxed sessions can reach GitHub, crates.io and npm again. tm now writes `sandbox.network.allowedDomains` into its user-level settings next to `strictAllowlist`, because Claude Code ignores project-tier `allowedDomains` while `strictAllowlist` is on. Before this fix, every host was denied. The next launch repairs a user settings file that 1.14.14 left with `strictAllowlist` and no hosts, and keeps the operator's other keys. Verify now refuses a launch when the user tier has no hosts, an empty list, or a host outside tm's list (#12042).
-- After upgrading, restart the tm daemon. A 1.14.14 daemon or CLI still running refuses the repaired user settings file, because it rejects any user-tier `allowedDomains`. A downgrade to 1.14.14 needs `sandbox.network.allowedDomains` removed from the user settings by hand (#12042).
