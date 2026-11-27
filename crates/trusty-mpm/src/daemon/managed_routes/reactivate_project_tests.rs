@@ -319,6 +319,29 @@ async fn state_after_settling(
 /// the route future, where the drop skips the rollback.
 #[tokio::test]
 async fn a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active() {
+    abandon_a_slow_reactivate_and_expect_stopped().await;
+}
+
+/// See PR (rollback outside tracing macro): the departed-client rollback must
+/// run when WARN is off. A process-global registry (raised by
+/// `enable_event_capture` elsewhere in this binary) admits WARN, so this test
+/// raises it too and then scopes a no-op subscriber over the reactivate.
+/// Test: this function IS the test. Fails if the rollback is a `tracing::warn!`
+/// argument, which a disabled event never evaluates.
+#[tokio::test]
+async fn an_abandoned_reactivate_rolls_back_with_tracing_off() {
+    crate::test_support::enable_event_capture();
+    let _off = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+    assert!(
+        !tracing::enabled!(tracing::Level::WARN),
+        "premise: WARN is off on this thread"
+    );
+    abandon_a_slow_reactivate_and_expect_stopped().await;
+}
+
+/// Drop a reactivate whose unpark outlasts a 2 s client, then assert the
+/// record settles on `Stopped`.
+async fn abandon_a_slow_reactivate_and_expect_stopped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, id) = bound_session(dir.path()).await;
     let parked: Parked = Arc::default();
