@@ -10,10 +10,11 @@
 //! and reacts to SIGTERM per its `mode=`; with
 //! `tc-lc-role=runner` it becomes a separate process that calls `start`.
 //! Each test hard-links this binary into a temp install dir under the names
-//! `lc-daemon` and `lc-other`, so `/proc/<pid>/exe` names the install-dir
-//! path. A process that survives SIGKILL cannot be made unprivileged, so the
-//! survivor tests run a real SIGTERM-ignoring process and drop SIGKILL through
-//! the module's `SignalDelivery` seam.
+//! `lc-daemon-<run>` and `lc-other-<run>` (#11996: `<run>` is the harness
+//! pid), so `/proc/<pid>/exe` names the install-dir path. A process that
+//! survives SIGKILL cannot be made unprivileged, so the survivor tests run a
+//! real SIGTERM-ignoring process and drop SIGKILL through the module's
+//! `SignalDelivery` seam.
 //!
 //! No fixture outlives its test (#11084): every daemon role exits on its own
 //! once its socket's directory is gone or `FIXTURE_LIFETIME` passes, and a
@@ -33,8 +34,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use trusty_common::linux_lifecycle::{
@@ -57,8 +58,38 @@ const SOCKET_ENV: &str = "TC_LC_SOCKET";
 const BAD_NAME_FLAG: &str = "bad-name";
 /// A `comm` that is not UTF-8; `/proc/<pid>/status` prints it unescaped.
 const BAD_NAME: &[u8] = b"lc-\xff\xfe-bad";
-const DAEMON: &str = "lc-daemon";
-const OTHER: &str = "lc-other";
+/// #11996: the runner's argument carrying the harness run id, so its
+/// descriptor names the same fixture binary as the harness.
+const RUN_FLAG: &str = "tc-lc-run";
+
+/// This harness run's id: this process's pid, or a runner's `tc-lc-run=`.
+fn run_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        std::env::args()
+            .find_map(|a| Some(a.strip_prefix(RUN_FLAG)?.strip_prefix('=')?.to_string()))
+            .unwrap_or_else(|| std::process::id().to_string())
+    })
+}
+
+/// The `tc-lc-run=` argument a runner needs to name this run's fixtures.
+fn run_arg() -> String {
+    format!("{RUN_FLAG}={}", run_id())
+}
+
+// #11996: a fixture of another run in another user namespace (a concurrent
+// EVO job's bwrap) hides its exe and environ (EACCES); a shared name let its
+// argv0 match and fail every scan with InstanceUnreadable. The run id keeps
+// another run's fixtures out of this run's name check.
+fn daemon() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| format!("lc-daemon-{}", run_id()))
+}
+
+fn other() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| format!("lc-other-{}", run_id()))
+}
 /// Longer than `tm restart`'s 3 s health wait, which AC1 rules out.
 const LINGER_MS: u64 = 3_500;
 const SERVE_BOUND: Duration = Duration::from_secs(20);
@@ -332,7 +363,7 @@ fn runner_main(args: &[String]) -> ! {
     let marker = PathBuf::from(arg(args, "marker").expect("marker"));
     let out = arg(args, "out").expect("out");
     let mut desc = DaemonDescriptor::with_install_dir(
-        DAEMON,
+        daemon(),
         arg(args, "install").expect("install"),
         &socket,
         StoppedSignal::SocketRefuses,
@@ -442,7 +473,7 @@ impl Fixture {
             .prefix("lc-install")
             .tempdir_in(exe_dir)
             .expect("install dir");
-        for name in [DAEMON, OTHER] {
+        for name in [daemon(), other()] {
             fs::hard_link(&exe, install_dir.path().join(name)).expect("hard link fixture");
         }
         let work_dir = tempfile::tempdir().expect("work dir");
@@ -464,7 +495,7 @@ impl Fixture {
 
     /// [`Fixture::descriptor`] for the instance on another socket path.
     fn descriptor_at(&self, signal: StoppedSignal, socket: &Path) -> DaemonDescriptor {
-        let mut desc = DaemonDescriptor::with_install_dir(DAEMON, &self.install, socket, signal)
+        let mut desc = DaemonDescriptor::with_install_dir(daemon(), &self.install, socket, signal)
             .expect("descriptor");
         desc.stop_grace = Duration::from_secs(30);
         desc.kill_wait = Duration::from_secs(5);
@@ -721,7 +752,7 @@ async fn stop_returns_not_running_when_socket_refuses_connections() {
 #[tokio::test]
 async fn stop_returns_stopped_promptly_after_a_clean_exit() {
     let fx = Fixture::new();
-    let mut d = fx.spawn(DAEMON, "serve", &[]);
+    let mut d = fx.spawn(daemon(), "serve", &[]);
     let rec = Recording::new(true);
     let t0 = Instant::now();
     let out = stop_with(&fx.descriptor(StoppedSignal::SocketRefuses), &rec).await;
@@ -744,7 +775,11 @@ async fn stop_returns_stopped_promptly_after_a_clean_exit() {
 async fn stop_waits_for_pid_exit_not_socket_close() {
     let fx = Fixture::new();
     let marker = fx.path("marker");
-    let mut d = fx.spawn(DAEMON, "linger", &[format!("marker={}", marker.display())]);
+    let mut d = fx.spawn(
+        daemon(),
+        "linger",
+        &[format!("marker={}", marker.display())],
+    );
     let t0 = Instant::now();
     let out = stop(&fx.descriptor(StoppedSignal::SocketRefuses)).await;
     let elapsed = t0.elapsed();
@@ -771,7 +806,7 @@ async fn stop_waits_for_pid_exit_not_socket_close() {
 #[tokio::test]
 async fn stop_sends_sigkill_to_a_process_that_ignores_sigterm() {
     let fx = Fixture::new();
-    let mut d = fx.spawn(DAEMON, "ignore-term", &[]);
+    let mut d = fx.spawn(daemon(), "ignore-term", &[]);
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.stop_grace = Duration::from_millis(300);
     let rec = Recording::new(true);
@@ -794,7 +829,7 @@ async fn stop_sends_sigkill_to_a_process_that_ignores_sigterm() {
 #[tokio::test]
 async fn stop_reports_a_survivor_when_sigkill_does_not_take() {
     let fx = Fixture::new();
-    let d = fx.spawn(DAEMON, "ignore-term", &[]);
+    let d = fx.spawn(daemon(), "ignore-term", &[]);
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.stop_grace = Duration::from_millis(200);
     desc.kill_wait = Duration::from_millis(300);
@@ -811,7 +846,7 @@ async fn stop_reports_a_survivor_when_sigkill_does_not_take() {
 #[tokio::test]
 async fn stop_refuses_to_signal_a_process_with_another_name() {
     let fx = Fixture::new();
-    let d = fx.spawn(OTHER, "serve", &[]);
+    let d = fx.spawn(other(), "serve", &[]);
     let rec = Recording::new(true);
     match stop_with(&fx.descriptor(StoppedSignal::SocketRefuses), &rec).await {
         Err(LifecycleError::IdentityMismatch {
@@ -821,7 +856,7 @@ async fn stop_refuses_to_signal_a_process_with_another_name() {
         }) => {
             assert_eq!(
                 (pid, expected.as_str(), found.as_str()),
-                (d.pid(), DAEMON, OTHER)
+                (d.pid(), daemon(), other())
             );
         }
         other => panic!("expected IdentityMismatch, got {other:?}"),
@@ -837,7 +872,7 @@ async fn stop_with_lock_signal_is_not_stopped_while_another_process_holds_the_lo
     let lock = fx.path("daemon.lock");
     let marker = fx.path("marker");
     let mut d = fx.spawn(
-        DAEMON,
+        daemon(),
         "fork-lock-holder",
         &[
             format!("lock={}", lock.display()),
@@ -875,7 +910,7 @@ async fn stop_with_lock_signal_is_not_stopped_while_another_process_holds_the_lo
 async fn stop_with_lock_signal_returns_stopped_once_the_lock_is_released() {
     let fx = Fixture::new();
     let lock = fx.path("daemon.lock");
-    let d = fx.spawn(DAEMON, "serve", &[format!("lock={}", lock.display())]);
+    let d = fx.spawn(daemon(), "serve", &[format!("lock={}", lock.display())]);
     let desc = fx.descriptor(StoppedSignal::LockFree(lock.clone()));
     let pid = d.pid();
     assert_eq!(
@@ -896,7 +931,7 @@ async fn start_from_another_process_spawns_the_install_dir_binary_and_it_outlive
     let decoy_dir = fx.path("decoy");
     fs::create_dir(&decoy_dir).expect("decoy dir");
     let decoy_ran = fx.path("decoy-ran");
-    let decoy = decoy_dir.join(DAEMON);
+    let decoy = decoy_dir.join(daemon());
     // #10248: no write fd to the stub in this process.
     trusty_common::exec_stub::write_executable(
         &decoy,
@@ -912,6 +947,7 @@ async fn start_from_another_process_spawns_the_install_dir_binary_and_it_outlive
     let marker = fx.path("marker");
     let status = Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", "child_entry", "-q", ROLE_RUNNER])
+        .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
         .arg(format!("marker={}", marker.display()))
@@ -935,7 +971,7 @@ async fn start_from_another_process_spawns_the_install_dir_binary_and_it_outlive
     assert!(is_alive(pid), "the daemon outlived the runner");
     assert!(UnixStream::connect(&fx.socket).is_ok(), "and still serves");
     let exe = fs::read_link(format!("/proc/{pid}/exe")).expect("exe link");
-    assert_eq!(exe, fx.install.join(DAEMON));
+    assert_eq!(exe, fx.install.join(daemon()));
     assert!(!decoy_ran.exists(), "the PATH decoy must never run");
 
     let desc = fx.descriptor(StoppedSignal::SocketRefuses);
@@ -980,6 +1016,7 @@ fn start_kills_the_child_when_its_pidfd_cannot_be_opened() {
     let out = fx.path("out");
     let status = Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", "child_entry", "-q", ROLE_RUNNER, "no-pidfd"])
+        .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
         .arg(format!("marker={}", marker.display()))
@@ -1058,7 +1095,7 @@ async fn restart_starts_a_daemon_that_is_not_running() {
         "the new daemon serves"
     );
     let exe = fs::read_link(format!("/proc/{pid}/exe")).expect("exe link");
-    assert_eq!(exe, fx.install.join(DAEMON));
+    assert_eq!(exe, fx.install.join(daemon()));
     assert_eq!(
         stop(&desc).await.expect("cleanup stop"),
         StopOutcome::Stopped { pid, forced: false }
@@ -1072,7 +1109,7 @@ async fn restart_does_not_start_when_stop_reports_a_survivor() {
     let fx = Fixture::new();
     let marker = fx.path("marker");
     let marker_arg = format!("marker={}", marker.display());
-    let d = fx.spawn(DAEMON, "ignore-term", std::slice::from_ref(&marker_arg));
+    let d = fx.spawn(daemon(), "ignore-term", std::slice::from_ref(&marker_arg));
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.spawn_args = daemon_args("serve", &[marker_arg]);
     desc.stop_grace = Duration::from_millis(200);
@@ -1104,7 +1141,7 @@ async fn stop_and_restart_refuse_when_the_lock_is_held_without_a_socket() {
     let marker = fx.path("marker");
     let marker_arg = format!("marker={}", marker.display());
     let holder = fx.launch(
-        DAEMON,
+        daemon(),
         "never-bind",
         &fx.socket,
         &[format!("lock={}", lock.display()), marker_arg.clone()],
@@ -1145,7 +1182,7 @@ async fn start_refuses_a_socket_that_already_serves_and_spawns_no_second_daemon(
     let fx = Fixture::new();
     let marker = fx.path("marker");
     let marker_arg = format!("marker={}", marker.display());
-    let d = fx.spawn(DAEMON, "serve", std::slice::from_ref(&marker_arg));
+    let d = fx.spawn(daemon(), "serve", std::slice::from_ref(&marker_arg));
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.spawn_args = daemon_args("serve", &[marker_arg]);
     let out = start(&desc).await;
@@ -1173,7 +1210,7 @@ async fn stop_refuses_to_signal_a_process_whose_executable_cannot_be_read() {
     // test's scan, where its unreadable environment would fail closed.
     let d = fx.launch_as(
         ROLE_BRIDGE,
-        DAEMON,
+        daemon(),
         "serve",
         &fx.socket,
         &["undumpable".to_string()],
@@ -1202,7 +1239,12 @@ async fn stop_and_restart_stop_short_when_the_socket_cannot_be_probed() {
     let socket = dir.join("d.sock");
     let marker = fx.path("marker");
     let marker_arg = format!("marker={}", marker.display());
-    let d = fx.spawn_at(DAEMON, "serve", &socket, std::slice::from_ref(&marker_arg));
+    let d = fx.spawn_at(
+        daemon(),
+        "serve",
+        &socket,
+        std::slice::from_ref(&marker_arg),
+    );
     let mut desc = fx.descriptor_at(StoppedSignal::SocketRefuses, &socket);
     desc.spawn_args = daemon_args("serve", &[marker_arg]);
     let guard = ModeGuard::lock(&dir);
@@ -1256,7 +1298,12 @@ async fn stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket() 
         let fx = Fixture::new();
         let marker = fx.path("marker");
         let marker_arg = format!("marker={}", marker.display());
-        let d = fx.launch(DAEMON, mode, &fx.socket, std::slice::from_ref(&marker_arg));
+        let d = fx.launch(
+            daemon(),
+            mode,
+            &fx.socket,
+            std::slice::from_ref(&marker_arg),
+        );
         assert!(
             wait_for(|| lines(&marker).iter().any(|l| l == "unserved")),
             "{mode}: the fixture never dropped its socket"
@@ -1303,7 +1350,7 @@ async fn stop_ignores_an_unrelated_process_whose_name_is_not_utf8() {
     let fx = Fixture::new();
     let marker = fx.path("marker");
     let other = fx.launch(
-        OTHER,
+        other(),
         "never-bind",
         &fx.instance_socket("other"),
         &[format!("marker={}", marker.display()), BAD_NAME_FLAG.into()],
@@ -1335,7 +1382,7 @@ async fn stop_returns_not_running_while_only_a_bridge_of_the_same_binary_runs() 
     let marker = fx.path("marker");
     let bridge = fx.launch_as(
         ROLE_BRIDGE,
-        DAEMON,
+        daemon(),
         "never-bind",
         &fx.socket,
         &[format!("marker={}", marker.display())],
@@ -1374,6 +1421,7 @@ fn start_runs_the_daemon_in_its_working_dir_with_only_the_allowed_environment() 
             ROLE_RUNNER,
             "allow=TC_LC_ALLOWED",
         ])
+        .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
         .arg(format!("marker={}", marker.display()))
@@ -1450,7 +1498,7 @@ impl Siblings {
     }
 
     fn run(&self, socket: &Path) -> Running {
-        self.fx.spawn_at(DAEMON, "serve", socket, &self.extra)
+        self.fx.spawn_at(daemon(), "serve", socket, &self.extra)
     }
 
     /// The descriptor for instance A, spawning A with B's argv.
@@ -1541,14 +1589,14 @@ async fn start_and_restart_start_a_stopped_instance_while_a_sibling_runs() {
 
 // #11098: a process that matches the binary and argv but hides its
 // environment (undumpable) cannot be told from this instance, so it fails
-// closed. It runs as `OTHER`, which no other test's descriptor names.
+// closed. It runs as `other()`, which no other test's descriptor names.
 #[tokio::test]
 async fn stop_and_start_fail_closed_when_a_matching_process_hides_its_environment() {
     let fx = Fixture::new();
     let marker = fx.path("marker");
     let marker_arg = format!("marker={}", marker.display());
     let hidden = fx.launch(
-        OTHER,
+        other(),
         "never-bind",
         &fx.socket,
         &[marker_arg.clone(), "undumpable".to_string()],
@@ -1558,7 +1606,7 @@ async fn stop_and_start_fail_closed_when_a_matching_process_hides_its_environmen
         "the fixture never started"
     );
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.binary = OTHER.to_string();
+    desc.binary = other().to_string();
     desc.spawn_args = daemon_args("serve", &[marker_arg]);
     let rec = Recording::new(true);
     let stopped = stop_with(&desc, &rec).await;
@@ -1728,6 +1776,7 @@ fn stop_fails_closed_when_the_scan_cannot_open_proc_files() {
     let out = fx.path("out");
     let status = Command::new(std::env::current_exe().expect("current_exe"))
         .args(["--exact", "child_entry", "-q", ROLE_RUNNER, "emfile"])
+        .arg(run_arg())
         .arg(format!("install={}", fx.install.display()))
         .arg(format!("socket={}", fx.socket.display()))
         .arg(format!("marker={}", fx.path("marker").display()))
@@ -1789,7 +1838,7 @@ impl PathSiblings {
             DIR_FLAG.to_string(),
             Self::dir(&self.sock_b).display().to_string(),
         ]);
-        let running = self.fx.launch(DAEMON, "serve", &self.sock_a, &extra);
+        let running = self.fx.launch(daemon(), "serve", &self.sock_a, &extra);
         assert!(wait_serving(&self.sock_b), "the sibling never served");
         running
     }
@@ -1821,7 +1870,7 @@ fn launch_unserved(fx: &Fixture, socket: &Path, name: &str, extra: &[String]) ->
     let marker = fx.path(name);
     let mut args = vec![format!("marker={}", marker.display())];
     args.extend_from_slice(extra);
-    let running = fx.launch(DAEMON, "never-bind", socket, &args);
+    let running = fx.launch(daemon(), "never-bind", socket, &args);
     assert!(
         wait_for(|| !pid_lines(&marker).is_empty()),
         "{name}: the fixture never started"
@@ -1861,7 +1910,7 @@ async fn stop_tells_a_sibling_from_this_instance_by_its_path_flag() {
 #[tokio::test]
 async fn restart_refuses_before_any_signal_when_another_process_is_this_instance() {
     let s = PathSiblings::new();
-    let a = s.fx.spawn_at(DAEMON, "serve", &s.sock_a, &s.extra);
+    let a = s.fx.spawn_at(daemon(), "serve", &s.sock_a, &s.extra);
     let sibling = s.sibling();
     let rec = Recording::new(true);
     let blocked = restart_with(&s.desc_a(false), &rec).await;
@@ -1942,8 +1991,8 @@ async fn stop_pid_refuses_a_pid_that_is_not_this_instance() {
         &[format!("marker={}", fx.path("spawned").display())],
     );
     let other_sock = fx.instance_socket("b");
-    let other = fx.launch(OTHER, "never-bind", &fx.socket, &[]);
-    let bridge = fx.launch_as(ROLE_BRIDGE, DAEMON, "never-bind", &fx.socket, &[]);
+    let other = fx.launch(other(), "never-bind", &fx.socket, &[]);
+    let bridge = fx.launch_as(ROLE_BRIDGE, daemon(), "never-bind", &fx.socket, &[]);
     let env_sibling = launch_unserved(&fx, &other_sock, "env-marker", &[]);
     let path_sibling = launch_unserved(
         &fx,
@@ -1964,7 +2013,7 @@ async fn stop_pid_refuses_a_pid_that_is_not_this_instance() {
     let rec = Recording::new(true);
     match stop_pid_with(&desc, other.pid(), &rec).await {
         Err(LifecycleError::IdentityMismatch { pid, found, .. }) => {
-            assert_eq!((pid, found.as_str()), (other.pid(), OTHER));
+            assert_eq!((pid, found.as_str()), (other.pid(), self::other()));
         }
         out => panic!("another binary: expected IdentityMismatch, got {out:?}"),
     }
@@ -2004,7 +2053,7 @@ async fn stop_pid_refuses_a_pid_that_is_not_this_instance() {
 #[tokio::test]
 async fn stop_pid_of_a_pid_that_is_gone_answers_as_stop_does() {
     let fx = Fixture::new();
-    let mut gone = fx.launch(DAEMON, "exit-now", &fx.socket, &[]);
+    let mut gone = fx.launch(daemon(), "exit-now", &fx.socket, &[]);
     gone.child.wait().expect("reap the exited fixture");
     let stale = gone.pid();
     let desc = fx.descriptor(StoppedSignal::SocketRefuses);
@@ -2091,7 +2140,7 @@ async fn restart_pid_refuses_before_any_signal_when_another_process_is_this_inst
 #[tokio::test]
 async fn stop_pid_reports_a_survivor_and_restart_pid_starts_nothing() {
     let fx = Fixture::new();
-    let d = fx.spawn(DAEMON, "ignore-term", &[]);
+    let d = fx.spawn(daemon(), "ignore-term", &[]);
     let marker = fx.path("marker");
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
@@ -2184,7 +2233,7 @@ async fn stop_pid_and_restart_pid_refuse_an_undecided_instance_before_any_signal
 async fn stop_pid_and_restart_pid_refuse_before_any_signal_when_another_pid_serves_the_socket() {
     let fx = Fixture::new();
     let p = launch_unserved(&fx, &fx.socket, "p-marker", &[]);
-    let q = fx.spawn(OTHER, "serve", &[]);
+    let q = fx.spawn(other(), "serve", &[]);
     let marker = fx.path("marker");
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
@@ -2257,9 +2306,9 @@ async fn stop_pid_and_restart_pid_stop_short_when_the_socket_cannot_be_probed() 
 #[tokio::test]
 async fn restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing() {
     let fx = Fixture::new();
-    let d = fx.spawn(DAEMON, "serve", &[]);
+    let d = fx.spawn(daemon(), "serve", &[]);
     let desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    let program = fx.install.join(DAEMON);
+    let program = fx.install.join(daemon());
     fs::remove_file(&program).expect("remove the install binary");
     let rec = Recording::new(true);
     let restarted = restart_with(&desc, &rec).await.map(|o| format!("{o:?}"));
