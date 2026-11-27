@@ -362,12 +362,13 @@ impl RpcRouter {
     /// the handler against a peer hang-up and drops the handler future when
     /// the peer goes.
     ///
-    /// 🔴 Cancel-safety contract. Mark a method only when dropping its handler
-    /// future at ANY `.await` leaves no half-applied state. Any state change
-    /// must either finish before its first `.await` point or be owned by work
-    /// that outlives the future (a spawned task that completes or rolls back
-    /// by itself). Never mark a method whose state a dropped future could
-    /// leave changed with nothing left to complete it or roll it back.
+    /// 🔴 Cancel-safety contract. A marked method must meet all three:
+    /// - No state change may stay applied when the handler future is dropped
+    ///   at any `.await`, unless a task that outlives the future completes or
+    ///   reverses it.
+    /// - That task must never undo the state of a later call; it reverses only
+    ///   what its own call applied.
+    /// - The caller gets no answer, so it must treat the outcome as unknown.
     ///
     /// [`mark_read_only`]: RpcRouter::mark_read_only
     ///

@@ -30,7 +30,12 @@ use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
 };
 
-use super::{parse_id, record_to_summary};
+use super::parse_id;
+
+// #12019: the post-mark steps and their rollback, split for the SLOC cap.
+#[path = "reactivate_steps.rs"]
+mod steps;
+use steps::{Detached, detach};
 
 /// Query parameters for the reactivate route.
 ///
@@ -202,130 +207,6 @@ async fn mark_then_detach(
     // No await between the mark above and this spawn, so a dropped route
     // cannot leave the record Active without the rollback below.
     Ok(detach(state, mgr, record, prior, budget))
-}
-
-/// The steps task's pending answer, and what [`Detached::answer`] needs to
-/// roll back a task that ended without one (#12012).
-struct Detached {
-    rx: tokio::sync::oneshot::Receiver<RouteOutcome>,
-    mgr: Arc<SessionManager>,
-    prior: Option<SessionRecord>,
-}
-
-/// Run the post-mark steps in a task the route cannot cancel (#12012).
-///
-/// Why: the steps wait on trusty-search, and the client or the transport can
-/// drop the route meanwhile. A dropped future would stop between the mark and
-/// the rollback, leaving an `Active` record no client execs into.
-/// What: a `tokio::spawn`ed task runs [`reactivate_project_and_index`] under
-/// `budget` and [`roll_back`]s on its failure or timeout. Its answer goes
-/// back on a oneshot; when the route is gone (the send fails) a success is
-/// rolled back too, since no client will exec. A task that ends without an
-/// answer is a 500 and is rolled back from here.
-/// Test: `a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active`,
-/// `an_unpark_slower_than_the_daemon_budget_fails_and_rolls_back`.
-fn detach(
-    state: Arc<DaemonState>,
-    mgr: Arc<SessionManager>,
-    record: SessionRecord,
-    prior: Option<SessionRecord>,
-    budget: Duration,
-) -> Detached {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let task_mgr = Arc::clone(&mgr);
-    let task_prior = prior.clone();
-    tokio::spawn(async move {
-        let (mgr, prior) = (task_mgr, task_prior);
-        let work = reactivate_project_and_index(&state, &mgr, &record);
-        let steps = match tokio::time::timeout(budget, work).await {
-            Ok(steps) => steps,
-            Err(_) => Err(format!(
-                "session {} ({}): its project and search index did not come back within \
-                 {}s (#12012)",
-                record.id,
-                record.tmux_name,
-                budget.as_secs_f32()
-            )),
-        };
-        let outcome = match steps {
-            Ok(()) => RouteOutcome::ok(&record_to_summary(&record)),
-            Err(why) => RouteOutcome::text(500, roll_back(&mgr, prior.as_ref(), why).await),
-        };
-        if let Err(outcome) = tx.send(outcome)
-            && outcome.is_success()
-        {
-            let why = "the reactivate caller went away before the answer (#12012)".to_string();
-            // #12019: awaited outside the macro, which skips a disabled level's args.
-            let rolled = roll_back(&mgr, prior.as_ref(), why).await;
-            tracing::warn!(id = %record.id, "{rolled}");
-        }
-    });
-    Detached { rx, mgr, prior }
-}
-
-impl Detached {
-    /// The steps task's answer; a task that ended without one is a 500 and is
-    /// rolled back from here (#12012).
-    async fn answer(self) -> RouteOutcome {
-        match self.rx.await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                let why = "the in-place reactivate task ended without an answer (#12012)";
-                let text = roll_back(&self.mgr, self.prior.as_ref(), why.to_string()).await;
-                RouteOutcome::text(500, text)
-            }
-        }
-    }
-}
-
-/// Bring back the project `record` binds to, then its search index (#12012).
-///
-/// Why: spawn and resume reactivate a decommissioned project and unpark its
-/// index (#10988, #10989); the in-place relaunch is a third way a session of
-/// that project runs again, so it owes the same two steps.
-/// What: [`crate::project::ProjectRegistry::reactivate_for_session`] (the
-/// spawn rule: only projects the record binds to), then
-/// [`SessionManager::restore_parked_index`]. The first failure is `Err`.
-/// Test: `an_inplace_reactivate_reactivates_the_bound_project_and_unparks_its_index`,
-/// `an_inplace_reactivate_leaves_an_unbound_decommissioned_project_alone`.
-async fn reactivate_project_and_index(
-    state: &Arc<DaemonState>,
-    mgr: &SessionManager,
-    record: &SessionRecord,
-) -> Result<(), String> {
-    let registry = state.project_registry().await;
-    registry.reactivate_for_session(record).await.map_err(|e| {
-        format!(
-            "session {} ({}): its project could not be reactivated and still reads \
-             decommissioned (#12012): {e}",
-            record.id, record.tmux_name
-        )
-    })?;
-    mgr.restore_parked_index(&registry, record).await?;
-    Ok(())
-}
-
-/// Roll a failed in-place reactivate back off `Active`; answers the route's
-/// error text (#12012).
-///
-/// What: [`SessionManager::revert_reactivation`] to `prior`; a missing
-/// snapshot or a failed rollback is named in the text and logged.
-/// Test: `a_failed_unpark_rolls_the_reactivate_back_to_stopped`.
-async fn roll_back(mgr: &SessionManager, prior: Option<&SessionRecord>, why: String) -> String {
-    let Some(prior) = prior else {
-        tracing::error!("in-place reactivate failed with no prior record to roll back to: {why}");
-        return format!("{why}; the session record could not be rolled back (no prior record)");
-    };
-    match mgr.revert_reactivation(prior).await {
-        Ok(record) => format!(
-            "{why}; the session record was rolled back to {}",
-            record.state
-        ),
-        Err(e) => {
-            tracing::error!(id = %prior.id, "in-place reactivate rollback failed: {e}");
-            format!("{why}; rolling the session record back also failed: {e}")
-        }
-    }
 }
 
 /// Why a caller claiming `id`'s own pane may not reactivate it, or `None`

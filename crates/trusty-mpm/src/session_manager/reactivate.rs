@@ -164,7 +164,12 @@ impl SessionManager {
     /// restores `prior`'s `claude_session_id`, plus its `terminal_at` and
     /// `stop_cause` when the target is `prior.state`. A record that is no
     /// longer `Active` is returned unchanged: something else already moved it.
+    /// #12019: so is one whose `last_activity_at` differs from `marked`'s, the
+    /// stamp this attempt's [`Self::mark_reactivated`] wrote. Any later write
+    /// that restamps it (a second reactivate, a stop) means the record is no
+    /// longer this attempt's to undo.
     /// Test: `a_failed_unpark_rolls_the_reactivate_back_to_stopped`,
+    /// `revert_reactivation_never_undoes_a_later_reactivate_12019`,
     /// `a_failed_project_reactivation_rolls_the_reactivate_back`,
     /// `revert_reactivation_restores_the_conversation_and_stop_cause`,
     /// `revert_reactivation_from_an_active_prior_keeps_the_conversation`,
@@ -172,12 +177,16 @@ impl SessionManager {
     pub(crate) async fn revert_reactivation(
         &self,
         prior: &SessionRecord,
+        marked: &SessionRecord,
     ) -> Result<SessionRecord, ManagedError> {
         // #12012: one guard over read, check and write, so a decommission
         // landing in between is never overwritten (as #9034).
         let mut guard = self.store.write().await;
         let mut record = guard.get(&prior.id).await?;
-        if record.state != ManagedSessionState::Active {
+        // #12019: the per-attempt token, re-checked under the guard (as #9034).
+        if record.state != ManagedSessionState::Active
+            || record.last_activity_at != marked.last_activity_at
+        {
             return Ok(record);
         }
         let target = match &prior.state {
