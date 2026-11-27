@@ -114,3 +114,44 @@ $R record --clock 1795784400 --out $D/daily-pass.json \
 $R replay $D/*.json -- $P/spec_drift_check.py
 $R replay $D/*.json -- <target>/debug/examples/replay_port spec_drift_check
 ```
+
+## stale-tasks, stalled_tasks, task_wait_check and il_timeline (#12028 P1d)
+
+Forty-six runs of the frozen Python reference, recorded on 2026-11-27 and
+replayed in `tests/replay_tasks.rs` against `examples/replay_port.rs`. Every
+input is a sample store or ledger built with sample names only. The three
+clock-dependent scripts are recorded with `--clock 1795784400`.
+
+- `stale-tasks/`: the script itself, twenty-two recordings: text and `--json`
+  rows (the 24-hour boundary at one second either side, a task never dated,
+  parked over and under seven days, a factory task, a non-UTC offset, rank
+  ties and a bool rank), `--hours`, `$DASHBOARD_ROOT`, an empty store, a
+  missing store, a corrupt or non-object document, `items` that is a file,
+  the other layout, the jsonl layout and its errors, a bad
+  `$DASHBOARD_FORMAT`, and the argparse paths.
+- `stalled_tasks/`: `driver.py [hook]`, ten recordings. The script's command
+  line reads `local/owner-queue/../il` and `local/owner-queue/items` beside
+  its checkout; the driver points both at the sandbox root and runs the
+  `__main__` body (`hook` uses the hook's cap of two). A `load_state` error,
+  a traceback in the script, is printed as its last line.
+- `task_wait_check/`: `driver.py`, eight recordings; it points `main()` at
+  the sandbox root and runs it unchanged.
+- `il_timeline/`: `driver.py PROJECT=DIR... [-- EPOCH...]`, six recordings:
+  two projects (rotated logs, a re-opened id, a parked task, ties, CRLF, the
+  three time formats and a one-digit hour), an empty project, and the two
+  inputs that raise.
+
+Not recorded: a `goal` that is a list or dict and an `--hours` that
+`timedelta` refuses end the script in a traceback (the port prints its last
+line, exit 1); a tmux-resolved per-PM ledger directory needs `$TMUX_PANE`,
+which the recorder clears. Regenerate with the scripts and their imports
+(`dashboard_*.py`, `datg.py`, `ids36.py`, `il_remind.py`, `task_tag.py`) and
+each `driver.py` (as `st_driver.py`, `tw_driver.py`, `tl_driver.py`) copied to
+a sandbox directory `P`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/stale-tasks/happy-text.json --seed $S/q=q -- $P/stale-tasks.py --root '{ROOT}/q'
+$R record --clock 1795784400 --out $D/stalled_tasks/cli-stalled.json --seed $S/local=local -- $P/st_driver.py
+$R replay $D/stale-tasks/*.json -- <target>/debug/examples/replay_port stale-tasks
+```

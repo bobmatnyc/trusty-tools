@@ -1,0 +1,24 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items/T01.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s1\",\n  \"goal\": \"G01\",\n  \"title\": \"Port the checker\",\n  \"progress_at\": \"2026-11-26T07:00:00Z\",\n  \"version\": 4\n}\n",
+    "q/items/T02.json": "{\r\n  \"kind\": \"task\",\r\n  \"status\" \"open\"\r\n}\r\n"
+  },
+  "reads": [
+    "q/items/T01.json",
+    "q/items/T02.json"
+  ],
+  "stdout": "",
+  "stderr": "stale-tasks: cannot read store: unreadable document {ROOT}/q/items/T02.json: Expecting ':' delimiter: line 3 column 12 (char 31)\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

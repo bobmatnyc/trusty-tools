@@ -9,11 +9,14 @@
 //! variable is absent) and writes its streams. The recordings always pass
 //! `--root`, so the default root is the current directory. `technical_level`
 //! and `architect_config` are libraries: their entries mirror the recording
-//! drivers `tests/fixtures/replay/<script>/driver.py` line for line.
+//! drivers `tests/fixtures/replay/<script>/driver.py` line for line, as do
+//! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d).
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
 //! `technical_level_recordings_replay_clean_against_the_port`,
-//! `architect_config_recordings_replay_clean_against_the_port`.
+//! `architect_config_recordings_replay_clean_against_the_port`,
+//! `stale_tasks_recordings_replay_clean_against_the_port` and the three
+//! other `tests/replay_tasks.rs` tests.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,6 +24,7 @@ use std::process::ExitCode;
 
 use trusty_architect::replay::CLOCK_ENV;
 use trusty_architect::spec_drift::{self, Outcome};
+use trusty_architect::tasks::{stale, stalled, timeline::Timeline, wait_check};
 use trusty_architect::{Clock, FakeClock, SystemClock};
 use trusty_architect::{architect_config as ac, level_lint, technical_level as tl};
 
@@ -129,6 +133,61 @@ fn architect_config(args: &[String]) -> Outcome {
     out(o, String::new(), 0)
 }
 
+/// Python's `repr()` of a float (the recorded epochs and keys).
+fn frepr(x: f64) -> String {
+    let s = format!("{x:?}");
+    if s.contains('e') || s.contains('.') || s.contains("inf") || s.contains("NaN") {
+        return s;
+    }
+    format!("{s}.0")
+}
+
+/// `driver.py` of `tests/fixtures/replay/il_timeline/` (#12028 P1d).
+fn il_timeline(args: &[String]) -> Outcome {
+    let cut = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let pairs: Vec<Option<(&str, &str)>> = args[..cut].iter().map(|a| a.split_once('=')).collect();
+    if pairs.is_empty() || pairs.iter().any(Option::is_none) {
+        let usage = "usage: driver.py PROJECT=DIR... [-- EPOCH...]\n";
+        return out(String::new(), usage.into(), 2);
+    }
+    let dirs: std::collections::BTreeMap<String, PathBuf> = pairs
+        .into_iter()
+        .flatten()
+        .map(|(p, d)| (p.to_owned(), PathBuf::from(d)))
+        .collect();
+    let epochs: Vec<f64> = args
+        .get(cut + 1..)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|a| a.parse().ok())
+        .collect();
+    let tl = match Timeline::load(&dirs) {
+        Ok(tl) => tl,
+        Err(class) => return out(String::new(), format!("load raised {class}\n"), 1),
+    };
+    let key = |k: Option<(&str, f64)>| {
+        k.map_or_else(|| "None".to_owned(), |(i, t)| format!("{i} {}", frepr(t)))
+    };
+    let mut o = String::new();
+    for inc in tl.incarnations() {
+        let close = inc.close.map_or_else(|| "None".to_owned(), frepr);
+        o += &format!(
+            "inc {} close={close} title={}\n",
+            key(Some((&inc.id, inc.open))),
+            inc.title_repr()
+        );
+    }
+    for (id, t) in tl.newest() {
+        o += &format!("newest {id} {}\n", key(Some((id, t))));
+    }
+    for p in dirs.keys().map(String::as_str).chain(["-"]) {
+        for e in &epochs {
+            o += &format!("at {p} {} {}\n", frepr(*e), key(tl.at(p, *e)));
+        }
+    }
+    out(o, String::new(), 0)
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let script = args.next().unwrap_or_default();
@@ -159,12 +218,45 @@ fn main() -> ExitCode {
             };
             level_lint::run(&rest, &mut std::io::stdin(), &opts)
         }
+        // See #12028 P1d: the recordings run in the sandbox root, which
+        // stands for the Architect checkout.
+        "stale-tasks" => {
+            let opts = stale::Options {
+                prog: "stale-tasks.py".into(),
+                default_root: PathBuf::from("local/owner-queue"),
+                env_root: std::env::var("DASHBOARD_ROOT").ok(),
+                dashboard_format: std::env::var("DASHBOARD_FORMAT").ok(),
+            };
+            stale::run(&rest, &opts, clock.as_ref())
+        }
+        "stalled_tasks" => {
+            let env = |k: &str| std::env::var(k).ok();
+            let (il, items) = (
+                Path::new("local/owner-queue/../il"),
+                Path::new("local/owner-queue/items"),
+            );
+            match rest.as_slice() {
+                [] => stalled::run(il, items, None, &env, clock.as_ref()),
+                [h] if h == "hook" => stalled::run(il, items, Some(2), &env, clock.as_ref()),
+                _ => out(String::new(), "usage: driver.py [hook]\n".into(), 2),
+            }
+        }
+        "task_wait_check" => {
+            let env = |k: &str| std::env::var(k).ok();
+            wait_check::run(
+                Path::new("local/il"),
+                Path::new("local/owner-queue/items"),
+                &env,
+            )
+        }
+        "il_timeline" => il_timeline(&rest),
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
             eprintln!(
                 "replay_port: no port named {other:?}; known: spec_drift_check, level_lint, \
-                 technical_level, architect_config"
+                 technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
+                 il_timeline"
             );
             return ExitCode::from(2);
         }

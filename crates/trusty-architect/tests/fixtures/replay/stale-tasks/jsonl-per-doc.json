@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_FORMAT": "jsonl",
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items/T01.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"session\": \"s1\",\n  \"goal\": \"G01\",\n  \"title\": \"Port the checker\",\n  \"progress_at\": \"2026-11-26T07:00:00Z\",\n  \"version\": 4\n}\n"
+  },
+  "reads": [
+    "q/items/T01.json"
+  ],
+  "stdout": "",
+  "stderr": "stale-tasks: cannot read store: {ROOT}/q/items holds per-document files and no items.jsonl: run scripts/dashboard-migrate.py\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

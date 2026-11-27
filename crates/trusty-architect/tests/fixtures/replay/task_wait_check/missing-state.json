@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/il/.keep": ""
+  },
+  "reads": [],
+  "stdout": "task_wait_check failed: DatgError: state.json missing; run init\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

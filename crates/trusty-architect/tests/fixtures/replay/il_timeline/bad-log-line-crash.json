@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "a={ROOT}/a"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "a/log.jsonl": "[\"ev\", \"ar-T01\"]\n"
+  },
+  "reads": [
+    "a/log.jsonl"
+  ],
+  "stdout": "",
+  "stderr": "load raised AttributeError\n",
+  "exit": 1,
+  "writes": {}
+}

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "a={ROOT}/a",
+    "--",
+    "1795165200"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "a/log.jsonl": "{\"t\": \"2026-11-20T09:00Z\", \"id\": \"ar-T01\", \"ev\": \"open\"}\n",
+    "a/state.json": "[1, 2]\n"
+  },
+  "reads": [
+    "a/state.json"
+  ],
+  "stdout": "",
+  "stderr": "load raised AttributeError\n",
+  "exit": 1,
+  "writes": {}
+}

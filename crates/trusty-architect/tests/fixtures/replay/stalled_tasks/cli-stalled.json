@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T01\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T10:59Z\",\n      \"remaining\": \"review the port\"\n    },\n    {\n      \"id\": \"ar-T02\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T11:00:00Z\",\n      \"remaining\": \"at the limit\"\n    },\n    {\n      \"id\": \"ar-T03\",\n      \"status\": \"running\",\n      \"priority\": \"2\",\n      \"created\": \"2026-11-27T08:00Z\",\n      \"to\": \"the CI result\"\n    },\n    {\n      \"id\": \"ar-T04\",\n      \"status\": \"open\",\n      \"progress_at\": \"2026-11-27T00:00:00+00:00\",\n      \"remaining\": \"line one\\nline two xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n    },\n    {\n      \"id\": \"ar-T05\",\n      \"status\": \"open\",\n      \"priority\": \"3\",\n      \"progress_at\": \"2026-11-27T02:00Z\"\n    },\n    {\n      \"id\": \"ar-T06\",\n      \"status\": \"parked\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-01T00:00Z\"\n    },\n    {\n      \"id\": \"ar-T07\",\n      \"status\": \"open\",\n      \"priority\": 2,\n      \"created\": \"2026-11-27T03:00Z\",\n      \"waiting_on\": \"owner: approve the plan\"\n    },\n    {\n      \"id\": \"ar-T08\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"created\": \"2026-11-27T03:00Z\",\n      \"remaining\": \"Bob to answer\"\n    },\n    {\n      \"id\": \"ar-T09\",\n      \"status\": \"open\",\n      \"priority\": 1.9,\n      \"progress_at\": \"2026-11-27T1:5+0000\",\n      \"remaining\": \"bobby tables\"\n    },\n    {\n      \"id\": \"ar-T0a\",\n      \"status\": \"open\",\n      \"priority\": \"x\",\n      \"progress_at\": \"2026-11-26 00:00\",\n      \"remaining\": \"\"\n    },\n    {\n      \"id\": \"ar-T0b\",\n      \"status\": \"open\",\n      \"priority\": 2,\n      \"progress_at\": \"not a time\",\n      \"created\": \"also not\"\n    },\n    {\n      \"id\": \"ar-T0c\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"created\": \"2026-11-26T00:00Z\",\n      \"waiting_on\": [\n        {\n          \"who\": \"Owner\",\n          \"what\": \"a call\"\n        }\n      ]\n    },\n    {\n      \"id\": \"ar-T0d\",\n      \"status\": \"open\",\n      \"priority\": 2,\n      \"created\": \"2026-11-26T00:00Z\",\n      \"remaining\": \"  BOB said wait\"\n    },\n    {\n      \"id\": \"ar-T0e\",\n      \"status\": \"done\",\n      \"priority\": 1,\n      \"created\": \"2026-11-01T00:00Z\"\n    },\n    {\n      \"id\": \"ar-T0f\",\n      \"status\": \"running\",\n      \"priority\": 1,\n      \"created\": \"2026-11-27T10:00Z\",\n      \"waiting_on\": \"bob\"\n    },\n    {\n      \"id\": \"ar-T0g\",\n      \"status\": \"open\",\n      \"created\": \"2026-11-26T23:00Z\",\n      \"remaining\": \"bob: sign the\\nrelease note yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"\n    }\n  ],\n  \"session\": {}\n}\n",
+    "local/owner-queue/items/D12.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"open\",\n  \"title\": \"Plan for ar-T08\",\n  \"detail\": \"\"\n}\n",
+    "local/owner-queue/items/D13.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"brief_pending\",\n  \"task\": \"T0c\",\n  \"title\": \"x\"\n}\n",
+    "local/owner-queue/items/D14.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"ar-T0d (a task, not an ask)\"\n}\n",
+    "local/owner-queue/items/D15.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"title\": \"ar-T0d answered already\"\n}\n",
+    "local/owner-queue/items/D16.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"open\",\n  \"title\": \"T0dx and ar-T0dy only\"\n}\n",
+    "local/owner-queue/items/D17.json": "{broken\n"
+  },
+  "reads": [
+    "local/il/.trusty-mpm/datg/state.json",
+    "local/owner-queue/items/D12.json",
+    "local/owner-queue/items/D13.json",
+    "local/owner-queue/items/D14.json",
+    "local/owner-queue/items/D15.json",
+    "local/owner-queue/items/D16.json",
+    "local/owner-queue/items/D17.json"
+  ],
+  "stdout": "STALLED (no progress past priority limit): ar-T0a P- 37.0h waits: unrecorded | ar-T09 P1 11.9h waits: bobby tables | +3 more\nOWNER WAIT, NEVER ASKED (no open D/A item): ar-T0d P2 37.0h waits:   BOB said wait | ar-T0g P- 14.0h waits: bob: sign the release note yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy | ar-T07 P2 10.0h waits: owner: approve the plan | ar-T0f P1 3.0h waits: bob\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

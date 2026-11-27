@@ -21,6 +21,8 @@ use super::ids::{py_str, truthy};
 use super::store::{Doc, Snapshot};
 
 pub use stale::{StaleTask, StaleTasks, last_activity, stale_tasks};
+// See #12028: the task checker ports parse timestamps the same way.
+pub(crate) use isotime::{from_iso, from_iso_parts};
 
 /// One owner event, with Python's keys in Python's order; the optional
 /// fields appear only on the kinds that carry them.

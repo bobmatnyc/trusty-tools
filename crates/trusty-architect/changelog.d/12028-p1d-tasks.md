@@ -1,0 +1,4 @@
+Added
+- `trusty-architect-stale-tasks`, `trusty-architect-stalled-tasks` and `trusty-architect-task-wait-check`, Rust ports of the Architect's `stale-tasks.py`, `stalled_tasks.py` and `task_wait_check.py`, with the library module `tasks` (`stale::run`, `stalled::line` and `unasked_line`, `wait_check::check`, `Ledger::load`). Forty recordings of the frozen scripts replay clean against them; a store or ledger that cannot be read is reported, never read as "nothing stale" (#12028).
+- `tasks::timeline::Timeline`, the port of the Architect's `il_timeline.py` (which task a project was on at a time, from its ledger log); its active set is kept ordered, so a sweep is O(events log tasks). Six recordings replay clean against it (#12028).
+- The shared `argparse` parser runs a `type=` conversion check in argparse's order (#12028).

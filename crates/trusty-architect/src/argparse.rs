@@ -166,6 +166,18 @@ fn classify(a: &str, opts: &[Opt]) -> Kind {
 /// Parses `args` (argv after the program name) for a parser with `opts` and,
 /// when `positional` is true, one `nargs="*"` positional.
 pub(crate) fn parse(args: &[String], opts: &[Opt], positional: bool) -> Parsed {
+    parse_checked(args, opts, positional, &|_, _| Ok(()))
+}
+
+/// [`parse`] with a `type=` conversion: `check(option index, value)` runs
+/// when the consume loop takes each value, in argparse's order, and its
+/// `Err` is the parse error (#12028 P1d: `--hours` is `type=float`).
+pub(crate) fn parse_checked(
+    args: &[String],
+    opts: &[Opt],
+    positional: bool,
+    check: &dyn Fn(usize, &str) -> Result<(), String>,
+) -> Parsed {
     let mut kinds = Vec::with_capacity(args.len());
     let mut rest = false;
     for a in args {
@@ -189,6 +201,7 @@ pub(crate) fn parse(args: &[String], opts: &[Opt], positional: bool) -> Parsed {
         },
         positional_left: positional,
         extras: Vec::new(),
+        check,
     };
     match st.run() {
         Ok(true) => Parsed::Help,
@@ -205,6 +218,7 @@ struct State<'a> {
     out: Args,
     positional_left: bool,
     extras: Vec<String>,
+    check: &'a dyn Fn(usize, &str) -> Result<(), String>,
 }
 
 impl State<'_> {
@@ -334,7 +348,10 @@ impl State<'_> {
                 return Ok(Step::Help);
             }
             match v {
-                Some(v) => self.out.values[i] = Some(v),
+                Some(v) => {
+                    (self.check)(i, &v)?;
+                    self.out.values[i] = Some(v);
+                }
                 None => self.out.flags[i] = true,
             }
         }

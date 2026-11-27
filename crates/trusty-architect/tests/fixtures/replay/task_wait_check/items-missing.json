@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T01\",\n      \"status\": \"open\",\n      \"remaining\": \"waits on D12 and Dfd, then Bob, Dec, D12 again\",\n      \"waiting_on\": [\n        {\n          \"who\": \"owner\",\n          \"what\": \"ar-A22 sign-off\"\n        }\n      ],\n      \"done_when\": \"the replay test passes on CI\"\n    },\n    {\n      \"id\": \"ar-T02\",\n      \"status\": \"running\",\n      \"remaining\": \"B07 and A3x-y (ar-D1234 too long) xD12\",\n      \"waiting_on\": \"A01\",\n      \"done_when\": \"Bob confirms the plan\"\n    },\n    {\n      \"id\": \"ar-T03\",\n      \"status\": \"open\",\n      \"done_when\": \"Owner approves; bob says ok\\n\"\n    },\n    {\n      \"id\": \"ar-T04\",\n      \"status\": \"open\",\n      \"done_when\": \" ;; ;\"\n    },\n    {\n      \"id\": \"ar-T05\",\n      \"status\": \"open\",\n      \"done_when\": \"two words\"\n    },\n    {\n      \"id\": \"ar-T06\",\n      \"status\": \"open\",\n      \"done_when\": \"bobcat confirms nothing at all here\"\n    },\n    {\n      \"id\": \"ar-T07\",\n      \"status\": \"done\",\n      \"remaining\": \"D12\",\n      \"done_when\": \"ok\"\n    },\n    {\n      \"id\": \"ar-T08\",\n      \"status\": \"open\",\n      \"waiting_on\": {\n        \"item\": \"D14\"\n      },\n      \"done_when\": \"\"\n    },\n    {\n      \"id\": \"ar-T09\",\n      \"status\": \"open\",\n      \"remaining\": \"D15\",\n      \"done_when\": \"OWNER says OK — then ship it\"\n    }\n  ],\n  \"session\": {}\n}\n"
+  },
+  "reads": [
+    "local/il/.trusty-mpm/datg/state.json"
+  ],
+  "stdout": "UNCHECKABLE ar-T02 done_when has no observable: \"Bob confirms the plan\"\nUNCHECKABLE ar-T03 done_when has no observable: \"Owner approves; bob says ok\n\"\nUNCHECKABLE ar-T04 done_when has no observable: \" ;; ;\"\nUNCHECKABLE ar-T05 done_when has no observable: \"two words\"\nUNCHECKABLE ar-T09 done_when has no observable: \"OWNER says OK — then ship it\"\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

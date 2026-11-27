@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "a={ROOT}/a",
+    "--",
+    "1795165140",
+    "1795165200"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "a/log.jsonl": "{\"t\": \"2026-11-20T09:00Z\", \"id\": \"ar-T01\", \"ev\": \"open\"}\n{\"t\": \"2026-11-20T09:00Z\", \"id\": \"ar-T02\", \"ev\": \"open\"}\n{\"t\": \"2026-11-20T09:00Z\", \"id\": \"ar-T01\", \"ev\": \"update\"}\n"
+  },
+  "reads": [
+    "a/log.jsonl"
+  ],
+  "stdout": "inc ar-T01 1795165200.0 close=None title=''\ninc ar-T02 1795165200.0 close=None title=''\nnewest ar-T01 ar-T01 1795165200.0\nnewest ar-T02 ar-T02 1795165200.0\nat a 1795165140.0 None\nat a 1795165200.0 ar-T02 1795165200.0\nat - 1795165140.0 None\nat - 1795165200.0 None\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}
