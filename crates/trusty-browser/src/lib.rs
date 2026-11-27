@@ -48,6 +48,7 @@ pub mod mcp_tools;
 pub mod mcp_upload;
 pub mod native_host;
 pub mod pages;
+pub mod pages_capture;
 mod pages_frames;
 mod pages_ops;
 pub mod pages_url;

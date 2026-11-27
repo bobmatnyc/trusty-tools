@@ -1,0 +1,5 @@
+Added
+- `browser_open_tab` opens a background tab at an allowed URL and returns it already leased to the session; `browser_close_tab` closes only a tab the session leases and answers `TabNotLeased` for any other (#11208)
+- `page_screenshot` returns the viewport or one element as a PNG image block with a `capture_id`, the image size, the captured region and the viewport metrics (CSS size, devicePixelRatio, zoom, scroll), captured with CDP `Page.captureScreenshot` over the existing `debugger` permission (#11211)
+- `page_click_at` and `page_type_at` take image pixels of a capture, map them to CSS pixels and dispatch trusted CDP input; they answer `StaleCapture` for a capture older than 5 s or a changed viewport, and `OutOfViewport` for a point outside it (#11211)
+- A screenshot whose image aspect ratio differs from its region by more than 2% (the viewport resized mid-capture) answers `StaleCapture`; an `open_tab` or `close_tab` with an unknown outcome is journaled, so a retry with the same `request_id` never opens a second tab, and a tab the extension created but could not finish is closed (#11211)

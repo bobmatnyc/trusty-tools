@@ -43,6 +43,34 @@ globalThis.TrustyPages = (() => {
     }
   }
 
+  // Why: a screenshot must record which viewport it shows, and a coordinate action must see the same one (#11211).
+  // What: returns the top viewport's CSS size, devicePixelRatio and scroll; with a ref, also the element's box
+  //   (scrolled into view, instantly) in top-frame viewport CSS pixels, clipped to the viewport. A ref that does
+  //   not resolve answers StaleElement, a box with no visible part OutOfViewport. Self-contained for injection.
+  // Test: live check; the broker's mapping is `image_pixels_map_to_css_at_1x_2x_and_zoomed`.
+  function pageView(ref) {
+    let region = null;
+    if (ref !== null) {
+      const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+      if (!el) return {error:"StaleElement"};
+      el.scrollIntoView({block:"center", inline:"center", behavior:"instant"});
+      const box = el.getBoundingClientRect();
+      let left = box.left, top = box.top;
+      for (let win = el.ownerDocument.defaultView; win?.frameElement; win = win.frameElement.ownerDocument.defaultView) {
+        const frame = win.frameElement, at = frame.getBoundingClientRect();
+        const css = frame.ownerDocument.defaultView.getComputedStyle(frame);
+        left += at.left + frame.clientLeft + parseFloat(css.paddingLeft);
+        top += at.top + frame.clientTop + parseFloat(css.paddingTop);
+      }
+      const x = Math.max(0, left), y = Math.max(0, top);
+      const width = Math.min(innerWidth, left + box.width) - x, height = Math.min(innerHeight, top + box.height) - y;
+      if (!(width >= 1 && height >= 1)) return {error:"OutOfViewport"};
+      region = {x, y, width, height};
+    }
+    return {ok:true, region, metrics:{css_width:innerWidth, css_height:innerHeight, device_pixel_ratio:devicePixelRatio,
+      scroll_x:scrollX, scroll_y:scrollY}};
+  }
+
   // Why: a drag must start and end on elements a read of this document reported (#11288).
   // What: resolves both refs through the read registry (StaleElement when either does not resolve, including
   //   one that left the top document through a shadow host or frame), then dispatches dragstart, drag and
@@ -520,7 +548,8 @@ globalThis.TrustyPages = (() => {
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
   const {pageInspect, pageRead, pageFind, pageFrames} = globalThis.TrustyPageRead;
-  return {pageProbe, pageInspect, pageRead, pageFind, pageFrames, pageTarget, pageHover, pageKeys, pageType, pagePress,
+  return {pageProbe, pageInspect, pageRead, pageFind, pageFrames, pageTarget, pageView, pageHover, pageKeys, pageType,
+    pagePress,
     pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
@@ -529,7 +558,8 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageInspect, pageFrames, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed,
+  const {pageProbe, pageInspect, pageFrames, pageTarget, pageView, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles,
+    pageDrag, trusted, urlAllowed,
     keyAllowed, modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says what was typed and what landed.
   // #11808: `frame` names the child a refused frame action had resolved.
@@ -557,6 +587,12 @@ TrustyPages.commands = deps => {
       typeof f.type === "string" && f.type.length <= 255 &&
       typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const dialog = v => v === "accept" || v === "dismiss";
+  const coord = v => Number.isFinite(v) && v >= 0 && v <= 100000;
+  const VIEW = ["css_width","css_height","device_pixel_ratio","zoom","scroll_x","scroll_y"];
+  const view = v => v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === VIEW.length &&
+    VIEW.every(k => Number.isFinite(v[k]));
+  // #11211: base64 characters a capture may carry, so the reply stays under the 1 MiB native frame limit.
+  const CAPTURE_BUDGET = 700000;
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref:actRef, dialog},
     page_drag:{tab, document:doc, ref, target:ref},
@@ -579,6 +615,13 @@ TrustyPages.commands = deps => {
     page_back:{tab}, page_forward:{tab}, page_reload:{tab},
     page_switch:{tab},
     page_emulate:{tab, ...TrustyEmulation.spec},
+    // #11208: tab lifecycle; #11211: screenshots and coordinate input (viewport CSS pixels from the broker).
+    page_open_tab:{url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
+    page_close_tab:{tab},
+    page_screenshot:{tab, document:doc, ref:v => v === null || ref(v)},
+    page_click_at:{tab, document:doc, x:coord, y:coord, metrics:view, dialog},
+    page_type_at:{tab, document:doc, x:coord, y:coord, metrics:view, dialog,
+      text:v => typeof v === "string" && v.length <= 8192},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -855,16 +898,17 @@ TrustyPages.commands = deps => {
   //   `stale document refuses before the page runs`, `trusted input rechecks the document before every event`,
   //   `a no-access tab is never debugger-attached`, `a failed dialog answer or a hung command answers OutcomeUnknown`,
   //   `a timed-out click sends no input after a later attach`.
-  async function act(req, drive) {
+  // #11211: `aim` replaces the ref lookup with another source of the point (a captured coordinate).
+  async function act(req, drive, aim) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     if (req.document === null) throw changed(await probe(req.tab));
     const first = await probe(req.tab);
     if (!first.access || first.document !== req.document) throw changed(first);
     // #11808: a frame-scoped ref is resolved, and its origin's permission checked, before any attachment.
     const frame = await frameActs.of(req);
-    try { return await attached(req, drive, first, frame); } catch (error) { throw frameActs.tag(error, frame); }
+    try { return await attached(req, drive, aim, first, frame); } catch (error) { throw frameActs.tag(error, frame); }
   }
-  async function attached(req, drive, first, frame) {
+  async function attached(req, drive, aim, first, frame) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     const target = frame ? frame.document : req.document;
     // #11294: once act returns, its leftover work must not reach a later attachment to this tab.
@@ -914,6 +958,20 @@ TrustyPages.commands = deps => {
 
     async function steps() {
       await raw("Page.enable");
+      const point = await (aim || byRef)();
+      // #11808: a child's point is in its own viewport; CDP maps it through the owner iframe's quad, and the
+      //   child must then confirm a trusted pointer event reached the target.
+      const at = frame ? await frameActs.locate(req, frame, point, raw) : point;
+      const witness = frame ? await frameActs.watch(req, frame) : null;
+      await drive(send, at);
+      await raw("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
+        .catch(() => {});
+      // A dialog Chrome would not close leaves the page blocked: the outcome is not the one reported.
+      if (!(await answered)) throw refuse("OutcomeUnknown");
+      if (frame && !await frameActs.witnessed(req, frame, witness)) throw refuse("OutcomeUnknown");
+    }
+
+    async function byRef() {
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[target]},
@@ -929,18 +987,97 @@ TrustyPages.commands = deps => {
       if (["StaleElement","Obscured"].includes(error)) throw refuse(error, {tab:req.tab});
       if (point?.ok !== true || hit.documentId !== target || !Number.isFinite(point.x) ||
           !Number.isFinite(point.y)) throw refuse("OutcomeUnknown");
-      // #11808: a child's point is in its own viewport; CDP maps it through the owner iframe's quad, and the
-      //   child must then confirm a trusted pointer event reached the target.
-      const at = frame ? await frameActs.locate(req, frame, point, raw) : point;
-      const witness = frame ? await frameActs.watch(req, frame) : null;
-      await drive(send, at);
-      await raw("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
-        .catch(() => {});
-      // A dialog Chrome would not close leaves the page blocked: the outcome is not the one reported.
-      if (!(await answered)) throw refuse("OutcomeUnknown");
-      if (frame && !await frameActs.witnessed(req, frame, witness)) throw refuse("OutcomeUnknown");
+      return point;
     }
   }
+
+  // #11211: the viewport metrics (with the tab's zoom) and an element region, read in the lease's document.
+  async function viewOf(req, ref) {
+    let hit;
+    try {
+      [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]},
+        func:pageView, args:[ref]});
+    } catch {
+      const now = await probe(req.tab);
+      if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
+      throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+    }
+    const result = hit?.result, error = result?.error;
+    if (["StaleElement","OutOfViewport"].includes(error)) throw refuse(error, {tab:req.tab});
+    const m = result?.metrics;
+    if (result?.ok !== true || hit.documentId !== req.document || !m) throw refuse("OutcomeUnknown");
+    const zoom = await chrome.tabs.getZoom(req.tab);
+    const metrics = {css_width:m.css_width, css_height:m.css_height, device_pixel_ratio:m.device_pixel_ratio, zoom,
+      scroll_x:m.scroll_x, scroll_y:m.scroll_y};
+    if (!view(metrics)) throw refuse("OutcomeUnknown");
+    return {region:result.region, metrics};
+  }
+
+  // Why: an agent must see what it cannot read as elements (canvas, maps, drawn controls), and a later
+  //   coordinate action must know which pixels the picture showed (#11211).
+  // What: probes, attaches chrome.debugger only to an accessible tab still on the lease's document (the
+  //   debugging bar resizes the viewport, so the metrics are read after the attach, as a coordinate action
+  //   reads them), then CDP Page.captureScreenshot as PNG of the viewport or the element's visible box. A PNG
+  //   over CAPTURE_BUDGET is retaken at half, then quarter scale; still too large answers CaptureTooLarge.
+  //   Bounded at 6 s; always detaches, and once it returns no leftover capture reaches a later attachment.
+  //   Uses the existing debugger permission only.
+  // Test: tests/js/pages.test.mjs `an oversized png is retaken at half and quarter scale, then refused CaptureTooLarge`,
+  //   `a screenshot whose attach fails on the same document answers DebuggerBusy`,
+  //   `a timed-out screenshot sends no capture after it returns`; `png_size_reads_the_ihdr`.
+  async function capture(req) {
+    const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+    if (req.document === null) throw changed(await probe(req.tab));
+    const first = await probe(req.tab);
+    if (!first.access || first.document !== req.document) throw changed(first);
+    const debuggee = {tabId:req.tab};
+    // #11294: as in act, a timed-out capture sends nothing after it returns.
+    let aborted = false;
+    const shotOf = params => {
+      if (aborted) throw refuse("OutcomeUnknown");
+      return chrome.debugger.sendCommand(debuggee, "Page.captureScreenshot", params);
+    };
+    // #11371: as in act, an emulated tab's attachment is shared and left attached.
+    let own = false;
+    try { own = await TrustyEmulation.attach(debuggee); } catch {
+      const now = await probe(req.tab);
+      if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
+      throw changed(now);
+    }
+    let timer;
+    const bound = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("capture")), 6000); });
+    try {
+      return await Promise.race([bound, shoot()]);
+    } finally {
+      aborted = true;
+      clearTimeout(timer);
+      if (own) await chrome.debugger.detach(debuggee).catch(() => {});
+    }
+
+    async function shoot() {
+      const {region: box, metrics} = await viewOf(req, req.ref);
+      const region = box || {x:0, y:0, width:metrics.css_width, height:metrics.css_height};
+      for (const scale of [1, 0.5, 0.25]) {
+        const params = {format:"png", captureBeyondViewport:false};
+        if (box || scale !== 1) {
+          params.clip = {x:region.x + metrics.scroll_x, y:region.y + metrics.scroll_y, width:region.width,
+            height:region.height, scale};
+        }
+        const shot = await shotOf(params);
+        if (typeof shot?.data !== "string") throw new Error("capture");
+        if (shot.data.length <= CAPTURE_BUDGET) return {document:req.document, data:shot.data, region, metrics};
+      }
+      throw refuse("CaptureTooLarge", {tab:req.tab});
+    }
+  }
+
+  // #11211: the point of a coordinate action, refused StaleCapture when the viewport metrics (read after the
+  //   attach, as the capture read them) differ from the capture's, OutOfViewport when it lies outside.
+  const atPoint = req => async () => {
+    const {metrics} = await viewOf(req, null);
+    if (!VIEW.every(k => metrics[k] === req.metrics[k])) throw refuse("StaleCapture", {tab:req.tab});
+    if (!(req.x < metrics.css_width && req.y < metrics.css_height)) throw refuse("OutOfViewport", {tab:req.tab});
+    return {ok:true, x:req.x, y:req.y};
+  };
 
   const run = {
     async page_tabs(req, row) {
@@ -1003,6 +1140,38 @@ TrustyPages.commands = deps => {
       return withFrames(req, base, plan, "find", {...terms, within_ref:null}, req.limit, READ_LIMIT);
     },
     page_click:req => act(req, trusted.click),
+    page_click_at:req => act(req, trusted.click, atPoint(req)),
+    // #11211: a trusted click focuses the point, then CDP Input.insertText types as one trusted input.
+    page_type_at:req => act(req, async (send, point) => {
+      await trusted.click(send, point);
+      await send("Input.insertText", {text:req.text});
+    }, atPoint(req)),
+    page_screenshot:req => capture(req),
+    // #11208: a new background tab; the broker leases it to the session that asked.
+    // Test: tests/js/pages.test.mjs `a tab that fails after it is created is closed and answers OutcomeUnknown`.
+    async page_open_tab(req, row) {
+      if (row.scope === "tab") throw refuse("OutOfScope");
+      if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
+      const made = await chrome.tabs.create({url:req.url, active:false});
+      try {
+        const wait = settle(made.id, 5000, true);
+        try { if ((await chrome.tabs.get(made.id)).status === "complete") wait.cancel(); } catch { wait.cancel(); }
+        await wait.done;
+        await deps.remember(made.id, new URL(req.url).origin);
+        const {access, document, origin, title} = await probe(made.id);
+        return {tab:made.id, window:made.windowId, access, document, origin, title};
+      } catch (error) {
+        // #11211 review: a tab the broker will never lease is closed, not left open; the answer stays unknown.
+        await chrome.tabs.remove(made.id).catch(() => {});
+        throw error;
+      }
+    },
+    // #11208: the broker sends this only for a tab the session leases; a tab grant never closes its tab.
+    async page_close_tab(req, row) {
+      if (row.scope === "tab") throw refuse("OutOfScope", {tab:req.tab});
+      try { await chrome.tabs.remove(req.tab); } catch { throw refuse("TabNotFound", {tab:req.tab}); }
+      return {closed:true};
+    },
     page_type:req => inject(req, pageKeys, at => [at, "type", req.text]),
     page_press:req => inject(req, pageKeys, at => [at, "press", {key:req.key, modifiers:req.modifiers}]),
     page_scroll(req) {
@@ -1089,7 +1258,8 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_hover","page_type","page_press","page_select","page_scroll","page_navigate",
-        "page_upload","page_back","page_forward","page_reload","page_drag","page_emulate"].includes(req.op);
+        "page_upload","page_back","page_forward","page_reload","page_drag","page_emulate","page_open_tab",
+        "page_close_tab","page_click_at","page_type_at"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));
