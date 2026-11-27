@@ -38,6 +38,16 @@ fn denies_every_secret_reading_op_shape_11800() {
         "op $SUB op://v/i/f",
         "op `echo read` op://v/i/f",
         "op $(echo read) op://v/i/f",
+        // #11800 review: a `$` or backtick glued to a literal in the slot.
+        "E=ead; op r$E op://v/i/f",
+        "op re`printf a`d op://v/i/f",
+        "op re$(printf a)d op://v/i/f",
+        "op r${E}d op://v/i/f",
+        "op \"r\"$E op://v/i/f",
+        "op --account x r$E op://v/i/f",
+        "op -a$X r$E",
+        "op --account=x r$E",
+        "op r'$E'",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -81,6 +91,8 @@ fn allows_a_prose_op_before_a_later_backtick_or_dollar_11800() {
 fn allows_an_op_dict_key_11800() {
     let rows: Vec<String> = [
         "write_ops_ev(p, [{\"op\": \"remind_fire\", \"now\": now}])\n\"\"\"moves `at`\"\"\"",
+        // The pre-#11800 guard refused only this row: `op:` is not the word `op`,
+        // but the spaced `"op" :` is.
         "write_ops_ev(p, [{\"op\" : \"remind_done\", \"id\": i}])\n\"\"\"moves `at`\"\"\"",
     ]
     .iter()

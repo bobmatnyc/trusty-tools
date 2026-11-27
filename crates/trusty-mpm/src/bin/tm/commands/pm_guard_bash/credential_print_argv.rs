@@ -13,7 +13,7 @@
 //! Test: `credential_print_tests::denies_a_credential_call_written_as_an_argv_list_10734`,
 //! `credential_print_tests::allows_the_10734_neighbours`.
 
-use super::{basename, names_op_then_run_time_word, names_trigger_words};
+use super::{basename, names_dynamic_op, names_op_then_run_time_word, names_trigger_words};
 
 /// Nesting past which the text is read as naming a call (fail closed), which
 /// also bounds the merge work per literal.
@@ -170,7 +170,10 @@ fn finish(mut group: Group, parent: Option<&mut Group>) -> bool {
     }
     // #11800: one argv list keeps the wider `op` … `$` reading, so
     // `["op", "item", "get", item]` refuses as it did before #11800.
-    if names_trigger_words(&group.words) || names_op_then_run_time_word(&group.words) {
+    if names_trigger_words(&group.words)
+        || names_dynamic_op(&group.words)
+        || names_op_then_run_time_word(&group.words)
+    {
         return true;
     }
     if let (Kind::List | Kind::Tuple, Some(parent)) = (group.kind, parent) {

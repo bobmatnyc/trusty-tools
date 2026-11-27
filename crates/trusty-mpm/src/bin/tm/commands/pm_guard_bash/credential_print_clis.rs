@@ -71,26 +71,32 @@ const RUN_TIME_PREFIXES: &[&[&str]] = &[
 
 /// Whether the quote-stripped, lowercased `flat` text names an interactive
 /// `security`, a [`WORD_TRIGGERS`] sequence, or a [`RUN_TIME_PREFIXES`] entry
-/// followed by a `$` or backtick (`gh auth -hgithub.com$T`); or `text`, quotes
-/// kept, names one as an argv list ([`names_argv_trigger`], #10734).
+/// followed by a `$` or backtick (`gh auth -hgithub.com$T`), or an `op` whose
+/// subcommand slot holds a `$` or backtick ([`names_dynamic_op`], read on
+/// unsplit words, #11800); or `text`, quotes kept, names one as an argv list
+/// ([`names_argv_trigger`], #10734).
 /// Test: `credential_print_tests::denies_a_cli_subcommand_chosen_at_run_time_8677`,
-/// `credential_print_tests::denies_a_credential_call_written_as_an_argv_list_10734`.
+/// `credential_print_tests::denies_a_credential_call_written_as_an_argv_list_10734`,
+/// `credential_print_op_11800_tests::denies_every_secret_reading_op_shape_11800`.
 pub(super) fn names_cli_trigger(flat: &str, text: &str) -> bool {
-    let words: Vec<String> = flat
-        .replace(['$', '`'], " $ ")
-        .split(|c: char| c.is_whitespace() || ";|&()<>{}".contains(c))
-        .filter(|w| !w.is_empty())
-        .map(basename)
+    let split = |s: &str| -> Vec<String> {
+        s.split(|c: char| c.is_whitespace() || ";|&()<>{}".contains(c))
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let words: Vec<String> = split(&flat.replace(['$', '`'], " $ "))
+        .iter()
+        .map(|w| basename(w))
         .collect();
-    names_trigger_words(&words) || names_argv_trigger(text)
+    // #11800 review: the slot rule reads words with `r$E` and `re`x`d` whole;
+    // splitting them off let the literal fill the slot.
+    names_trigger_words(&words) || names_dynamic_op(&split(flat)) || names_argv_trigger(text)
 }
 
 /// Whether `words`, in order, name an interactive `security`, a
 /// [`WORD_TRIGGERS`] sequence, or a [`RUN_TIME_PREFIXES`] entry followed by a
-/// `$` word, or an `op` whose subcommand slot is `$` ([`op_slot_is_dynamic`]).
-/// Shared with the argv-list reading (#10734).
-/// Test: `credential_print_op_11800_tests::denies_every_secret_reading_op_shape_11800`,
-/// `credential_print_op_11800_tests::allows_a_prose_op_before_a_later_backtick_or_dollar_11800`.
+/// `$` word. Shared with the argv-list reading (#10734).
 fn names_trigger_words(words: &[String]) -> bool {
     let interactive = words
         .iter()
@@ -100,13 +106,7 @@ fn names_trigger_words(words: &[String]) -> bool {
         let mut rest = words.iter();
         seq.iter().all(|want| rest.any(|w| w == want)) && (!then_dynamic || rest.any(|w| w == "$"))
     };
-    // #11800: a bare `op` with any later `$` refused prose (`the op re-checks `at``).
-    let op_dynamic = words
-        .iter()
-        .enumerate()
-        .any(|(at, w)| w == "op" && op_slot_is_dynamic(&words[at + 1..]));
     interactive
-        || op_dynamic
         || WORD_TRIGGERS.iter().any(|seq| in_order(seq, false))
         || RUN_TIME_PREFIXES.iter().any(|seq| in_order(seq, true))
 }
@@ -121,19 +121,35 @@ fn names_op_then_run_time_word(words: &[String]) -> bool {
         .is_some_and(|at| words[at + 1..].iter().any(|w| w == "$"))
 }
 
-/// Whether the word `op` reads as its subcommand, after `op`, is `$` (#11800).
+/// Whether `words` hold a bare `op` whose subcommand slot is chosen at run
+/// time ([`op_slot_is_dynamic`]). #11800: a bare `op` with any later `$`
+/// refused prose (`the op re-checks `at``).
+/// Test: `credential_print_op_11800_tests::denies_every_secret_reading_op_shape_11800`,
+/// `credential_print_op_11800_tests::allows_a_prose_op_before_a_later_backtick_or_dollar_11800`.
+fn names_dynamic_op(words: &[String]) -> bool {
+    words
+        .iter()
+        .enumerate()
+        .any(|(at, w)| basename(w) == "op" && op_slot_is_dynamic(&words[at + 1..]))
+}
+
+/// Whether the word `op` reads as its subcommand, after `op`, is chosen at
+/// run time (#11800).
 ///
-/// What: the slot rule of [`subcommand_is_dynamic`] over split words. A dash
-/// word with no `=` may take the next word as its value (`op --vault x $SUB`),
-/// so it adds one slot; a dash word with `=` spends none; any other word
-/// spends the slot. `$` met while the slot is open is dynamic.
+/// What: the slot rule of [`subcommand_is_dynamic`] over unsplit words. A
+/// word holding `$` or a backtick while the slot is open is dynamic, a dash
+/// word too (`-a$X`); this is checked first. A dash word with no `=` may take
+/// the next word as its value (`op --vault x $SUB`), so it adds one slot; a
+/// dash word with `=` spends none; any other word spends the slot.
+/// Test: `credential_print_op_11800_tests::denies_every_secret_reading_op_shape_11800`.
 fn op_slot_is_dynamic(after: &[String]) -> bool {
     let mut left = 1usize;
     for w in after {
         if left == 0 {
             return false;
         }
-        if w == "$" {
+        // #11800 review: `r$E`, `re`x`d` and `r${E}d` are dynamic, as in subcommand_is_dynamic.
+        if w.contains(['$', '`']) {
             return true;
         }
         if w.starts_with('-') {
