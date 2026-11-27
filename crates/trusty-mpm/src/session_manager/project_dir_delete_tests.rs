@@ -1271,9 +1271,15 @@ fn a_corrupt_ledger_vouches_for_no_settings_backup_11218() {
         matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
         "{err}"
     );
-    // An unreadable ledger refuses too (pass one already counts its files).
+    // An unreadable ledger refuses too, and earlier than the half above: with
+    // no ledger pass one already counts tm's other provisioning files, so the
+    // refusal names those, never the gitignored-file walk (#11267).
     std::fs::write(&ledger, "not json").expect("corrupt the ledger");
     let err = plan_repo(&fx).expect_err("a corrupt ledger vouches for nothing");
-    assert!(matches!(err, DirDeleteError::Dirty { .. }), "{err}");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. }
+            if reason.contains("uncommitted/untracked file(s)") && !reason.contains("gitignored")),
+        "{err}"
+    );
     assert!(fx.repo.join(".claude/settings.json.bak").exists());
 }
