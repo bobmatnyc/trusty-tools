@@ -259,6 +259,10 @@ mod provisioning_ledger_fifo_tests;
 #[cfg(test)]
 mod provisioned_dirt_tests;
 
+// #11267: decommission's two delete routes and tm's gitignored settings backups.
+#[cfg(test)]
+mod decommission_settings_backup_tests;
+
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]
 mod worktree_ignored_output_route_tests;
