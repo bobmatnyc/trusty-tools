@@ -29,12 +29,17 @@ struct HungControls {
 impl HungControls {
     /// The double behind [`TimeLimited`] at [`LIMIT`], and its release.
     fn limited() -> (Arc<dyn SecretBackend>, std::sync::mpsc::Sender<()>) {
+        Self::limited_at(LIMIT)
+    }
+
+    /// The double behind [`TimeLimited`] at `limit`, and its release.
+    fn limited_at(limit: Duration) -> (Arc<dyn SecretBackend>, std::sync::mpsc::Sender<()>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let hung = Arc::new(Self {
             inner: MemoryBackend::new(),
             release: std::sync::Mutex::new(rx),
         });
-        (Arc::new(TimeLimited::new(hung, LIMIT)), tx)
+        (Arc::new(TimeLimited::new(hung, limit)), tx)
     }
 }
 
@@ -139,6 +144,56 @@ async fn doctor_keychain_row_names_a_pending_authorization_when_the_control_read
         VAULT,
         "console",
     ] {
+        assert!(detail.contains(part), "{part:?} missing from {detail}");
+    }
+}
+
+/// Why: #11786 — doctor's control read runs under its own
+/// [`KEYCHAIN_PROBE_TIMEOUT`], not the backend's 20 s call limit or the
+/// 15 s request deadline; without that bound one doctor call waits the
+/// longer of those on a prompt nobody answers.
+/// What: the hung read sits behind a 60 s wrapper limit, so only doctor's
+/// bound can end it. The call answers no sooner than the bound and within
+/// it plus 3 s, as `authorization_pending` naming the item and its vault.
+/// The client waits 30 s, so a missing bound fails on the elapsed time.
+/// Red without the bound: the row came back after ~15 s.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_control_read_returns_within_the_probe_bound_when_the_peer_never_answers() {
+    use crate::store::KEYCHAIN_PROBE_TIMEOUT;
+    let fx = fixture();
+    index_vault(&fx);
+    let (keychain, release) = HungControls::limited_at(Duration::from_secs(60));
+    let server = start_with_keychain(&fx, keychain).await;
+    let request = json!({"jsonrpc": "2.0", "id": 7, "method": DOCTOR, "params": Value::Null});
+    let started = std::time::Instant::now();
+    let reply = send_framed_request(&fx.settings.socket, &request, Duration::from_secs(30))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    drop(release);
+    server.stop().await;
+
+    let bound = KEYCHAIN_PROBE_TIMEOUT;
+    assert_eq!(bound, Duration::from_secs(5));
+    assert!(
+        elapsed >= bound && elapsed < bound + Duration::from_secs(3),
+        "doctor answered after {elapsed:?}, want within {bound:?} + 3 s"
+    );
+    let report: DoctorResponse = serde_json::from_value(ok(reply)).unwrap();
+    let row = report
+        .backends
+        .into_iter()
+        .find(|b| b.id.as_str() == BackendId::KEYCHAIN)
+        .expect("a keychain row");
+    assert!(!row.available, "{row:?}");
+    assert_eq!(
+        row.reason,
+        Some(Unavailable::AuthorizationPending),
+        "{row:?}"
+    );
+    let detail = row.detail.unwrap_or_default();
+    for part in ["trusty-secrets.agents-deny-migrated", VAULT] {
         assert!(detail.contains(part), "{part:?} missing from {detail}");
     }
 }
