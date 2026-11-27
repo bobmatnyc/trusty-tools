@@ -1,7 +1,7 @@
 """The Projects view reads tm's project registry with no secrets module (#10571).
 
-Covers: a fresh HOME holding the two files tm writes (~/.trusty-mpm/project-registry/projects.json, the ProjectStore
-shape {"projects": {name: {name, repo_url, default_branch}}}, and ~/.trusty-mpm/project-paths.json, the
+Covers: a fresh HOME holding the two files tm writes (<mpm_root>/project-registry/projects.json, the ProjectStore
+shape {"projects": {name: {name, repo_url, default_branch}}}, and <mpm_root>/project-paths.json, the
 ProjectAliasEntry shape [{alias, path}]) lists every registered project; with no map row the canonical
 <projects_root>/<owner>/<repo> clone is the root, a missing one carries a plain "Root not found" note, and a map path
 wins; through registered_projects() and through
@@ -23,12 +23,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
+import architect_config as ac  # noqa: E402
 import dashboard_projects as dp  # noqa: E402
 
 
 def write_registry(home, checkouts):
-    """tm's two registry files under `home`/.trusty-mpm, in the shapes the Rust serializers write."""
-    root = os.path.join(home, ".trusty-mpm")
+    """tm's two registry files under the tm root of `home`, in the shapes the Rust serializers write."""
+    root = ac.install_mpm_root({"HOME": home})  # #11821 P7: the reader's default, <home>/.trusty-mpm
     os.makedirs(os.path.join(root, "project-registry"))
     projects = {name: {"name": name, "repo_url": url, "default_branch": "main"} for name, url, _ in checkouts}
     with open(os.path.join(root, "project-registry", "projects.json"), "w") as f:
@@ -67,7 +68,7 @@ class NoBridge(unittest.TestCase):
 
     def test_canonical_layout_and_root_not_found(self):
         # #10571 (a)(b)(c): no project map -> <projects_root>/<owner>/<repo>; a missing clone says so; a map path wins
-        pr = os.path.join(self.home, "trusty-mpm-projects")
+        pr = ac.install_projects_root({"HOME": self.home})
         os.makedirs(os.path.join(pr, "acme", "web"))
         os.makedirs(os.path.join(pr, "acme", "api"))
         mapped = os.path.join(self.home, "elsewhere", "api")
@@ -90,7 +91,7 @@ class NoBridge(unittest.TestCase):
     def test_mixed_case_repo_url_links_the_session_in_the_lowercase_clone(self):
         # #10571: tm clones ACME/Widget_Shop.git to acme/widget-shop (slugify_component);
         # the derived root must be that directory, so a live pane inside it links the session
-        pr = os.path.join(self.home, "trusty-mpm-projects")
+        pr = ac.install_projects_root({"HOME": self.home})
         clone = os.path.join(pr, "acme", "widget-shop")
         os.makedirs(os.path.join(clone, "src"))
         write_registry(self.home, [("widget-shop", "https://github.com/ACME/Widget_Shop.git", None)])
@@ -111,7 +112,7 @@ class NoBridge(unittest.TestCase):
 
     def test_a_projects_list_instead_of_a_map_is_a_plain_error(self):
         # #10571: {"projects": [...]} is not tm's shape; the page is told, never handed a silent empty list
-        root = os.path.join(self.home, ".trusty-mpm", "project-registry")
+        root = os.path.join(ac.install_mpm_root({"HOME": self.home}), "project-registry")
         os.makedirs(root)
         with open(os.path.join(root, "projects.json"), "w") as f:
             json.dump({"projects": [{"name": "web"}]}, f)
@@ -122,7 +123,7 @@ class NoBridge(unittest.TestCase):
         self.assertTrue(out["registry_error"].startswith("The project list file has an unexpected shape"))
 
     def test_an_unreadable_record_keeps_its_row_with_a_note(self):
-        root = os.path.join(self.home, ".trusty-mpm", "project-registry")
+        root = os.path.join(ac.install_mpm_root({"HOME": self.home}), "project-registry")
         os.makedirs(root)
         with open(os.path.join(root, "projects.json"), "w") as f:
             json.dump({"projects": {"broken": "not a record", "web": {"name": "web", "repo_url": "https://github.com/acme/web"}}}, f)
@@ -145,7 +146,7 @@ class NoBridge(unittest.TestCase):
 
     def test_absent_registry_is_empty_and_malformed_is_a_plain_error(self):
         self.assertEqual(dp.registered_projects(), [])
-        root = os.path.join(self.home, ".trusty-mpm", "project-registry")
+        root = os.path.join(ac.install_mpm_root({"HOME": self.home}), "project-registry")
         os.makedirs(root)
         with open(os.path.join(root, "projects.json"), "w") as f:
             f.write("{not json")
