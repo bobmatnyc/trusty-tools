@@ -87,6 +87,10 @@ mod remove_path;
 mod residency_pins;
 mod residency_pull;
 mod residency_sweep;
+// #10534: 30-day evict of idle duplicate and unregistered indexes.
+mod retention;
+#[cfg(test)]
+mod retention_10534_tests;
 // #4289: the create-index-time containment guard over registered index roots.
 mod root_overlap;
 mod router;

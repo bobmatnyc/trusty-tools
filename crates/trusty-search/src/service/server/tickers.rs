@@ -398,6 +398,8 @@ pub(super) fn spawn_watcher_idle_suspend_ticker(state: Arc<SearchAppState>) {
 /// registration removed, on-disk data preserved. [`is_reapable_orphan`] only
 /// fires when the root is missing AND its parent survives, so an unmounted
 /// external volume is never reaped.
+/// #10534: each tick then runs `retention::evict_idle_once`, so
+/// `TRUSTY_ORPHAN_REAP_SECS=0` disables the 30-day retention pass too.
 /// Test: `orphan_reaper` unit tests cover the predicate + interval; one pass
 /// is [`reap_orphans_once`].
 ///
@@ -424,6 +426,11 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
                 tracing::info!(
                     "orphan-reaper: reaped {reaped} orphaned registration(s) this cycle"
                 );
+            }
+            // #10534: the same hygiene cadence runs the 30-day retention pass.
+            let evicted = super::retention::evict_idle_once(&state).await;
+            if evicted > 0 {
+                tracing::info!("retention: evicted {evicted} idle index(es) this cycle");
             }
         }
     });
