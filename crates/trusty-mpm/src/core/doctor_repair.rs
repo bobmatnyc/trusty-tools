@@ -234,9 +234,18 @@ pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<R
 /// Test: `missing_group_repair_never_writes_the_project_file_12077`.
 const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
 
-/// Why the missing-group repair writes nothing (#12077).
-const MISSING_GROUP_REFUSAL: &str = "tm does not write `.claude/settings.json` (#12077); the \
-     project's next managed `tm` launch re-renders the group";
+/// Why the missing-group repair writes nothing, and what restores the group
+/// (#12077 row 9a).
+///
+/// Test: `missing_group_refusal_names_the_launch_that_restores_the_guard_12077`.
+fn missing_group_refusal(project_dir: &Path) -> String {
+    format!(
+        "tm does not write `.claude/settings.json` (#12077). The project's next tm launch \
+         re-renders tm's hook group, which restores the guard (`tm hook --pm-guard`) and the \
+         other tm hooks; start one with `tm launch {}`",
+        project_dir.display()
+    )
+}
 
 /// Report the tm hook lifecycle groups a project settings file is missing
 /// (issue #7490), and refuse to write them (#12077).
@@ -257,9 +266,10 @@ const MISSING_GROUP_REFUSAL: &str = "tm does not write `.claude/settings.json` (
 /// [`crate::core::session_launch::missing_lifecycle_hook_events`] or (#7849)
 /// [`crate::core::session_launch::project_hook_group_gaps`] names at least one
 /// gap — no step for a complete file, a missing file, or one tm never
-/// provisioned. The step is [`StepStatus::Refused`] in both modes and the file
-/// is never written.
+/// provisioned. The step is [`StepStatus::Refused`] in both modes, naming the
+/// `tm launch` that restores the guard, and the file is never written.
 /// Test: `missing_group_repair_never_writes_the_project_file_12077`,
+/// `missing_group_refusal_names_the_launch_that_restores_the_guard_12077`,
 /// `missing_group_repair_dry_run_changes_nothing`,
 /// `missing_group_repair_is_silent_for_a_complete_file`,
 /// `missing_group_repair_reports_a_toggle_driven_gap`.
@@ -316,9 +326,10 @@ pub(crate) fn repair_missing_hook_group_with(
     if gaps.is_empty() {
         return Vec::new();
     }
-    let what = format!("merge the tm hook group back under [{}]", gaps.join(", "));
+    // #12077 row 9a: the step names the gap; the refusal names the launch.
+    let what = format!("tm hook group missing under [{}]", gaps.join(", "));
     // #12077: never written here, in either mode; the launch re-renders it.
-    let status = StepStatus::Refused(MISSING_GROUP_REFUSAL.to_string());
+    let status = StepStatus::Refused(missing_group_refusal(project_dir));
     vec![RepairStep {
         check: MISSING_GROUP_CHECK,
         path,

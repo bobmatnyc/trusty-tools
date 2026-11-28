@@ -299,7 +299,7 @@ fn check_hooks_hygiene_reports_a_missing_sessionstart_group() {
     );
     // #12077: `--fix` reports only; the next managed launch is the repair.
     assert!(
-        missing.message.contains("next managed `tm` launch"),
+        missing.message.contains("next tm launch"),
         "the report must name the repair: {}",
         missing.message
     );

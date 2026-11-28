@@ -276,12 +276,14 @@ fn toggle_driven_gaps(settings_path: &Path, hook_exe: Option<&Path>) -> Vec<Stri
 /// a finding whose remedy the operator has to guess is how #4948 happened.
 /// What: `Ok` when `gaps` is empty. Otherwise `Warn`, listing up to 5
 /// `<path>: <event>, <event>` pairs plus an overflow count, and naming the
-/// next managed launch as the repair (#12077: `--fix` reports only).
+/// `tm launch <project>` that restores the guard as the repair (#12077: `--fix`
+/// reports only).
 /// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
 /// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
 /// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`,
 /// `doctor_flags_missing_post_tool_use_failure_group_10095`,
-/// `doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095`.
+/// `doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095`,
+/// `missing_group_row_names_the_launch_that_restores_the_guard_12077`.
 fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
     if gaps.is_empty() {
         return DoctorCheck::new(
@@ -300,6 +302,16 @@ fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
     } else {
         String::new()
     };
+    // #12077 row 9a: the launch that restores the group, per shown project
+    // (`<project>/.claude/settings*.json`).
+    let mut launches: Vec<String> = Vec::new();
+    for (path, _) in gaps.iter().take(5) {
+        let project = path.parent().and_then(Path::parent).unwrap_or(path);
+        let launch = format!("`tm launch {}`", project.display());
+        if !launches.contains(&launch) {
+            launches.push(launch);
+        }
+    }
     DoctorCheck::new(
         "hooks_missing_tm_group",
         CheckStatus::Warn,
@@ -309,12 +321,14 @@ fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
              session its savings row and the 💸 statusline segment, and a missing \
              `Stop (asks for … --prompt-feedback)` costs it every prompt-feedback row \
              (#7849). `tm doctor --fix` reports the gap but does not write the project \
-             file (#12077); the project's next managed `tm` launch merges the groups back \
-             in, preserving every other entry (issue #7490), and \
+             file (#12077); the project's next tm launch re-renders tm's hook group, \
+             preserving every other entry (issue #7490), which restores the guard \
+             (`tm hook --pm-guard`) — start one with {}; \
              `tm validate --repair --path <project>` resyncs one project in place. {}{}",
             gaps.len(),
             if gaps.len() == 1 { "" } else { "s" },
             if gaps.len() == 1 { "s" } else { "" },
+            launches.join(" or "),
             shown.join("; "),
             overflow,
         ),
