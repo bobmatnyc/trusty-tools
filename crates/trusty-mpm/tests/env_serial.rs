@@ -35,6 +35,8 @@ mod carrier_claude_floor_12077;
 mod config_dir_deploy_12048;
 mod daemon_env_isolation;
 mod inproject_cold_start;
+// #12077 part 4c: the Architect arm of the bin's sandbox launch-files test.
+mod launch_files_sandbox_architect_12077;
 // #11821 P2: a broken install.toml fails clone and delete paths closed.
 mod inproject_git_failure;
 mod install_paths_fail_closed_11821;
