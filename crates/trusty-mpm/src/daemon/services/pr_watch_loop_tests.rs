@@ -266,10 +266,12 @@ async fn a_failed_emit_advances_nothing() {
     assert_eq!((rig.ledger.n(), rig.wake.n()), (0, 0));
     rig.ledger.fail.store(true, Ordering::SeqCst);
     rig.emit.fail.store(false, Ordering::SeqCst);
-    assert_eq!(l.tick(2).await.failed, 1);
+    // #12112: a failed ledger write is reported, and the wake goes ahead.
+    let r = l.tick(2).await;
+    assert_eq!((r.failed, r.ledger_failed, r.woken), (0, 1, 1));
     let r = rig.row();
-    assert_eq!((r.ledger_key, r.last_woken_key), (None, None));
-    assert_eq!(rig.wake.n(), 0, "no wake past a failed ledger write");
+    assert_eq!(r.ledger_key, None, "the refused write is not marked done");
+    assert_eq!(r.last_woken_key.as_deref(), Some("o/r#1@h1:red#1"));
 }
 
 /// #12112: a ledger that refuses every write (an owner state.json over the
