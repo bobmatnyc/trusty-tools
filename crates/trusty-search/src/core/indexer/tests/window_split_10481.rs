@@ -105,8 +105,13 @@ pub(super) fn rig(window: Option<usize>) -> Rig {
         seen: Arc::clone(&seen),
     });
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch new"));
-    let indexer =
-        CodeIndexer::new("w10481", "/tmp/test").with_components(embedder, Arc::clone(&store));
+    // #12117: one id per rig. A shared id put every catch-up checkpoint at one
+    // `<data>/indexes/<id>/hnsw.usearch`, whose pid-named staging files collide
+    // between parallel tests, so one test's rename found the other's gone.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let indexer = CodeIndexer::new(format!("w10481-{n}"), "/tmp/test")
+        .with_components(embedder, Arc::clone(&store));
     Rig {
         indexer,
         store,
