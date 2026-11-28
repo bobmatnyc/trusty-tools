@@ -55,10 +55,11 @@ fn tally_counts_kinds_parked_running_and_waiting() -> R {
         let store = Store::new(tmp.path(), format).with_secret_scan(no_secret);
         mixed(&store)?;
         let t = tally(&store, NOW)?;
+        // #12029 P2e: the frozen tally adds `decisions` and `blockers`.
         assert_eq!(
             serde_json::to_value(&t)?,
             json!({"open": 3, "questions": 1, "actions": 1, "tasks": 1, "answered_unrelayed": 1,
-                   "parked": 1, "running": 1, "answers_waiting": 2})
+                   "parked": 1, "decisions": 1, "blockers": 0, "running": 1, "answers_waiting": 2})
         );
         let one = Store::new(tmp.path().join("one"), format).with_secret_scan(no_secret);
         one.set(
@@ -93,6 +94,37 @@ fn footer_equals_tally_line() -> R {
         assert!(f.footer.ends_with(&tally_line(&f.tally)));
         assert_eq!(footer(&store, NOW, &links())?, f, "footer is deterministic");
     }
+    Ok(())
+}
+
+/// #12029 P2e: `tally_corpus.json` through the live count path gives the
+/// frozen `dashboard-db.py tally` (derive.tally + running + answers_waiting)
+/// on the same documents at the same clock: canaries skipped, `interactive`
+/// open, a `decision` counted as a question, relayed answers left out, and
+/// the `decisions`, `blockers` and `interactive` keys in Python's order.
+#[test]
+fn tally_follows_the_python_rule_for_canaries_interactive_decisions_and_relays() -> R {
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/dashboard/tally_corpus.json"))?;
+    let tmp = tempfile::tempdir()?;
+    let store = Store::new(tmp.path(), Format::Dir).with_secret_scan(no_secret);
+    for (coll, docs) in corpus.as_object().ok_or("corpus")? {
+        for (id, data) in docs.as_object().ok_or("docs")? {
+            store.set(coll, id, data.clone(), None)?;
+        }
+    }
+    let t = tally(&store, 1_795_784_400.0)?;
+    let reply = trusty_architect::dashboard::verbs::Reply::Tally(t.clone(), true);
+    assert_eq!(
+        trusty_architect::dashboard::verbs::render(&reply),
+        "{\n  \"open\": 7,\n  \"questions\": 3,\n  \"actions\": 3,\n  \"tasks\": 1,\n  \
+         \"answered_unrelayed\": 1,\n  \"parked\": 2,\n  \"decisions\": 3,\n  \"blockers\": 2,\n  \
+         \"interactive\": 2,\n  \"running\": 1,\n  \"answers_waiting\": 1\n}\n"
+    );
+    assert_eq!(
+        tally_line(&t),
+        "7 open dashboard items: 3 questions, 3 actions, 1 task (2 parked) (1 running), 1 answers waiting"
+    );
     Ok(())
 }
 

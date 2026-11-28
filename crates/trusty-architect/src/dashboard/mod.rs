@@ -16,7 +16,8 @@
 //! which the daemon, the MCP tool and `tm architect dashboard` share.
 //! #12029 P2d adds [`pyids`] and [`pyqual`], the `dashboard_ids.py` and
 //! `dashboard_qual.py` ports on the [`store::py`] store. #12029 P2e adds
-//! [`pyanswers`] (`owner_answers.py`, `pending-answers.py`).
+//! [`pyanswers`] (`owner_answers.py`, `pending-answers.py`) and runs the live
+//! tally and the poller's owner events on [`pyderive`]'s rules.
 //! Test: `tests/dashboard_golden.rs`, `tests/dashboard_store.rs`,
 //! `tests/dashboard_tally.rs`, `tests/dashboard_case.rs`, `tests/dashboard_log.rs`,
 //! `tests/dashboard_hardening.rs`, `tests/dashboard_verbs.rs`.
@@ -44,9 +45,6 @@ pub mod verbs;
 
 pub use derive::{GoalSessions, RunProgress, goal_sessions, ordered, run_progress};
 pub use error::DashError;
-pub use pending::{
-    Pending, PendingEvent, SkippedField, StaleTask, StaleTasks, last_activity, pending, stale_tasks,
-};
 pub use schema_check::{SchemaDir, SchemaMode, SchemaSet};
 pub use store::{
     DeleteArchive, Doc, Format, ListQuery, Op, OpResult, PruneLog, Removed, Snapshot, Store,

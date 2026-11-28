@@ -291,8 +291,14 @@ fn tally_emit(t: &Tally) -> Emit {
         ("tasks", s(t.tasks)),
         ("answered_unrelayed", s(t.answered_unrelayed)),
         ("parked", s(t.parked)),
-        ("running", s(t.running)),
+        // #12029 P2e: `dashboard-db.py tally`'s keys, in its order.
+        ("decisions", s(t.decisions)),
+        ("blockers", s(t.blockers)),
     ];
+    if let Some(i) = t.interactive {
+        fields.push(("interactive", s(i)));
+    }
+    fields.push(("running", s(t.running)));
     if let Some(w) = t.answers_waiting {
         fields.push(("answers_waiting", s(w)));
     }

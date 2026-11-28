@@ -5,9 +5,9 @@
 //! give the same answer for every document shape, so it works on
 //! [`PyValue`]s, which keep Python's types and key order. The live
 //! [`super::ids`] and [`super::derive::is_parked`] run these rules (#12029
-//! P2d); the serde [`super::pending`](mod@super::pending), [`super::tally`](mod@super::tally)
-//! and the rest of [`super::derive`] still serve the live verbs with their
-//! own rules (see #12029).
+//! P2d), as do [`super::tally`](mod@super::tally) and the poller's owner
+//! events through [`super::pyanswers`] (#12029 P2e); the rest of
+//! [`super::derive`] still serves the live verbs with its own rules (see #12029).
 //! What: the predicates here ([`building_brief`], [`is_parked`],
 //! [`is_selftest`], [`is_relayed`]) and the shared time and equality helpers;
 //! `counts` (`decision_counts`, `tally`, `run_progress`, `running_count`),
@@ -21,10 +21,10 @@
 //! Test: `dashboard_derive_recordings_replay_clean_against_the_port`.
 
 mod cases;
-mod counts;
+pub(crate) mod counts; // #12029 P2e: the live `dashboard::tally` runs these rules
 pub(crate) mod ids; // #12029 P2d: the live `dashboard::ids` runs these rules
 mod order;
-pub(crate) mod pending; // #12029 P2e: `pending-answers` runs these rules
+pub(crate) mod pending; // #12029 P2e: the poller and `pending-answers` run these rules
 pub(crate) mod stale;
 
 use std::collections::BTreeMap;

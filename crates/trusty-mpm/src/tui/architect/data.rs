@@ -205,6 +205,13 @@ fn tally_of(v: &Value) -> Tally {
         tasks: n("tasks"),
         answered_unrelayed: n("answered_unrelayed"),
         parked: n("parked"),
+        // #12029 P2e: the tally gained `dashboard-db.py`'s keys.
+        decisions: n("decisions"),
+        blockers: n("blockers"),
+        interactive: v
+            .get("interactive")
+            .and_then(Value::as_u64)
+            .map(|i| i as usize),
         running: n("running"),
         answers_waiting: v
             .get("answers_waiting")

@@ -3,8 +3,8 @@
 //! Why: `_ts` in `dashboard_derive.py` decides whether a park is due and
 //! whether a task is stale; a parser that accepts a different set of strings
 //! changes which events the Architect sees (#10403).
-//! What: [`ts`] is `_ts(value)`: Python `str(value)`, every `Z` replaced by
-//! `+00:00`, then `fromisoformat`; a naive result is read as UTC. The answer is
+//! What: [`from_iso`] is `fromisoformat` (the caller replaces `Z` by
+//! `+00:00` first, as `_ts` does); a naive result is read as UTC. The answer is
 //! microseconds since the Unix epoch, or `None` where Python raises. The date
 //! half follows `_pydatetime` (calendar, basic and week dates, any
 //! one-character separator); the time half follows CPython's C parser, which
@@ -12,17 +12,8 @@
 //! refuses (`T10:Z`, `T104Z`).
 //! Test: `isotime_matches_python_fromisoformat` (2,900 strings CPython 3.14 parsed).
 
-use serde_json::Value;
-
 use super::super::derive::days_in_month;
-use super::super::ids::py_str;
 use crate::classify::alerts::days_from_civil;
-
-/// `_ts(value)`: microseconds since the epoch, or `None` where Python's
-/// `fromisoformat` raises.
-pub(crate) fn ts(value: &Value) -> Option<i64> {
-    from_iso(&py_str(value).replace('Z', "+00:00"))
-}
 
 /// `datetime.fromisoformat(s)` as UTC microseconds (naive read as UTC).
 pub(crate) fn from_iso(s: &str) -> Option<i64> {
