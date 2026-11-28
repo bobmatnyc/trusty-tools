@@ -17,6 +17,8 @@ pub(crate) mod commit;
 // #9230: an incremental commit stamps the corpus's reindex stamp.
 pub(crate) mod commit_stamp;
 pub(crate) mod deferred;
+// #12064: owed ids and absent rows come from the durable corpus.
+pub(crate) mod deferred_corpus;
 pub(crate) mod deferred_stream;
 pub(crate) mod embed;
 // #8976: what one `index_file` write did, so zero chunks never read as success.

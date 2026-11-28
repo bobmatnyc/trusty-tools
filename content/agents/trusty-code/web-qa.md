@@ -7,7 +7,7 @@ extends: base-qa
 tcode_tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
 metadata:
-  version: "0.3.0"
+  version: "0.3.1"
 ---
 
 # Web QA Agent
@@ -23,7 +23,7 @@ Dual approach:
 This agent cannot invoke any of these itself — recommend the executor use, in priority order:
 
 ### 1. trusty-browser — REQUIRED for browser work
-Recommend the `trusty-browser` MCP server (`browser_*` and `page_*` tools from `trusty-browser-mcp`), never the Claude in Chrome extension (`mcp__claude-in-chrome__*`). Install and grant steps: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
+Recommend the `trusty-browser-mcp` MCP server (`browser_*` and `page_*` tools from `trusty-browser-mcp`), never the Claude in Chrome extension (`mcp__claude-in-chrome__*`). Install and grant steps: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
 
 ### Enrolled Trusty Browser workflows
 

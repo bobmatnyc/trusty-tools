@@ -712,16 +712,8 @@ pub(crate) async fn search_report(
     // state; the reconcile converges any missed edits for subsequent queries.
     // #7434: gated on `needs_root_resync` (EVERY root watched?), so a root
     // whose start failed is retried rather than hidden behind a live sibling.
-    if state.watcher_manager.needs_root_resync(&handle).await {
-        state.watcher_manager.spawn_for_index(&handle).await;
-        if !state.watcher_manager.needs_root_resync(&handle).await {
-            let woken = Arc::clone(&handle);
-            let summary = Arc::clone(&state.reconcile_summary);
-            tokio::spawn(crate::service::reconcile::reconcile_one_index(
-                woken, summary,
-            ));
-        }
-    }
+    // #10533: shared with the active-set pre-wake.
+    super::residency_pull::resume_watcher(state, &handle).await;
     // Issue #993: rate-limited write of last_queried_unix (max once per
     // LAST_QUERIED_WRITE_INTERVAL_SECS) so the LRU sort key stays current for
     // future selective warm-boots without hammering indexes.toml on every query.

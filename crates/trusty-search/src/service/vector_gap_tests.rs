@@ -395,12 +395,12 @@ async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
     );
 }
 
-/// Why (#8884): a deferred pass whose plan cannot see a corpus row finishes
+/// Why (#8884): a deferred pass that cannot embed a corpus row finishes
 /// without error. Publishing `Ready` then hides that row's missing vector
 /// until a restart, which is the fail-open settle this issue reported.
-/// What: commits [`SOURCE`] through the indexer, writes one more chunk straight
-/// into the durable corpus so the chunk map never sees it, runs the pass, and
-/// requires `Failed` naming the gap, never `Ready`.
+/// What: commits [`SOURCE`] through the indexer, plants one corpus row the
+/// pass can name but not load (#12064: a readable row is now embedded), runs
+/// the pass, and requires `Failed` naming the gap, never `Ready`.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::parallel]
@@ -429,10 +429,7 @@ async fn a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready() {
         )
         .await
         .expect("commit");
-    let (hidden, _) = chunk_ast("src/hidden.rs", "pub fn hidden() -> u32 {\n    3\n}\n");
-    corpus
-        .upsert_chunks(&hidden)
-        .expect("write a row around the chunk map");
+    write_hidden_row(&corpus);
     let handle = Arc::new(IndexHandle::bare(
         IndexId::new(id),
         Arc::new(tokio::sync::RwLock::new(indexer)),
@@ -537,15 +534,74 @@ async fn run_pass(handle: &Arc<IndexHandle>) -> StageState {
     handle.stages.read().await.semantic.clone()
 }
 
-/// A corpus row no chunk-map entry and no vector covers: what the #8884
-/// adoption left, and what `remove_file` leaves between its vector removal
-/// and its redb delete.
+/// A corpus row no chunk-map entry and no vector covers, and that no pass can
+/// load: the pass plans it from the corpus (#12064) but cannot embed it.
 fn write_hidden_row(corpus: &crate::core::corpus::CorpusStore) -> String {
-    let (hidden, _) = chunk_ast("src/hidden.rs", "pub fn hidden() -> u32 {\n    3\n}\n");
-    corpus
-        .upsert_chunks(&hidden)
+    let id = "src/hidden.rs:1:3";
+    crate::core::corpus::test_support::write_unloadable_chunk_row(corpus, id)
         .expect("write a row around the chunk map");
-    hidden[0].id.clone()
+    id.to_owned()
+}
+
+/// Why (#12064): a corpus row the chunk map lacks (a write in the #10738
+/// carryover window) was owed by the settle and never planned, so every retry
+/// embedded nothing and the stage stayed `Failed` until a restart.
+/// What: builds that state — [`SOURCE`] through the indexer, one readable row
+/// written around the chunk map, no vectors, stage `Failed` — then runs one
+/// retry (`resume_semantic`, what the retry ticker calls). The row must get a
+/// vector, coverage must report nothing missing, and the stage must read
+/// `Ready`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_corpus_row_missing_from_the_chunk_map_is_embedded_on_one_retry_12064() {
+    let id = "vector-gap-12064-unmapped-row";
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, total, corpus, dir) = corpus_handle(id, embedder, Arc::clone(&store)).await;
+    let (unmapped, _) = chunk_ast("src/unmapped.rs", "pub fn unmapped() -> u32 {\n    3\n}\n");
+    corpus
+        .upsert_chunks(&unmapped)
+        .expect("write a row around the chunk map");
+    // Written straight to redb, so the chunk map never sees it.
+    let unmapped_id = unmapped[0].id.clone();
+    crate::service::persistence::upsert_index_registry_entry(
+        crate::service::persistence::PersistedIndex::new(id.to_owned(), dir.path().to_path_buf()),
+    )
+    .expect("persist entry");
+    handle.stages.write().await.semantic = StageState::failed("1 chunk still without a vector");
+
+    let report = crate::service::embed_missing::resume_semantic(&handle, false)
+        .await
+        .expect("one retry");
+    assert_eq!(report.missing, Some(total + 1), "every chunk is owed");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let semantic = loop {
+        let semantic = handle.stages.read().await.semantic.clone();
+        if semantic.status != StageStatus::InProgress && deferred_embed_queue_depth() == 0 {
+            break semantic;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retry never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    assert!(
+        store.contains(&unmapped_id).await,
+        "the row the chunk map lacked must be embedded on the retry"
+    );
+    let coverage = handle.indexer.read().await.vector_coverage().await;
+    assert!(
+        matches!(&coverage, VectorCoverage::Measured { missing, .. } if missing.is_empty()),
+        "coverage must pass after one retry: {coverage:?}"
+    );
+    assert_eq!(
+        semantic.status,
+        StageStatus::Ready,
+        "one retry must take the stage out of failed: {semantic:?}"
+    );
 }
 
 /// Why (#8884 review): the store refuses a NaN or all-zero embedding on every

@@ -5,6 +5,7 @@ on:
       - "python/trusty-browser/**"
       - "crates/trusty-browser/extension/**"
       - "crates/trusty-browser/tests/extension/**"
+      - "crates/trusty-browser/tests/js/**"
       - ".github/workflows/trusty-browser.yml"
   push:
     branches: [main]
@@ -12,6 +13,7 @@ on:
       - "python/trusty-browser/**"
       - "crates/trusty-browser/extension/**"
       - "crates/trusty-browser/tests/extension/**"
+      - "crates/trusty-browser/tests/js/**"
       - ".github/workflows/trusty-browser.yml"
 permissions:
   contents: read
@@ -41,4 +43,6 @@ jobs:
       - run: python -m pip install playwright pytest
       - run: python -m playwright install chromium
       - run: node --test crates/trusty-browser/tests/extension/*.mjs
+      # #11211: the tabs, screenshot and coordinate-input tests on the fake-Chrome harness.
+      - run: node --test crates/trusty-browser/tests/js/*.test.mjs
       - run: python -m pytest -q crates/trusty-browser/tests/extension

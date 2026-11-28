@@ -63,6 +63,10 @@ pub(super) struct HealthResponse {
     /// Which input produced [`Self::resident_index_cap`] (#6821): `"env"`,
     /// `"env (off)"`, or `"tier default"`.
     pub(super) resident_index_cap_source: &'static str,
+    /// #10533: whether tm's active-project set is trusted, and how many
+    /// registered indexes it pins against `resident_index_cap`. Always present.
+    /// Test: `health_reports_the_active_set_pin_count_and_trust`.
+    pub(super) residency_active_set: super::residency_pins::ActiveSetHealth,
     pub(super) disk_bytes: u64,
     /// CPU usage percent. Same staleness semantics as `rss_mb`: returns the
     /// last good sample on contention, `0.0` only before the first sample.
@@ -1000,6 +1004,10 @@ async fn health_response(state: Arc<SearchAppState>) -> HealthResponse {
         rss_limit_mb,
         resident_index_cap: resident_cap.cap,
         resident_index_cap_source: resident_cap.source.as_str(),
+        residency_active_set: state.residency_pins.health(
+            std::time::Instant::now(),
+            &super::residency_pins::registered_in(&state),
+        ),
         disk_bytes,
         cpu_pct,
         embedder_info,

@@ -887,9 +887,22 @@ impl CodeIndexer {
     /// What: stores the milliseconds elapsed since [`Self::created_at`] into
     /// [`Self::last_activity_ms`] with `Relaxed` ordering.
     /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks` touches then
-    /// asserts eviction is skipped within the window.
-    pub(super) fn touch_activity(&self) {
+    /// asserts eviction is skipped within the window;
+    /// `grep_and_list_chunks_keep_a_non_member_resident_within_grace` covers
+    /// the server read paths.
+    // #10533: `pub(crate)` so grep and list_chunks stamp it too; the residency
+    // grace period reads this clock.
+    pub(crate) fn touch_activity(&self) {
         stamp_activity(self.created_at, &self.last_activity_ms);
+    }
+
+    /// Test seam: make the idle clock read `idle` from now (#10533).
+    #[cfg(test)]
+    pub(crate) fn backdate_activity_for_test(&mut self, idle: std::time::Duration) {
+        self.created_at = Instant::now()
+            .checked_sub(idle)
+            .unwrap_or_else(Instant::now);
+        self.last_activity_ms.store(0, Ordering::Relaxed);
     }
 
     /// Milliseconds since the last recorded activity (query/ingest).

@@ -186,9 +186,11 @@ async fn reactivate_core_within(
 /// What: a `tokio::spawn`ed task runs [`reactivate_project_and_index`] under
 /// `budget` and [`roll_back`]s on its failure or timeout. Its answer goes
 /// back on a oneshot; when the route is gone (the send fails) a success is
-/// rolled back too, since no client will exec. A task that ends without an
-/// answer is a 500 and is rolled back from here.
+/// rolled back too, since no client will exec, and only then logged, so the
+/// rollback runs whatever the log level. A task that ends without an answer is
+/// a 500 and is rolled back from here.
 /// Test: `a_client_that_gives_up_on_a_slow_unpark_never_leaves_the_record_active`,
+/// `an_abandoned_reactivate_rolls_back_with_tracing_off`,
 /// `an_unpark_slower_than_the_daemon_budget_fails_and_rolls_back`.
 async fn finish_detached(
     state: Arc<DaemonState>,
@@ -221,7 +223,10 @@ async fn finish_detached(
             && outcome.is_success()
         {
             let why = "the reactivate caller went away before the answer (#12012)".to_string();
-            tracing::warn!(id = %record.id, "{}", roll_back(&mgr, prior.as_ref(), why).await);
+            // #12046: a disabled WARN never evaluates a macro argument, so
+            // the rollback must run first.
+            let rolled_back = roll_back(&mgr, prior.as_ref(), why).await;
+            tracing::warn!(id = %record.id, "{rolled_back}");
         }
     });
     match rx.await {

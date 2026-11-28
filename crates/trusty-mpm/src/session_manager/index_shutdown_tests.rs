@@ -102,9 +102,15 @@ pub(crate) fn healthy_search() -> Answer {
     })
 }
 
-/// A trusty-memory that has and unloads any palace.
+/// A trusty-memory that has and unloads any palace, with no aliases.
 pub(crate) fn healthy_memory() -> Answer {
-    Arc::new(|method, params| match method {
+    aliasing_memory(PathBuf::from("/nonexistent/trusty-memory-rig"))
+}
+
+/// [`healthy_memory`] whose `memory.config` names `data_root` (#11977).
+pub(crate) fn aliasing_memory(data_root: PathBuf) -> Answer {
+    Arc::new(move |method, params| match method {
+        super::METHOD_CONFIG => Ok(json!({ "data_root": data_root.to_string_lossy() })),
         super::METHOD_PALACE_GET => Ok(json!({ "id": params["palace_id"] })),
         METHOD_PALACE_UNLOAD => Ok(json!({
             "palace_id": params["palace_id"], "unloaded": true, "exists": true,
@@ -136,6 +142,7 @@ fn target() -> ShutdownTarget {
         palace: Ok(Some("acme-widget".into())),
         palace_lookup: false,
         palace_shared: None,
+        palace_peers: Vec::new(),
     }
 }
 
@@ -311,6 +318,7 @@ async fn a_daemon_not_running_holds_nothing_and_an_unresolved_target_fails() {
         palace: Err("could not resolve the palace: bad pin".into()),
         palace_lookup: false,
         palace_shared: None,
+        palace_peers: Vec::new(),
     };
     let report = rig.capability().shut_down(&unresolved).await;
     // #11551: no queries is NotLoaded; a resolve error on a checkout stays Failed.
@@ -534,4 +542,97 @@ async fn an_unreachable_socket_is_a_failure_not_a_daemon_down() {
         matches!(restore, RestoreState::Failed { .. }),
         "{restore:?}"
     );
+}
+
+/// A palace registry dir holding folder palace `app`, aliased by `code-app`
+/// and `work-app` (#11977).
+pub(crate) fn aliased_registry() -> tempfile::TempDir {
+    use trusty_common::palace_alias::PalaceAliasStore;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("app")).expect("palace dir");
+    std::fs::write(dir.path().join("app").join("palace.json"), b"{}").expect("palace.json");
+    for alias in ["code-app", "work-app"] {
+        PalaceAliasStore::register_alias(dir.path(), alias, "app").expect("alias");
+    }
+    dir
+}
+
+/// Why: #11977 — `/a/code/app` (`code-app`) and `/b/work/app` (`work-app`)
+/// derive different ids but alias to one folder palace `app`; trusty-memory
+/// unloads by canonical id, so unloading one closes the other's palace.
+/// Test: this test. Fails if the guard compares derived ids only and sends
+/// `memory.palace_unload`.
+#[tokio::test]
+async fn an_aliased_palace_another_project_reaches_is_never_unloaded() {
+    let registry = aliased_registry();
+    let mine = ShutdownTarget::for_project(Some("local:1"), "/a/code/app", None)
+        .refuse_shared_palace(&[("other".to_string(), Ok(Some("work-app".to_string())))]);
+    assert_eq!(mine.palace_shared, None, "premise: the derived ids differ");
+    let rig = rig(healthy_search(), aliasing_memory(registry.path().into())).await;
+    let report = rig.capability().shut_down(&mine).await;
+    match &report.palace {
+        ShutdownState::Skipped { reason } => assert!(
+            reason.contains("other") && reason.contains("palace app"),
+            "{reason}"
+        ),
+        got => panic!("expected a reported skip, got {got:?}"),
+    }
+    assert!(report.still_loaded().is_empty(), "a skip is no failure");
+    assert!(
+        rig.params_of(METHOD_PALACE_UNLOAD).is_none(),
+        "{:?}",
+        rig.methods()
+    );
+}
+
+/// Why: #11977 acceptance 3 — a palace no other project reaches, through an
+/// alias or not, still unloads.
+/// Test: this test. Fails if the canonical check refuses an unshared palace.
+#[tokio::test]
+async fn an_unaliased_palace_no_other_project_shares_still_unloads() {
+    let registry = aliased_registry();
+    let mine = ShutdownTarget::for_project(Some("local:1"), "/a/code/app", None)
+        .refuse_shared_palace(&[("other".to_string(), Ok(Some("b-tools".to_string())))]);
+    let rig = rig(healthy_search(), aliasing_memory(registry.path().into())).await;
+    let report = rig.capability().shut_down(&mine).await;
+    assert_eq!(
+        report.palace,
+        ShutdownState::Unloaded {
+            id: "code-app".into()
+        },
+        "{:?}",
+        rig.methods()
+    );
+}
+
+/// Why: #11977 (Fail-Open Check) — when trusty-memory cannot name the
+/// canonical id, the palace may be shared, so it is kept loaded.
+/// Test: this test. Fails if a failed `memory.config`, or one with no
+/// `data_root`, lets `memory.palace_unload` through.
+#[tokio::test]
+async fn an_unresolvable_canonical_id_skips_the_unload() {
+    let unload_ok = || {
+        json!({ "palace_id": "code-app", "unloaded": true, "exists": true,
+                "was_resident": true, "data_kept": true })
+    };
+    let failing: Answer = Arc::new(move |method, _| match method {
+        METHOD_PALACE_UNLOAD => Ok(unload_ok()),
+        _ => Err(RpcError::new(-32603, "config unavailable")),
+    });
+    let rootless: Answer = Arc::new(move |method, _| match method {
+        super::METHOD_CONFIG => Ok(json!({ "model": "x" })),
+        METHOD_PALACE_UNLOAD => Ok(unload_ok()),
+        other => Err(RpcError::new(-32601, format!("unexpected {other}"))),
+    });
+    for (memory, why) in [(failing, "config unavailable"), (rootless, "no data_root")] {
+        let mine = ShutdownTarget::for_project(Some("local:1"), "/a/code/app", None)
+            .refuse_shared_palace(&[("other".to_string(), Ok(Some("work-app".to_string())))]);
+        let rig = rig(healthy_search(), memory).await;
+        let report = rig.capability().shut_down(&mine).await;
+        match &report.palace {
+            ShutdownState::Skipped { reason } => assert!(reason.contains(why), "{reason}"),
+            got => panic!("{why}: expected a reported skip, got {got:?}"),
+        }
+        assert!(rig.params_of(METHOD_PALACE_UNLOAD).is_none(), "{why}");
+    }
 }

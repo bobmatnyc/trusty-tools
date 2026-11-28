@@ -197,7 +197,7 @@ def fmt_row(x):
 
 def step(project, now=None, dry_run=False):
     """The poller's step: fire every due reminder once, in one datg commit. Returns one row per firing (rows carry the task title).
-    dry_run reads only. A reminder fires again only after its repeat moved `at` past now: the op re-checks `at` under datg's lock."""
+    dry_run reads only. A reminder fires again only after its repeat moved `at` past now: the operation re-checks `at` under datg's lock."""
     import datg   # lazy: datg imports this module
     now = now or datetime.now(timezone.utc)
     st = datg.load_state(project)

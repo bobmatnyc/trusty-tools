@@ -13,9 +13,9 @@
 //! What: Resolves the install directory (defaults to `$CARGO_HOME/bin` /
 //! `~/.cargo/bin`, since this command targets `cargo install`-produced
 //! binaries), then delegates to `macos_signing::sign_set_strict` for the
-//! requested target. Prints cert-setup guidance and returns a non-zero exit
-//! code when no Developer ID certificate is available or signing/verification
-//! fails; prints a success note and returns 0 otherwise. On non-macOS: prints
+//! requested target. Prints cert-setup guidance and exits 3 when no Developer
+//! ID certificate is available, and exits 1 when signing or verification
+//! fails (#11683); prints a success note and returns 0 otherwise. On non-macOS: prints
 //! a no-op notice and returns 0 (codesign/TCC are Apple-specific).
 //!
 //! Test: `tests::run_unknown_target_is_error` covers the shared error path
@@ -28,9 +28,39 @@ use std::path::PathBuf;
 
 use super::macos_signing;
 
+/// Exit code for any signing failure other than a missing certificate.
+///
+/// Why: #11683 — the signed-install scripts must fail hard on these.
+pub const EXIT_SIGN_FAILED: i32 = 1;
+
+/// Exit code for an unknown signing target.
+pub const EXIT_UNKNOWN_TARGET: i32 = 2;
+
+/// Exit code when no Developer ID Application certificate is available.
+///
+/// Why: #11683 — the signed-install scripts soft-pass this case alone, so it
+/// needs a code no other failure shares.
+pub const EXIT_NO_CERTIFICATE: i32 = 3;
+
+/// Map a `sign_set_strict` error to the `tctl sign` process exit code.
+///
+/// Why: #11683 — the scripts tell "no certificate" apart from every other
+/// failure by exit code only.
+/// What: `NoCertificate` gives [`EXIT_NO_CERTIFICATE`]; every other variant
+/// gives [`EXIT_SIGN_FAILED`].
+/// Test: `tests::no_certificate_has_distinct_exit_code`,
+/// `tests::sign_failure_exit_code_is_not_no_certificate`.
+pub fn sign_error_exit_code(err: &macos_signing::SignSetError) -> i32 {
+    match err {
+        macos_signing::SignSetError::NoCertificate => EXIT_NO_CERTIFICATE,
+        _ => EXIT_SIGN_FAILED,
+    }
+}
+
 /// Handle `tctl sign <target>` (target: `trusty-search`, `trusty-mpm`,
 /// `trusty-memory` / `trusty-analyze` — owner ruling 2026-08-06 — or
-/// `trusty-assistants` — #4277, renamed in #11632).
+/// `trusty-assistants` — #4277, renamed in #11632 — or `trusty-secrets` —
+/// #11587).
 ///
 /// Why: The CLI-facing entry point for standalone Developer-ID signing,
 /// separate from the fail-soft hooks `commands::install` runs automatically.
@@ -40,17 +70,22 @@ use super::macos_signing;
 /// macOS calls `sign_set_strict`. `verbose` (#2939) is forwarded to the macOS
 /// path, printing the raw identity-probe output and selected identity to
 /// stderr — a diagnostic aid for "no identity found" failures despite a valid
-/// keychain cert. Returns the process exit code: `0` on success, `1` on a
-/// signing/verification/no-cert failure, `2` for an unknown target. On
-/// non-macOS this is always a `0` no-op.
+/// keychain cert. Returns the process exit code: `0` on success,
+/// [`EXIT_NO_CERTIFICATE`] (`3`) when no Developer ID certificate is
+/// available, [`EXIT_SIGN_FAILED`] (`1`) on any other signing, verification
+/// or record-refresh failure (#11587: including a signature that reads back
+/// ad-hoc or with the wrong Team ID), and [`EXIT_UNKNOWN_TARGET`] (`2`) for an
+/// unknown target. On non-macOS a known target is always a `0` no-op.
 ///
-/// Test: `tests::run_unknown_target_is_error`.
+/// Test: `tests::run_unknown_target_is_error`,
+/// `tests::no_certificate_has_distinct_exit_code`.
 pub fn run(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     if macos_signing::binaries_for_set(target).is_empty() {
         eprintln!(
-            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-assistants')"
+            // #11587: trusty-secrets is a signable target.
+            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', 'trusty-assistants', or 'trusty-secrets')"
         );
-        return 2;
+        return EXIT_UNKNOWN_TARGET;
     }
 
     #[cfg(target_os = "macos")]
@@ -94,24 +129,24 @@ fn run_macos(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i
             // #10607: signing rewrites the bytes the record's digests name.
             if let Err(why) = super::deployment_record::refresh_digests(target) {
                 eprintln!("tctl sign: could not update the install record: {why}");
-                return 1;
+                return EXIT_SIGN_FAILED;
             }
             0
         }
         // PR #2657 review (MEDIUM): match on the typed `SignSetError` variant
         // instead of substring-matching `e.to_string()` — brittle against any
         // future wording change to the error message.
-        Err(macos_signing::SignSetError::NoCertificate) => {
-            if !json {
-                eprintln!("{}", macos_signing::cert_setup_guidance(target));
-            }
-            1
-        }
+        // #11683: the exit code comes from `sign_error_exit_code`, so no cert
+        // (3) stays distinct from every other failure (1).
         Err(e) => {
             if !json {
-                eprintln!("tctl sign: {e}");
+                if matches!(e, macos_signing::SignSetError::NoCertificate) {
+                    eprintln!("{}", macos_signing::cert_setup_guidance(target));
+                } else {
+                    eprintln!("tctl sign: {e}");
+                }
             }
-            1
+            sign_error_exit_code(&e)
         }
     }
 }
@@ -148,7 +183,35 @@ mod tests {
     #[test]
     fn run_unknown_target_is_error() {
         let code = run("not-a-real-target", None, true, false);
+        assert_eq!(code, EXIT_UNKNOWN_TARGET);
         assert_eq!(code, 2);
+    }
+
+    /// Why: #11683 — the signed-install scripts soft-pass a missing cert by
+    /// exit code alone, so the code is a contract.
+    /// What: `NoCertificate` maps to 3, and 3 is not the generic failure code.
+    /// Test: This is the test.
+    #[test]
+    fn no_certificate_has_distinct_exit_code() {
+        let code = sign_error_exit_code(&macos_signing::SignSetError::NoCertificate);
+        assert_eq!(code, 3);
+        assert_ne!(code, EXIT_SIGN_FAILED);
+        assert_ne!(code, EXIT_UNKNOWN_TARGET);
+    }
+
+    /// Why: #11683 — a codesign error or a wrong-Team-ID signature must not
+    /// read as "no cert", or the scripts would soft-pass it.
+    /// What: `Sign` and `NoBinariesFound` map to 1.
+    /// Test: This is the test.
+    #[test]
+    fn sign_failure_exit_code_is_not_no_certificate() {
+        let sign = macos_signing::SignSetError::Sign(anyhow::anyhow!("wrong Team ID"));
+        assert_eq!(sign_error_exit_code(&sign), 1);
+        let missing = macos_signing::SignSetError::NoBinariesFound {
+            set: "trusty-memory".to_owned(),
+            dir: "/nonexistent".to_owned(),
+        };
+        assert_eq!(sign_error_exit_code(&missing), 1);
     }
 
     /// Why: PR #2657 review (LOW) — the non-macOS no-op path (codesign/TCC are

@@ -25,7 +25,12 @@ fn repo_with_origin(name: &str) -> Option<(tempfile::TempDir, String)> {
     {
         return None;
     }
-    let path = repo.to_string_lossy().into_owned();
+    // #11253: the daemon answers the canonical path (macOS `/var` is a symlink).
+    let path = repo
+        .canonicalize()
+        .expect("canonical repo")
+        .to_string_lossy()
+        .into_owned();
     Some((dir, path))
 }
 

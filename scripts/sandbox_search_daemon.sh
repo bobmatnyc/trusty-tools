@@ -12,7 +12,7 @@
 #   live one (`com.trusty.search`, its socket) or its data.
 # What: validates, then runs in the foreground:
 #     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_SANDBOX=1 \
-#            TRUSTY_DATA_DIR=<dir>/data \
+#            TRUSTY_DATA_DIR=<dir>/data TRUSTY_DATA_DIR_OVERRIDE=<dir>/data \
 #            [FASTEMBED_CACHE_DIR=<model cache>] [<KNOBS the caller set>] \
 #            <bin> start --foreground [--no-auto-discover] \
 #                  --data-dir <dir>/data
@@ -20,7 +20,10 @@
 #   ANTHROPIC*, GITHUB* or SLACK* name. KNOBS (pass through only when the
 #   caller exported them): TRUSTY_WARMBOOT_MAX_INDEXES, TRUSTY_MAX_RESIDENT_INDEXES,
 #   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
-#   TRUSTY_EMBEDDERD_BIN, and the perf-probe knobs (#10192): idle evict
+#   TRUSTY_EMBEDDERD_BIN, the residency knobs TRUSTY_RESIDENCY and
+#   TRUSTY_RESIDENCY_{PULL,STALE,GRACE}_SECS (see #10533; unset stays unset;
+#   TRUSTY_DATA_DIR_OVERRIDE=<dir>/data is pinned so the tm pull dials the
+#   tm sandbox of the same <dir>), and the perf-probe knobs (#10192): idle evict
 #   TRUSTY_CHUNKS_IDLE_EVICT_SECS, rehydrate TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS
 #   and TRUSTY_REHYDRATE_WAIT_MS, query TRUSTY_QUERY_TIMEOUT_SECS and
 #   TRUSTY_QUERY_EMBED_DEADLINE_MS (#10194, read once that lands), sidecar
@@ -119,7 +122,8 @@ KNOBS="TRUSTY_WARMBOOT_MAX_INDEXES TRUSTY_MAX_RESIDENT_INDEXES TRUSTY_REDB_CACHE
 TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG TRUSTY_EMBEDDERD_BIN \
 TRUSTY_CHUNKS_IDLE_EVICT_SECS TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS TRUSTY_REHYDRATE_WAIT_MS \
 TRUSTY_QUERY_TIMEOUT_SECS TRUSTY_QUERY_EMBED_DEADLINE_MS \
-TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS"
+TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS \
+TRUSTY_RESIDENCY TRUSTY_RESIDENCY_PULL_SECS TRUSTY_RESIDENCY_STALE_SECS TRUSTY_RESIDENCY_GRACE_SECS"
 SANDBOX_PATH="/usr/bin:/bin"
 # #9214: the daemon serves this socket under its data dir; it binds no port.
 SOCKET_NAME="trusty-search.sock"
@@ -365,7 +369,10 @@ fi
 # The KNOBS the caller exported, as NAME=value words for env -i. `compgen -e`
 # lists exported names only. Values are read by indirect expansion.
 EXPORTED=" $(compgen -e | tr '\n' ' ') "
-ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data/trusty-search" "TRUSTY_SANDBOX=1")
+ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data/trusty-search" "TRUSTY_SANDBOX=1"
+  # See #10533: the same override sandbox_daemon.sh pins, so mpm_socket() resolves
+  # <dir>/data/trusty-mpm/trusty-mpm.sock, the socket of a tm sandbox of this <dir>.
+  "TRUSTY_DATA_DIR_OVERRIDE=$SANDBOX/data")
 if [ -n "$MODEL_CACHE" ]; then
   ENV_WORDS+=("FASTEMBED_CACHE_DIR=$MODEL_CACHE")
 fi
