@@ -19,7 +19,7 @@ const CHILD_HOLD_ENV: &str = "TRUSTY_REVIEW_TEST_HOLD_DEDUP";
 /// Temp dir for a test that races real holders against `LOCK_WAIT_BUDGET`.
 ///
 /// Why: #12006 — every redb open, commit and close fsyncs. On a disk shared
-/// with a loaded host (EVO's ext4 root, where the gate runner points
+/// with a loaded host (the remote Linux build host's ext4 root, where the gate runner points
 /// `TMPDIR`), fsync latency alone pushed eight serialised holders past the
 /// fixed 2 s budget: the concurrent test took p50 897 ms / p90 1907 ms there
 /// against a flat 163 ms on tmpfs. These tests assert lock semantics, not disk
