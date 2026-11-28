@@ -68,7 +68,7 @@ pub(crate) fn tally(ctx: &Ctx) -> Result<PyValue, PyStoreError> {
     Ok(PyValue::Dict(out))
 }
 
-/// `tally_line(t)`: `"<d> decisions, <b> blockers"` (Bob 2026-11-15).
+/// `tally_line(t)`: `"<d> decisions, <b> blockers"` (#12029 P2g).
 pub(crate) fn tally_line(t: &PyValue) -> String {
     let n = |k: &str| get(t, k).map_or("None".into(), py_str);
     format!("{} decisions, {} blockers", n("decisions"), n("blockers"))

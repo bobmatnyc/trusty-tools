@@ -132,7 +132,7 @@ pub fn tally(store: &Store, now: f64) -> Result<Tally, DashError> {
 }
 
 /// `"<d> decisions, <b> blockers"`: the frozen `dashboard-db.py`'s
-/// `tally_line` (Bob 2026-11-15: "only report on decision and blocker counts").
+/// `tally_line` (#12029 P2g: only decision and blocker counts are reported).
 // #12029 P2g: the open/kind wording was an older prototype's.
 pub fn tally_line(t: &Tally) -> String {
     format!("{} decisions, {} blockers", t.decisions, t.blockers)

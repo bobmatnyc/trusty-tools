@@ -230,7 +230,7 @@ fn left_interactive(old: Option<&PyValue>, data: &PyValue) -> bool {
 }
 
 /// Why: Remote Control on the questions session goes off once the last
-/// interactive question is answered (Bob 2026-11-17).
+/// interactive question is answered (#12029 P2g).
 /// What: `kick_questions_rc()`: nothing under `QUESTIONS_RC_KICK=off`; else the
 /// caller's in-process `questions::rc` pass on a worker thread, after the
 /// write's lock is gone, waited for at most `kick_timeout`. A failure or the
@@ -376,7 +376,7 @@ fn pinned_update(
     refuse("update retried without a result")
 }
 
-/// Why: short accomplishment lines on a task (Bob 2026-10-28).
+/// Why: short accomplishment lines on a task (#12029 P2g).
 /// What: `append_log(store, collection, id, text)`: `{at, text}` appended to
 /// `log`, `progress_at` set to the same instant, version-pinned.
 /// Test: `dashboard_db_recordings_replay_clean_against_the_port` (`log`).
