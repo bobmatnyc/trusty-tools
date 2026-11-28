@@ -82,6 +82,8 @@ impl CommandExecutor {
             inject_task,
             deliverable_id,
             force_new,
+            // #12077: the switch is read in the client, where the operator set it.
+            claude_sandbox: crate::core::claude_sandbox::sandbox_opted_in(),
         };
         match self.client().spawn_managed_session(&req).await {
             Ok(resp) => CommandResult::ManagedSpawned {

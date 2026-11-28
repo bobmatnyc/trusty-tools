@@ -261,6 +261,7 @@ async fn seed_sessions(
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -496,6 +497,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

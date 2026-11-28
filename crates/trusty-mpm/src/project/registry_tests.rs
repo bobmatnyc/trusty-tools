@@ -56,6 +56,7 @@ fn make_session_with_repo(repo_url: &str, branch: Option<&str>) -> SessionRecord
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 
@@ -96,6 +97,7 @@ fn make_session_no_repo() -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

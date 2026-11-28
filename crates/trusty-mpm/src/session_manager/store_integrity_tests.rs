@@ -68,6 +68,7 @@ fn record(id: ManagedSessionId, task: &str) -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

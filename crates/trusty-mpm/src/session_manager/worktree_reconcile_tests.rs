@@ -84,6 +84,7 @@ fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionR
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

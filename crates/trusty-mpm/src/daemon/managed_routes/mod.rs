@@ -255,6 +255,10 @@ pub struct SpawnRequest {
     /// `"worktree": null` is a 400 rather than a silently-tolerated `false`.
     #[serde(default)]
     pub worktree: bool,
+    /// #12077: the client's Claude Code sandbox opt-in. Absent → `false`, the
+    /// default, so every existing caller spawns unsandboxed.
+    #[serde(default)]
+    pub claude_sandbox: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).

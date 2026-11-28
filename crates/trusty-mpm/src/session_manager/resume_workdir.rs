@@ -361,6 +361,7 @@ mod tests {
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         }
     }
 

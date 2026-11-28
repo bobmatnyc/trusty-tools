@@ -121,6 +121,7 @@ fn inputs(cwd: &Path) -> ManagedLaunch<'_> {
         settings: None,
         alternate_screen: false,
         profile: Default::default(),
+        sandbox: None,
     }
 }
 

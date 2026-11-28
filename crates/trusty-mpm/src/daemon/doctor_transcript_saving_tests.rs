@@ -188,6 +188,18 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
         "test fixtures for the disclaim wrapper — not launch lines",
     ),
     (
+        "core/claude_sandbox_tests.rs",
+        3,
+        "test fixtures: three `Command::new(\"claude\")` stand-ins that the sandbox \
+         opt-in tests (#12077) feed to apply the sandbox switch — not launch lines",
+    ),
+    (
+        "daemon/api/claude_config_restart_sandbox_tests.rs",
+        1,
+        "test fixture: an `env{} claude` command line string handed to the restart \
+         path to prove a sandboxed restart is refused (#12077) — not a launch line",
+    ),
+    (
         "daemon/discovery.rs",
         1,
         "a test fixture pane-line string parsed by discovery — not a launch line",

@@ -37,6 +37,14 @@ use super::managed_launch::{self, ManagedLaunch};
 #[path = "claude_code_agents.rs"]
 mod claude_code_agents;
 
+/// The managed sandbox step and the in-place `--settings` tail (#10102,
+/// #12077) — a sibling submodule because this file sits at the SLOC cap.
+#[path = "claude_code_sandbox.rs"]
+mod claude_code_sandbox;
+#[cfg(test)]
+use claude_code_sandbox::managed_sandbox_at;
+use claude_code_sandbox::{inplace_tail_args, managed_sandbox};
+
 /// Claude Code's live-session registry, for the remote-name check (#9025).
 ///
 /// What: `claude agents --json` through the resolved binary under the
@@ -338,45 +346,6 @@ fn owner_settings(
         .map_err(|err| RuntimeError::Spawn(err.to_string()))
 }
 
-/// The sandbox step of a managed launch in `cwd` (#10102).
-///
-/// Why: #8928 step 6 — a managed spawn, resume or in-place relaunch goes
-/// through the same sandbox step as every other launch path.
-/// What: [`crate::core::session_launch::apply_launch_sandbox`] for
-/// `profile`'s role, with `config_dir` as the user tier and the home from
-/// [`crate::core::launch_home::sandbox_launch_home`]. #12077: enforcement is
-/// off, so it writes nothing and refuses nothing; with no home resolved the
-/// step is skipped ([`managed_sandbox_at`]).
-/// Test: `spawn_writes_no_sandbox_settings_12077`,
-/// `spawn_and_resume_go_ahead_over_a_local_override_12077`,
-/// `a_split_config_base_launch_writes_no_sandbox_12077`.
-fn managed_sandbox(
-    cwd: &Path,
-    config_dir: &Path,
-    profile: crate::core::session_profile::SessionProfile,
-) -> Result<(), RuntimeError> {
-    // #10102: the real (sandbox-aware) home, never `fw.root`'s parent — that is
-    // the config base, which can sit off `$HOME`.
-    let home = crate::core::launch_home::sandbox_launch_home().map_err(RuntimeError::Spawn)?;
-    managed_sandbox_at(cwd, home.as_deref(), config_dir, profile)
-}
-
-/// [`managed_sandbox`] with the home passed in; `None` skips the step (#12077).
-/// Test: `managed_sandbox_goes_ahead_with_no_home_12077`.
-fn managed_sandbox_at(
-    cwd: &Path,
-    home: Option<&Path>,
-    config_dir: &Path,
-    profile: crate::core::session_profile::SessionProfile,
-) -> Result<(), RuntimeError> {
-    use crate::core::session_launch as sl;
-    // #12077: no home is no sandbox refusal; there is nothing to apply.
-    let Some(home) = home else { return Ok(()) };
-    let inputs = sl::launch_sandbox_inputs(cwd, home);
-    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, Some(config_dir))
-        .map_err(|err| RuntimeError::Spawn(err.to_string()))
-}
-
 /// [`prepare_managed_config`] with the hook binary pinned by the caller.
 ///
 /// Why (#7244): provisioning writes the managed hook triad, and that write
@@ -661,8 +630,9 @@ fn build_inplace_resume_command_with(
     let (prompt_file, profile) = build_prompt_file_in(&fw.root, prompt_dir, cwd, None);
     // #8286: a relaunched PM pane never runs without its prompt.
     let prompt_file = prompt_file?;
-    // #10102: the relaunched pane starts only inside its verified sandbox.
-    managed_sandbox(cwd, &config_dir, profile)?;
+    // #12077: the pane's switch, which its spawn spec set when it opted in.
+    let opted_in = crate::core::claude_sandbox::sandbox_opted_in();
+    let sandbox = managed_sandbox(cwd, &config_dir, profile, opted_in)?;
     let mut args = compose_inplace_args(
         cwd,
         Some(&config_dir),
@@ -671,7 +641,11 @@ fn build_inplace_resume_command_with(
     );
     // #8988: the owner MCP policy provisioned for this relaunch under `fw`.
     let owner = owner_settings(fw, cwd, &config_dir, profile)?;
-    args.extend(inplace_tail_args(profile, owner.file.as_deref())?);
+    args.extend(inplace_tail_args(
+        profile,
+        owner.file.as_deref(),
+        sandbox.as_ref(),
+    )?);
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     // #4181: same per-project MCP pins the tmux-pane paths export.
     let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
@@ -683,25 +657,6 @@ fn build_inplace_resume_command_with(
         mcp_env,
         profile,
     })
-}
-
-/// The in-place relaunch argv after [`compose_inplace_args`]: the owner
-/// `--settings` and the #8992 tool trim for `profile`.
-///
-/// What: #10127 — an Architect's deny joins the owner file as ONE
-/// `--settings` ([`crate::core::architect_lockdown::Lockdown::settings_argv`]);
-/// its error refuses the relaunch. The exec seam
-/// (`build_inplace_exec_command`) drops the chat tokens and sets the trim env.
-/// Test: `an_architect_inplace_relaunch_carries_the_lockdown`.
-fn inplace_tail_args(
-    profile: crate::core::session_profile::SessionProfile,
-    carrier: Option<&Path>,
-) -> Result<Vec<String>, RuntimeError> {
-    let mut args = crate::core::architect_lockdown::Lockdown::PRODUCTION
-        .settings_argv(profile, carrier)
-        .map_err(lockdown_refusal)?;
-    args.extend(crate::core::pm_tool_trim::trim_args(profile));
-    Ok(args)
 }
 
 /// A #10127 Architect lockdown error as the launch's refusal.
@@ -727,6 +682,8 @@ pub struct ClaudeCodeAdapter {
     /// #8286: where `spawn`/`spawn_resume` write the PM prompt file — the
     /// process temp dir; tests name an unwritable one to prove the refusal.
     prompt_dir: std::path::PathBuf,
+    /// #12077: the session's sandbox opt-in (its record's `claude_sandbox`).
+    claude_sandbox: bool,
 }
 
 impl ClaudeCodeAdapter {
@@ -750,7 +707,15 @@ impl ClaudeCodeAdapter {
             tmux,
             fw: FrameworkPaths::from_root(framework_root),
             prompt_dir: std::env::temp_dir(),
+            claude_sandbox: false,
         }
+    }
+
+    /// This adapter with the session's sandbox opt-in (#12077); off by default.
+    /// Test: `an_opted_in_spawn_and_resume_carry_the_sandbox_inline_12077`.
+    pub fn with_claude_sandbox(mut self, on: bool) -> Self {
+        self.claude_sandbox = on;
+        self
     }
 
     /// Resolve the `claude` binary to an absolute path, or `None` if missing.
@@ -913,8 +878,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let (prompt_file, profile) =
             build_prompt_file_in(&self.fw.root, &self.prompt_dir, cwd, Some(session_id));
         let prompt_file = prompt_file?;
-        // #10102: the role's sandbox is written and verified before the line is sent.
-        managed_sandbox(cwd, &config_dir, profile)?;
+        // #12077: the record's opt-in decides the inline sandbox; no file is written.
+        let sandbox = managed_sandbox(cwd, &config_dir, profile, self.claude_sandbox)?;
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -953,6 +918,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             settings: settings.file.as_deref(),
             alternate_screen,
             profile,
+            sandbox: sandbox.as_ref(),
         };
         // #8233 review round 2 (finding 6): a fresh spawn used to pass `None`
         // here, which makes every pane-directed step — the interrupt that
@@ -1057,8 +1023,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let (prompt_file, profile) =
             build_prompt_file_in(&self.fw.root, &self.prompt_dir, cwd, Some(session_id));
         let prompt_file = prompt_file?;
-        // #10102: the role's sandbox is written and verified before the line is sent.
-        managed_sandbox(cwd, &config_dir, profile)?;
+        // #12077: the record's opt-in decides the inline sandbox; no file is written.
+        let sandbox = managed_sandbox(cwd, &config_dir, profile, self.claude_sandbox)?;
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to
@@ -1131,6 +1097,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             settings: settings.file.as_deref(),
             alternate_screen,
             profile,
+            sandbox: sandbox.as_ref(),
         };
         // #6863: a session Claude Code is still running in the background
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its

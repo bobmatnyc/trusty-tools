@@ -83,6 +83,37 @@ pub(crate) fn apply_sandbox(
         .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
+/// The role's inline sandbox payload for a launch of `profile` in `workspace`
+/// (#12077), with this process's switch (`TM_CLAUDE_SANDBOX=1`): see
+/// [`launch_sandbox_with`].
+/// Test: `an_opted_in_session_start_spec_carries_the_sandbox_inline_12077`.
+pub(crate) fn launch_sandbox(
+    workspace: &Path,
+    home: Option<&Path>,
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let opted_in = trusty_mpm::core::claude_sandbox::sandbox_opted_in();
+    launch_sandbox_with(workspace, home, profile, opted_in)
+}
+
+/// [`launch_sandbox`] with the switch passed in (#12077).
+///
+/// What: `None` when not `opted_in`; opted in, the role's payload, or an
+/// error naming the switch and the missing home (Fail-Open Check). Writes no
+/// file.
+/// Test: `a_cli_launch_refuses_an_opt_in_with_no_home_12077`.
+pub(crate) fn launch_sandbox_with(
+    workspace: &Path,
+    home: Option<&Path>,
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+    opted_in: bool,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let role = trusty_mpm::core::session_launch::sandbox_role_for(profile);
+    Ok(trusty_mpm::core::claude_sandbox::opted_in_launch_sandbox(
+        opted_in, role, workspace, home,
+    )?)
+}
+
 /// Compose the session-scoped MCP config and the owner settings file under
 /// `home`'s `~/.trusty-tools/trusty-mpm/` (#7422, #8545, #8988).
 ///
@@ -96,6 +127,8 @@ pub(crate) fn apply_sandbox(
 /// root, which fails the launch only on a broken `install.toml` (#11821
 /// df-D1w); `profile` is the launch's resolved
 /// profile, which decides whether the #8992 skill and tool parts apply.
+/// #12077: plus, when this process opted in (`TM_CLAUDE_SANDBOX=1`), the
+/// role's inline sandbox payload ([`launch_files_with`]); no file is written.
 /// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
 /// `launch_files_add_no_settings_without_an_owner`; the `--settings` token
 /// itself: `isolated_spec_carries_the_owner_settings_after_the_mcp_config`.
@@ -105,8 +138,24 @@ pub(crate) fn launch_files(
     home: Option<&Path>,
     profile: trusty_mpm::core::session_profile::SessionProfile,
 ) -> anyhow::Result<trusty_mpm::core::launch_policy::LaunchFiles> {
+    let opted_in = trusty_mpm::core::claude_sandbox::sandbox_opted_in();
+    launch_files_with(workspace, config_dir, home, profile, opted_in)
+}
+
+/// [`launch_files`] with the sandbox opt-in passed in (#12077), so a test
+/// never sets the process-global switch.
+/// Test: `launch_files_carry_the_sandbox_only_when_opted_in_12077`.
+pub(crate) fn launch_files_with(
+    workspace: &Path,
+    config_dir: Option<&Path>,
+    home: Option<&Path>,
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+    opted_in: bool,
+) -> anyhow::Result<trusty_mpm::core::launch_policy::LaunchFiles> {
     use trusty_mpm::core::launch_policy::{provision_settings, provision_settings_default};
     use trusty_mpm::core::session_mcp_scope::{provision_for_spawn, provision_for_spawn_at};
+    // #12077: first, so a refused opt-in writes nothing.
+    let sandbox = launch_sandbox_with(workspace, home, profile, opted_in)?;
     // #11821 P3: the layout of `home`'s install.
     let root =
         home.map(|h| trusty_mpm::core::paths::FrameworkPaths::under_home(h).crate_config_root());
@@ -126,6 +175,7 @@ pub(crate) fn launch_files(
     Ok(trusty_mpm::core::launch_policy::LaunchFiles {
         mcp_config,
         settings: settings.file,
+        sandbox,
     })
 }
 

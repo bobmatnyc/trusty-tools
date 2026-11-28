@@ -772,6 +772,7 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let existing_id = existing.id;
     mgr.store.write().await.upsert(existing).await.unwrap();

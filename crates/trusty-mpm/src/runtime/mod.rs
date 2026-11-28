@@ -280,6 +280,48 @@ pub fn build_adapter(
     }
 }
 
+/// [`build_adapter`] for a launch the `tm` CLI starts in its own process
+/// (`tm meta run`, #12077): Claude Code carries this process's sandbox opt-in
+/// ([`crate::core::claude_sandbox::sandbox_opted_in`]).
+///
+/// Why: that path has no spawn request or record to carry the switch, and in
+/// 1.14.15 its spawn was sandboxed.
+/// Test: `a_cli_adapter_honours_the_process_switch_12077`.
+pub fn build_cli_adapter(
+    kind: RuntimeKind,
+    tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+    framework_root: &std::path::Path,
+) -> Box<dyn RuntimeAdapter> {
+    match kind {
+        RuntimeKind::ClaudeCode => Box::new(
+            ClaudeCodeAdapter::new(tmux, framework_root)
+                .with_claude_sandbox(crate::core::claude_sandbox::sandbox_opted_in()),
+        ),
+        kind => build_adapter(kind, tmux, framework_root),
+    }
+}
+
+/// [`build_adapter`] for a persisted `record`: its runtime, and for Claude
+/// Code its sandbox opt-in (#12077).
+///
+/// Why: a resume or relaunch of a session must honour the sandbox choice made
+/// when it was spawned, and the record is the one place that choice survives.
+/// What: a [`ClaudeCodeAdapter`] carrying `record.claude_sandbox`; any other
+/// runtime is [`build_adapter`] unchanged.
+/// Test: `a_record_adapter_carries_the_sandbox_opt_in_12077`.
+pub fn build_record_adapter(
+    record: &crate::session_manager::SessionRecord,
+    tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+    framework_root: &std::path::Path,
+) -> Box<dyn RuntimeAdapter> {
+    match record.runtime {
+        RuntimeKind::ClaudeCode => Box::new(
+            ClaudeCodeAdapter::new(tmux, framework_root).with_claude_sandbox(record.claude_sandbox),
+        ),
+        kind => build_adapter(kind, tmux, framework_root),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_helpers::FakeTmux;

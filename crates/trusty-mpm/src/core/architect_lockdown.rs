@@ -196,6 +196,8 @@ pub struct Lockdown<'a> {
     env_unset: &'a [&'a str],
     /// Agent names hidden from the roster (MB159a); no capitalised variants.
     deny_agents: &'a [&'a str],
+    /// #12077: the opted-in sandbox payload, for any profile; `None` is off.
+    sandbox: Option<&'a Value>,
 }
 
 impl Lockdown<'static> {
@@ -212,6 +214,7 @@ impl<'a> Lockdown<'a> {
             deny_globs,
             env_unset,
             deny_agents: &[],
+            sandbox: None,
         }
     }
 
@@ -219,6 +222,28 @@ impl<'a> Lockdown<'a> {
     pub const fn with_deny_agents(mut self, agents: &'a [&'a str]) -> Self {
         self.deny_agents = agents;
         self
+    }
+
+    /// This lockdown, also carrying the opted-in `sandbox` payload (#12077).
+    ///
+    /// Why: the sandbox keys reach Claude Code only as inline `--settings`,
+    /// never through a settings file, and Claude Code keeps only the last
+    /// `--settings`; so the sandbox joins the one payload this type builds.
+    /// What: `None` leaves every argv and env exactly as before. `Some` makes
+    /// [`Self::settings_argv`] emit one inline payload for any profile, the
+    /// owner carrier and an Architect's deny merged in, and makes the env
+    /// seams set [`crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV`]`=1`.
+    /// Test: `an_opted_in_launch_carries_the_sandbox_inline_12077`.
+    pub fn with_sandbox<'b>(self, sandbox: Option<&'b Value>) -> Lockdown<'b>
+    where
+        'a: 'b,
+    {
+        Lockdown {
+            deny_globs: self.deny_globs,
+            env_unset: self.env_unset,
+            deny_agents: self.deny_agents,
+            sandbox,
+        }
     }
 
     /// Every deny glob plus its [`capitalised`] variant, sorted, deduplicated.
@@ -258,7 +283,9 @@ impl<'a> Lockdown<'a> {
     /// unchanged — no new flag. An Architect with a non-empty list gets
     /// `["--settings", <json>]`: the carrier file's object (or `{}`) with every
     /// [`Self::deny_rules`] entry appended to `permissions.deny`; it never
-    /// sets `disableClaudeAiConnectors` (#10735).
+    /// sets `disableClaudeAiConnectors` (#10735). #12077: with a
+    /// [`Self::with_sandbox`] payload, every profile gets the inline pair with
+    /// the sandbox keys merged in.
     /// Test: `architect_launch_carries_every_glob_and_its_capitalised_variant`,
     /// `architect_lockdown_merges_into_the_owner_carrier_file`,
     /// `a_carrier_file_that_cannot_be_read_refuses_the_architect_launch`,
@@ -275,28 +302,39 @@ impl<'a> Lockdown<'a> {
     }
 
     /// The merged `--settings` JSON for an Architect under a non-empty deny
-    /// list; `None` when the carrier argv applies unchanged.
+    /// list, or for any launch with a sandbox payload (#12077); `None` when
+    /// the carrier argv applies unchanged.
     fn payload(
         &self,
         profile: SessionProfile,
         carrier: Option<&Path>,
     ) -> Result<Option<String>, LockdownError> {
-        if !profile.is_architect() || (self.deny_globs.is_empty() && self.deny_agents.is_empty()) {
+        let architect =
+            profile.is_architect() && (!self.deny_globs.is_empty() || !self.deny_agents.is_empty());
+        // #12077: an opted-in sandbox needs the inline payload for any profile.
+        if !architect && self.sandbox.is_none() {
             return Ok(None);
         }
-        let mut rules = self.deny_rules()?;
-        // MB159a: the roster cut rides the same payload, so every seam has it.
-        rules.extend(super::architect_agent_scope::deny_rules(self.deny_agents));
         let mut body = match carrier {
             Some(path) => read_object(path)?,
             None => Map::new(),
         };
-        merge_deny(&mut body, rules).map_err(|reason| LockdownError::BadCarrier {
-            path: carrier.map(Path::to_path_buf).unwrap_or_default(),
-            reason,
-        })?;
+        if architect {
+            let mut rules = self.deny_rules()?;
+            // MB159a: the roster cut rides the same payload, so every seam has it.
+            rules.extend(super::architect_agent_scope::deny_rules(self.deny_agents));
+            merge_deny(&mut body, rules).map_err(|reason| LockdownError::BadCarrier {
+                path: carrier.map(Path::to_path_buf).unwrap_or_default(),
+                reason,
+            })?;
+        }
+        let mut body = Value::Object(body);
+        // #12077: the sandbox joins the same payload; its lists union with the carrier's.
+        if let Some(sandbox) = self.sandbox {
+            crate::core::claude_sandbox::merge_settings_payload(&mut body, sandbox);
+        }
         // #10735: no `disableClaudeAiConnectors`; the connectors load (#10725).
-        Ok(Some(serde_json::to_string(&Value::Object(body))?))
+        Ok(Some(serde_json::to_string(&body)?))
     }
 
     /// [`Self::settings_argv`] for a line a shell re-splits (#10127 Q2).
@@ -347,11 +385,23 @@ impl<'a> Lockdown<'a> {
 
     /// Unset [`Self::env_unset`] in `spec`, and drop any assignment of it.
     ///
-    /// Test: `architect_launch_unsets_the_env_list_and_a_pm_launch_does_not`.
+    /// #12077: the sandbox switch is set to `1` when a payload is carried and
+    /// unset otherwise, so the pane's own relaunch and divert worker see
+    /// exactly this launch's choice, never a stale value from the tmux server.
+    /// Test: `architect_launch_unsets_the_env_list_and_a_pm_launch_does_not`,
+    /// `an_off_launch_unsets_a_stale_switch_12077`.
     pub fn scrub_spec_env(&self, profile: SessionProfile, spec: &mut LaunchSpec) {
+        let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
         let unset = self.env_unset(profile);
-        spec.env_set.retain(|(name, _)| !unset.contains(name));
+        spec.env_set
+            .retain(|(name, _)| !unset.contains(name) && name != switch);
         spec.env_unset.extend(unset);
+        // #12077: the session's own relaunch and divert worker read the switch.
+        if self.sandbox.is_some() {
+            spec.env_set.push((switch.to_owned(), "1".to_owned()));
+        } else {
+            spec.env_unset.push(switch.to_owned());
+        }
     }
 
     /// [`Self::apply_to_spec`] for a [`std::process::Command`]: the argv
@@ -367,6 +417,13 @@ impl<'a> Lockdown<'a> {
         cmd.args(self.settings_argv(profile, carrier)?);
         for name in self.env_unset(profile) {
             cmd.env_remove(name);
+        }
+        // #12077: as in `scrub_spec_env` — set when carried, removed otherwise.
+        let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
+        if self.sandbox.is_some() {
+            cmd.env(switch, "1");
+        } else {
+            cmd.env_remove(switch);
         }
         Ok(())
     }

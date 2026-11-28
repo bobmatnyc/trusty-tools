@@ -378,6 +378,7 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         };
         mgr.store
             .write()
@@ -424,6 +425,7 @@ async fn spawn_managed_session_surfaces_daemon_error_body() {
         inject_task: None,
         deliverable_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
         force_new: false,
+        claude_sandbox: false,
     };
     let err = client
         .spawn_managed_session(&req)
@@ -1002,6 +1004,7 @@ fn managed_spawn_request_serializes() {
         inject_task: None,
         deliverable_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
         force_new: false,
+        claude_sandbox: false,
     };
     let v = serde_json::to_value(&req).unwrap();
     assert_eq!(v["ref"], "main");
@@ -1023,6 +1026,7 @@ fn managed_spawn_request_serializes() {
         inject_task: None,
         deliverable_id: None,
         force_new: false,
+        claude_sandbox: false,
     };
     let v = serde_json::to_value(&bare).unwrap();
     assert!(v.get("name_hint").is_none(), "None name_hint is omitted");
@@ -1417,4 +1421,35 @@ fn command_delivery_refuses_an_undelivered_command_10101() {
     assert!(err.to_string().contains("socket gone"), "{err}");
     assert!(command_delivery(&serde_json::json!({"sent": true})).is_ok());
     assert!(command_delivery(&serde_json::json!({"output": ""})).is_ok());
+}
+
+/// #12077 (d): the spawn request names the sandbox opt-in only when it is on,
+/// so a default request is byte-identical to before, and the daemon reads an
+/// absent field as off.
+#[test]
+fn spawn_request_carries_the_sandbox_opt_in_only_when_set_12077() {
+    let mut req = ManagedSpawnRequest {
+        repo_url: "/r".to_string(),
+        git_ref: "main".to_string(),
+        task: "t".to_string(),
+        name_hint: None,
+        runtime: None,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: false,
+        claude_sandbox: false,
+    };
+    let off = serde_json::to_value(&req).unwrap();
+    assert!(off.get("claude_sandbox").is_none(), "{off}");
+    req.claude_sandbox = true;
+    let on = serde_json::to_value(&req).unwrap();
+    assert_eq!(on["claude_sandbox"], serde_json::json!(true));
+    #[cfg(feature = "daemon")]
+    {
+        use crate::daemon::managed_routes::SpawnRequest;
+        let daemon: SpawnRequest = serde_json::from_value(on).unwrap();
+        assert!(daemon.claude_sandbox);
+        let legacy: SpawnRequest = serde_json::from_value(off).unwrap();
+        assert!(!legacy.claude_sandbox, "an absent field is off");
+    }
 }

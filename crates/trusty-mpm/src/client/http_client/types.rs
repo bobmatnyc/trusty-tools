@@ -762,6 +762,10 @@ pub struct ManagedSpawnRequest {
     /// non-forcing caller.
     #[serde(skip_serializing_if = "is_false")]
     pub force_new: bool,
+    /// #12077: this client's Claude Code sandbox opt-in (`TM_CLAUDE_SANDBOX=1`).
+    /// Omitted when `false`, so a default request is byte-identical to before.
+    #[serde(skip_serializing_if = "is_false")]
+    pub claude_sandbox: bool,
 }
 
 /// Whether a bool is `false` — the `skip_serializing_if` predicate that omits a

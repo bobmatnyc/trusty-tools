@@ -190,9 +190,15 @@ async fn spawn_worker_at_reports_an_unstartable_binary() {
     let tmp = tempfile::tempdir().unwrap();
     let missing = tmp.path().join("no-such-claude");
 
-    let err = spawn_worker_at(&missing, "m", "payload", std::time::Duration::from_secs(5))
-        .await
-        .expect_err("an unstartable binary must not answer");
+    let err = spawn_worker_at(
+        &missing,
+        "m",
+        "payload",
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await
+    .expect_err("an unstartable binary must not answer");
     assert!(
         err.contains(WORKER_BINARY),
         "the error must name the worker: {err}"
@@ -218,9 +224,15 @@ async fn spawn_worker_at_times_out() {
     trusty_common::exec_stub::write_executable(&fake, "#!/bin/sh\nexec /bin/sleep 30\n")
         .expect("install the stand-in worker");
 
-    let err = spawn_worker_at(&fake, "m", "payload", std::time::Duration::from_millis(300))
-        .await
-        .expect_err("a hung worker must not answer");
+    let err = spawn_worker_at(
+        &fake,
+        "m",
+        "payload",
+        std::time::Duration::from_millis(300),
+        None,
+    )
+    .await
+    .expect_err("a hung worker must not answer");
     assert!(
         err.contains("timed out"),
         "a hang must report as a timeout, not a generic failure: {err}"
@@ -269,6 +281,7 @@ async fn a_worker_starts_without_a_config_dir_or_over_a_local_override_12077() {
             workspace: &ws,
             home: Some(&home),
             config_dir,
+            opted_in: false,
         };
         let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
             .await
@@ -293,6 +306,7 @@ async fn a_worker_runs_with_no_sandbox_written_12077() {
         workspace: &ws,
         home: Some(&home),
         config_dir: Some(&config),
+        opted_in: false,
     };
     let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
         .await
@@ -322,6 +336,7 @@ async fn a_worker_runs_with_no_home_12077() {
         workspace: &ws,
         home: None,
         config_dir: Some(&config),
+        opted_in: false,
     };
     let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
         .await
@@ -333,4 +348,100 @@ async fn a_worker_runs_with_no_home_12077() {
     );
     assert!(!config.join("settings.json").exists(), "no user-tier write");
     assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
+}
+
+/// #12077 (a)/(b): an opted-in worker receives the agent sandbox as ONE inline
+/// `--settings` on its argv (no tmux socket, sandbox on); a default worker
+/// gets no `--settings`; neither writes a sandbox key anywhere.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_opted_in_worker_carries_the_agent_sandbox_inline_12077() {
+    let (tmp, ws, home, config) = sandbox_fixture();
+    let fake = tmp.path().join("claude");
+    let argv_log = tmp.path().join("argv.txt");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\n\
+             cat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
+            argv_log.display()
+        ),
+    )
+    .expect("install the stand-in worker");
+    for opted_in in [false, true] {
+        let sandbox = WorkerSandbox {
+            workspace: &ws,
+            home: Some(&home),
+            config_dir: Some(&config),
+            opted_in,
+        };
+        let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+            .await
+            .expect("the worker answers");
+        assert_eq!(reply.text, "ok");
+        let argv: Vec<String> = std::fs::read_to_string(&argv_log)
+            .expect("argv log")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let at = argv.iter().position(|a| a == "--settings");
+        if !opted_in {
+            assert_eq!(at, None, "{argv:?}");
+            continue;
+        }
+        let json = at
+            .and_then(|i| argv.get(i + 1))
+            .expect("a --settings value");
+        let inline: serde_json::Value = serde_json::from_str(json).expect("inline JSON");
+        assert_eq!(
+            inline.pointer("/sandbox/enabled"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(
+            inline.pointer("/sandbox/credentials/envVars").is_some(),
+            "{inline}"
+        );
+    }
+    for file in [
+        ws.join(".claude/settings.json"),
+        ws.join(".claude/settings.local.json"),
+        home.join(".claude/settings.json"),
+        config.join("settings.json"),
+        ws.join(".trusty-mpm/sandbox-roles.json"),
+    ] {
+        assert!(!file.exists(), "{} was written", file.display());
+    }
+}
+
+/// #12077 Fail-Open Check: an opted-in worker with no home is refused with an
+/// error naming the switch, before the worker starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_opted_in_worker_with_no_home_is_refused_12077() {
+    let (tmp, ws, _home, config) = sandbox_fixture();
+    let fake = tmp.path().join("claude");
+    let ran = tmp.path().join("ran");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        format!(
+            "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
+            ran.display()
+        ),
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: None,
+        config_dir: Some(&config),
+        opted_in: true,
+    };
+    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect_err("an opt-in with no home is refused");
+    assert!(err.contains("TM_CLAUDE_SANDBOX"), "{err}");
+    assert!(!ran.exists(), "the worker never started");
+    assert!(
+        !ws.join(".claude/settings.json").exists(),
+        "no project write"
+    );
 }

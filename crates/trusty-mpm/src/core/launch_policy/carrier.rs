@@ -102,6 +102,9 @@ pub struct LaunchFiles {
     pub mcp_config: Option<PathBuf>,
     /// The owner settings file (`--settings`).
     pub settings: Option<PathBuf>,
+    /// #12077: the opted-in sandbox payload, merged into the one inline
+    /// `--settings`; `None` (the default) adds nothing.
+    pub sandbox: Option<Value>,
 }
 
 /// What [`provision_settings_at`] reads from and writes to.

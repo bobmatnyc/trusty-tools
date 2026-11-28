@@ -102,6 +102,7 @@ fn record(tmux_name: &str, workspace: Option<&Path>) -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

@@ -147,6 +147,52 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Record the spawn request's sandbox opt-in on a new session (#12077).
+    ///
+    /// Why: a resume or relaunch of the session must honour the choice made at
+    /// spawn; [`crate::runtime::build_record_adapter`] reads it off the record.
+    /// What: `on == false` (the default) changes and writes nothing. `true`
+    /// sets `claude_sandbox` on a fresh read of the stored record and upserts
+    /// it. FAIL-CLOSED: a failed write marks the record errored (best-effort,
+    /// so no automatic path resumes it) and is the caller's error, which
+    /// refuses the spawn — a record that says off must never sit behind a
+    /// session that ran sandboxed.
+    ///
+    /// # Errors
+    ///
+    /// The [`ManagedError`] of the read or the write.
+    ///
+    /// Test: `set_claude_sandbox_persists_only_an_opt_in_12077`,
+    /// `an_unpersisted_opt_in_refuses_the_spawn_12077`.
+    pub async fn set_claude_sandbox(
+        &self,
+        mut record: super::record::SessionRecord,
+        on: bool,
+    ) -> Result<super::record::SessionRecord, ManagedError> {
+        if !on {
+            return Ok(record);
+        }
+        record.claude_sandbox = true;
+        let persisted: Result<(), ManagedError> = async {
+            let mut fresh = self.get(&record.id).await?;
+            fresh.claude_sandbox = true;
+            self.store.write().await.upsert(fresh).await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = persisted {
+            let why = format!(
+                "the TM_CLAUDE_SANDBOX=1 opt-in could not be stored on the record, so a \
+                 resume would run unsandboxed; refusing the spawn (#12077): {e}"
+            );
+            error!(id = %record.id, "set_claude_sandbox: {why}");
+            // #12077: an Errored record is never auto-resumed.
+            let _ = self.mark_errored(&record.id, &why).await;
+            return Err(e);
+        }
+        Ok(record)
+    }
+
     /// Record a source project identity on a session, with a bounded retry
     /// (#2157 item 5, the #2154 remedy).
     ///

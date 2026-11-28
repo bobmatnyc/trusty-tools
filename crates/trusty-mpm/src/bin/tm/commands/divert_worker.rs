@@ -272,6 +272,8 @@ pub(crate) async fn spawn_worker(
         workspace: &workspace,
         home: home.as_deref(),
         config_dir: config_dir.as_deref(),
+        // #12077: the parent session's switch, which its launch spec set.
+        opted_in: trusty_mpm::core::claude_sandbox::sandbox_opted_in(),
     };
     spawn_sandboxed_worker_at(&program, model, payload, timeout, &sandbox).await
 }
@@ -284,6 +286,8 @@ pub(crate) struct WorkerSandbox<'a> {
     pub(crate) home: Option<&'a Path>,
     /// The parent session's `CLAUDE_CONFIG_DIR`, the worker's user tier.
     pub(crate) config_dir: Option<&'a Path>,
+    /// #12077: whether the worker runs under the opted-in agent sandbox.
+    pub(crate) opted_in: bool,
 }
 
 /// Run the agent sandbox step, then the worker.
@@ -293,10 +297,14 @@ pub(crate) struct WorkerSandbox<'a> {
 /// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
 /// [`trusty_mpm::core::session_launch::SandboxRole::Agent`]; on success
 /// [`spawn_worker_at`]. #12077: enforcement is off, so that step writes and
-/// refuses nothing; with no home resolved it is skipped.
+/// refuses nothing; with no home resolved it is skipped. When `opted_in`, the
+/// agent policy rides inline on the worker's argv as `--settings '<json>'`,
+/// and an opt-in with no home is refused before the worker starts.
 /// Test: `a_worker_starts_without_a_config_dir_or_over_a_local_override_12077`,
 /// `a_worker_runs_with_no_sandbox_written_12077`,
-/// `a_worker_runs_with_no_home_12077`.
+/// `a_worker_runs_with_no_home_12077`,
+/// `an_opted_in_worker_carries_the_agent_sandbox_inline_12077`,
+/// `an_opted_in_worker_with_no_home_is_refused_12077`.
 pub(crate) async fn spawn_sandboxed_worker_at(
     program: &Path,
     model: &str,
@@ -305,13 +313,27 @@ pub(crate) async fn spawn_sandboxed_worker_at(
     sandbox: &WorkerSandbox<'_>,
 ) -> Result<WorkerReply, String> {
     use trusty_mpm::core::session_launch as sl;
-    // #12077: no home is no sandbox refusal; the step is skipped.
+    // #12077: Fail-Open Check — an opt-in with no home refuses the worker.
+    if sandbox.opted_in && sandbox.home.is_none() {
+        let workspace = sandbox.workspace.to_path_buf();
+        return Err(trusty_mpm::core::claude_sandbox::NoHomeForSandbox { workspace }.to_string());
+    }
+    // #12077: a default worker with no home skips the step.
+    let mut settings = None;
     if let Some(home) = sandbox.home {
         let inputs = sl::launch_sandbox_inputs(sandbox.workspace, home);
         sl::apply_launch_sandbox(sl::SandboxRole::Agent, &inputs, sandbox.config_dir)
             .map_err(|e| e.to_string())?;
+        // #12077: the agent policy, inline on argv; never a settings file.
+        settings = sandbox.opted_in.then(|| {
+            trusty_mpm::core::claude_sandbox::inline_sandbox_settings(
+                sl::SandboxRole::Agent,
+                &inputs,
+            )
+            .to_string()
+        });
     }
-    spawn_worker_at(program, model, payload, timeout).await
+    spawn_worker_at(program, model, payload, timeout, settings.as_deref()).await
 }
 
 /// Run a specific worker binary and return its reply.
@@ -322,16 +344,19 @@ pub(crate) async fn spawn_sandboxed_worker_at(
 /// (#5544) forbids a process-global `set_var`, and a `PATH` rewrite in one test
 /// corrupts every other test in the binary regardless.
 /// What: see [`spawn_worker`], which resolves the path and delegates here.
+/// #12077: `settings`, when set, is appended as `--settings <json>`.
 /// Test: `spawn_worker_at_reports_an_unstartable_binary`, `spawn_worker_at_times_out`.
 pub(crate) async fn spawn_worker_at(
     program: &Path,
     model: &str,
     payload: &str,
     timeout: Duration,
+    settings: Option<&str>,
 ) -> Result<WorkerReply, String> {
     let mut command = tokio::process::Command::new(program);
     command
         .args(worker_argv(model))
+        .args(settings.into_iter().flat_map(|json| ["--settings", json]))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

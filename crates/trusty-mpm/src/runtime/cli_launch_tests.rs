@@ -95,9 +95,11 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
 
     assert_eq!(spec.cwd, Path::new("/work"));
     assert_eq!(spec.program, "claude");
+    // #12077: plus the sandbox switch, unset last so a stale value never leaks.
+    let mut scrub = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
+    scrub.push(crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV);
     assert_eq!(
-        spec.env_unset,
-        crate::core::claude_env_scrub::parse_env_unset_vars(&line),
+        spec.env_unset, scrub,
         "the same scrub, in the same order: {line}"
     );
     assert_eq!(
@@ -491,4 +493,77 @@ fn a_cli_spec_writes_no_started_sentinel() {
         .expect("write");
     LaunchSpec::mark_started(&path, "");
     assert_eq!(entries(tmp.path()), [path], "only the spec itself");
+}
+
+/// #12077: `tm launch`, `tm connect` and the Architect launch carry an
+/// opted-in sandbox as ONE inline `--settings` merged with the owner file,
+/// and assign the switch; with no payload the spec is unchanged.
+#[test]
+fn an_opted_in_isolated_spec_carries_the_sandbox_inline_12077() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let carrier = tmp.path().join("owner.json");
+    std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
+    let launch = CliLaunch {
+        model: None,
+        prompt_file: None,
+        config_dir: Some(Path::new("/h/cfg")),
+        oauth_token: None,
+        mcp_env: &[],
+        scoped_mcp: None,
+        settings: Some(&carrier),
+        alternate_screen: false,
+    };
+    let switch = (
+        crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned(),
+        "1".to_owned(),
+    );
+    let payload = serde_json::json!({ "sandbox": { "enabled": true } });
+    let spec =
+        super::isolated_spec_sandboxed(Path::new("/work"), &launch, Some(&payload)).expect("spec");
+    let values: Vec<&String> = spec
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--settings")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(values.len(), 1, "one --settings: {:?}", spec.args);
+    let inline: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    assert_eq!(
+        inline.pointer("/sandbox/enabled"),
+        Some(&serde_json::json!(true))
+    );
+    assert!(inline.get("deniedMcpServers").is_some(), "{inline}");
+    assert!(spec.env_set.contains(&switch), "{:?}", spec.env_set);
+
+    let plain = super::isolated_spec_sandboxed(Path::new("/work"), &launch, None).expect("spec");
+    let same = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
+    assert_eq!(plain.args, same.args);
+    assert!(!plain.env_set.contains(&switch));
+    assert!(plain.args.contains(&carrier.display().to_string()));
+}
+
+/// #12077 (criterion 4): a `tm launch`/`tm connect` spec that is not opted in
+/// unsets the switch and drops any assignment of it, so the pane never runs
+/// under a stale `TM_CLAUDE_SANDBOX=1`.
+#[test]
+fn an_off_isolated_spec_unsets_a_stale_switch_12077() {
+    let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned();
+    let env = [(switch.clone(), "1".to_owned())];
+    let launch = CliLaunch {
+        model: None,
+        prompt_file: None,
+        config_dir: None,
+        oauth_token: None,
+        mcp_env: &env,
+        scoped_mcp: None,
+        settings: None,
+        alternate_screen: false,
+    };
+    let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
+    assert_eq!(spec.env_unset.last(), Some(&switch), "{:?}", spec.env_unset);
+    assert!(
+        spec.env_set.iter().all(|(k, _)| k != &switch),
+        "{:?}",
+        spec.env_set
+    );
 }

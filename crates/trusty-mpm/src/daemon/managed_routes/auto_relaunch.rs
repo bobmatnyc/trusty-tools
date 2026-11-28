@@ -95,8 +95,9 @@ impl RuntimeRelauncher for DaemonRelauncher {
         let tmux = mgr.tmux_driver_for(record).map_err(|e| e.to_string())?; // See #10101
         let gh_env = super::lifecycle::resolve_gh_env(&state, &workspace).await;
         // #8233: the daemon's own framework root, never the process home.
+        // #12077: the record carries the sandbox opt-in.
         let adapter =
-            crate::runtime::build_adapter(record.runtime, tmux.clone(), state.framework_root());
+            crate::runtime::build_record_adapter(record, tmux.clone(), state.framework_root());
         // #8983: the resumed claude may rebind its session id; a failed
         // launch, or a refused pane (#9101), revokes the grant.
         let granted = state.grant_resume_of(record);

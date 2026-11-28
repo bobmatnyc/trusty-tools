@@ -91,6 +91,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 
@@ -131,6 +132,7 @@ fn session_no_repo() -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

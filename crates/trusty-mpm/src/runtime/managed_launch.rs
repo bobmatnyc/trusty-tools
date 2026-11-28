@@ -180,6 +180,9 @@ pub(super) struct ManagedLaunch<'a> {
     pub alternate_screen: bool,
     /// #8453: the profile this launch's prompt was composed for — the stamp.
     pub profile: crate::core::session_profile::SessionProfile,
+    /// #12077: the opted-in sandbox payload, carried as inline `--settings`;
+    /// `None` (the default) adds nothing.
+    pub sandbox: Option<&'a serde_json::Value>,
 }
 
 impl ManagedLaunch<'_> {
@@ -224,7 +227,10 @@ impl ManagedLaunch<'_> {
             env_set,
         };
         // #10127: the Architect's chat tokens, unset and never assigned.
-        Lockdown::PRODUCTION.scrub_spec_env(self.profile, &mut spec);
+        // #12077: and, when opted in, the switch for the pane's own relaunch.
+        Lockdown::PRODUCTION
+            .with_sandbox(self.sandbox)
+            .scrub_spec_env(self.profile, &mut spec);
         spec
     }
 
@@ -268,7 +274,9 @@ impl ManagedLaunch<'_> {
         ));
         // #8988: the owner MCP policy, right after the file it filters.
         // #10127: an Architect's deny joins it as ONE `--settings`.
-        args.extend(Lockdown::PRODUCTION.settings_argv(self.profile, self.settings)?);
+        // #12077: an opted-in sandbox joins it too, inline, never as a file.
+        let lockdown = Lockdown::PRODUCTION.with_sandbox(self.sandbox);
+        args.extend(lockdown.settings_argv(self.profile, self.settings)?);
         // #8992: a PM denies the optional built-ins it never calls.
         args.extend(crate::core::pm_tool_trim::trim_args(self.profile));
         args.extend(

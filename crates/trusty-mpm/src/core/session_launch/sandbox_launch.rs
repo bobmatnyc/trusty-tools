@@ -6,9 +6,10 @@
 //! the refusal rules identical on every path.
 //! What: [`sandbox_role_for`] maps a launch profile to its role,
 //! [`launch_sandbox_inputs`] resolves the paths a policy names, and
-//! [`apply_launch_sandbox`] is the launch entry. #12077: enforcement is off on
-//! every launch path, so it writes nothing; the policy writer stays in
-//! `enforce_launch_sandbox` for the slice-2 opt-in.
+//! [`apply_launch_sandbox`] is the launch entry. #12077: it writes nothing on
+//! any launch path, opted in or not; an opted-in launch carries the policy
+//! inline on argv (`crate::core::claude_sandbox`), and the file writer in
+//! `enforce_launch_sandbox` has no launch caller.
 //! Test: `a_default_launch_writes_no_sandbox_key_12077`,
 //! `a_launch_with_no_config_dir_is_not_refused_12077`,
 //! `a_launch_with_no_config_dir_is_refused`,
@@ -32,10 +33,12 @@ pub fn sandbox_role_for(profile: SessionProfile) -> SandboxRole {
 /// The paths a policy for `workspace` under `home` names.
 ///
 /// What: the workspace's private tmux socket (#10101), the daemon's
-/// `trusty-mpm.sock` when it resolves, an absolute `CARGO_TARGET_DIR`, and
-/// the sccache socket when `home`'s config opts in (`build.sccache: true`).
-/// A config that cannot be read leaves sccache off.
-/// Test: `a_launch_applies_and_verifies_the_policy`.
+/// `trusty-mpm.sock` when it resolves, the [`client_daemon_sockets`]
+/// (#12077), an absolute `CARGO_TARGET_DIR`, and the sccache socket when
+/// `home`'s config opts in (`build.sccache: true`). A config that cannot be
+/// read leaves sccache off.
+/// Test: `a_launch_applies_and_verifies_the_policy`,
+/// `a_launch_allows_exactly_the_client_daemon_sockets`.
 pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
     let mut inputs = SandboxInputs::new(workspace, home);
     let server = crate::core::tmux_server::workspace_server_name(workspace);
@@ -44,6 +47,7 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
         &server,
     ));
     inputs.mpm_socket = crate::client::http_client::resolve_daemon_socket().ok();
+    inputs.daemon_sockets = client_daemon_sockets();
     inputs.cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_absolute());
@@ -53,10 +57,37 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
     inputs
 }
 
+/// The daemon sockets a sandboxed role's CLI clients dial, besides
+/// `trusty-mpm.sock`.
+///
+/// Why: #12077 — the trusty daemons are socket-only, so a sandbox that names
+/// only `trusty-mpm.sock` breaks `tm memory`, `trusty-search`,
+/// `trusty-review` (it dials trusty-analyze) and `ta` from Bash, while MCP
+/// already reaches the same daemons.
+/// What: each path from the dial-side resolver its client uses: trusty-memory,
+/// trusty-search, trusty-analyze and trusty-agents. A resolver that fails
+/// leaves its socket out and refuses nothing. Never trusty-code,
+/// trusty-secrets, trusty-events, trusty-console, trusty-embedderd or sccache.
+/// Test: `a_launch_allows_exactly_the_client_daemon_sockets`.
+fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
+    [
+        trusty_common::memory_rpc::resolve_memory_dial_socket().ok(),
+        trusty_common::search_rpc::search_dial_socket().ok(),
+        // No shared name constant reaches this crate; same rule as `tm tui`.
+        trusty_common::daemon_socket_path_no_create("trusty-analyze").ok(),
+        // #12077: no trusty-code.sock — its daemon runs agent loops unsandboxed
+        // (`task.run`) and `session.permission.respond` has no caller binding.
+        trusty_agents_common::health::agents_dial_socket().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// The launch-time sandbox step: a no-op while enforcement is off (#12077).
 ///
-/// Why: #12077 slice 1 — the Claude Code sandbox enforcement is off on every
-/// launch path until an opt-in exists.
+/// Why: #12077 — tm never writes the sandbox into a Claude settings file; an
+/// opted-in launch carries it inline (`crate::core::claude_sandbox`).
 /// What: returns `Ok` before any write or refusal. It writes no project tier,
 /// no user tier and no role record, and refuses no config dir. Every launch
 /// path (`tm launch`/`tm connect`, `tm run`, the managed spawn, resume and
@@ -89,7 +120,8 @@ pub fn apply_launch_sandbox(
 /// What: refuses when `config_dir` is `None` (the spawn sets no
 /// `CLAUDE_CONFIG_DIR`, so Claude Code would read `~/.claude`), relative, or
 /// `<home>/.claude`; otherwise [`write_sandbox_settings`], which verifies.
-/// #12077: unreachable from launch until the slice-2 opt-in calls it.
+/// #12077: no launch path calls it — tm never writes the sandbox into a
+/// Claude settings file; the opt-in carries it inline instead.
 ///
 /// # Errors
 ///
@@ -100,7 +132,7 @@ pub fn apply_launch_sandbox(
 /// `a_launch_into_the_operators_claude_dir_is_refused`,
 /// `a_launch_applies_and_verifies_the_policy`,
 /// `a_verify_failure_refuses_the_launch`.
-#[allow(dead_code)] // #12077: slice 2 calls this behind the opt-in.
+#[allow(dead_code)] // #12077: kept for its tests; no launch path writes the sandbox.
 pub(super) fn enforce_launch_sandbox(
     role: SandboxRole,
     inputs: &SandboxInputs,

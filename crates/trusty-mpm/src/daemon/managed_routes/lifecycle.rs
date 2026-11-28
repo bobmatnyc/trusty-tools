@@ -28,7 +28,7 @@ use super::local_only_spawn::SessionSource;
 use super::managed_checkout::deny_worktree_fallback;
 use super::resume_error::ResumeManagedError;
 use crate::daemon::state::DaemonState;
-use crate::runtime::{RuntimeKind, build_adapter};
+use crate::runtime::{RuntimeKind, build_record_adapter};
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
 // `ManagedError` moved out of this file's non-test code with the #2577 review
 // enum split (see `resume_error.rs`); it is still used by this module's own
@@ -75,6 +75,9 @@ pub(super) async fn resolve_gh_env(
 pub struct SpawnParams {
     /// Absolute path to an EXISTING local directory the session runs in (ADR-0055).
     pub repo_url: String,
+    /// #12077: the client's Claude Code sandbox opt-in (`TM_CLAUDE_SANDBOX=1`);
+    /// `false` for every non-client caller. Stored on the record.
+    pub claude_sandbox: bool,
     /// Git branch or ref to check out.
     pub git_ref: String,
     /// Human-readable task description for the session.
@@ -871,6 +874,12 @@ pub(super) async fn spawn_managed_inproject(
             warn!(id = %session_id, "spawn_managed (inproject): create failed: {e}");
             e.to_string()
         })?;
+    // #12077: the request's sandbox opt-in rides on the record, for every resume;
+    // a failed write refuses the spawn (fail closed).
+    let record = mgr
+        .set_claude_sandbox(record, params.claude_sandbox)
+        .await
+        .map_err(|e| format!("TM_CLAUDE_SANDBOX=1 opt-in not stored, spawn refused: {e}"))?;
 
     // Record the source project identity so callers can reconnect later.
     if let Some(source_id) = &source.source_id
@@ -927,7 +936,8 @@ pub(super) async fn spawn_managed_inproject(
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, state.framework_root());
+    // #12077: the record carries the sandbox opt-in.
+    let adapter = build_record_adapter(&record, tmux_arc, state.framework_root());
     let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -1192,8 +1202,9 @@ pub async fn resume_managed(
     }
 
     // #6766: the post-send launch check below takes its own driver handle.
-    let adapter = build_adapter(
-        record.runtime,
+    // #12077: the record carries the sandbox opt-in.
+    let adapter = build_record_adapter(
+        &record,
         mgr.tmux_driver_for(&record)
             .map_err(|e| ResumeManagedError::Other(e.to_string()))?,
         fw_root,

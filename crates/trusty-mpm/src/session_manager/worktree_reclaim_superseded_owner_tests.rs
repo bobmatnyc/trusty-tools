@@ -95,6 +95,7 @@ pub(super) fn pm_record(tmux_name: &str, current: &str) -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

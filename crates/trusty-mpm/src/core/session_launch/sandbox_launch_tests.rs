@@ -1,7 +1,8 @@
 //! Tests for the #10102 launch-time sandbox entry and the per-role record.
 //!
 //! #12077: the launch entry writes nothing; the #10102 tests drive the
-//! retained `enforce_launch_sandbox`, which slice 2 calls behind an opt-in.
+//! retained `enforce_launch_sandbox`, which no launch calls. An opted-in
+//! launch carries the policy inline instead.
 
 use std::path::{Path, PathBuf};
 
@@ -129,6 +130,76 @@ fn a_launch_applies_and_verifies_the_policy() {
     let resolved = launch_sandbox_inputs(&inputs.workspace, &inputs.home);
     assert_eq!(resolved.workspace, inputs.workspace);
     assert!(resolved.tmux_socket.is_some(), "the workspace tmux socket");
+}
+
+/// #12077: each sandboxed role allows exactly `trusty-mpm.sock` and the client
+/// daemon sockets, plus the tmux socket for a PM only — never trusty-code, no
+/// other file in a daemon's data dir, no data dir, and none of the daemons
+/// kept out.
+#[test]
+#[serial_test::serial]
+fn a_launch_allows_exactly_the_client_daemon_sockets() {
+    use crate::core::session_launch::tests::EnvVarGuard;
+    let fx = Fx::new();
+    let data = fx.root.join("data");
+    let _data = EnvVarGuard::set(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV, &data);
+    // Socket overrides would bypass the data-dir rule this test pins.
+    let _cleared = [
+        trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV,
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV,
+        trusty_agents_common::health::TRUSTY_AGENTS_SOCKET_ENV,
+    ]
+    .map(EnvVarGuard::clear);
+    let home = fx.root.join("home");
+    let mut inputs = launch_sandbox_inputs(&fx.root.join("ws"), &home);
+    // An sccache server that is running must still stay out of both roles.
+    let sccache = crate::core::sccache_socket::socket_path_at(&home);
+    inputs.sccache_socket = Some(sccache.clone());
+    let sock = |app: &str| data.join(app).join(format!("{app}.sock"));
+    let tmux = inputs
+        .tmux_socket
+        .clone()
+        .expect("the workspace tmux socket");
+    let clients = [
+        "trusty-mpm",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-agents",
+    ]
+    .map(sock);
+    let memory_dir = data.join("trusty-memory");
+    let denied = [
+        sock("trusty-code"),
+        sock("trusty-secrets"),
+        sock("trusty-events"),
+        sock("trusty-console"),
+        sock("trusty-embedderd"),
+        sccache,
+        memory_dir.join("palace.db"),
+        memory_dir,
+        data.clone(),
+    ];
+    for (role, with_tmux) in [(SandboxRole::Pm, true), (SandboxRole::Agent, false)] {
+        let mut got = sockets(&project_policy(role, &inputs));
+        got.sort();
+        let mut want: Vec<String> = clients
+            .iter()
+            .chain(with_tmux.then_some(&tmux))
+            .map(|p| p.display().to_string())
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "{role:?}: exactly the client sockets");
+        for path in &denied {
+            assert!(
+                !got.iter().any(|entry| path.starts_with(entry)),
+                "{role:?}: `{}` must not be allowed: {got:?}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// #10102 Fail-Open Check: a read-back that does not verify refuses the launch.
@@ -314,4 +385,87 @@ fn a_launch_with_no_config_dir_is_not_refused_12077() {
     }
     assert!(!operators.exists(), "no `~/.claude` write");
     assert!(!fx.root.join("ws/.claude/settings.json").exists());
+}
+
+/// #12077 (c): an opted-in PM launch carries its policy as ONE inline
+/// `--settings` that allows `trusty-mpm.sock` and the four client daemon
+/// sockets (memory, search, analyze, agents), never `trusty-code.sock`, holds
+/// both tiers' sandbox keys, and writes no settings file.
+#[test]
+#[serial_test::serial]
+fn an_opted_in_launch_puts_the_client_sockets_on_inline_settings_12077() {
+    use crate::core::session_launch::tests::EnvVarGuard;
+    let fx = Fx::new();
+    let data = fx.root.join("data");
+    let _data = EnvVarGuard::set(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV, &data);
+    // Socket overrides would bypass the data-dir rule this test pins.
+    let _cleared = [
+        trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV,
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV,
+        trusty_agents_common::health::TRUSTY_AGENTS_SOCKET_ENV,
+    ]
+    .map(EnvVarGuard::clear);
+    let ws = fx.root.join("ws");
+    let home = fx.root.join("home");
+    let payload = crate::core::claude_sandbox::opted_in_launch_sandbox(
+        true,
+        SandboxRole::Pm,
+        &ws,
+        Some(&home),
+    )
+    .expect("not refused")
+    .expect("an opted-in launch has a payload");
+    let argv = crate::core::architect_lockdown::Lockdown::PRODUCTION
+        .with_sandbox(Some(&payload))
+        .settings_argv(SessionProfile::Pm, None)
+        .expect("the argv builds");
+    assert_eq!(argv.len(), 2, "one --settings pair: {argv:?}");
+    assert_eq!(argv[0], "--settings");
+    let inline: Value = serde_json::from_str(&argv[1]).expect("inline JSON, not a file path");
+    let got = sockets(&inline);
+    let sock = |app: &str| {
+        data.join(app)
+            .join(format!("{app}.sock"))
+            .display()
+            .to_string()
+    };
+    for app in [
+        "trusty-mpm",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-agents",
+    ] {
+        assert!(got.contains(&sock(app)), "{app} allowed: {got:?}");
+    }
+    assert!(
+        !got.contains(&sock("trusty-code")),
+        "trusty-code.sock stays out: {got:?}"
+    );
+    assert_eq!(inline.pointer("/sandbox/enabled"), Some(&json!(true)));
+    assert_eq!(
+        inline.pointer("/sandbox/network/strictAllowlist"),
+        Some(&json!(true))
+    );
+    assert_eq!(inline.pointer("/env/RUSTC_WRAPPER"), Some(&json!("")));
+    let env_vars = inline
+        .pointer("/sandbox/credentials/envVars")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    assert_eq!(env_vars, Some(11), "{inline}");
+    let deny = inline
+        .pointer("/permissions/deny")
+        .and_then(Value::as_array);
+    assert!(deny.is_some_and(|d| !d.is_empty()), "{inline}");
+    for file in [
+        ws.join(".claude/settings.json"),
+        ws.join(".claude/settings.local.json"),
+        home.join(".claude/settings.json"),
+        fx.config.join("settings.json"),
+        record_path(&ws),
+    ] {
+        assert!(!file.exists(), "{} was written", file.display());
+    }
 }
