@@ -57,6 +57,9 @@ trusty-installer	commands::standalone_launcher::tests::real_cargo_force_install_
 trusty-memory	engine::store::hnsw_store::op_budget::progress_tests::exactly_cap_group_completes_through_the_real_budget_path	CPU only: a cap-sized HNSW group at 384 dims through the real op budget (52 s debug on EVO, #9728); no model, no daemon
 trusty-memory	write_format_0_fixture_palace_for_the_live_check	#10094 fixture dumper; with no env var it writes a format-0 palace into a temp dir and checks it; no model, no daemon
 trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built trusty-secrets binary (file backend, temp HOME) and a child/grandchild tree (#9071); not under Claude Code; no Keychain, no network
+trusty-mpm	config_dir_deploy_12048::session_start_deploys_real_files_under_the_config_dir_12048	spawns the built tm (scratch /tmp HOME, install.toml config_dir) against the #10459 stub daemon, fake claude and tmux on PATH (#12048); no real daemon, no Keychain, no network
+trusty-mpm	config_dir_deploy_12048::connect_deploys_real_files_under_the_config_dir_12048	spawns the built tm `connect` against the #10459 stub daemon, fake claude and tmux on PATH (#12048); scratch HOME, no Keychain, no network
+trusty-mpm	config_dir_deploy_12048::session_start_refuses_a_malformed_install_toml_live_12048	spawns the built tm with a malformed install.toml; asserts the start refuses and deploys nothing under $HOME (#12048); stub daemon, no Keychain, no network
 
 # THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
 # on the Linux runner; the 29 rows above run, and 122 do not. A macOS checkout
