@@ -58,7 +58,7 @@ use trusty_mpm::core::harness_root::linked_worktree_owner;
 
 use super::build_lease_spawn::{Lease, exit_with, spawn_and_wait, write_record};
 use super::build_lease_status::{print_census, print_status};
-use super::build_lease_target::{announce_slot, guard_kept_dir, seal_after_build, target_dir};
+use super::build_lease_target::{announce_slot, guard_owned_dir, seal_after_build, target_dir};
 use super::build_lease_where::print_where;
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
@@ -287,11 +287,12 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             decision,
         } => {
             warn_degraded(&decision);
-            // #11661: a kept directory gets the slot's stale-checkout guard.
+            // #11661, #8692: a kept or cargo's own directory is locked for this build.
             let kept = target_dir(&target_plan, guard.slot(), &cwd, wait).and_then(|target| {
-                guard_kept_dir(&target_plan, &cwd, wait).map(|lock| (target, lock))
+                guard_owned_dir(&target_plan, target.as_deref(), &cwd, wait)
+                    .map(|owned| (target, owned))
             });
-            let (target, _kept_lock) = match kept {
+            let (target, owned) = match kept {
                 Ok(target) => target,
                 Err(why) => {
                     // #8261 (owner ruling 2026-09-21): an unsafe target never admits.
@@ -319,8 +320,9 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             record.target_dir.clone_from(&target);
             let _ = write_record(&mut guard, &record);
             post_decision(daemon.as_ref(), "admitted", &command_line, &decision, &[]).await;
-            // #8692: only a slot-owned dir flips to run; PR B (#9223) lifts this.
-            let lock_dir = flip_lock_dir(&target_plan, target.as_deref());
+            // #8692 PR B: a lease flips in the directory it owns, slot or dir lock.
+            let owned_dir = owned.as_ref().map(|(dir, _lock)| dir.as_str());
+            let lock_dir = flip_lock_dir(&target_plan, target.as_deref().or(owned_dir));
             // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
             // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
             let run_argv = match (&explicit_target_dir, &target) {
@@ -371,8 +373,8 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 &[],
             )
             .await;
-            // #11661: unleased, a kept directory is still guarded.
-            let _kept_lock = guard_kept_dir(&target_plan, &cwd, wait)
+            // #11661, #8692: unleased, a kept or cargo's own directory is still locked.
+            let _owned = guard_owned_dir(&target_plan, None, &cwd, wait)
                 .unwrap_or_else(|why| refuse(&format!("not running the build — {why}")));
             let status = spawn_and_wait(&args.command, None, pinned.as_deref(), None).await;
             seal_after_build(&target_plan, None, &cwd);

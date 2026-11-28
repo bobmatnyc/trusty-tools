@@ -244,6 +244,66 @@ pub fn rewrite_target_dir_arg(argv: &[String], new_dir: &str) -> Vec<String> {
     out
 }
 
+/// Cargo's own target directory for a build run in `cwd` with no
+/// `CARGO_TARGET_DIR`: `<workspace root>/target` (#8692, the `Unset` plan).
+///
+/// Why: an `Unset` lease builds in cargo's own `target/`, which every build of
+/// that workspace shares, so the lease must name the directory to own it.
+/// What: the nearest `Cargo.toml` at or above `cwd` is the package; its
+/// workspace root is its `package.workspace` path when set, else the nearest
+/// directory at or above it whose `Cargo.toml` has a `[workspace]` table, else
+/// the package's own directory. `Ok(None)` when no `Cargo.toml` is found, so
+/// nothing cargo builds there. A `build.target-dir` in `.cargo/config.toml`
+/// is not read.
+///
+/// # Errors
+///
+/// A description naming a manifest that could not be read or parsed: the
+/// caller refuses rather than guess the directory (#8692 Q1).
+/// Test: `cargos_own_target_dir_is_the_workspace_roots_8692`,
+/// `an_unparseable_manifest_names_itself_8692`.
+pub fn cargo_own_target_dir(cwd: &Path) -> Result<Option<PathBuf>, String> {
+    let mut found = None;
+    for dir in cwd.ancestors() {
+        if let Some(manifest) = read_manifest(dir)? {
+            found = Some((dir, manifest));
+            break;
+        }
+    }
+    let Some((package, manifest)) = found else {
+        return Ok(None);
+    };
+    let explicit = manifest
+        .get("package")
+        .and_then(|p| p.get("workspace"))
+        .and_then(toml::Value::as_str);
+    if let Some(rel) = explicit {
+        return Ok(Some(package.join(rel).join("target")));
+    }
+    if manifest.contains_key("workspace") {
+        return Ok(Some(package.join("target")));
+    }
+    for dir in package.ancestors().skip(1) {
+        if read_manifest(dir)?.is_some_and(|m| m.contains_key("workspace")) {
+            return Ok(Some(dir.join("target")));
+        }
+    }
+    Ok(Some(package.join("target")))
+}
+
+/// `dir/Cargo.toml` parsed, `Ok(None)` when there is none.
+fn read_manifest(dir: &Path) -> Result<Option<toml::Table>, String> {
+    let path = dir.join("Cargo.toml");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("could not read {}: {err}", path.display())),
+    };
+    body.parse::<toml::Table>()
+        .map(Some)
+        .map_err(|err| format!("{} does not parse: {err}", path.display()))
+}
+
 /// The `build:` section of `~/.trusty-tools/trusty-mpm` config, if readable.
 fn load_build_config(home: &Path) -> Option<crate::core::build_env::BuildConfig> {
     trusty_common::crate_config::load_at::<crate::core::trusty_tools_config::TrustyToolsConfig>(
@@ -508,6 +568,42 @@ mod tests {
         assert_eq!(
             rewrite_target_dir_arg(&no_pre_dash_flag, "/pool/slot-0"),
             no_pre_dash_flag
+        );
+    }
+
+    /// #8692: the `Unset` plan's directory is cargo's own, at the workspace root.
+    #[test]
+    fn cargos_own_target_dir_is_the_workspace_roots_8692() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("ws");
+        let member = root.join("crates/m");
+        let lone = tmp.path().join("lone");
+        for (dir, body) in [
+            (&root, "[workspace]\nmembers = [\"crates/m\"]\n"),
+            (&member, "[package]\nname = \"m\"\n"),
+            (&lone, "[package]\nname = \"lone\"\n"),
+        ] {
+            std::fs::create_dir_all(dir.join("src")).expect("dir");
+            std::fs::write(dir.join("Cargo.toml"), body).expect("manifest");
+        }
+        let got = |cwd: &Path| cargo_own_target_dir(cwd).expect("readable");
+        assert_eq!(got(&member.join("src")), Some(root.join("target")));
+        assert_eq!(got(&root), Some(root.join("target")));
+        assert_eq!(got(&lone.join("src")), Some(lone.join("target")));
+        assert_eq!(got(tmp.path()), None, "no manifest: nothing to own");
+    }
+
+    /// #8692 Q1: a manifest that does not parse is named, never guessed past.
+    #[test]
+    fn an_unparseable_manifest_names_itself_8692() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("bad");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("Cargo.toml"), "[package\n").expect("manifest");
+        let err = cargo_own_target_dir(&dir).expect_err("unparseable");
+        assert!(
+            err.contains(&dir.join("Cargo.toml").display().to_string()),
+            "{err}"
         );
     }
 }

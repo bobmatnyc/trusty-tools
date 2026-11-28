@@ -1373,16 +1373,33 @@ fn second_build_while_the_first_runs(
     verb: &str,
     phase_secs: u64,
 ) -> (Output, std::process::ExitStatus, bool, bool) {
+    let mut second = build_lease(home);
+    second.args(["--wait-secs", "5", "--", "true"]);
+    let (mut outs, status, running, run_phase) =
+        builds_while_the_first_runs(home, krate, target, verb, phase_secs, vec![second]);
+    (outs.remove(0), status, running, run_phase)
+}
+
+/// [`second_build_while_the_first_runs`] with `builds` run in order, once the
+/// first's program runs and before it is released (#8692).
+fn builds_while_the_first_runs(
+    home: &Path,
+    krate: &Path,
+    target: Option<&Path>,
+    verb: &str,
+    phase_secs: u64,
+    builds: Vec<Command>,
+) -> (Vec<Output>, std::process::ExitStatus, bool, bool) {
     let first = leased_cargo(home, krate, target, verb);
     let running = wait_for_file(&home.join("running"), 180);
     let run_phase = wait_for_run_phase(home, 0, phase_secs);
-    let second = build_lease(home)
-        .args(["--wait-secs", "5", "--", "true"])
-        .output()
-        .expect("a second build");
+    let outs = builds
+        .into_iter()
+        .map(|mut build| build.output().expect("a build beside the first"))
+        .collect();
     std::fs::write(home.join("release"), "").expect("release");
     let status = first.wait_with_output().expect("the first exits").status;
-    (second, status, running, run_phase)
+    (outs, status, running, run_phase)
 }
 
 /// The canonical scratch home, as a lease records it for its checkout.
@@ -1421,33 +1438,93 @@ fn a_second_build_is_admitted_while_the_first_ones_test_binary_runs_8692() {
     );
 }
 
-/// #8692 (fix round, #9223): a `Keep` or `Unset` lease builds in a directory
-/// another build can share, so it stays `compile` through its test run: at
-/// ceiling 1 a second build waits and exits 75, as before #8692, and can never
-/// rebuild binaries those tests use. PR B (#9223) lifts this with a dir lock.
+/// #8692 PR B (#9223): a `Keep` or `Unset` lease owns its directory by an
+/// exclusive dir lock, so once its test binary runs it frees compile capacity
+/// like a slot: at ceiling 1 a build elsewhere is admitted. A build into the
+/// SAME directory — the same checkout too — still waits and exits 75 naming
+/// the lock, so nothing rebuilds binaries those tests use. Before PR B the
+/// first lease kept its capacity and the build elsewhere exited 75.
 #[test]
 // #8692: the unleased census counts every live `tm build-lease` thread on
 // Linux, so these never overlap the long-lived 8692 leases.
 #[serial_test::serial(lease_processes)]
-fn a_shared_dir_lease_keeps_its_capacity_while_its_test_binary_runs_8692() {
+fn a_kept_or_unset_dir_lease_frees_capacity_while_its_test_binary_runs_8692() {
     for plan in [Plan::Keep, Plan::Unset] {
         let home = home_with_ceiling_and_cargo(1);
         let (krate, target) = crate_for(home.path(), plan, slow_test_crate);
-        let (second, first, running, run_phase) =
-            second_build_while_the_first_runs(home.path(), &krate, target.as_deref(), "test", 3);
-        let err = stderr(&second);
-        assert!(running, "{plan:?}: the test binary never ran");
-        assert_eq!(
-            second.status.code(),
-            Some(75),
-            "{plan:?}: a lease outside a slot must keep its capacity: {err}"
+        let mut elsewhere = build_lease(home.path());
+        elsewhere.args(["--wait-secs", "5", "--", "true"]);
+        let mut same_dir = build_lease(home.path());
+        same_dir
+            .current_dir(&krate)
+            .args(["--wait-secs", "3", "--", "true"]);
+        if let Some(dir) = target.as_deref() {
+            same_dir.env("CARGO_TARGET_DIR", dir);
+        }
+        let (outs, first, running, run_phase) = builds_while_the_first_runs(
+            home.path(),
+            &krate,
+            target.as_deref(),
+            "test",
+            15,
+            vec![elsewhere, same_dir],
         );
-        assert!(!run_phase, "{plan:?}: the record must stay phase compile");
+        let (elsewhere, same_dir) = (&outs[0], &outs[1]);
+        assert!(running, "{plan:?}: the test binary never ran");
+        assert!(run_phase, "{plan:?}: the record never read phase run");
+        assert_eq!(
+            elsewhere.status.code(),
+            Some(0),
+            "{plan:?}: a run-phase dir-lock holder must not hold capacity: {}",
+            stderr(elsewhere)
+        );
+        let err = stderr(same_dir);
+        assert_eq!(
+            same_dir.status.code(),
+            Some(75),
+            "{plan:?}: a build into the owned directory must wait: {err}"
+        );
+        assert!(
+            err.contains(".trusty-checkout.lock") && err.contains("held by another lease"),
+            "{plan:?}: the refusal names the lock: {err}"
+        );
         assert!(
             first.success(),
             "{plan:?}: the first build exits: {first:?}"
         );
     }
+}
+
+/// #8692 Q1 (owner ruling: refuse when the lock cannot be read): an `Unset`
+/// lease whose dir lock cannot be opened — a directory planted at
+/// `target/.trusty-checkout.lock` — refuses with exit 75 naming the lock file,
+/// and the build never runs. Before PR B the `Unset` plan took no lock and ran.
+#[test]
+fn an_unreadable_target_dir_lock_refuses_the_build_8692() {
+    let home = home_with_ceiling(2, "");
+    let krate = home.path().join("probe");
+    std::fs::create_dir_all(&krate).expect("crate dir");
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .expect("manifest");
+    let lock = krate.join("target/.trusty-checkout.lock");
+    std::fs::create_dir_all(&lock).expect("a directory where the lock file goes");
+    let ran = home.path().join("ran");
+    let out = build_lease(home.path())
+        .current_dir(&krate)
+        .args(["--wait-secs", "3", "--", "touch"])
+        .arg(&ran)
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(75), "{err}");
+    assert!(
+        err.contains(".trusty-checkout.lock") && err.contains("cannot be read"),
+        "the refusal names the lock file: {err}"
+    );
+    assert!(!ran.exists(), "the build never runs on a guess: {err}");
 }
 
 /// #8692: a slot-owned leased `cargo run` whose program is running (a server)

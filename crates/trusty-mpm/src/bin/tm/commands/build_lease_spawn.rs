@@ -38,8 +38,8 @@ pub(super) struct Lease<'a> {
     pub(super) guard: &'a mut SlotGuard,
     /// The record written into it.
     pub(super) record: &'a mut HolderRecord,
-    /// #8692: the slot directory whose `.cargo-lock` ends the compile phase;
-    /// `None` (a `Keep` or `Unset` plan) never flips, until PR B (#9223).
+    /// #8692: the directory this lease owns (slot flock or dir lock) whose
+    /// `.cargo-lock` ends the compile phase; `None` (it owns none) never flips.
     pub(super) lock_dir: Option<PathBuf>,
 }
 
@@ -133,7 +133,7 @@ pub(super) async fn spawn_and_wait(
     let mut tick = tokio::time::interval(PHASE_POLL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        // #8692: a Keep/Unset lease has no lock_dir and stays compile (#9223).
+        // #8692: a lease that owns no directory has no lock_dir and stays compile.
         let tracking = lease.as_ref().is_some_and(|l| l.lock_dir.is_some()) && !tracker.is_done();
         let sig = tokio::select! {
             status = child.wait() => {

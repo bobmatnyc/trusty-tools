@@ -15,9 +15,9 @@
 //! a failed record write keeps the phase at [`Phase::Compile`] and is retried
 //! on the next poll, so every failure keeps the slot counted. A lock never seen
 //! held never flips: the build keeps its capacity until it exits, as before.
-//! Only a lease whose target plan is the slot-owned `Slot` plan flips
-//! ([`flip_lock_dir`]); a `Keep` or `Unset` lease stays compiling until it
-//! exits, as before, until PR B (#9223) locks shared directories.
+//! A lease flips only in a directory it owns exclusively ([`flip_lock_dir`]):
+//! a slot under its flock, or since #8692 PR B (#9223) a kept or cargo's own
+//! directory under its dir lock ([`super::keep_guard`]).
 //! A run-phase holder keeps its flock and its target directory until it exits;
 //! only the capacity count changes. Its later compilers (a `cargo watch`
 //! rebuild) are left to the census, which counts them as foreign.
@@ -134,19 +134,20 @@ impl PhaseTracker {
 /// The directory whose build lock ends the compile phase, or `None` when
 /// this lease must stay [`Phase::Compile`] until it exits.
 ///
-/// What: `Some(target)` only for a [`TargetPlan::Slot`] lease — the slot's
-/// own directory, which no other lease builds in while the flock is held.
-/// A `Keep` or `Unset` plan builds in a directory another build can share,
-/// so a foreign `.cargo-lock` there could flip this lease while it still
-/// compiles, and a second lease could rebuild binaries its tests use (#9223).
-/// Test: `only_a_slot_plan_has_a_flip_lock_dir`,
-/// `a_shared_dir_lease_keeps_its_capacity_while_its_test_binary_runs_8692`.
+/// What: `target` is the directory the lease builds in and owns exclusively
+/// for its whole life — a slot under its flock (`Slot`, `UnsetSlot`), or a
+/// kept or cargo's own directory under [`super::keep_guard::lock_dir`]
+/// (`Keep`, `Unset`); `None` when it owns none. No other lease builds there,
+/// so a flip cannot let a second lease rebuild binaries its tests use
+/// (#9223). A `Refuse` plan never flips.
+/// Test: `every_owned_dir_plan_has_a_flip_lock_dir_8692`,
+/// `a_kept_or_unset_dir_lease_frees_capacity_while_its_test_binary_runs_8692`.
 #[must_use]
 pub fn flip_lock_dir(plan: &TargetPlan, target: Option<&str>) -> Option<PathBuf> {
-    // #8692: slot-owned dirs only; PR B (#9223) adds a dir lock and lifts this.
+    // #8692 PR B: a kept or cargo's own dir is owned by its dir lock now.
     match plan {
-        TargetPlan::Slot { .. } => target.map(PathBuf::from),
-        _ => None,
+        TargetPlan::Refuse(_) => None,
+        _ => target.map(PathBuf::from),
     }
 }
 

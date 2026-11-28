@@ -65,7 +65,9 @@
 //! | #8692: cargo's build lock unreadable while a lease polls it | reads as held: the lease stays `compile` and keeps its capacity | `a_probe_error_reads_as_held` |
 //! | #8692: the `run` record write fails | the phase stays `compile` (counted) and the write is retried next poll | `a_failed_write_stays_compile_and_retries` |
 //! | #8692: a held slot's record with no `phase` (an older `tm`), or an unparseable one | counts as compiling | `a_record_without_a_phase_counts_for_capacity` |
-//! | #8692: a `Keep` or `Unset` lease (a directory another build can share) | never flips: stays `compile` until it exits, so no second lease enters that directory while its tests run; PR B (#9223) lifts this | `a_shared_dir_lease_keeps_its_capacity_while_its_test_binary_runs_8692`, `only_a_slot_plan_has_a_flip_lock_dir` |
+//! | #8692 PR B (#9223): a `Keep` or `Unset` lease | owns its directory (the kept one, or cargo's own `<workspace>/target`) by an exclusive dir lock for its life, so it flips like a slot; a second lease into that directory waits, then exits 75 naming the lock | `a_kept_or_unset_dir_lease_frees_capacity_while_its_test_binary_runs_8692`, `every_owned_dir_plan_has_a_flip_lock_dir_8692`, `a_second_lease_of_one_checkout_waits_for_a_kept_dir_8692` |
+//! | #8692 Q1 (owner ruling: refuse): the dir lock cannot be opened or locked, or a `Cargo.toml` naming cargo's own directory cannot be read or parsed | REFUSED at once, exit 75, naming the file; the build never runs on a guess | `an_unreadable_target_dir_lock_refuses_the_build_8692`, `an_unopenable_dir_lock_refuses_naming_the_lock_file_8692`, `an_unparseable_manifest_names_itself_8692` |
+//! | #8692 (Q2): a raw cargo, outside any lease, compiling in a shared `CARGO_TARGET_DIR` | cannot be refused (the lease never sees it); `tm doctor`'s `raw_cargo` row WARNS naming the directory | `a_held_cargo_lock_in_a_shared_dir_warns_8692` |
 //! | #8692: run-phase owners reach `ceiling + builders.max_run_slots` | a new build waits, then exits 75, naming the cap | `a_run_slot_cap_withholds_with_a_named_reason_8692` |
 //! | a free slot whose leftover record is corrupt, or whose build's pid or start time cannot be read | BROKEN: skipped, never taken, record kept; `tm doctor` FAILS | `a_corrupt_record_in_a_free_slot_is_broken`, `a_corrupt_record_slot_is_skipped_not_taken`, `doctor_fails_on_a_corrupt_slot_record`, `an_unparseable_started_at_is_broken`, `an_uncheckable_pid_is_broken`, `a_failed_pid_check_is_unknown`, `an_unreadable_start_time_is_unknown` |
 //! | shared `CARGO_TARGET_DIR` and no slot directory (no pool, seed failed, fingerprints not clearable) | REFUSED, exit 75 | `an_unusable_slot_directory_refuses_instead_of_sharing`, `a_shared_target_without_a_repo_identity_refuses` |
@@ -120,6 +122,7 @@ pub mod target_dir;
 // #11661: a `cargo test` target that filtered out every test unasked fails.
 pub mod test_summary;
 // #11661: a pinned target directory gets the slot's stale-checkout guard.
+// #8692: and, with cargo's own `target/`, an exclusive dir lock.
 pub mod keep_guard;
 // #11661: a sealed marker, so a build outside the lease cannot pass as its checkout.
 pub mod marker_seal;

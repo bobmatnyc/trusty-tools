@@ -100,6 +100,8 @@ pub(crate) mod doctor_slot_pool;
 // #10212: a bounded entry count of each shared target's and slot's debug/deps.
 pub(crate) mod doctor_deps_budget;
 pub(crate) mod doctor_session_target_dir;
+// #8692: a raw cargo compiling in a shared CARGO_TARGET_DIR, outside the lease.
+pub(crate) mod doctor_raw_cargo;
 // #10212: `tm doctor --rotate-deps`, the operator rotation of an oversized `debug/`.
 pub(crate) mod doctor_rotate_deps;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the

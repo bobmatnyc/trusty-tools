@@ -194,15 +194,24 @@ fn run_phase_holders_free_capacity_but_keep_their_slots() {
     );
 }
 
-/// #8692: only the slot-owned `Slot` plan flips; a kept, unset or refused
-/// plan builds where another build can, so it never reads a lock dir.
+/// #8692 PR B (#9223): a kept or unset plan's directory is owned by its dir
+/// lock, so it flips like a slot; a lease that owns no directory, or a
+/// refused plan, never reads a lock dir.
 #[test]
-fn only_a_slot_plan_has_a_flip_lock_dir() {
+fn every_owned_dir_plan_has_a_flip_lock_dir_8692() {
     use crate::core::build_lease::target_dir::TargetPlan;
+    use std::path::PathBuf;
     assert_eq!(
         flip_lock_dir(&TargetPlan::Keep("/private/t".into()), Some("/private/t")),
-        None
+        Some(PathBuf::from("/private/t"))
+    );
+    assert_eq!(
+        flip_lock_dir(&TargetPlan::Unset, Some("/work/a/target")),
+        Some(PathBuf::from("/work/a/target"))
     );
     assert_eq!(flip_lock_dir(&TargetPlan::Unset, None), None);
-    assert_eq!(flip_lock_dir(&TargetPlan::Refuse("x".into()), None), None);
+    assert_eq!(
+        flip_lock_dir(&TargetPlan::Refuse("x".into()), Some("/x")),
+        None
+    );
 }
