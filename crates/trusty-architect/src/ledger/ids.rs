@@ -4,8 +4,9 @@
 //! regex; DOC-82 LDG-1.1 wants one definition every caller imports.
 //! What: [`Code`] (`^[a-z][a-z0-9]{1,7}$`), [`Prefix`] (the PM ledger's
 //! G, D, A, T, B), [`LedgerId`] (`<code>-<Prefix><hex2>`, lowercase hex) and
-//! [`is_bare_id`] (`^[A-Z][0-9a-f]{2}$`, the dashboard's bare form). Hand
-//! parsers, not regexes: the crate takes no regex dependency (#9171 A1).
+//! [`is_bare_id`] (`^[A-Z][0-9a-f]{2}$`, the ledger's hex bare form; live
+//! dashboard ids are base 34, judged by `pyderive::ids::id_number`, #12029).
+//! Hand parsers, not regexes: the crate takes no regex dependency (#9171 A1).
 //! Test: `ledger_id_grammar_accepts_exactly_the_one_form`.
 
 use std::fmt;
@@ -165,7 +166,8 @@ impl fmt::Display for LedgerId {
     }
 }
 
-/// True for the bare dashboard form `^[A-Z][0-9a-f]{2}$` (LDG-2.2.1).
+/// True for the hex bare form `^[A-Z][0-9a-f]{2}$` (LDG-2.2.1).
+// #12029: not the live dashboard id rule, which is base 34 (`pyderive::ids::id_number`).
 pub fn is_bare_id(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_uppercase()) && hex2(chars.as_str()).is_some()

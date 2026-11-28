@@ -8,12 +8,13 @@
 //! not `done` or `removed`), checks `goal` against the goal ids, and each
 //! entry of `depends_on` (or `depends-on`, as `il-archive.py` reads it) and
 //! of `links` (a string, or an object's `item`) against every id. Only a
-//! bare id (`^[A-Z][0-9a-f]{2}$`) is a reference: free text, URLs and
-//! qualified ids are not checked. When the id collections cannot be read
-//! (a case variant or the other format, which the file checks accept), the
-//! one line says the references were not checked, so `fsck` is never clean
-//! without the check (#10063).
+//! bare id (`^[A-Z][0-9a-km-np-z]{2}$`, base 34, which holds every hex-era
+//! id) is a reference: free text, URLs and qualified ids are not checked.
+//! When the id collections cannot be read (a case variant or the other
+//! format, which the file checks accept), the one line says the references
+//! were not checked, so `fsck` is never clean without the check (#10063).
 //! Test: `fsck_reports_dangling_links_depends_on_and_goal`,
+//! `fsck_reports_dangling_references_to_base34_ids`,
 //! `fsck_reports_references_not_checked_when_the_snapshot_fails`.
 
 use std::collections::BTreeSet;
@@ -21,8 +22,8 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value};
 
 use super::super::ids::ID_COLLECTIONS;
+use super::super::pyderive::ids::id_number;
 use super::Store;
-use crate::ledger::is_bare_id;
 
 /// Statuses and lifecycles of a record that is no longer live.
 const ENDED: [&str; 4] = ["done", "wont_do", "cancelled", "removed"];
@@ -45,7 +46,8 @@ pub(super) fn dangling(store: &Store) -> Vec<String> {
     for (coll, docs) in &snap {
         for d in docs.iter().filter(|d| live(&d.data)) {
             let mut miss = |at: String, r: &str, set: &BTreeSet<&str>, what: &str| {
-                if is_bare_id(r) && !set.contains(r) {
+                // #12029: the base-34 id rule the live `ids` verb issues from, not hex.
+                if id_number(r).is_some() && !set.contains(r) {
                     out.push(format!(
                         "{coll}/{}: {at}: {r} is not {what} in the store",
                         d.id
