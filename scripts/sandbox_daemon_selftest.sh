@@ -92,6 +92,11 @@
 #                   no daemon; without --credential a provider key in the
 #                   caller env never arrives; the wrapper refuses a bad or
 #                   unset NAME and a malformed or stdio token fd; and its FORWARDED list matches the launcher's
+#     mise-*        (#11804) no --bin, on a PATH with no real tm: a fake mise
+#                   shim first on PATH (it adds __MISE_* names when run as tm)
+#                   is replaced by `mise which tm`, else by the next non-shim
+#                   tm on PATH, and the daemon sees no __MISE_* name; a plain
+#                   tm on PATH runs unchanged; with neither route it refuses
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -952,6 +957,83 @@ run_wrapper cred-wrapper-bad-fd "TRUSTY_SECRETS_TOKEN_FD is not an fd number" \
   ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD='3;x' bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
 run_wrapper cred-wrapper-stdio-fd "TRUSTY_SECRETS_TOKEN_FD names stdio" \
   ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD=2 bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+
+# mise-* (#11804): no --bin, `tm` on PATH found by `command -v`. A fake mise
+# answers `mise which tm` from <case>/which-answer; run through its shim link
+# shims/tm it adds __MISE_SHIM and __MISE_DIFF and execs the stub, as mise does.
+mise_case() {
+  local case_dir="$TMP_ROOT/$1"
+  mkdir -p "$case_dir/bin" "$case_dir/shims" "$case_dir/real" "$case_dir/sbx"
+  cat > "$case_dir/bin/mise" <<MISE_EOF
+#!/bin/sh
+case "\${0##*/}" in
+  tm) __MISE_SHIM=1 __MISE_DIFF=selftest; export __MISE_SHIM __MISE_DIFF; exec "$STUB" "\$@" ;;
+esac
+if [ "\$1 \$2" = "which tm" ] && [ -f "$case_dir/which-answer" ]; then cat "$case_dir/which-answer"; exit 0; fi
+echo "mise ERROR tm is not active" >&2
+exit 1
+MISE_EOF
+  chmod +x "$case_dir/bin/mise"
+  ln -s ../bin/mise "$case_dir/shims/tm"
+  cp "$STUB" "$case_dir/real/tm"
+  echo "$case_dir"
+}
+
+# NO_TM_PATH: $PATH without any entry holding a `tm`, so no mise case can
+# reach a real tm (or a real mise shim) and start a real daemon.
+NO_TM_PATH=""
+IFS=: read -r -a PATH_DIRS <<< "$PATH"
+for d in ${PATH_DIRS[@]+"${PATH_DIRS[@]}"}; do
+  [ -n "$d" ] && [ ! -e "$d/tm" ] && [ ! -L "$d/tm" ] || continue
+  NO_TM_PATH="${NO_TM_PATH:+$NO_TM_PATH:}$d"
+done
+
+# expect_mise_run <name> <case dir> <want bin> <PATH prefix>: the launcher
+# starts <want bin>, and the daemon sees no __MISE_* name.
+expect_mise_run() {
+  local name="$1" dir="$2" want="$3" out status
+  set +e
+  out="$(PATH="$4:$NO_TM_PATH" run_launcher --dir "$dir/sbx" 2>&1)"
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    fail "$name" "launcher exit $status"
+    printf '%s\n' "$out" | sed 's/^/    /'
+  elif [ ! -f "$dir/sbx/home/stub-env-names" ]; then
+    fail "$name" "the stub never ran"
+  elif grep -q '^__MISE' "$dir/sbx/home/stub-env-names"; then
+    fail "$name" "the daemon saw $(grep '^__MISE' "$dir/sbx/home/stub-env-names" | tr '\n' ' ')"
+  elif ! printf '%s' "$out" | grep -qF "command: env -i HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG $want daemon --sandbox"; then
+    fail "$name" "the launcher did not start $want"
+    printf '%s\n' "$out" | sed 's/^/    /'
+  else
+    pass "$name"
+  fi
+}
+
+# mise-shim-which: the shim is first on PATH; `mise which tm` names the binary.
+MC="$(mise_case mise-which)"
+printf '%s\n' "$MC/real/tm" > "$MC/which-answer"
+expect_mise_run mise-shim-which "$MC" "$MC/real/tm" "$MC/shims:$MC/bin"
+# mise-shim-path: `mise which tm` fails; the next non-shim tm on PATH runs.
+MC="$(mise_case mise-path)"
+expect_mise_run mise-shim-path "$MC" "$MC/real/tm" "$MC/shims:$MC/bin:$MC/real"
+# mise-plain-tm: a tm on PATH that is no shim runs as before.
+MC="$(mise_case mise-plain)"
+expect_mise_run mise-plain-tm "$MC" "$MC/real/tm" "$MC/real:$MC/shims:$MC/bin"
+# mise-shim-none: neither route names a real tm; refuse, start nothing.
+MC="$(mise_case mise-none)"
+set +e
+OUTMN="$(PATH="$MC/shims:$MC/bin:$NO_TM_PATH" run_launcher --dir "$MC/sbx" 2>&1)"
+STATUSMN=$?
+set -e
+if [ "$STATUSMN" -ne 1 ] || ! printf '%s' "$OUTMN" | grep -qF "is a mise shim and neither"; then
+  fail mise-shim-none "exit $STATUSMN, output: $OUTMN"
+elif [ -e "$MC/sbx/home/stub-env-names" ]; then
+  fail mise-shim-none "the stub ran"
+else
+  pass mise-shim-none
+fi
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
