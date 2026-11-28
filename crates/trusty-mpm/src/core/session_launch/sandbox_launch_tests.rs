@@ -131,9 +131,10 @@ fn a_launch_applies_and_verifies_the_policy() {
     assert!(resolved.tmux_socket.is_some(), "the workspace tmux socket");
 }
 
-/// #12077: a PM launch allows exactly the tmux socket, `trusty-mpm.sock` and
-/// the client daemon sockets — no other file in a daemon's data dir, no data
-/// dir, and none of the daemons kept out.
+/// #12077: each sandboxed role allows exactly `trusty-mpm.sock` and the client
+/// daemon sockets, plus the tmux socket for a PM only — never trusty-code, no
+/// other file in a daemon's data dir, no data dir, and none of the daemons
+/// kept out.
 #[test]
 #[serial_test::serial]
 fn a_launch_allows_exactly_the_client_daemon_sockets() {
@@ -150,45 +151,53 @@ fn a_launch_allows_exactly_the_client_daemon_sockets() {
         trusty_agents_common::health::TRUSTY_AGENTS_SOCKET_ENV,
     ]
     .map(EnvVarGuard::clear);
-    let inputs = launch_sandbox_inputs(&fx.root.join("ws"), &fx.root.join("home"));
-    let mut got = sockets(&project_policy(SandboxRole::Pm, &inputs));
-    got.sort();
+    let home = fx.root.join("home");
+    let mut inputs = launch_sandbox_inputs(&fx.root.join("ws"), &home);
+    // An sccache server that is running must still stay out of both roles.
+    let sccache = crate::core::sccache_socket::socket_path_at(&home);
+    inputs.sccache_socket = Some(sccache.clone());
     let sock = |app: &str| data.join(app).join(format!("{app}.sock"));
     let tmux = inputs
         .tmux_socket
         .clone()
         .expect("the workspace tmux socket");
-    let mut want: Vec<String> = [
+    let clients = [
         "trusty-mpm",
         "trusty-memory",
         "trusty-search",
         "trusty-analyze",
-        "trusty-code",
         "trusty-agents",
     ]
-    .map(sock)
-    .into_iter()
-    .chain([tmux])
-    .map(|p| p.display().to_string())
-    .collect();
-    want.sort();
-    assert_eq!(got, want, "exactly the client sockets");
+    .map(sock);
     let memory_dir = data.join("trusty-memory");
     let denied = [
-        memory_dir.join("palace.db"),
-        memory_dir,
-        data.clone(),
+        sock("trusty-code"),
         sock("trusty-secrets"),
         sock("trusty-events"),
         sock("trusty-console"),
         sock("trusty-embedderd"),
+        sccache,
+        memory_dir.join("palace.db"),
+        memory_dir,
+        data.clone(),
     ];
-    for path in denied {
-        assert!(
-            !got.iter().any(|entry| path.starts_with(entry)),
-            "`{}` must not be allowed: {got:?}",
-            path.display()
-        );
+    for (role, with_tmux) in [(SandboxRole::Pm, true), (SandboxRole::Agent, false)] {
+        let mut got = sockets(&project_policy(role, &inputs));
+        got.sort();
+        let mut want: Vec<String> = clients
+            .iter()
+            .chain(with_tmux.then_some(&tmux))
+            .map(|p| p.display().to_string())
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "{role:?}: exactly the client sockets");
+        for path in &denied {
+            assert!(
+                !got.iter().any(|entry| path.starts_with(entry)),
+                "{role:?}: `{}` must not be allowed: {got:?}",
+                path.display()
+            );
+        }
     }
 }
 

@@ -60,13 +60,13 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
 /// `trusty-mpm.sock`.
 ///
 /// Why: #12077 — the trusty daemons are socket-only, so a sandbox that names
-/// only `trusty-mpm.sock` breaks `tm memory`, `trusty-search`, `tcode`,
+/// only `trusty-mpm.sock` breaks `tm memory`, `trusty-search`,
 /// `trusty-review` (it dials trusty-analyze) and `ta` from Bash, while MCP
 /// already reaches the same daemons.
 /// What: each path from the dial-side resolver its client uses: trusty-memory,
-/// trusty-search, trusty-analyze, trusty-code and trusty-agents. A resolver
-/// that fails leaves its socket out and refuses nothing. Never trusty-secrets,
-/// trusty-events, trusty-console, trusty-embedderd or sccache.
+/// trusty-search, trusty-analyze and trusty-agents. A resolver that fails
+/// leaves its socket out and refuses nothing. Never trusty-code,
+/// trusty-secrets, trusty-events, trusty-console, trusty-embedderd or sccache.
 /// Test: `a_launch_allows_exactly_the_client_daemon_sockets`.
 fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
     [
@@ -74,7 +74,8 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
         trusty_common::search_rpc::search_dial_socket().ok(),
         // No shared name constant reaches this crate; same rule as `tm tui`.
         trusty_common::daemon_socket_path_no_create("trusty-analyze").ok(),
-        trusty_common::daemon_socket_path_no_create("trusty-code").ok(),
+        // #12077: no trusty-code.sock — its daemon runs agent loops unsandboxed
+        // (`task.run`) and `session.permission.respond` has no caller binding.
         trusty_agents_common::health::agents_dial_socket().ok(),
     ]
     .into_iter()
