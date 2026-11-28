@@ -796,8 +796,9 @@ crates/trusty-mpm/src/core/scaffold_gitignore_tests.rs	BRIEF_PATH	1
 crates/trusty-mpm/src/core/session_launch/asset_notices.rs	RULING_DATED	1
 crates/trusty-mpm/src/core/session_launch/entry.rs	BRIEF_PATH	1
 crates/trusty-mpm/src/core/session_launch/entry.rs	RULING_DATED	1
-crates/trusty-mpm/src/core/session_launch/mod.rs	RULING_DATED	3
+crates/trusty-mpm/src/core/session_launch/mod.rs	RULING_DATED	2
 crates/trusty-mpm/src/core/session_launch/palace_alias.rs	EMAIL	1
+crates/trusty-mpm/src/core/session_launch/prep_error.rs	RULING_DATED	1
 crates/trusty-mpm/src/core/session_launch/skills.rs	RULING_DATED	1
 crates/trusty-mpm/src/core/session_launch/tests.rs	BRIEF_PATH	2
 crates/trusty-mpm/src/core/session_launch/tests.rs	EMAIL	3
