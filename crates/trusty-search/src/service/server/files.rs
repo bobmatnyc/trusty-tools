@@ -306,6 +306,8 @@ pub(crate) async fn index_chunks_report(
     // the handler forwards the caller's string verbatim.
     let scope = params.path_prefix.as_deref();
     let indexer = handle.indexer.read().await;
+    // #10533: a page read is use; the residency grace period reads this clock.
+    indexer.touch_activity();
 
     // Cursor mode (issue #1325): opt-in by sending the `after` param at all —
     // even an empty string, which means "start from the first chunk". The
@@ -411,6 +413,8 @@ async fn grep_one_index(
     // evicted corpus — each file is then read and scanned exactly once.
     let files = {
         let indexer = handle.indexer.read().await;
+        // #10533: a grep is use; the residency grace period reads this clock.
+        indexer.touch_activity();
         indexer.indexed_file_set().await?
     };
     counts.corpus_files = files.len();

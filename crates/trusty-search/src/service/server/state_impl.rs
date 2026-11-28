@@ -135,6 +135,8 @@ impl SearchAppState {
             // drain is observed by `health_report`.
             last_seen_defer_embed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             warm: Arc::new(super::warm_all::WarmTracker::default()),
+            // #10533: nothing observed yet, so the sweep runs as before.
+            residency_pins: Arc::new(super::residency_pins::ResidencyPins::from_env()),
         }
     }
 
