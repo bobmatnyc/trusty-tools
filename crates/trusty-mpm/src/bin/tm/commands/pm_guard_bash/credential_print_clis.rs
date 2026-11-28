@@ -355,18 +355,37 @@ fn unmasked_run(own: &[String]) -> bool {
 }
 
 /// Stdout, or the path an out-file flag in `flags` names (`--flag=PATH`,
-/// `--flag PATH`); `-` is stdout.
+/// `--flag PATH`).
+///
+/// What: a path only when exactly one out-file word is present, the word
+/// before it is not a dash word with no `=` that may take it as its value,
+/// and the path does not start with `-` (`-` is stdout). Anything else is
+/// stdout.
+/// Test: `credential_print_tests::denies_an_out_file_flag_taken_as_a_value_11959`,
+/// `credential_print_tests::allows_the_11959_neighbours`.
 fn out_or_file<'a>(args: &'a [String], flags: &[&str]) -> Vec<Echo<'a>> {
-    let path = args.iter().enumerate().find_map(|(n, a)| {
+    // #11959: pflag gives `--account -o` the `-o` and keeps the last repeat.
+    let mut found = args.iter().enumerate().filter_map(|(n, a)| {
         flags.iter().find_map(|f| {
             a.strip_prefix(f)
                 .and_then(|rest| rest.strip_prefix('='))
                 .or_else(|| (a == f).then(|| args.get(n + 1).map_or("-", String::as_str)))
+                .map(|p| (n, p))
         })
     });
+    let path = match (found.next(), found.next()) {
+        (Some((n, p)), None) => {
+            let taken = n
+                .checked_sub(1)
+                .and_then(|m| args.get(m))
+                .is_some_and(|w| w.starts_with('-') && !w.contains('='));
+            (!taken && !p.starts_with('-')).then_some(p)
+        }
+        _ => None,
+    };
     match path {
-        None | Some("-") => vec![Echo::Out],
         Some(p) => vec![Echo::Path(p)],
+        None => vec![Echo::Out],
     }
 }
 

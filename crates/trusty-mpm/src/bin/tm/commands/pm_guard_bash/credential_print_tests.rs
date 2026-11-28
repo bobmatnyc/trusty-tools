@@ -1907,6 +1907,22 @@ fn denies_the_11959_mixed_flag_spellings() {
     );
 }
 
+/// 🔴 REGRESSION (#11959 delta review): an out-file flag word that pflag
+/// reads as the value of the dash flag before it, and a repeated out-file
+/// flag, whose last value pflag keeps. Each row was allowed at 807c4042c1.
+#[test]
+fn denies_an_out_file_flag_taken_as_a_value_11959() {
+    check(
+        true,
+        &[
+            "op read --account -o op://fake-vault/fake-item/f",
+            "op document get --account -o fake-doc",
+            "op inject --account -o -i fake.tpl",
+            "op read op://fake-vault/fake-item/f --out-file /tmp/fake-out --out-file=",
+        ],
+    );
+}
+
 /// #11959: captured or file-bound reads, masked `op run`, other `op`
 /// subcommands, and prose mentions stay allowed.
 #[test]
@@ -1922,6 +1938,9 @@ fn allows_the_11959_neighbours() {
             "op document get fake-doc --out-file /tmp/fake-doc",
             "op document get fake-doc -o /tmp/fake-doc",
             "op inject -i fake.tpl -o /tmp/fake.env",
+            "op read op://fake-vault/fake-item/f -o /tmp/fake-out",
+            "op document get fake-doc --out-file /tmp/fake-out",
+            "op inject -i fake.tpl -o /tmp/fake-out",
             "op run --env-file .env -- npm test",
             "op run -- printenv FAKE_VAR",
             "op run -- grep --no-masking notes.txt",
