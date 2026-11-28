@@ -257,6 +257,18 @@ pub(super) async fn mark_reindex_failed(handle: &Arc<IndexHandle>, reason: &str)
     stages.graph = StageState::failed(reason);
 }
 
+/// Put every stage back to the pre-run snapshot, for a run that stopped with
+/// the live corpus attached and nothing committed (#12064).
+///
+/// Why: the lanes still serve the live corpus's data, so `Failed` would
+/// report an intact index degraded; the run record carries the stop.
+/// What: replaces all three stages with `prior`, the snapshot
+/// [`reset_stages_for_reindex`] returned.
+/// Test: `a_carryover_window_stop_keeps_stages_stamps_and_quarantine`.
+pub(super) async fn restore_stages(handle: &Arc<IndexHandle>, prior: &IndexStages) {
+    *handle.stages.write().await = prior.clone();
+}
+
 /// Mark every lane failed for a reindex refused BEFORE the lexical phase ran
 /// (issue #4356).
 ///

@@ -452,13 +452,15 @@ pub(super) async fn run_reindex(
             {
                 Ok(path) => path,
                 Err(e) => {
-                    // #12064: a window write stops the run; name it, not a copy fault.
-                    let reason = super::corpus_swap::begin_failure_reason(&e);
+                    // #12064: a window stop names itself, keeps the pre-run
+                    // stages and does not count toward quarantine.
+                    let (reason, counts) =
+                        super::corpus_swap::settle_begin_failure(&handle, &e, &pre_walk_stages)
+                            .await;
                     tracing::error!(
                         "reindex[{}]: ABORTING incremental reindex — {reason} ({e:#})",
                         index_id.0
                     );
-                    mark_reindex_failed(&handle, reason).await;
                     // #6386: status and frame in one hold — see `push_terminal`.
                     let frame = serde_json::json!({
                         "event": "error",
@@ -470,7 +472,7 @@ pub(super) async fn run_reindex(
                     // term_guard drops here → broadcasts error event via Drop.
                     drop(term_guard);
                     schedule_progress_cleanup(cleanup_map, cleanup_id);
-                    if let Some(ref q) = quarantine {
+                    if let Some(q) = quarantine.as_ref().filter(|_| counts) {
                         q.record_failure(&index_id);
                     }
                     return;
