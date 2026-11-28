@@ -8,6 +8,7 @@ use crate::service::index_identity::CarryoverWindowWrite;
 /// copy-fault reason. Both are `Failed` in the runner.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn a_window_write_stop_is_reported_as_a_stop() {
     let stop = anyhow::Error::new(CarryoverWindowWrite {
         index_id: "x".into(),
