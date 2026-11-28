@@ -735,7 +735,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 3 open dashboard items: 1 question, 1 action, 1 task (2 parked)",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 1 decisions, 0 blockers",
     "free": {
      "A": 1154,
      "D": 1150,
@@ -845,7 +845,7 @@
      "running": 0,
      "tasks": 1
     },
-    "tally_line": "3 open dashboard items: 1 question, 1 action, 1 task (2 parked)"
+    "tally_line": "1 decisions, 0 blockers"
    },
    "name": "synthetic"
   },
@@ -5649,7 +5649,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 2 open dashboard items: 0 questions, 1 action, 1 task",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 decisions, 0 blockers",
     "free": {
      "A": 1147,
      "D": 1124,
@@ -6095,7 +6095,7 @@
      "running": 0,
      "tasks": 1
     },
-    "tally_line": "2 open dashboard items: 0 questions, 1 action, 1 task"
+    "tally_line": "0 decisions, 0 blockers"
    },
    "name": "live"
   },
@@ -7299,7 +7299,7 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 open dashboard items: 0 questions, 0 actions, 0 tasks",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 decisions, 0 blockers",
     "free": {
      "A": 1155,
      "D": 1155,
@@ -7367,7 +7367,7 @@
      "running": 0,
      "tasks": 0
     },
-    "tally_line": "0 open dashboard items: 0 questions, 0 actions, 0 tasks"
+    "tally_line": "0 decisions, 0 blockers"
    },
    "name": "edge"
   }

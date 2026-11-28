@@ -370,9 +370,10 @@ fn dashboard_verbs_render_the_prototype_shapes() -> R {
             store: store.clone(),
         },
     )?;
+    // #12029 P2g: the frozen `dashboard-db.py` tally line.
     assert_eq!(
         render(&Reply::Tally(t.clone(), false)),
-        "2 open dashboard items: 1 question, 0 actions, 1 task\n"
+        "1 decisions, 0 blockers\n"
     );
     assert!(render(&Reply::Tally(t, true)).starts_with("{\n  \"open\": 2,\n  \"questions\": 1,"));
     let ids = verbs::ids(

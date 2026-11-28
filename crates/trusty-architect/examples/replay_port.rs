@@ -18,8 +18,8 @@
 //! mirrored in the library), `dashboard_ids` and `dashboard_qual` (#12029
 //! P2d, mirrored in the library), `owner_answers` (#12029 P2e, mirrored in
 //! the library), `questions_rc` (#12029 P2f, mirrored in the library).
-//! `gh-session-track` (#12087) and `pending-answers` (#12029 P2e) run the
-//! script's own command line.
+//! `gh-session-track` (#12087), `pending-answers` (#12029 P2e) and
+//! `dashboard-db` (#12029 P2g) run the script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
 //! `technical_level_recordings_replay_clean_against_the_port`,
@@ -38,8 +38,9 @@
 //! `dashboard_ids_recordings_replay_clean_against_the_port`,
 //! `dashboard_qual_recordings_replay_clean_against_the_port`,
 //! `owner_answers_recordings_replay_clean_against_the_port`,
-//! `pending_answers_recordings_replay_clean_against_the_port` and
-//! `questions_rc_recordings_replay_clean_against_the_port`.
+//! `pending_answers_recordings_replay_clean_against_the_port`,
+//! `questions_rc_recordings_replay_clean_against_the_port` and
+//! `dashboard_db_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -541,6 +542,12 @@ fn main() -> ExitCode {
             &rest,
             frozen.map_or_else(|| SystemClock.now_unix(), |t| t as f64),
         ),
+        // #12029 P2g: `ddb_driver.py` points the script's checkout at the
+        // working directory, so the sandbox root stands for it.
+        "dashboard-db" => trusty_architect::dashboard::pydb::replay(
+            &rest,
+            frozen.map_or_else(|| SystemClock.now_unix(), |t| t as f64),
+        ),
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
@@ -550,7 +557,7 @@ fn main() -> ExitCode {
                  il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
                  gh-session-track, ruling_pack, ids36, dashboard_schema, dashboard_jsonl, \
                  dashboard_derive, dashboard_store, dashboard_ids, dashboard_qual, \
-                 owner_answers, pending-answers, questions_rc"
+                 owner_answers, pending-answers, questions_rc, dashboard-db"
             );
             return ExitCode::from(2);
         }

@@ -1,0 +1,49 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "local/owner-queue",
+    "set",
+    "items",
+    "T01",
+    "--if-version",
+    "1",
+    "--json",
+    "{\"kind\": \"task\", \"status\": \"open\", \"title\": \"Ship it\", \"goal\": \"G01\", \"projects\": [\"sample-org/sample-repo\"], \"progress\": {\"pct\": 50}}"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/owner-queue-archive/pruned.jsonl": "{\"actor\": \"architect\", \"collection\": \"items\", \"data\": {\"title\": \"old one\"}, \"id\": \"D09\", \"pruned_at\": \"2026-11-20T00:00:00Z\", \"version\": 2}\n{\"actor\": \"architect\", \"collection\": \"goals\", \"data\": {\"title\": \"old goal\"}, \"id\": \"G09\", \"pruned_at\": \"2026-11-21T00:00:00Z\", \"version\": 1}\n{\"actor\": \"architect\", \"collection\": \"items\", \"data\": {\"title\": \"older\"}, \"id\": \"D0a\", \"pruned_at\": \"2026-11-22T00:00:00Z\", \"version\": 3}\n",
+    "local/owner-queue/goals/G01.json": "{\n  \"title\": \"Sample goal\",\n  \"steer_requests\": [\n    {\n      \"at\": \"2026-11-26T05:00:00Z\",\n      \"text\": \"keep it small\"\n    }\n  ],\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/A01.json": "{\n  \"kind\": \"action\",\n  \"status\": \"open\",\n  \"title\": \"Sign the sample form\",\n  \"created\": \"2026-11-20T12:00:00Z\",\n  \"updated\": \"2026-11-20T12:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/B01.json": "{\n  \"kind\": \"blocker\",\n  \"status\": \"open\",\n  \"title\": \"Waiting on the sample key\",\n  \"task\": \"T02\",\n  \"created\": \"2026-11-20T11:00:00Z\",\n  \"updated\": \"2026-11-20T11:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D01.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"open\",\n  \"title\": \"Pick the release plan\",\n  \"detail\": \"The sample team must pick one plan for the next release. Plan A ships the small change first; plan B waits for the full change. Either way the owner reviews the result before it goes out.\",\n  \"task\": \"T01\",\n  \"options\": [\n    {\n      \"label\": \"Plan A (Recommended)\",\n      \"desc\": \"small first\",\n      \"recommended\": true\n    },\n    {\n      \"label\": \"Plan B\",\n      \"desc\": \"all at once\"\n    }\n  ],\n  \"created\": \"2026-11-20T10:00:00Z\",\n  \"updated\": \"2026-11-20T10:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D02.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"title\": \"Name the sample\",\n  \"answer\": \"Option one\",\n  \"answered_at\": \"2026-11-26T08:00:00Z\",\n  \"created\": \"2026-11-19T10:00:00Z\",\n  \"updated\": \"2026-11-26T08:00:00Z\",\n  \"session\": \"pm-beta\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D03.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"open\",\n  \"title\": \"Choose a colour\",\n  \"detail\": \"The sample team must pick one plan for the next release. Plan A ships the small change first; plan B waits for the full change. Either way the owner reviews the result before it goes out.\",\n  \"task\": \"T01\",\n  \"options\": [\n    {\n      \"label\": \"Red\"\n    },\n    {\n      \"label\": \"Blue (Recommended)\"\n    }\n  ],\n  \"created\": \"2026-11-21T10:00:00Z\",\n  \"updated\": \"2026-11-21T10:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D04.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"interactive\",\n  \"title\": \"Talk over the layout\",\n  \"answered_at\": \"2026-11-26T09:00:00Z\",\n  \"created\": \"2026-11-22T10:00:00Z\",\n  \"updated\": \"2026-11-26T09:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/Q01.json": "{\n  \"kind\": \"question\",\n  \"status\": \"open\",\n  \"title\": \"Which day suits?\",\n  \"created\": \"2026-11-23T10:00:00Z\",\n  \"updated\": \"2026-11-23T10:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/T01.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"Ship the sample release\",\n  \"goal\": \"G01\",\n  \"projects\": [\n    \"sample-org/sample-repo\"\n  ],\n  \"progress\": {\n    \"pct\": 40\n  },\n  \"links\": [\n    {\n      \"label\": \"issue\",\n      \"url\": \"https://github.com/sample-org/sample-repo/issues/7\"\n    }\n  ],\n  \"created\": \"2026-11-18T10:00:00Z\",\n  \"updated\": \"2026-11-25T10:00:00Z\",\n  \"progress_at\": \"2026-11-25T10:00:00Z\",\n  \"log\": [\n    {\n      \"at\": \"2026-11-25T10:00:00Z\",\n      \"text\": \"drafted the notes\"\n    }\n  ],\n  \"session\": \"pm-alpha\",\n  \"status_request\": {\n    \"at\": \"2026-11-26T07:00:00Z\"\n  },\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/T02.json": "{\n  \"kind\": \"task\",\n  \"status\": \"running\",\n  \"title\": \"Tidy the sample docs\",\n  \"goal\": \"G01\",\n  \"projects\": [\n    \"architect\"\n  ],\n  \"progress\": 10,\n  \"created\": \"2026-11-18T11:00:00Z\",\n  \"updated\": \"2026-11-24T10:00:00Z\",\n  \"status_briefs\": [\n    {\n      \"id\": \"MB0001\",\n      \"at\": \"2026-11-23T10:00:00Z\",\n      \"brief\": \"sample/notes/a.md\"\n    },\n    {\n      \"id\": \"MB0be9\",\n      \"at\": \"2026-11-22T10:00:00Z\",\n      \"brief\": \"sample/notes/old.md\"\n    }\n  ],\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/T03.json": "{\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"title\": \"Untracked sample task\",\n  \"created\": \"2026-11-18T12:00:00Z\",\n  \"updated\": \"2026-11-24T10:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/meta/id-aliases.json": "{\n  \"rules\": [\n    {\n      \"from\": \"A\",\n      \"to\": \"B\"\n    }\n  ],\n  \"version\": 1\n}\n",
+    "local/owner-queue/meta/settings.json": "{\n  \"user_state\": \"away\",\n  \"user_state_at\": \"2026-11-26T20:00:00Z\",\n  \"technical_level\": \"engineer\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/questions/Q0a.json": "{\n  \"status\": \"open\",\n  \"asked\": \"Is the sample ready?\",\n  \"title\": \"Is the sample ready?\",\n  \"created\": \"2026-11-24T10:00:00Z\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/questions/Q0b.json": "{\n  \"status\": \"pending\",\n  \"asked\": \"Follow up on the sample.\",\n  \"title\": \"Follow up on the sample\",\n  \"created\": \"2026-11-24T11:00:00Z\",\n  \"thread\": [\n    {\n      \"q\": \"more detail?\",\n      \"answer\": \"\"\n    }\n  ],\n  \"version\": 1\n}\n",
+    "local/owner-queue/sessions/S0b.json": "{\n  \"name\": \"pm-alpha\",\n  \"state\": \"idle\",\n  \"status\": \"\",\n  \"summary\": \"\",\n  \"updated\": \"2026-11-26T00:00:00Z\",\n  \"command\": {\n    \"type\": \"steer\",\n    \"status\": \"new\",\n    \"at\": \"2026-11-26T06:00:00Z\",\n    \"note\": \"focus on the notes\"\n  },\n  \"version\": 1\n}\n"
+  },
+  "reads": [
+    "local/owner-queue/items/T01.json",
+    "local/owner-queue/meta/settings.json"
+  ],
+  "stdout": "{\n  \"collection\": \"items\",\n  \"id\": \"T01\",\n  \"version\": 2\n}\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/owner-queue/.lock": "",
+    "local/owner-queue/items/T01.json": "{\n  \"goal\": \"G01\",\n  \"kind\": \"task\",\n  \"progress\": {\n    \"pct\": 50\n  },\n  \"progress_at\": \"2026-11-27T13:00:00Z\",\n  \"projects\": [\n    \"sample-org/sample-repo\"\n  ],\n  \"status\": \"open\",\n  \"title\": \"Ship it\",\n  \"version\": 2\n}\n"
+  },
+  "clock": 1795784400
+}

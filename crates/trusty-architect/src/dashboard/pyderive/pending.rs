@@ -7,7 +7,12 @@
 //! instructions, each source in id order (a missing collection yields
 //! nothing). [`request_queue`] keeps the kinds in [`REQUEST_LABELS`], adds
 //! `label` and sorts by `(at, id, kind)`. Every text is Python's `str()`.
-//! Test: `dashboard_derive_recordings_replay_clean_against_the_port` (`pending`).
+//! Intended divergence (#12029 P2g): an `answered`
+//! event's text carries `: <trimmed answer_note>` as the Architect Do text
+//! does ([`with_note`], the bundled copy's `_with_note`, #10765); the frozen
+//! derive drops the note there.
+//! Test: `dashboard_derive_recordings_replay_clean_against_the_port` (`pending`),
+//! `answered_text_carries_the_trimmed_answer_note`.
 
 use super::{
     PySnap, building_brief, coll, dict, done, is_selftest, list, relayed, text, text_or, ts,
@@ -56,6 +61,19 @@ fn ad_linked(d: &PyValue) -> bool {
         && (!strip(&text_or(d, "session")).is_empty() || projects)
 }
 
+/// `_with_note(head, note)` (#10765): `head`, then `: <note>` when the owner
+/// typed a non-blank `answer_note` string.
+// #12029 P2g: the frozen derive appends the note to Architect Do only; the
+// bundled copy's rule covers the plain answer too.
+pub(crate) fn with_note(mut head: String, note: Option<&PyValue>) -> String {
+    if let Some(PyValue::Str(n)) = note
+        && !strip(n).is_empty()
+    {
+        head.push_str(&format!(": {}", strip(n)));
+    }
+    head
+}
+
 /// The answer-state event of an item (the `if/elif` chain of `pending_items`).
 fn status_event(d: &PyValue, id: &str) -> Option<Ev> {
     let note = get(d, "answer_note");
@@ -76,11 +94,6 @@ fn status_event(d: &PyValue, id: &str) -> Option<Ev> {
             if !ad_linked(d) {
                 t.push_str(" (needs target resolution)");
             }
-            if let Some(PyValue::Str(n)) =
-                note.filter(|n| matches!(n, PyValue::Str(s) if !strip(s).is_empty()))
-            {
-                t.push_str(&format!(": {}", strip(n)));
-            }
             let f = |k| text(d, k);
             return Some(ev(&[
                 ("id", id.into()),
@@ -89,14 +102,15 @@ fn status_event(d: &PyValue, id: &str) -> Option<Ev> {
                 ("title", f("title")),
                 ("task", f("task")),
                 ("session", f("session")),
-                ("text", t),
+                ("text", with_note(t, note)),
             ]));
         }
         let mut e = ev(&[
             ("id", id.into()),
             ("kind", "answered".into()),
             ("at", text(d, "answered_at")),
-            ("text", text(d, "answer")),
+            // #12029 P2g: intended divergence from the frozen derive: "Other" plus the typed text.
+            ("text", with_note(text(d, "answer"), note)),
         ]);
         if let Some(PyValue::List(subs)) = get(d, "subs") {
             let subs = subs

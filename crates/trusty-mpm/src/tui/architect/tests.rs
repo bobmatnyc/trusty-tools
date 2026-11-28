@@ -65,7 +65,8 @@ fn sample() -> DashSnapshot {
         doc("Q02", json!({"asked": "gone", "status": "cleared"})),
     ];
     let tally = json!({"open": 2, "questions": 1, "actions": 0, "tasks": 1,
-        "answered_unrelayed": 1, "parked": 0, "running": 0, "answers_waiting": 1});
+        "answered_unrelayed": 1, "parked": 0, "decisions": 1, "blockers": 0,
+        "running": 0, "answers_waiting": 1});
     snapshot_from(&items, &goals, &sessions, &questions, &tally)
 }
 
@@ -86,10 +87,8 @@ fn snapshot_splits_items_by_kind_and_drops_closed_rows() {
             .iter()
             .any(|(k, v)| k == "title" && v.starts_with("Read-only"))
     );
-    assert_eq!(
-        s.tally,
-        "2 open dashboard items: 1 question, 0 actions, 1 task, 1 answers waiting"
-    );
+    // #12029 P2g: the frozen `dashboard-db.py` tally line.
+    assert_eq!(s.tally, "1 decisions, 0 blockers");
 }
 
 #[tokio::test]
@@ -308,7 +307,8 @@ fn architect_render_lists_rows_with_badges_and_counts() {
         "D3a",
         " OPEN ",
         "Read-only Architect view?",
-        "1 answers waiting",
+        // #12029 P2g: the footer carries the frozen `dashboard-db.py` tally line.
+        "1 decisions, 0 blockers",
     ] {
         assert!(screen.contains(want), "missing {want:?}");
     }

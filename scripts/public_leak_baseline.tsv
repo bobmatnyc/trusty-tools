@@ -162,6 +162,8 @@ crates/trusty-architect/tests/classify_ported.rs	EMAIL	3
 crates/trusty-architect/tests/dashboard_golden.rs	HOSTNAME	1
 crates/trusty-architect/tests/fixtures/a3/corpus_a3.json	BRIEF_PATH	1
 crates/trusty-architect/tests/fixtures/a3/regen_a3.py	BRIEF_PATH	1
+# #12029 P2g: frozen schema pattern, verbatim (the frozen dashboard schemas the dashboard-db replay seeds, one shared copy).
+crates/trusty-architect/tests/fixtures/dashboard-db/frozen-schemas.json	BRIEF_PATH	6
 crates/trusty-architect/tests/fixtures/dashboard/corpus.json	BRIEF_PATH	4
 crates/trusty-architect/tests/fixtures/dashboard/corpus.json	HOSTNAME	3
 crates/trusty-architect/tests/fixtures/dashboard/pending/cases.json	BRIEF_PATH	2

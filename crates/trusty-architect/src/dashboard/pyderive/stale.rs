@@ -62,7 +62,7 @@ pub(crate) fn last_activity(d: &PyValue) -> Option<Time> {
 }
 
 /// `_moved(old, new)`: progress (`pct`, `eta*`), `status`, `steps` or `outcome` changed.
-fn moved(old: &PyValue, new: &PyValue) -> bool {
+pub(crate) fn moved(old: &PyValue, new: &PyValue) -> bool {
     let empty = PyValue::Dict(Vec::new());
     let op = dict(old, "progress").unwrap_or(&empty);
     let np = dict(new, "progress").unwrap_or(&empty);

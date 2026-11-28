@@ -22,5 +22,6 @@
   "D0m": {"kind": "question", "status": "open", "parked": {"until": "2026-11-01", "at": "2026-10-30T00:00:00Z"}},
   "D0n": {"kind": "question", "status": "open", "parked": true, "answer": "Yes", "answered_at": "2026-11-20T09:35:00Z"},
   "D0p": {"kind": "question", "status": "answered", "answer": "Yes", "answered_at": "2026-11-20T09:36:00Z", "refs": ["arch:ilio"]},
-  "D0q": {"kind": "question", "status": "relayed", "answer": "Yes", "answered_at": "2026-11-20T09:37:00Z"}
+  "D0q": {"kind": "question", "status": "relayed", "answer": "Yes", "answered_at": "2026-11-20T09:37:00Z"},
+  "D0r": {"kind": "question", "status": "answered", "answer": "Other", "answer_note": "  ship the small one ", "answered_at": "2026-11-20T09:38:00Z"}
 }

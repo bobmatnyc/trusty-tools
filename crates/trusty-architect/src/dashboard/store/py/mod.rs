@@ -39,7 +39,10 @@ pub use cases::replay_cases;
 // #12029 P2d: the ids and qual driver mirrors share these.
 pub(crate) use cases::{error_line, file_op};
 pub(crate) use fsio::makedirs;
+// #12029 P2g: `dashboard-db` checks documents against the schemas and reports write results.
+pub(crate) use jsonl::to_json;
 pub(crate) use value::{normalize_timestamps, sorted, with_key};
+pub(crate) use write::OpOut;
 
 use super::writer::WriterClass;
 use crate::clock::Clock;

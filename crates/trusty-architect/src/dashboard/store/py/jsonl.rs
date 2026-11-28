@@ -16,7 +16,7 @@ use crate::dashboard::pyjsonl;
 use crate::pyjson_load::{PyInt, PyValue};
 
 /// A [`PyValue`] as the schema validator's JSON (a big int as a float, a non-finite float as `null`).
-fn to_json(v: &PyValue) -> Value {
+pub(crate) fn to_json(v: &PyValue) -> Value {
     match v {
         PyValue::Null => Value::Null,
         PyValue::Bool(b) => Value::Bool(*b),
