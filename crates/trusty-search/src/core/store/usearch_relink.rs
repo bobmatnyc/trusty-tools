@@ -56,13 +56,16 @@ pub(super) fn find_stranded(
     Ok(sweep(index, n, dim, threads, read)?.stranded)
 }
 
-/// True when one of `hits` holds the same stored vector as `key`, so the
-/// self-search reached `key`'s vector and only the tie order left `key` out.
+/// True when all [`SWEEP_K`] `hits` hold the same stored vector as `key`, so
+/// the top-k is saturated by duplicates and only tie order left `key` out.
 /// Why: more than [`SWEEP_K`] identical vectors cannot all appear in one
 /// top-[`SWEEP_K`] search, and re-inserting them never changes that (#11891).
+/// A smaller group cannot fill the top-k: a distance-0 key outranks every
+/// other, so a member absent beside its twins is unreachable, a real strand.
 /// What: compares the decoded stored vectors (same quantization, so an exact
 /// duplicate decodes to identical floats) of `key` and each hit.
-/// Test: `super::relink_dup_11891_tests::duplicate_ties_are_reachable_and_real_strands_still_relink`.
+/// Test: `super::relink_dup_11891_tests::duplicate_ties_are_reachable_and_real_strands_still_relink`,
+/// `super::relink_dup_11891_tests::a_stranded_member_of_a_small_duplicate_group_is_relinked`.
 fn ties_with_duplicate(
     index: &Index,
     key: u64,
@@ -70,6 +73,10 @@ fn ties_with_duplicate(
     own: &mut [f32],
     other: &mut [f32],
 ) -> Result<bool> {
+    // #11891 critic round: a tie only when duplicates saturate the top-k.
+    if hits.len() < SWEEP_K {
+        return Ok(false);
+    }
     let got = index
         .get(key, own)
         .map_err(|e| anyhow!("usearch read of key {key} failed: {e}"))?;
@@ -80,11 +87,11 @@ fn ties_with_duplicate(
         let got = index
             .get(hit, other)
             .map_err(|e| anyhow!("usearch read of key {hit} failed: {e}"))?;
-        if got > 0 && own == other {
-            return Ok(true);
+        if got == 0 || own != other {
+            return Ok(false);
         }
     }
-    Ok(false)
+    Ok(true)
 }
 
 /// [`find_stranded`] plus the duplicate-tie count.
@@ -149,13 +156,13 @@ fn sweep(
 }
 
 /// What one [`relink_stranded`] call saw, for its log line.
-struct Outcome {
+pub(super) struct Outcome {
     /// Graph-stranded keys found by each sweep, in order; the last entry is
     /// the final sweep (0 when the loop converged).
-    passes: Vec<usize>,
+    pub(super) passes: Vec<usize>,
     /// Duplicate ties seen by the first sweep.
-    duplicate_ties: usize,
-    relinked: usize,
+    pub(super) duplicate_ties: usize,
+    pub(super) relinked: usize,
 }
 
 /// Make every key of `read` reachable by its own vector; returns how many
@@ -214,8 +221,10 @@ pub(super) fn relink_stranded(
 /// Log the sweep's outcome (silent when nothing was stranded or tied) and
 /// pass the re-link count through. `path` is the index's snapshot file, so a
 /// line names the index it concerns.
-/// Test: `super::relink_warn_11891_tests::the_relink_warnings_name_the_index_path`.
-fn finish(out: &Outcome, label: &str, path: &str, started: Instant) -> usize {
+/// Test: `super::relink_warn_11891_tests::the_relink_warnings_name_the_index_path`,
+/// `super::relink_warn_11891_tests::the_relinked_warning_names_the_index_path`,
+/// `super::relink_warn_11891_tests::the_still_stranded_warning_names_the_index_path`.
+pub(super) fn finish(out: &Outcome, label: &str, path: &str, started: Instant) -> usize {
     let (relinked, left) = (out.relinked, out.passes.last().copied().unwrap_or(0));
     let graph_stranded = out.passes.first().copied().unwrap_or(0);
     // #11891: per-pass, duplicate-tie and graph-strand counts, the live data

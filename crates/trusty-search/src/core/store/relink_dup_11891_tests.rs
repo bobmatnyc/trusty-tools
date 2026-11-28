@@ -80,3 +80,56 @@ fn duplicate_ties_are_reachable_and_real_strands_still_relink() {
     }
     assert_eq!(index.size(), n, "re-linking must not add or lose a key");
 }
+
+/// Twins added for a stranded key: a group of 3, too few to fill the top-10.
+const TWINS: usize = 2;
+
+/// #11891 critic round: a stranded member of a small duplicate group is still
+/// a strand. Its twins are linked and found by its vector, but they cannot
+/// fill the top-10, so the key is unreachable and must be re-linked. Under the
+/// first tie rule (any identical hit) `before` missed it.
+#[test]
+fn a_stranded_member_of_a_small_duplicate_group_is_relinked() {
+    let (index, mut vectors, mut keys) = damaged_index(BASE, 9450);
+    let plain = |i: usize, buf: &mut [f32]| {
+        buf.copy_from_slice(&vectors[keys[i] as usize]);
+        Ok(Some(keys[i]))
+    };
+    let seed = find_stranded(&index, keys.len(), BLOBS.dim, 4, &plain).expect("find");
+    let stranded = seed.first().expect("the churn must strand a key").1;
+    let v = vectors[stranded as usize].clone();
+    index.reserve(index.size() + TWINS).expect("reserve");
+    for t in 0..TWINS {
+        let twin = (BASE + t) as u64;
+        index.add(twin, &v).expect("add twin");
+        while vectors.len() <= twin as usize {
+            vectors.push(Vec::new());
+        }
+        vectors[twin as usize] = v.clone();
+        keys.push(twin);
+    }
+    let hits = index.search(&v, 10).expect("self-search");
+    assert!(
+        !hits.keys.contains(&stranded) && hits.keys.contains(&(BASE as u64)),
+        "precondition: the twins are found and {stranded} is not: {:?}",
+        hits.keys
+    );
+    let read = |i: usize, buf: &mut [f32]| {
+        buf.copy_from_slice(&vectors[keys[i] as usize]);
+        Ok(Some(keys[i]))
+    };
+    let n = keys.len();
+
+    let before = find_stranded(&index, n, BLOBS.dim, 4, &read).expect("find");
+    assert!(
+        before.iter().any(|&(_, k)| k == stranded),
+        "key {stranded} has only {TWINS} twins, so it is a strand, not a tie: {before:?}"
+    );
+    relink_stranded(&index, n, BLOBS.dim, 4, "dup group test", "test", &read).expect("relink");
+    let hits = index.search(&v, 10).expect("self-search");
+    assert!(
+        hits.keys.contains(&stranded),
+        "key {stranded} must find itself after the sweep: {:?}",
+        hits.keys
+    );
+}

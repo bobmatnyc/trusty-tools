@@ -7,11 +7,15 @@
 //! makes a compaction log the per-sweep line with duplicate ties, which must
 //! carry the store's snapshot path as the `path` field. Since the
 //! duplicate-aware sweep, those ties strand nothing, so no strand warning fires.
+//! The last two tests guard criterion 1 (#12109) on each strand warning.
 //! Test: this module. Run with `cargo test -p trusty-search --lib relink_warn_11891`.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use super::relink_9450_tests::{damaged_index, BLOBS};
 use super::types::{CompactMode, VectorStore};
+use super::usearch_relink::{finish, relink_stranded, Outcome};
 use super::usearch_store::UsearchStore;
 
 /// Collects every formatted log line written through its subscriber.
@@ -90,4 +94,63 @@ fn the_relink_warnings_name_the_index_path() {
         !logged.contains("vectors still stranded after"),
         "duplicate ties must not leave keys stranded:\n{logged}"
     );
+}
+
+/// Run `f` with WARN-level log lines on this thread captured; returns them.
+fn capture_warnings(f: impl FnOnce()) -> String {
+    let cap = Capture::default();
+    let writer = cap.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = cap.0.lock().expect("capture lock").clone();
+    String::from_utf8(bytes).expect("utf8")
+}
+
+/// The line of `logged` holding `warning`; panics naming both when absent.
+fn line_with<'a>(logged: &'a str, warning: &str) -> &'a str {
+    logged
+        .lines()
+        .find(|l| l.contains(warning))
+        .unwrap_or_else(|| panic!("no `{warning}` warning in:\n{logged}"))
+}
+
+/// #11891 criterion 1: the "re-linked" warning names the index. A churned
+/// index has real strands, so `relink_stranded` re-links and warns.
+#[test]
+fn the_relinked_warning_names_the_index_path() {
+    let (index, vectors, survivors) = damaged_index(8_000, 9450);
+    let read = |i: usize, buf: &mut [f32]| {
+        buf.copy_from_slice(&vectors[survivors[i] as usize]);
+        Ok(Some(survivors[i]))
+    };
+    let path = "/idx/relinked/hnsw.usearch";
+    let n = survivors.len();
+    let logged = capture_warnings(|| {
+        relink_stranded(&index, n, BLOBS.dim, 4, "f16", path, &read).expect("relink");
+    });
+    let line = line_with(&logged, "stranded vectors after rebuild");
+    assert!(line.contains(&format!("path={path}")), "{line}");
+}
+
+/// #11891 criterion 1: the "still stranded" warning names the index. No
+/// seeded build reliably fails to converge, so `finish` gets an outcome whose
+/// last sweep still found strands.
+#[test]
+fn the_still_stranded_warning_names_the_index_path() {
+    let path = "/idx/left/hnsw.usearch";
+    let out = Outcome {
+        passes: vec![5, 4, 3, 3, 2],
+        duplicate_ties: 0,
+        relinked: 15,
+    };
+    let logged = capture_warnings(|| {
+        finish(&out, "f16", path, Instant::now());
+    });
+    let line = line_with(&logged, "vectors still stranded after");
+    assert!(line.contains(&format!("path={path}")), "{line}");
 }
