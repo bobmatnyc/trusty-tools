@@ -913,6 +913,11 @@ pub(crate) async fn attach_cmd(
     }
 }
 
+// #12049: `tm events` daemon-event lines, kept out of the capped `tests.rs`.
+#[cfg(test)]
+#[path = "misc_events_tests.rs"]
+mod events_tests;
+
 // #7278: the parking detector opens a path the hook payload chose, so these
 // cover the screen that decides whether it opens anything at all. Temp dirs
 // come from `crate::test_support::hermetic_temp_dir`, never a bare
