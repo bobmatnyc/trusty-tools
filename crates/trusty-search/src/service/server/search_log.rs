@@ -81,6 +81,11 @@ pub(super) fn log_search(
         lexical_ms = s.lexical_ms,
         ripgrep_ms = s.ripgrep_ms,
         fusion_ms = s.fusion_ms,
+        // #11964: the fusion stage's sub-steps.
+        chunk_fetch_ms = s.chunk_fetch_ms,
+        chunk_fetch_queue_ms = s.chunk_fetch_queue_ms,
+        kg_ms = s.kg_ms,
+        rerank_ms = s.rerank_ms,
         rehydrate_wait_ms = s.rehydrate_wait_ms,
         rehydrate_ran = s.rehydrate_ran,
         hnsw_promoted = s.hnsw_promoted,

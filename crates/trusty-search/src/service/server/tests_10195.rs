@@ -324,3 +324,42 @@ async fn search_log_splits_the_vector_lane() {
         assert!(line.contains(field), "missing `{field}` in: {line}");
     }
 }
+
+/// #11964: `meta.timings` and the search log line split `fusion_ms` into the
+/// chunk fetch (queue wait included), KG expansion and the MMR pass.
+///
+/// Pre-fix `fusion_ms` was one number, so a 1 s fusion spike could not be
+/// attributed.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn search_log_splits_the_fusion_stage() {
+    let registry = IndexRegistry::new();
+    let _tmp = add_index(&registry, "fusion-11964").await;
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let (cap, _guard) = capture(tracing::Level::INFO);
+    let body = super::search::search_report(&state, "fusion-11964", query("shared_symbol"))
+        .await
+        .unwrap_or_else(|(s, b)| panic!("expected 200, got {s}: {b}"));
+
+    let timings = &body["meta"]["timings"];
+    let fields = [
+        "chunk_fetch_ms",
+        "chunk_fetch_queue_ms",
+        "kg_ms",
+        "rerank_ms",
+    ];
+    for key in fields {
+        assert!(timings[key].is_u64(), "meta.timings.{key} missing: {body}");
+    }
+    assert!(timings["fusion_ms"].is_u64(), "fusion_ms stays: {body}");
+
+    let line = cap.line(": search index_id=fusion-11964 ");
+    for key in fields {
+        assert!(
+            line.contains(&format!(" {key}=")),
+            "missing `{key}` in: {line}"
+        );
+    }
+}

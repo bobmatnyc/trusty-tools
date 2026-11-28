@@ -54,7 +54,7 @@ use drops::SearchDrops;
 use embed_degrade::PrecomputedQueryVector;
 use exact::ExactMatchReport;
 use materialize::PageFilters;
-use timings::{QueryPhase, SearchTimings, StageClock};
+use timings::{fetch_scoped, QueryPhase, SearchTimings, StageClock};
 
 /// #2203: a balanced intent (`Unknown`; `Keyword` since #9027) in `Code` mode
 /// down-ranks non-code files instead of dropping them, so a short NL query can
@@ -244,8 +244,8 @@ impl CodeIndexer {
         query_vector: Option<PrecomputedQueryVector<'_>>,
     ) -> Result<SearchOutcome> {
         // #10193: one short rehydrate wait per query, shared by every lane.
-        self.with_query_rehydrate_deadline(self.run_search(query, query_vector))
-            .await
+        let search = fetch_scoped(self.run_search(query, query_vector)); // #11964
+        self.with_query_rehydrate_deadline(search).await
     }
 
     /// The search pipeline behind [`Self::search_with_outcome_vec`].
@@ -431,7 +431,7 @@ impl CodeIndexer {
         } else {
             fused_raw
         };
-        let fused = self.apply_mmr_rerank(fused_raw, want).await;
+        let fused = self.mmr_rerank_timed(fused_raw, want, &mut clock).await; // #11964
 
         // 4) KG expand (conditional). Issue #147: embed `refine_query` for
         // KG-neighbourhood reranking.
@@ -454,13 +454,12 @@ impl CodeIndexer {
         let (all, kg_ids) = if skip_kg {
             (fused, HashSet::new())
         } else {
-            let effective_use_kg = use_kg_first || force_kg;
-            let effective_expand = query.expand_graph || force_kg;
-            self.expand_with_kg(
+            self.expand_with_kg_timed(
+                &mut clock, // #11964
                 fused,
                 &intent,
-                effective_use_kg,
-                effective_expand,
+                use_kg_first || force_kg,
+                query.expand_graph || force_kg,
                 refine_embedding.as_deref(),
             )
             .await
