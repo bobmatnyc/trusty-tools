@@ -1,4 +1,4 @@
-//! Grant lifecycle on a live broker: reconnect grace and rebinding (`grants.py`).
+//! Grant lifecycle on a live broker: worker loss, rebinding and browser restart (`grants.py`).
 
 mod common;
 
@@ -105,7 +105,7 @@ fn grant_count(reply: &Json) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grace_expiry_ends_a_grant_whose_worker_never_returns() {
+async fn a_grant_survives_a_worker_stop_until_the_browser_restarts() {
     let dir = state_dir();
     let state = dir.path();
     let store = MemoryKeyStore::new();
@@ -143,30 +143,44 @@ async fn grace_expiry_ends_a_grant_whose_worker_never_returns() {
         Some(&Json::Bool(true)),
         "{connected:?}"
     );
+    // #11570: Chrome stops the idle MV3 worker; the port closes while the browser stays open.
     drop(worker);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Inside the grace the grant stays listed; a same-incarnation worker rebinds it.
-    *clock.0.lock().expect("clock") = 1040.0;
+    // Far past the old 45 s grace the grant is still listed and attachable.
+    *clock.0.lock().expect("clock") = 1000.0 + 31.0 * 60.0;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         grant_count(&once(state, "agent.sock", r#"{"op":"profiles"}"#).await),
         1
     );
+    let attached = once(state, "agent.sock", r#"{"op":"attach"}"#).await;
+    assert_eq!(attached.get("ok"), Some(&Json::Bool(true)), "{attached:?}");
+    // The woken worker, same browser incarnation, rebinds the grant.
     let worker = handshake(state, "inc-1").await;
-    drop(worker);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // The second loss restarts the grace from 1040; at 1085 it has run out.
-    *clock.0.lock().expect("clock") = 1084.0;
     assert_eq!(
         grant_count(&once(state, "agent.sock", r#"{"op":"profiles"}"#).await),
         1
     );
-    *clock.0.lock().expect("clock") = 1085.0;
+    drop(worker);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A second stop, another long wait: still listed.
+    *clock.0.lock().expect("clock") = 1000.0 + 120.0 * 60.0;
+    assert_eq!(
+        grant_count(&once(state, "agent.sock", r#"{"op":"profiles"}"#).await),
+        1
+    );
+    let audit = fs::read_to_string(state.join("audit.jsonl")).expect("audit");
+    assert!(!audit.contains(r#""outcome":"browser_gone""#), "{audit}");
+
+    // A browser restart brings a new incarnation: only that ends the grant.
+    let worker = handshake(state, "inc-2").await;
     assert_eq!(
         grant_count(&once(state, "agent.sock", r#"{"op":"profiles"}"#).await),
         0
     );
+    drop(worker);
     broker.close().await;
     let audit = fs::read_to_string(state.join("audit.jsonl")).expect("audit");
     assert!(audit.contains(r#""event":"grant_reuse""#), "{audit}");
@@ -217,9 +231,9 @@ async fn listed(state: &std::path::Path) -> usize {
     grant_count(&once(state, "agent.sock", r#"{"op":"profiles"}"#).await)
 }
 
-/// #11528: a restart keeps the grant; the stored incarnation and the grace still decide its fate.
+/// #11528: a restart keeps the grant; the stored incarnation decides its fate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_keeps_a_grant_until_its_grace_ends() {
+async fn a_restart_keeps_a_grant_until_a_new_incarnation() {
     let dir = state_dir();
     let state = dir.path();
     let clock = Manual(Arc::new(Mutex::new(1000.0)));
@@ -233,8 +247,10 @@ async fn a_restart_keeps_a_grant_until_its_grace_ends() {
 
     let second = start(state, &clock);
     assert_eq!(listed(state).await, 1, "grant must survive the restart");
-    // The same incarnation rebinds it inside the grace.
-    *clock.0.lock().expect("clock") = 1030.0;
+    // #11570: no timer ends it; the same incarnation rebinds it long after the restart.
+    *clock.0.lock().expect("clock") = 1000.0 + 31.0 * 60.0;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(listed(state).await, 1, "no grace timer may end the grant");
     let worker = handshake(state, "inc-1").await;
     assert_eq!(listed(state).await, 1);
     drop(worker);

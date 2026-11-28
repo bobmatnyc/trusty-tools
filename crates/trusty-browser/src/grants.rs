@@ -3,16 +3,15 @@
 //! Why: one Connect click grants a profile to every same-user local agent
 //! until the browser closes or the owner disconnects (#11239 owner rulings).
 //! Grants live only in memory, so parity means wire shape and audit lines.
-//! What: connect, attach, list, revoke, the 45 s reconnect grace with a
-//! deadline sweep, rebinding across a worker restart, and the best-effort
+//! What: connect, attach, list, revoke, the away state while the worker is
+//! stopped, rebinding across a worker restart, and the best-effort
 //! `grant_end` notice to the worker.
 //! Test: `captured_exchanges_replay_byte_identically` (connect, grants,
 //! profiles, attach, operator grants and revoke) in `tests/parity_broker.rs`;
-//! `grace_expiry_ends_a_grant_whose_worker_never_returns` in `tests/broker_grants.rs`.
+//! `a_grant_survives_a_worker_stop_until_the_browser_restarts` in `tests/broker_grants.rs`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use crate::broker::{Core, Inner};
 use crate::entropy::token_hex;
@@ -21,8 +20,6 @@ use crate::peer_conn::Peer;
 use crate::pyjson::Json;
 use crate::refusal::{Refusal, request_string};
 
-/// Seconds a grant waits for its worker to return (`RECONNECT_GRACE`).
-pub const RECONNECT_GRACE: f64 = 45.0;
 /// Popup and operator grant ops.
 pub const OPERATOR_OPS: &[&str] = &["grants", "revoke_grant", "revoke_grants"];
 /// Refusals relayed whole on `enrollment.sock`.
@@ -57,8 +54,8 @@ pub struct Grant {
     pub reason: Option<String>,
     /// Browser incarnation it may rebind to.
     pub incarnation: Option<String>,
-    /// End of the reconnect grace, while the worker is away.
-    pub grace_until: Option<f64>,
+    /// The worker is away (stopped or not yet back); ops are refused until it returns.
+    pub away: bool,
 }
 
 /// `urlsplit(url).hostname`: lowercase host, no userinfo, port or brackets.
@@ -140,19 +137,6 @@ pub fn gone(grant: &Grant) -> Refusal {
 }
 
 impl Core {
-    /// End every grant whose reconnect grace ran out (`expire`).
-    pub fn expire(&self, inner: &mut Inner, now: f64) {
-        let due: Vec<String> = inner
-            .grants
-            .iter()
-            .filter(|g| g.active && g.grace_until.is_some_and(|t| t <= now))
-            .map(|g| g.ident.clone())
-            .collect();
-        for ident in due {
-            self.retire(inner, &ident, "browser_gone");
-        }
-    }
-
     /// Fail-closed audit line (`record`): a failed write is `AuditUnavailable`.
     pub fn record(&self, event: &str, fields: &[(&str, Option<Json>)]) -> Result<(), Refusal> {
         self.audit
@@ -178,7 +162,6 @@ impl Core {
         let Some(peer) = inner.peer(&profile) else {
             return Err(Refusal::new("BrowserDisconnected"));
         };
-        self.expire(inner, self.clock.now());
         let ident = match Core::profile_grant(inner, &profile) {
             Some(g) => g.ident.clone(),
             None => {
@@ -201,7 +184,7 @@ impl Core {
                     last_used: self.clock.now(),
                     reason: None,
                     incarnation: Some(peer.incarnation.clone()),
-                    grace_until: None,
+                    away: false,
                 };
                 self.record(
                     "connect",
@@ -253,7 +236,6 @@ impl Core {
         {
             return Err(Refusal::new("InvalidRequest"));
         }
-        self.expire(inner, self.clock.now());
         let wanted = match hello.get("profile") {
             Some(_) => Some(request_string(hello, "profile")?.to_owned()),
             None => None,
@@ -333,40 +315,16 @@ impl Core {
         self.persist_grants(inner);
     }
 
-    /// Keep one task at the earliest reconnect-grace deadline (`arm`).
-    pub fn arm(&self, inner: &mut Inner) {
-        if let Some(task) = inner.sweeper.take() {
-            task.abort();
-        }
-        if inner.halted {
-            return;
-        }
-        let due = inner
-            .grants
-            .iter()
-            .filter(|g| g.active)
-            .filter_map(|g| g.grace_until)
-            .fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.min(t))));
-        let (Some(due), Some(me)) = (due, self.this.upgrade()) else {
-            return;
-        };
-        let delay = (due - self.clock.now()).max(0.0);
-        let task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
-            let mut inner = me.lock();
-            if inner.halted {
-                return;
-            }
-            inner.sweeper = None;
-            me.expire(&mut inner, me.clock.now());
-            me.arm(&mut inner);
-        });
-        inner.sweeper = Some(task.abort_handle());
-    }
-
-    /// Start the reconnect grace for the lost peer's grants (`peer_gone`).
+    /// Mark the lost peer's grants away (`peer_gone`).
+    ///
+    /// Why: Chrome stops an idle MV3 worker while the browser stays open, and
+    /// a grant lasts until the browser is disconnected or restarted (#11570
+    /// owner rule), so a lost port alone must not end it.
+    /// What: a grant with a browser incarnation turns away with no deadline;
+    /// `peer_back` rebinds it to the same incarnation or ends it for a new
+    /// one. A grant with no incarnation can never rebind and ends now.
+    /// Test: `a_grant_survives_a_worker_stop_until_the_browser_restarts`.
     pub fn peer_gone(&self, inner: &mut Inner, peer: &Peer) {
-        let until = self.clock.now() + RECONNECT_GRACE;
         let mine: Vec<(String, bool)> = inner
             .grants
             .iter()
@@ -380,19 +338,18 @@ impl Core {
             .collect();
         for (ident, has_incarnation) in mine {
             if has_incarnation {
+                // #11570: no reconnect-grace timer; only a new incarnation ends the grant.
                 if let Some(g) = inner.grants.iter_mut().find(|g| g.ident == ident) {
-                    g.grace_until = Some(until);
+                    g.away = true;
                 }
             } else {
                 self.retire(inner, &ident, "browser_gone");
             }
         }
-        self.arm(inner);
     }
 
     /// Rebind the profile's grants to a returning worker (`peer_back`).
     pub fn peer_back(&self, inner: &mut Inner, peer: &Peer) {
-        let now = self.clock.now();
         let mine: Vec<Grant> = inner
             .grants
             .iter()
@@ -406,10 +363,6 @@ impl Core {
             .cloned()
             .collect();
         for grant in mine {
-            if grant.grace_until.is_some_and(|t| t <= now) {
-                self.retire(inner, &grant.ident, "browser_gone");
-                continue;
-            }
             let same = grant
                 .incarnation
                 .as_deref()
@@ -425,10 +378,9 @@ impl Core {
             }
             if let Some(g) = inner.grants.iter_mut().find(|g| g.ident == grant.ident) {
                 g.generation = Some(peer.generation.clone());
-                g.grace_until = None;
+                g.away = false;
             }
         }
-        self.arm(inner);
     }
 
     /// End every grant of a profile as `unenrolled`.
@@ -469,10 +421,8 @@ impl Core {
             .as_ref()
             .is_none_or(|p| Some(p.generation.as_str()) != grant.generation.as_deref())
         {
-            if grant.grace_until.is_some_and(|t| self.clock.now() < t) {
-                return Err(Refusal::new("BrowserDisconnected").into());
-            }
-            self.retire(inner, ident, "browser_gone");
+            // #11570: an away worker refuses the op; it never ends the grant.
+            return Err(Refusal::new("BrowserDisconnected").into());
         } else if route.is_none_or(|r| {
             r.ticket != grant.route.ticket || r.browser_key != grant.route.browser_key
         }) {
@@ -493,8 +443,6 @@ impl Core {
         profile: Option<&str>,
     ) -> Result<Json, Refusal> {
         let op = request.get("op").and_then(Json::as_str);
-        let now = self.clock.now();
-        self.expire(inner, now);
         let mine: Vec<Grant> = inner
             .grants
             .iter()

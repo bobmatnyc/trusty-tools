@@ -74,8 +74,9 @@ reply with a `reason` code and a line in the audit log.
 **Grants.** A **Connect** click in the popup creates a standing grant for that
 one profile. Any local agent running as you can then attach to it. The grant
 ends when you disconnect, when you revoke it with `trusty-browser revoke-grant`
-or `revoke-grants`, or when the browser stays away longer than a 45 s
-reconnect grace. Grants live in memory only; a broker restart ends them.
+or `revoke-grants`, or when the browser restarts. Chrome stopping the idle
+extension worker does not end a grant: it waits, with no deadline, for the
+worker to return from the same browser session. A broker restart keeps grants.
 `trusty-browser grants` lists them.
 
 **Site reach.** The grant covers a profile, not a site. Which sites the agent

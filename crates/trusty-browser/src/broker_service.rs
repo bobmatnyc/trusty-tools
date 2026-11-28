@@ -129,7 +129,7 @@ async fn pair(
 }
 
 impl Core {
-    /// Drop a worker: its claims, its pending commands, and start its grants' grace (`forget`).
+    /// Drop a worker: its claims, its pending commands, and mark its grants away (`forget`).
     pub fn forget(&self, inner: &mut Inner, peer: &Arc<Peer>) {
         inner.peers.retain(|p| !Arc::ptr_eq(p, peer));
         inner.claims.retain(|c| c.generation != peer.generation);

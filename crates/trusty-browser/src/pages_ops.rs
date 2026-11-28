@@ -144,9 +144,9 @@ pub(crate) async fn send(
     let live = inner.grant(&grant.ident).cloned();
     let lost = matches!(exc.code.as_str(), "BrowserDisconnected" | "OutcomeUnknown")
         && gone_peer
-        && live.as_ref().is_some_and(|g| {
-            g.grace_until.is_none() && g.generation.as_deref() == Some(peer.generation.as_str())
-        });
+        && live
+            .as_ref()
+            .is_some_and(|g| !g.away && g.generation.as_deref() == Some(peer.generation.as_str()));
     if exc.code == "TabNotFound" && grant.scope == "tab" {
         core.retire(&mut inner, &grant.ident, "tab_closed");
     } else if exc.code == "UnknownGrant" || lost {

@@ -44,8 +44,7 @@ pub async fn agent(core: Arc<Core>, stream: UnixStream) {
     let op = hello.get("op").and_then(Json::as_str);
     if op == Some("profiles") {
         let reply = if pairing::key_set_is(&hello, &["op"]) {
-            let mut inner = core.lock();
-            core.expire(&mut inner, core.clock.now());
+            let inner = core.lock();
             Json::object([
                 ("ok", Json::Bool(true)),
                 ("profiles", Core::profiles(&inner)),

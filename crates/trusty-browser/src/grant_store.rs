@@ -8,7 +8,7 @@
 //! file (0600), fsyncs, and renames it over the store. [`GrantStore::load`]
 //! fails closed: a symlink, a file not owner-only, bad JSON or one malformed
 //! entry rejects the whole store. [`Core::restore_grants`] runs at broker start
-//! and gives each restored grant the normal reconnect grace, so the existing
+//! and marks each restored grant away from its worker, so the existing
 //! incarnation rule in `peer_back` decides whether it survives.
 //! [`Core::persist_grants`] rewrites the store at every grant change; when the
 //! rewrite fails the store is deleted, so a revoked grant can never return.
@@ -27,11 +27,11 @@
 //! generations); an audit log that cannot be read restores nothing (#11582).
 //! Limit: the tombstone is the audit row. If the audit write also failed (for
 //! example a fully read-only disk), there is no `grant_end` row, and the
-//! revoked grant returns inside its reconnect grace; the incarnation rule
+//! revoked grant returns away from its worker; the incarnation rule
 //! still decides its fate.
 //! Test: `store_round_trips_and_is_owner_only`, `a_rejected_store_restores_nothing`,
 //! `a_failed_rewrite_deletes_the_store`, `a_failed_rewrite_and_delete_reports_a_stale_store`
-//! here; `a_restart_keeps_a_grant_until_its_grace_ends`,
+//! here; `a_restart_keeps_a_grant_until_a_new_incarnation`,
 //! `a_revoked_grant_does_not_return_after_a_restart`,
 //! `a_stale_store_refuses_new_grants_until_a_persist_succeeds`,
 //! `a_stale_store_does_not_restore_a_revoked_grant`,
@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, Audit};
 use crate::broker::{Core, Inner};
-use crate::grants::{Grant, RECONNECT_GRACE};
+use crate::grants::Grant;
 use crate::pairing;
 
 /// File name inside the state directory.
@@ -262,14 +262,13 @@ fn ended_grants(audit: &Audit) -> io::Result<HashSet<String>> {
 }
 
 impl Core {
-    /// Load the store at broker start and re-create each grant in its reconnect grace.
+    /// Load the store at broker start and re-create each grant away from its worker.
     ///
     /// Why: a restart must not drop grants (#11528).
     /// What: a rejected store restores nothing. A grant whose profile is no
-    /// longer paired is dropped. Each restored grant is bound to no worker and
-    /// ends at `now + RECONNECT_GRACE` unless a worker with the stored
-    /// incarnation attaches first.
-    /// Test: `a_restart_keeps_a_grant_until_its_grace_ends` in `tests/broker_grants.rs`.
+    /// longer paired is dropped. Each restored grant is bound to no worker;
+    /// a worker with the stored incarnation rebinds it, any other ends it.
+    /// Test: `a_restart_keeps_a_grant_until_a_new_incarnation` in `tests/broker_grants.rs`.
     pub fn restore_grants(&self, inner: &mut Inner) {
         let store = GrantStore::new(&self.state);
         let stored = match store.load() {
@@ -287,7 +286,6 @@ impl Core {
                 return;
             }
         };
-        let until = self.clock.now() + RECONNECT_GRACE;
         for s in stored.into_iter().filter(|s| !ended.contains(&s.grant)) {
             let route = match pairing::profile_row(&inner.db, &s.profile) {
                 Ok(Some(route)) => route,
@@ -305,11 +303,11 @@ impl Core {
                 last_used: self.clock.now(),
                 reason: None,
                 incarnation: Some(s.incarnation),
-                grace_until: Some(until),
+                // #11570: away with no deadline until the worker says hello.
+                away: true,
             });
         }
         self.persist_grants(inner);
-        self.arm(inner);
     }
 
     /// Rewrite the store from the active grants; on failure delete it.
