@@ -20,6 +20,9 @@
 //! Test: `rpc/project_health_tests.rs`.
 //!
 //! [`register`]: crate::service::rpc::project_health::register
+//! [`project_health_report`]: crate::service::rpc::project_health::project_health_report
+//! [`project_health_counts`]: crate::service::rpc::project_health::project_health_counts
+//! [`ProjectHealthCounts`]: trusty_common::search_rpc::ProjectHealthCounts
 
 use std::collections::HashSet;
 use std::sync::Arc;
