@@ -799,8 +799,15 @@ Python in a traceback; the port prints one line and exits 1. Where the frozen
 scripts carry on after a failed tmux call or write (`capture-pane` exiting
 non-zero, a failed queue append or `mkdir`, `new-session` failing, a failed
 `relaunch.log` append), the port stops with exit 1 and writes nothing after
-it (`rc_fails_closed_on_a_failed_tmux_call_or_write`,
-`start_fails_closed_on_a_failed_tmux_call_or_write`). A queue that is not
+it. Each has its own test: `capture-pane` in
+`rc_exits_1_and_keeps_the_state_file_on_a_failed_capture_pane` and
+`start_exits_1_with_no_rc_line_on_a_failed_capture_pane`, the queue in
+`start_exits_1_with_no_tmux_call_when_the_queue_dir_cannot_be_made` and
+`start_exits_1_with_no_tmux_call_when_the_queue_append_fails`, `new-session`
+in `start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session`
+and the log in
+`start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails`. With
+several ids, a failed append keeps the ids appended before it. A queue that is not
 UTF-8 cannot be a recorded file. Regenerate with the scripts and the driver
 copied to a sandbox directory `P` whose path has no symlink (the probe
 compares canonical paths), each recording's `files` laid into `S/<name>` and

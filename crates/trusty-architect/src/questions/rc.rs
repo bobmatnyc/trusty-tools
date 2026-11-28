@@ -11,7 +11,8 @@
 //! ([`write_state`], temp file then rename). `--dry-run` runs no action and
 //! writes nothing. The session is never killed.
 //! Test: `questions_rc_recordings_replay_clean_against_the_port`,
-//! `rc_fails_closed_on_a_failed_tmux_call_or_write`.
+//! `rc_exits_1_and_keeps_the_state_file_on_a_failed_capture_pane`,
+//! `rc_exits_1_and_keeps_the_state_file_when_the_state_write_fails`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -367,7 +368,11 @@ fn pass(o: &Options<'_>, dry: bool, out: &mut String) -> Result<(), QuestionsErr
 /// already printed; the state file is written only after every read and the
 /// action succeeded.
 /// Test: `questions_rc_recordings_replay_clean_against_the_port`,
-/// `rc_fails_closed_on_a_failed_tmux_call_or_write`.
+/// `rc_exits_1_and_keeps_the_state_file_when_tmux_cannot_start`,
+/// `rc_exits_1_and_keeps_the_state_file_on_a_failed_capture_pane`,
+/// `rc_exits_1_and_keeps_the_state_file_when_the_action_script_cannot_start`,
+/// `rc_exits_1_and_keeps_the_state_file_when_the_state_write_fails`,
+/// `rc_exits_1_and_keeps_the_state_file_on_a_queue_that_is_not_utf8`.
 pub fn run(args: &[String], o: &Options<'_>) -> Outcome {
     let dry = args.iter().any(|a| a == "--dry-run");
     let mut stdout = String::new();

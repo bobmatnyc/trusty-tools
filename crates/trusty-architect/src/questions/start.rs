@@ -15,7 +15,8 @@
 //! `${NAME:-default}` reading: unset or empty takes the default.
 //! Test: `start_recordings_replay_clean_against_the_port`,
 //! `start_launch_runs_only_on_the_private_socket_and_logs_the_url`,
-//! `start_fails_closed_on_a_failed_tmux_call_or_write`.
+//! `start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session`,
+//! `start_treats_a_nan_rc_sleep_as_no_pause`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -284,7 +285,10 @@ fn launch(o: &Options<'_>, v: &Vars, out: &mut Outcome) -> Result<(), QuestionsE
     let root = o.root.to_string_lossy();
     let log = env_or(o.env, "RC_URL_LOG").unwrap_or_else(|| format!("{root}/inbox/relaunch.log"));
     let tries: u64 = env_or(o.env, "ARCH_Q_RC_TRIES").map_or(30, |t| t.parse().unwrap_or(0));
-    let pause: f64 = env_or(o.env, "ARCH_Q_RC_SLEEP").map_or(1.0, |t| t.parse().unwrap_or(0.0));
+    // #12029: `sleep nan` fails and the loop runs on unpaused; NaN is 0 s, never a panic.
+    let pause: f64 = env_or(o.env, "ARCH_Q_RC_SLEEP").map_or(1.0, |t| {
+        t.parse().ok().filter(|p: &f64| !p.is_nan()).unwrap_or(0.0)
+    });
     for _ in 0..tries {
         o.clock
             .sleep(Duration::from_secs_f64(pause.clamp(0.0, 3600.0)));
@@ -306,7 +310,11 @@ fn launch(o: &Options<'_>, v: &Vars, out: &mut Outcome) -> Result<(), QuestionsE
 /// is missing or a tmux call or write fails (the message on stderr, nothing
 /// after it run), else 0.
 /// Test: `start_recordings_replay_clean_against_the_port`,
-/// `start_fails_closed_on_a_failed_tmux_call_or_write`.
+/// `start_exits_1_with_no_tmux_call_when_the_queue_dir_cannot_be_made`,
+/// `start_exits_1_with_no_tmux_call_when_the_queue_append_fails`,
+/// `start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session`,
+/// `start_exits_1_with_no_rc_line_on_a_failed_capture_pane`,
+/// `start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails`.
 pub fn run(args: &[String], o: &Options<'_>) -> Outcome {
     let mut out = Outcome {
         stdout: String::new(),
