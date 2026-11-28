@@ -23,14 +23,15 @@ use trusty_common::install_paths::MPM_DIR_NAME;
 use crate::common::tm_command_in;
 
 /// A daemon stand-in on HTTP and the unix socket that logs every call.
-struct StubDaemon {
-    url: String,
-    socket: PathBuf,
+/// #12048: shared with `config_dir_deploy_12048`.
+pub(crate) struct StubDaemon {
+    pub(crate) url: String,
+    pub(crate) socket: PathBuf,
     calls: Arc<Mutex<Vec<String>>>,
 }
 
 impl StubDaemon {
-    fn start(dir: &Path) -> Self {
+    pub(crate) fn start(dir: &Path) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub daemon");
         let url = format!("http://{}", listener.local_addr().expect("addr"));

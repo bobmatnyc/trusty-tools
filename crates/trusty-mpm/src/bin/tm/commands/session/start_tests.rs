@@ -1335,10 +1335,70 @@ fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
         Some(PathBuf::from("/Users/example")),
     )
     .expect("a sandbox with a data override resolves");
-    let fw = super::start_framework_paths(home.as_deref());
+    let fw = super::start_framework_paths(home.as_deref()).expect("no install.toml resolves");
     let sandbox_home = Path::new("/tmp/sbx/home");
     assert!(fw.crate_config_root().starts_with(sandbox_home), "{fw:?}");
     assert!(fw.root.starts_with(sandbox_home), "{fw:?}");
+}
+
+/// #12048: with `install.toml` moving `config_dir`, `tm session start` deploys
+/// the framework source under the root `tm launch` reads, never `$HOME`.
+#[test]
+fn session_start_deploys_under_the_config_dir_launch_reads_12048() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let home = tmp.path().join("home");
+    let cfg = tmp.path().join("cfg");
+    let tools = home.join(trusty_common::install_paths::TOOLS_DIR_NAME);
+    std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
+    std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+    let install = format!("config_dir = {:?}\n", cfg.display().to_string());
+    std::fs::write(tools.join("install.toml"), install).expect("write install.toml");
+
+    let deploy = super::start_framework_paths(Some(&home)).expect("install.toml resolves");
+    // The framework source `tm launch` / `tm connect` prepare from.
+    let launch = trusty_mpm::core::paths::FrameworkPaths::for_managed_workspace_under(
+        trusty_mpm::core::config_base::config_base_under(&home),
+        tmp.path().join("ws"),
+    );
+    assert_eq!(deploy.root, launch.root, "deploy and launch roots differ");
+    assert_eq!(deploy.agents, launch.agents);
+    assert_eq!(deploy.skills, launch.skills);
+    let framework = cfg.join(".trusty-mpm").join("framework");
+    assert_eq!(deploy.agents, framework.join("agents"));
+    assert_eq!(deploy.skills, framework.join("skills"));
+    assert!(
+        !deploy.root.starts_with(&home),
+        "{:?} is under $HOME",
+        deploy.root
+    );
+}
+
+/// #12048 Fail-Open Check: a malformed `install.toml` refuses the session
+/// start's framework layout with a typed error; a missing one still resolves.
+#[test]
+fn session_start_refuses_a_malformed_install_toml_12048() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let home = tmp.path().join("home");
+    let tools = home.join(trusty_common::install_paths::TOOLS_DIR_NAME);
+    std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
+    let missing = super::start_framework_paths(Some(&home)).expect("no install.toml resolves");
+    assert_eq!(
+        missing.root,
+        home.join(trusty_common::install_paths::MPM_DIR_NAME)
+    );
+    std::fs::write(
+        tools.join("install.toml"),
+        "config_dir = \"/elsewhere\"\nbogus = 1\n",
+    )
+    .expect("write install.toml");
+    let err = super::start_framework_paths(Some(&home)).expect_err("malformed refuses");
+    assert!(err.to_string().contains("install.toml"), "{err}");
+    assert!(
+        !home
+            .join(trusty_common::install_paths::MPM_DIR_NAME)
+            .exists(),
+        "nothing deployed"
+    );
 }
 
 /// #10102 Fail-Open Check: a `tm connect` whose sandbox does not verify — a

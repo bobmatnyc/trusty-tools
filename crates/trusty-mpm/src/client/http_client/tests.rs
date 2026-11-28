@@ -203,6 +203,87 @@ async fn launch_session_writes_the_user_tier_under_the_config_dir_9999() {
     assert!(!home.path().join(".claude.json").exists());
 }
 
+/// A stub daemon answering the launch's `/health`, name-rule and register calls.
+async fn spawn_launch_stub_12048() -> String {
+    use std::future::IntoFuture as _;
+    let router = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/api/v1/sessions/managed",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"sessions": []})) }),
+        )
+        .route(
+            "/sessions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({"name": "tm-12048-fake"}))
+            })
+            .get(|| async { axum::Json(serde_json::json!({"sessions": []})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    format!("http://{addr}")
+}
+
+/// Run `launch_session` under a pinned `home` whose `install.toml` is `install`,
+/// with a fake `tmux` that exits 1. Returns the launch result.
+async fn launch_under_install_toml_12048(
+    home: &std::path::Path,
+    install: &str,
+) -> anyhow::Result<String> {
+    let tools = home.join(trusty_common::install_paths::TOOLS_DIR_NAME);
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::write(tools.join("install.toml"), install).unwrap();
+    let url = spawn_launch_stub_12048().await;
+    let bin_dir = tempfile::tempdir().unwrap();
+    let tmux = bin_dir.path().join("fake-tmux");
+    // See #10248
+    trusty_common::exec_stub::write_executable(&tmux, "#!/bin/sh\nexit 1\n").unwrap();
+    let project = crate::test_support::hermetic_temp_dir();
+    let workdir = project.path().to_string_lossy().into_owned();
+    let client = DaemonClient::new(url).with_home(home);
+    crate::core::tmux::with_tmux_binary(tmux, client.launch_session(&workdir)).await
+}
+
+/// #12048: the TUI launch (`session_connect`) deploys under the `install.toml`
+/// `config_dir` `tm launch` reads, never `<home>/.trusty-mpm`.
+#[tokio::test]
+async fn launch_session_deploys_under_the_config_dir_launch_reads_12048() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let home = tmp.path().join("home");
+    let cfg = tmp.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let install = format!("config_dir = {:?}\n", cfg.display().to_string());
+    let result = launch_under_install_toml_12048(&home, &install).await;
+    assert!(result.is_err(), "the fake tmux ends this launch");
+    assert!(
+        cfg.join(".trusty-mpm").exists(),
+        "prep wrote nothing under the config dir"
+    );
+    assert!(
+        !home
+            .join(trusty_common::install_paths::MPM_DIR_NAME)
+            .exists(),
+        "prep deployed under <home>/.trusty-mpm"
+    );
+}
+
+/// #12048 Fail-Open Check: a malformed `install.toml` refuses the TUI launch
+/// before prep deploys anything under `<home>`.
+#[tokio::test]
+async fn launch_session_refuses_a_malformed_install_toml_12048() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let home = tmp.path().join("home");
+    let install = "config_dir = \"/elsewhere\"\nbogus = 1\n";
+    let err = launch_under_install_toml_12048(&home, install)
+        .await
+        .expect_err("a malformed install.toml refuses the launch");
+    assert!(err.to_string().contains("install.toml"), "{err}");
+    for written in [".trusty-mpm", ".claude", ".claude.json"] {
+        assert!(!home.join(written).exists(), "prep wrote <home>/{written}");
+    }
+}
+
 #[tokio::test]
 async fn connect_session_errors_when_daemon_unreachable() {
     // Why: `tm connect` registers via `POST /api/v1/sessions/connect`
