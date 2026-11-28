@@ -54,6 +54,11 @@ impl StubDaemon {
         Self { url, socket, calls }
     }
 
+    /// Every call the stub saw, in order: HTTP request lines and JSON-RPC methods.
+    pub(crate) fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("calls").clone()
+    }
+
     /// Every call that would register a session.
     fn registrations(&self) -> Vec<String> {
         let calls = self.calls.lock().expect("calls");
