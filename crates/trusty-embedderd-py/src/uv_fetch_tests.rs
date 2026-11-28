@@ -490,7 +490,9 @@ fn a_download_trickling_past_the_budget_times_out_and_places_nothing() {
     let elapsed = started.elapsed();
     assert!(matches!(err, UvError::Network { .. }), "{err:?}");
     assert!(err.to_string().contains("timed out"), "{err}");
-    assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+    // #10519: bound is budget + 2 s; a 1 s wall-clock bound failed under load.
+    let bound = Duration::from_millis(300) + Duration::from_secs(2);
+    assert!(elapsed < bound, "took {elapsed:?}, bound {bound:?}");
     assert_eq!(leftovers(tmp.path()), [".fetch.lock"]);
 }
 
