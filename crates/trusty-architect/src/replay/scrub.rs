@@ -306,6 +306,7 @@ impl Scrubber {
                 .iter()
                 .map(|(k, v)| (t(k), v.as_deref().map(t)))
                 .collect(),
+            fakes: rec.fakes.map(|f| f.map(t)), // See #12028
         }
     }
 }
@@ -352,6 +353,7 @@ fn fields(rec: &Recording) -> Vec<(String, &str)> {
         out.push((format!("writes#{i}"), k));
         out.extend(v.as_deref().map(|v| (format!("writes#{i}"), v)));
     }
+    out.extend(rec.fakes.iter().flat_map(|f| f.fields())); // See #12028
     out
 }
 
@@ -380,11 +382,13 @@ fn leak_kind(s: &str, sessions: &[Rule]) -> Option<RefusalKind> {
 
 /// Refuses `rec` when any field still holds a local path shape, one of
 /// `sessions` or an unlisted `tm-<x>` token at a name boundary, a
-/// secret-shaped value, or an env entry whose key names a credential.
+/// secret-shaped value, an env entry whose key names a credential, or a fake
+/// string holding a URL password.
 ///
 /// Why: the last gate before a public fixture (#12026 AC3).
 /// What: scans every string [`fields`] lists, then each env entry as
-/// `KEY=VALUE`, by key name and for a URL password; the first hit is the error.
+/// `KEY=VALUE`, by key name and for a URL password, then each fake string
+/// for a URL password; the first hit is the error.
 /// Test: `check_refuses_an_unscrubbed_home_path_session_and_secret`,
 /// `check_refuses_an_unlisted_tm_session_name_but_not_a_skill_name`,
 /// `check_refuses_a_secret_named_env_key`,
@@ -411,6 +415,15 @@ pub fn check(rec: &Recording, sessions: &[String]) -> Result<(), Refusal> {
         if secret_env_key(k) || has_url_password(v) || looks_secret(&format!("{k}={v}")) {
             return Err(Refusal {
                 field: format!("env#{i}"),
+                kind: RefusalKind::Secret,
+            });
+        }
+    }
+    // See #12028: a fake's answer or argv is as public as stdout.
+    for (field, s) in rec.fakes.iter().flat_map(|f| f.fields()) {
+        if has_url_password(s) {
+            return Err(Refusal {
+                field,
                 kind: RefusalKind::Secret,
             });
         }

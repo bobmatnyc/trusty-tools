@@ -7,6 +7,10 @@
 //! recording against a program and prints one line per differing channel;
 //! `check` runs the refusal check on fixtures. Exit 0 clean, 1 a mismatch or a
 //! refusal, 2 a usage or run error. No value is printed from the environment.
+//! `record --fakes FILE` declares fake executables (#12028): FILE is a JSON
+//! object of name to answers, each `{"argv": [...], "stdout": "...",
+//! "stderr": "...", "exit": N}` (`argv` omitted matches any call). The stubs
+//! go first on `PATH` on record and on replay; replay diffs their calls.
 //! The crate's dependency list (#9171 A1) has no `anyhow`, so errors are
 //! the library's `ReplayError`, printed once.
 //! Test: `cli_records_replays_and_checks_a_fixture`.
@@ -17,12 +21,16 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use trusty_architect::replay::{
-    EnvRule, RecordSpec, ReplayError, Target, check, load, record, replay, save,
+    EnvRule, FakeAnswer, RecordSpec, ReplayError, Target, check, load, record, replay, save,
 };
 
 const USAGE: &str = "usage:
   trusty-architect-replay record --out FILE [--seed SRC=REL]... [--env NAME[=VALUE]]...
-      [--stdin-file F] [--session NAME]... [--timeout SECS] -- PROGRAM [ARGS...]
+      [--stdin-file F] [--session NAME]... [--timeout SECS] [--fakes FILE]...
+      -- PROGRAM [ARGS...]
+      --fakes FILE: JSON {NAME: [{\"argv\": [ARG...], \"stdout\": S, \"stderr\": S, \"exit\": N}]};
+      stubs first on PATH on record and replay; first matching answer wins,
+      no argv matches any call; replay diffs the calls
   trusty-architect-replay replay [--timeout SECS] FILE... -- PROGRAM [PREFIX_ARGS...]
   trusty-architect-replay check [--session NAME]... FILE...";
 
@@ -33,6 +41,7 @@ struct Opts {
     env: Vec<EnvRule>,
     stdin_file: Option<PathBuf>,
     sessions: Vec<String>,
+    fakes: BTreeMap<String, Vec<FakeAnswer>>,
     timeout: Duration,
     files: Vec<PathBuf>,
     command: Vec<String>,
@@ -62,6 +71,14 @@ fn parse(args: &[String]) -> Result<Opts, ReplayError> {
             "--out" => o.out = Some(value()?.into()),
             "--stdin-file" => o.stdin_file = Some(value()?.into()),
             "--session" => o.sessions.push(value()?),
+            "--fakes" => {
+                // See #12028: one name in two files is an author error.
+                for (name, answers) in fakes_file(Path::new(&value()?))? {
+                    if o.fakes.insert(name.clone(), answers).is_some() {
+                        return Err(bad(format!("fake {name} is declared twice")));
+                    }
+                }
+            }
             "--timeout" => {
                 let secs = value()?
                     .parse()
@@ -114,6 +131,7 @@ fn run(cmd: &str, args: &[String]) -> Result<bool, ReplayError> {
                 seeds: o.seeds,
                 sessions: o.sessions.clone(),
                 timeout: o.timeout,
+                fakes: o.fakes,
             };
             let rec = record(&spec, &parent)?;
             save(&out, &rec, &o.sessions)?;
@@ -160,6 +178,18 @@ fn run(cmd: &str, args: &[String]) -> Result<bool, ReplayError> {
         }
         other => Err(bad(format!("unknown command {other}"))),
     }
+}
+
+/// The fakes map in `p`; a parse error names the position, never the text.
+fn fakes_file(p: &Path) -> Result<BTreeMap<String, Vec<FakeAnswer>>, ReplayError> {
+    serde_json::from_str(&read(p)?).map_err(|e| {
+        bad(format!(
+            "--fakes {}: not a fakes map (line {}, column {})",
+            p.display(),
+            e.line(),
+            e.column()
+        ))
+    })
 }
 
 fn read(p: &Path) -> Result<String, ReplayError> {

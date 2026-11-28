@@ -1,0 +1,3 @@
+Added
+
+- `trusty-architect-replay record --fakes FILE` declares fake executables. Each fake is a named stub whose answers (stdout, stderr, exit code, optionally selected by argv) live in the recording. On record and on replay the stubs sit first on `PATH`, every call to them is recorded, and replay reports a `FakeCalls` mismatch when the program calls a fake with different argv or calls an undeclared network or fleet tool (`gh`, `git`, `curl`, `tmux`, `rg` and others), which meets a trap stub instead of the host binary. The refusal check also scans fake answers and argv. A recording with fakes is format version 2; a recording without fakes stays version 1, byte for byte (Refs [#12028](https://github.com/bobmatnyc/trusty-tools/issues/12028))
