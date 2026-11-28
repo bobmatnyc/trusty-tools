@@ -1,12 +1,14 @@
-//! The one-time removal of the four launch keys earlier tm releases wrote into
-//! a project's `<ws>/.claude/settings.json` (#12127, part 4a of #12077).
+//! The one-time removal of the launch keys earlier tm releases wrote into a
+//! project's `<ws>/.claude/settings.json` (#12127, parts 4a and 4b of #12077).
 //!
 //! Why: #12127 moves `outputStyle`, `model`, `autoMemoryEnabled` and
-//! `skillOverrides` onto the `--settings` flag tier. The values earlier
+//! `skillOverrides` (4a), and `spinnerTipsEnabled`, `spinnerTipsOverride` and
+//! `attribution` (4b), onto the `--settings` flag tier. The values earlier
 //! releases left in the project file are tm's to take back, once, and no value
 //! the user set may go.
 //! What: [`clean_tm_launch_keys_once`] removes each of those keys, and each
-//! `skillOverrides` entry, whose value equals what tm wrote ([`TmLaunchKeys`]),
+//! `skillOverrides` entry, whose value equals what tm wrote ([`TmLaunchKeys`];
+//! `spinnerTipsOverride` and `attribution` match only as a whole value),
 //! reports every other value at those keys, and writes its own done marker
 //! `<ws>/.trusty-mpm/`[`LAUNCH_KEYS_CLEANUP_MARKER_FILE`]. The marker is
 //! distinct from the sandbox pass's (`sandbox-cleanup.json`), because that
@@ -24,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use super::cleanup::{SandboxCleanupError, marker_body, prune_locked, write_marker};
 use super::detect::read_object;
+use crate::core::session_launch::{COMPANION_KEYS, tm_companion_keys};
 use crate::core::skill_overrides::{OFF, SKILL_OVERRIDES_KEY};
 
 /// The done marker's file name under `<ws>/.trusty-mpm/`.
@@ -36,7 +39,9 @@ pub const LAUNCH_KEYS_CLEANUP_MARKER_FILE: &str = "launch-keys-cleanup.json";
 /// `model` = `model` (the value tm's model record holds; `None` when there is
 /// no record, so no `model` is tm's), and one `"off"` entry per skill in
 /// `skills_off` (this launch's computed set; `None` when stack detection was
-/// partial, so no entry is tm's).
+/// partial, so no entry is tm's). #12077 part 4b: the spinner tips and the
+/// attribution footer are tm's constants ([`tm_companion_keys`]), so they need
+/// no field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmLaunchKeys {
     /// The style id tm wrote.
@@ -60,6 +65,8 @@ impl TmLaunchKeys {
             let off = skills.iter().map(|s| (s.clone(), json!(OFF))).collect();
             map.insert(SKILL_OVERRIDES_KEY.to_owned(), Value::Object(off));
         }
+        // #12077: part 4b's three keys, at the constants tm wrote.
+        map.extend(tm_companion_keys());
         Value::Object(map)
     }
 }
@@ -83,7 +90,7 @@ pub enum LaunchKeysCleanupOutcome {
     },
 }
 
-/// Remove tm's four launch keys from `workspace`'s project settings, once.
+/// Remove tm's launch keys from `workspace`'s project settings, once.
 ///
 /// What, in order:
 /// 1. the marker exists: [`LaunchKeysCleanupOutcome::AlreadyDone`];
@@ -110,7 +117,10 @@ pub enum LaunchKeysCleanupOutcome {
 /// `a_launch_key_marker_failure_writes_no_marker_12127`,
 /// `a_symlinked_settings_file_keeps_its_launch_keys_12127`,
 /// `a_missing_settings_file_is_marked_absent_12127`,
-/// `a_partial_detection_removes_no_skill_entry_12127`.
+/// `a_partial_detection_removes_no_skill_entry_12127`,
+/// `tms_companion_values_are_removed_and_edits_kept_12077`,
+/// `a_companion_publish_failure_is_an_error_and_writes_no_marker_12077`,
+/// `an_unreadable_settings_file_fails_the_cleanup_and_keeps_no_marker_12077`.
 pub fn clean_tm_launch_keys_once(
     workspace: &Path,
     ours: &TmLaunchKeys,
@@ -134,7 +144,8 @@ pub fn clean_tm_launch_keys_once(
         // #12127: nothing of tm's, so no rewrite at all.
         settings
     } else {
-        match prune_locked(&file, &wanted, &[])? {
+        // #12077: part 4b's object values are tm's only when whole and equal.
+        match prune_locked(&file, &wanted, &COMPANION_KEYS)? {
             Some(read) => read,
             None => return mark_absent(&marker, ours),
         }
@@ -167,8 +178,10 @@ fn body(removed: &[String], kept: &[String], ours: &TmLaunchKeys, absent: bool) 
 
 /// The labels of `have`'s values at tm's keys: (equal to tm's, different).
 ///
-/// What: a scalar key is tm's when equal; `skillOverrides` is matched per
-/// entry, and a `skillOverrides` that is not an object is the user's.
+/// What: `skillOverrides` is matched per entry, and a `skillOverrides` that is
+/// not an object is the user's; every other key, `spinnerTipsOverride` and
+/// `attribution` included (#12077 part 4b), is tm's only when its whole value
+/// is equal.
 fn split(have: &Value, ours: &Value) -> (Vec<String>, Vec<String>) {
     let (mut removed, mut kept) = (Vec::new(), Vec::new());
     let (Some(have), Some(ours)) = (have.as_object(), ours.as_object()) else {
@@ -178,8 +191,9 @@ fn split(have: &Value, ours: &Value) -> (Vec<String>, Vec<String>) {
         let Some(theirs) = have.get(key) else {
             continue;
         };
+        let per_entry = key == SKILL_OVERRIDES_KEY;
         match (value, theirs) {
-            (Value::Object(wanted), Value::Object(theirs)) => {
+            (Value::Object(wanted), Value::Object(theirs)) if per_entry => {
                 for (entry, v) in wanted {
                     if let Some(t) = theirs.get(entry) {
                         let label = format!("{key}.{entry}");
@@ -191,7 +205,7 @@ fn split(have: &Value, ours: &Value) -> (Vec<String>, Vec<String>) {
                     }
                 }
             }
-            (Value::Object(_), _) => kept.push(key.clone()),
+            (Value::Object(_), _) if per_entry => kept.push(key.clone()),
             _ if theirs == value => removed.push(key.clone()),
             _ => kept.push(key.clone()),
         }

@@ -117,6 +117,8 @@ pub(crate) use launch_keys::effective_settings;
 pub use launch_keys::{
     LaunchKeysError, read_launch_keys, record_path as launch_keys_record_path, set_launch_key,
 };
+// #12077: part 4b — the one-time cleanup matches the same constants.
+pub(crate) use launch_keys::{COMPANION_KEYS, tm_companion_keys};
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -207,7 +209,6 @@ use settings::{
     deploy_output_style,
     preseed_workspace_trust_home,
     remove_global_trusty_memory_hooks,
-    write_output_style,
     // #9018: the launch builds its additions with every toggle resolved — the
     // #7688 capture and `[pm_guard] enabled` included — and hands them to the
     // shared writer.
@@ -919,11 +920,9 @@ pub(super) fn prepare_session_inner(
     // `skillOverrides` ride the launch's `--settings` flag tier, never the
     // project file: remove what earlier releases wrote there, once, then record
     // the values for the launch. A record that cannot be written refuses it.
+    // #12077: part 4b — the spinner tips and the attribution footer ride the
+    // same record; nothing writes them into the project file any more.
     launch_keys::deliver_launch_keys(project_dir, &active_style_id, profile)?;
-    // #12127: the spinner tips and the attribution seed stay in the project file.
-    if let Err(err) = write_output_style(project_dir) {
-        tracing::warn!("failed to set the trusty-mpm spinner tips: {err}");
-    }
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -1117,8 +1116,8 @@ pub(super) fn prepare_session_inner(
     // PROJECT tier (`<project_dir>/.claude/output-styles/`). The daemon
     // managed-spawn path launches `claude --setting-sources project,local`,
     // which excludes the `user` tier the deploy above lands in — without a
-    // project-tier copy, the `outputStyle` id `write_output_style` writes into
-    // `<project_dir>/.claude/settings.json` cannot resolve under that flag, so
+    // project-tier copy, the `outputStyle` id the launch delivers (#12127: on
+    // the `--settings` flag tier, `launch_keys`) cannot resolve under that flag, so
     // Claude Code silently falls back to its own default (never applying the
     // PM delegation persona). Non-fatal: a failure here only leaves that one
     // carrier degraded — the home-tier deploy and the standalone `tm run`

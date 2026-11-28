@@ -9,7 +9,7 @@
 //! bytes, the copy, and the rewritten file together.
 //! What:
 //! - `merge_settings_backs_up_a_malformed_file_before_rewriting_it` — the
-//!   output-style / auto-memory writer.
+//!   shared one-key writer (`merge_settings_key`).
 //! - `merge_settings_refuses_when_the_copy_cannot_be_written` — the fail-open
 //!   check: a read-only `.claude/` still allows `fs::write` onto the EXISTING
 //!   file, which is exactly how the pre-fix writer destroyed it; the copy is
@@ -91,7 +91,10 @@ fn merge_settings_backs_up_a_malformed_file_before_rewriting_it() {
     let project = tmp.path();
     seed_settings(project, BROKEN);
 
-    settings::write_output_style(project).expect("the rewrite proceeds after the copy");
+    // #12077: part 4b removed the spinner-tips writer; the shared one-key
+    // writer drives the same `merge_settings` body.
+    settings::merge_settings_key(project, AUTO_MEMORY_KEY, serde_json::json!(false))
+        .expect("the rewrite proceeds after the copy");
 
     assert_eq!(copies(project).len(), 1, "{:?}", copies(project));
     assert_eq!(
@@ -100,8 +103,7 @@ fn merge_settings_backs_up_a_malformed_file_before_rewriting_it() {
         "the copy must hold the ORIGINAL bytes"
     );
     assert!(
-        // #12127: the writer sets the spinner tips, no longer the style.
-        read_settings(project)["spinnerTipsEnabled"].is_boolean(),
+        read_settings(project)[AUTO_MEMORY_KEY].is_boolean(),
         "the rewrite must still happen"
     );
 }
@@ -127,7 +129,7 @@ fn merge_settings_refuses_when_the_copy_cannot_be_written() {
 
     std::fs::write(claude.join("settings.json.lock"), b"").expect("pre-create the lock sidecar");
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let result = settings::write_output_style(project);
+    let result = settings::merge_settings_key(project, AUTO_MEMORY_KEY, serde_json::json!(false));
     // Restore before asserting, so a failed assertion still leaves a removable
     // temp dir behind.
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -232,8 +234,8 @@ fn prepare_session_backs_up_a_malformed_settings_file_exactly_once() {
 
     let after = read_settings(project);
     assert!(
-        // #12127: the spinner tips stand for the launch's project-file keys.
-        after["spinnerTipsEnabled"].is_boolean(),
+        // #12077: part 4b — the hooks stand for the launch's project-file keys.
+        after["hooks"].is_object(),
         "the launch must still write its own keys: {after}"
     );
     let commands = pre_tool_use_commands(&after);

@@ -7,9 +7,14 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+use super::super::settings::SPINNER_TIPS;
 use super::super::tests::EnvVarGuard;
 use super::*;
-use crate::core::claude_sandbox::LAUNCH_KEYS_CLEANUP_MARKER_FILE;
+use crate::core::attribution::ATTRIBUTION_FOOTER;
+use crate::core::claude_sandbox::{
+    LAUNCH_KEYS_CLEANUP_MARKER_FILE, LaunchKeysCleanupOutcome, SandboxCleanupError, TmLaunchKeys,
+    clean_tm_launch_keys_once,
+};
 
 fn write_text(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -30,6 +35,27 @@ const FOUR: [&str; 4] = [
     "autoMemoryEnabled",
     "skillOverrides",
 ];
+
+/// #12077 part 4b: the three keys that left the project file in 4b.
+const COMPANIONS: [&str; 3] = ["spinnerTipsEnabled", "spinnerTipsOverride", "attribution"];
+
+/// The three companion keys at the values tm used to write into the project file.
+fn tm_companions() -> Value {
+    json!({
+        "spinnerTipsEnabled": true,
+        "spinnerTipsOverride": {"tips": SPINNER_TIPS},
+        "attribution": {"commit": ATTRIBUTION_FOOTER, "pr": ATTRIBUTION_FOOTER},
+    })
+}
+
+/// `keys` with the three companion keys at tm's values laid over it.
+fn with_companions(keys: Value) -> Value {
+    let mut merged = keys;
+    if let (Some(map), Some(extra)) = (merged.as_object_mut(), tm_companions().as_object()) {
+        map.extend(extra.clone());
+    }
+    merged
+}
 
 /// The skills the table turns off for a Rust project.
 fn rust_skills_off() -> BTreeSet<&'static str> {
@@ -62,17 +88,17 @@ fn the_record_carries_each_key_with_the_old_value_12127() {
     let architect = launch_keys_for(tmp.path(), "tm-arch", SessionProfile::Architect, Some(&off));
     assert_eq!(
         Value::Object(architect),
-        json!({
+        with_companions(json!({
             "outputStyle": "tm-arch",
             "autoMemoryEnabled": false,
             "model": ARCHITECT_MODEL,
             "skillOverrides": {"pdf": "off", "xlsx": "off"},
-        })
+        }))
     );
     let pm = launch_keys_for(tmp.path(), "trusty-mpm", SessionProfile::Pm, None);
     assert_eq!(
         Value::Object(pm),
-        json!({"outputStyle": "trusty-mpm", "autoMemoryEnabled": false}),
+        with_companions(json!({"outputStyle": "trusty-mpm", "autoMemoryEnabled": false})),
         "a partial detection delivers no skillOverrides; a PM gets no model"
     );
 }
@@ -96,7 +122,7 @@ fn a_user_value_keeps_winning_where_it_used_to_12127() {
     let keys = launch_keys_for(ws, "trusty-mpm", SessionProfile::Architect, Some(&off));
     assert_eq!(
         Value::Object(keys),
-        json!({"skillOverrides": {"docx": "off"}})
+        with_companions(json!({"skillOverrides": {"docx": "off"}}))
     );
 
     // A project-file style alone was overwritten before; the flag tier wins too.
@@ -193,6 +219,8 @@ fn prepare_session_writes_none_of_the_four_keys_12127() {
     assert_eq!(record["outputStyle"], json!("trusty-mpm"));
     assert_eq!(record["autoMemoryEnabled"], json!(false));
     assert_eq!(record["skillOverrides"][tm_skill], json!("off"));
+    // #12077 part 4b: the local file's `spinnerTipsEnabled` keeps winning.
+    assert!(record.get("spinnerTipsEnabled").is_none(), "{record:?}");
     assert!(
         project
             .join(".trusty-mpm")
@@ -356,4 +384,247 @@ fn add_launch_exclude_refuses_on_a_git_error_with_no_project_record_12077() {
         !record_path(&project).exists(),
         "no directory record written"
     );
+}
+
+/// tm's launch values for a launch whose style, model and skills match nothing
+/// in the fixtures below, so only the companion keys are in play.
+fn ours_without_four() -> TmLaunchKeys {
+    TmLaunchKeys {
+        output_style: "trusty-mpm".to_owned(),
+        model: None,
+        skills_off: Some(BTreeSet::new()),
+    }
+}
+
+fn marker(project: &Path) -> std::path::PathBuf {
+    project
+        .join(".trusty-mpm")
+        .join(LAUNCH_KEYS_CLEANUP_MARKER_FILE)
+}
+
+/// #12077 part 4b: with no user value, the record carries the spinner tips and
+/// the attribution footer at the values the project-file write used to set.
+#[test]
+fn the_record_carries_the_spinner_tips_and_attribution_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let keys = launch_keys_for(tmp.path(), "trusty-mpm", SessionProfile::Pm, None);
+    let tm = tm_companions();
+    for key in COMPANIONS {
+        assert_eq!(keys.get(key), tm.get(key), "{key}: {keys:?}");
+    }
+}
+
+/// #12077 part 4b: a value the user set at any of the three keys, in either
+/// project settings file, leaves that key out of the record and only that key.
+#[test]
+fn a_user_companion_value_keeps_winning_12077() {
+    let user = json!({
+        "spinnerTipsEnabled": false,
+        "spinnerTipsOverride": {"tips": ["mine"]},
+        "attribution": {"commit": "", "pr": ""},
+    });
+    for file in ["settings.json", "settings.local.json"] {
+        for key in COMPANIONS {
+            let tmp = crate::test_support::hermetic_temp_dir();
+            let ws = tmp.path();
+            write_text(
+                &ws.join(".claude").join(file),
+                &json!({ key: user[key] }).to_string(),
+            );
+            let keys = launch_keys_for(ws, "trusty-mpm", SessionProfile::Pm, None);
+            assert!(keys.get(key).is_none(), "{file} {key}: {keys:?}");
+            for other in COMPANIONS.iter().filter(|k| **k != key) {
+                assert_eq!(
+                    keys.get(*other),
+                    tm_companions().get(*other),
+                    "{file} {key}: {other} still rides inline"
+                );
+            }
+        }
+    }
+}
+
+/// #12077 part 4b: a launch writes none of the three keys into the project
+/// file, and the launch runs with them from the record.
+#[test]
+#[serial_test::serial]
+fn prepare_session_writes_none_of_the_companion_keys_12077() {
+    let tmp_home = crate::test_support::hermetic_temp_dir();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path();
+    let claude = project.join(".claude");
+    write_text(&claude.join("settings.json"), r#"{"theme": "dark"}"#);
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    super::super::prepare_session_with_home(&fw, project, None, false, Some(tmp_home.path()))
+        .expect("prep succeeds");
+
+    let file = read_json(&claude.join("settings.json"));
+    assert_eq!(file["theme"], json!("dark"));
+    for key in COMPANIONS {
+        assert!(file.get(key).is_none(), "{key} written: {file}");
+    }
+    assert!(!claude.join("settings.local.json").exists());
+    let effective = effective_settings(project);
+    for key in COMPANIONS {
+        assert_eq!(effective.get(key), tm_companions().get(key), "{key}");
+    }
+}
+
+/// #12077 part 4b (c): the one-time cleanup removes each of the three keys
+/// only when its whole value equals tm's, and keeps every edited value.
+#[test]
+fn tms_companion_values_are_removed_and_edits_kept_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let ws = tmp.path();
+    let settings = ws.join(".claude").join("settings.json");
+    write_text(
+        &settings,
+        &with_companions(json!({"theme": "dark"})).to_string(),
+    );
+    let outcome = clean_tm_launch_keys_once(ws, &ours_without_four()).expect("cleanup");
+    let LaunchKeysCleanupOutcome::Cleaned { mut removed, kept } = outcome else {
+        panic!("{outcome:?}");
+    };
+    removed.sort();
+    assert_eq!(
+        removed,
+        ["attribution", "spinnerTipsEnabled", "spinnerTipsOverride"]
+    );
+    assert!(kept.is_empty(), "{kept:?}");
+    assert_eq!(read_json(&settings), json!({"theme": "dark"}));
+
+    // Edited values stay, the file byte-identical: one tip of tm's list, and
+    // an attribution whose `commit` alone is tm's footer.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let ws = tmp.path();
+    let settings = ws.join(".claude").join("settings.json");
+    let text = json!({
+        "spinnerTipsEnabled": false,
+        "spinnerTipsOverride": {"tips": [SPINNER_TIPS[0]]},
+        "attribution": {"commit": ATTRIBUTION_FOOTER, "pr": "mine"},
+    })
+    .to_string();
+    write_text(&settings, &text);
+    let outcome = clean_tm_launch_keys_once(ws, &ours_without_four()).expect("cleanup");
+    let LaunchKeysCleanupOutcome::Cleaned { removed, mut kept } = outcome else {
+        panic!("{outcome:?}");
+    };
+    kept.sort();
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(
+        kept,
+        ["attribution", "spinnerTipsEnabled", "spinnerTipsOverride"]
+    );
+    assert_eq!(std::fs::read_to_string(&settings).expect("read"), text);
+}
+
+/// Set `path`'s mode.
+#[cfg(unix)]
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// Drop `path` to `mode`; `false` (mode restored to `back`) when this runner
+/// ignores it, as root does.
+#[cfg(unix)]
+fn deny(path: &Path, mode: u32, back: u32) -> bool {
+    chmod(path, mode);
+    let denied = if path.is_dir() {
+        std::fs::write(path.join("probe"), b"x").is_err()
+    } else {
+        std::fs::read(path).is_err()
+    };
+    if !denied {
+        chmod(path, back);
+        eprintln!("skipped: this runner ignores the mode");
+    }
+    denied
+}
+
+/// #12077 part 4b, Fail-Open Check (write arm): a cleanup whose rewrite cannot
+/// be published is an error naming the file; the launch goes ahead with no
+/// marker, so a later launch retries, and its record leaves out the keys the
+/// file still carries, so the launch does not run as if they were gone.
+#[cfg(unix)]
+#[test]
+fn a_companion_publish_failure_is_an_error_and_writes_no_marker_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path();
+    let claude = project.join(".claude");
+    let settings = claude.join("settings.json");
+    let text = tm_companions().to_string();
+    write_text(&settings, &text);
+    write_text(&crate::core::settings_lock::lock_sidecar(&settings), "");
+    if !deny(&claude, 0o555, 0o755) {
+        return;
+    }
+    let cleanup = clean_tm_launch_keys_once(project, &ours_without_four());
+    let delivered = deliver_launch_keys(project, "trusty-mpm", SessionProfile::Pm);
+    chmod(&claude, 0o755);
+
+    let err = cleanup.expect_err("a publish failure is an error");
+    assert!(matches!(err, SandboxCleanupError::Write { .. }), "{err}");
+    assert!(
+        err.to_string().contains(&settings.display().to_string()),
+        "{err}"
+    );
+    delivered.expect("a cleanup failure never refuses the launch");
+    assert!(
+        !marker(project).exists(),
+        "no marker after a failed cleanup"
+    );
+    assert_eq!(std::fs::read_to_string(&settings).expect("read"), text);
+    let record = read_launch_keys(project)
+        .expect("readable")
+        .expect("recorded");
+    for key in COMPANIONS {
+        assert!(
+            record.get(key).is_none(),
+            "{key} doubled inline: {record:?}"
+        );
+    }
+    let effective = effective_settings(project);
+    for key in COMPANIONS {
+        assert_eq!(effective.get(key), tm_companions().get(key), "{key}");
+    }
+}
+
+/// #12077 part 4b, Fail-Open Check (read arm): a settings file that cannot be
+/// read fails the cleanup with an error naming it and leaves no marker; the
+/// launch goes ahead and carries the three keys inline, as Claude Code cannot
+/// read that file either.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_settings_file_fails_the_cleanup_and_keeps_no_marker_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path();
+    let settings = project.join(".claude").join("settings.json");
+    write_text(&settings, &tm_companions().to_string());
+    if !deny(&settings, 0o000, 0o644) {
+        return;
+    }
+    let cleanup = clean_tm_launch_keys_once(project, &ours_without_four());
+    let delivered = deliver_launch_keys(project, "trusty-mpm", SessionProfile::Pm);
+    chmod(&settings, 0o644);
+
+    let err = cleanup.expect_err("an unreadable file is an error");
+    assert!(matches!(err, SandboxCleanupError::Read(_)), "{err}");
+    assert!(
+        err.to_string().contains(&settings.display().to_string()),
+        "{err}"
+    );
+    delivered.expect("a cleanup failure never refuses the launch");
+    assert!(
+        !marker(project).exists(),
+        "no marker after a failed cleanup"
+    );
+    let record = read_launch_keys(project)
+        .expect("readable")
+        .expect("recorded");
+    for key in COMPANIONS {
+        assert_eq!(record.get(key), tm_companions().get(key), "{key}");
+    }
 }
