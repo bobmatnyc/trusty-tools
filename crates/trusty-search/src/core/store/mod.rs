@@ -9,7 +9,9 @@
 
 // #9414: the search beam and query floor, scaled with index size.
 mod hnsw_tuning;
+// #12108: the cold vector-lane split the search log reports.
 pub(crate) mod path_match;
+pub(crate) mod search_split;
 // #2936: reaps staging files a SIGKILLed process left behind. Its own file so
 // `usearch_store.rs` stays under the 500-SLOC production cap.
 mod staging_reap;

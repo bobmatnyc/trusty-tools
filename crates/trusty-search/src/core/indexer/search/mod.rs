@@ -376,7 +376,7 @@ impl CodeIndexer {
         let bm25_fut = self.bm25_search(&query.text, lex_want, filter);
         clock.enter(QueryPhase::Vector);
         let hnsw_results = match &embedding {
-            Some(v) => self.vector_search_scoped(v, want, query).await?,
+            Some(v) => self.vector_search_timed(v, want, query, &mut clock).await?, // #12108
             None => Vec::new(),
         };
         clock.enter(QueryPhase::Lexical);

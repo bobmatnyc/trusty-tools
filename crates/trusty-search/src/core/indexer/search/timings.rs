@@ -21,6 +21,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use super::super::CodeIndexer;
+use crate::core::store::search_split::{self, VectorSplit};
 
 /// The stage a query is in; logged when the query is cancelled (#10195).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,11 +127,23 @@ pub fn scope_state() -> Option<(QueryPhase, bool)> {
 /// when the corpus was evicted and this query started or joined its
 /// rehydrate; `hnsw_promoted` when the vector store promoted its mmap view to
 /// a heap copy while the query ran.
-/// Test: `search_reports_per_stage_timings_in_log_and_meta`.
+/// #12108: `vector_lock_ms`, `vector_traverse_ms` and `vector_map_ms` split
+/// `vector_ms` into the graph lock wait (a load, promotion or rebuild holds
+/// the write lock), the HNSW traversal (page fault-in on an mmap view lands
+/// here) and the key-to-chunk-id mapping; `hnsw_view` is `true` when the
+/// traversal ran on the mmap view. The remainder of `vector_ms` is lane
+/// overhead outside the store.
+/// Test: `search_reports_per_stage_timings_in_log_and_meta`,
+/// `search_log_splits_the_vector_lane`,
+/// `stage_clock_reports_the_vector_split`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct SearchTimings {
     pub embed_ms: u64,
     pub vector_ms: u64,
+    pub vector_lock_ms: u64,
+    pub vector_traverse_ms: u64,
+    pub vector_map_ms: u64,
+    pub hnsw_view: bool,
     pub lexical_ms: u64,
     pub ripgrep_ms: u64,
     pub fusion_ms: u64,
@@ -147,6 +160,8 @@ pub(crate) struct StageClock {
     micros: [u64; 5],
     rehydrate_ran: bool,
     promotions_at_start: u64,
+    /// #12108: the store's split of the vector lap.
+    vector: VectorSplit,
 }
 
 impl StageClock {
@@ -159,6 +174,7 @@ impl StageClock {
             micros: [0; 5],
             rehydrate_ran,
             promotions_at_start: promotions,
+            vector: VectorSplit::default(),
         }
     }
 
@@ -182,13 +198,23 @@ impl StageClock {
         mark(next);
     }
 
+    /// Add the vector store's split of a vector-lane lap (#12108).
+    pub(crate) fn add_vector_split(&mut self, split: VectorSplit) {
+        self.vector.absorb(split);
+    }
+
     /// Close the last lap and report the totals.
     pub(crate) fn finish(mut self, promotions: u64, rehydrate_wait_ms: u64) -> SearchTimings {
         self.enter(QueryPhase::Respond);
         let ms = |i: usize| self.micros[i] / 1000;
+        let whole_ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         SearchTimings {
             embed_ms: ms(0),
             vector_ms: ms(1),
+            vector_lock_ms: whole_ms(self.vector.lock_wait),
+            vector_traverse_ms: whole_ms(self.vector.traverse),
+            vector_map_ms: whole_ms(self.vector.map),
+            hnsw_view: self.vector.on_view,
             lexical_ms: ms(2),
             ripgrep_ms: ms(3),
             fusion_ms: ms(4),
@@ -204,6 +230,27 @@ impl CodeIndexer {
     /// a heap copy; `0` with no vector store (#10195).
     pub(crate) fn hnsw_promotions(&self) -> u64 {
         self.store.as_ref().map_or(0, |s| s.promotions())
+    }
+
+    /// The vector lane, with the store's sub-step split charged to `clock`.
+    ///
+    /// Why: #12108 — a cold query's `vector_ms` must say whether it waited
+    /// for the graph, traversed it or mapped the hits.
+    /// What: runs [`Self::vector_search_scoped`] inside
+    /// [`search_split::measured`] and adds the recorded split to `clock`.
+    /// Ranking and the hits are unchanged.
+    /// Test: `search_log_splits_the_vector_lane`.
+    pub(crate) async fn vector_search_timed(
+        &self,
+        embedding: &[f32],
+        want: usize,
+        query: &crate::core::indexer::SearchQuery,
+        clock: &mut StageClock,
+    ) -> anyhow::Result<Vec<(String, f32)>> {
+        let (hits, split) =
+            search_split::measured(self.vector_search_scoped(embedding, want, query)).await;
+        clock.add_vector_split(split);
+        hits
     }
 }
 
@@ -227,6 +274,30 @@ mod tests {
         assert_eq!(t.vector_ms, 0);
         assert_eq!(t.rehydrate_wait_ms, 2);
         assert!(t.rehydrate_ran && t.hnsw_promoted);
+    }
+
+    /// The store's split reaches the reported timings, summed per sub-step.
+    #[test]
+    #[serial_test::parallel]
+    fn stage_clock_reports_the_vector_split() {
+        let mut clock = StageClock::start(QueryPhase::Vector, false, 0);
+        let ms = std::time::Duration::from_millis;
+        clock.add_vector_split(VectorSplit {
+            lock_wait: ms(5),
+            traverse: ms(20),
+            map: ms(1),
+            on_view: true,
+        });
+        clock.add_vector_split(VectorSplit {
+            traverse: ms(2),
+            ..Default::default()
+        });
+        let t = clock.finish(0, 0);
+        assert_eq!(
+            (t.vector_lock_ms, t.vector_traverse_ms, t.vector_map_ms),
+            (5, 22, 1)
+        );
+        assert!(t.hnsw_view);
     }
 
     /// Outside a query scope the phase is not tracked and `mark` is a no-op.

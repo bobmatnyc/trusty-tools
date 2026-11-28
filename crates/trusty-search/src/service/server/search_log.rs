@@ -73,6 +73,11 @@ pub(super) fn log_search(
         lock_ms = t.lock_ms,
         embed_ms = s.embed_ms,
         vector_ms = s.vector_ms,
+        // #12108: the vector lane's sub-steps.
+        vector_lock_ms = s.vector_lock_ms,
+        vector_traverse_ms = s.vector_traverse_ms,
+        vector_map_ms = s.vector_map_ms,
+        hnsw_view = s.hnsw_view,
         lexical_ms = s.lexical_ms,
         ripgrep_ms = s.ripgrep_ms,
         fusion_ms = s.fusion_ms,

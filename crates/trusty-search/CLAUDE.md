@@ -871,7 +871,10 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `lexical_ms` and `ripgrep_ms`) and `total_ms`, equal to `latency_ms`, which now starts
     before the index is resolved. `rehydrate_ran` / `hnsw_promoted` say
     whether the query started a corpus rehydrate or ran while the vector index
-    promoted its mmap view. The `search` log line carries the same fields. A
+    promoted its mmap view. `vector_lock_ms`, `vector_traverse_ms` and
+    `vector_map_ms` split `vector_ms` into graph lock wait, HNSW traversal
+    (mmap page fault-in lands here) and key mapping; `hnsw_view` says the
+    traversal ran on the mmap view (#12108). The `search` log line carries the same fields. A
     search the query deadline cancels logs one `query_timeout` line at WARN
     with `index_id`, `query`, `stage` and `elapsed_ms`; `search_all` logs one
     `info` line naming its target indexes.
