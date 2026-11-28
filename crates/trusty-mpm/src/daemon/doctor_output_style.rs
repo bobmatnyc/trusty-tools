@@ -244,7 +244,7 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
 /// Test: `output_style_reads_the_launch_settings_record_12077`,
 /// `output_style_fails_on_an_unreadable_launch_settings_record_12077`.
 fn record_style(project: &Path) -> Result<Option<(String, PathBuf)>, DoctorCheck> {
-    use crate::core::session_launch::{OUTPUT_STYLE_KEY, launch_keys_record_path};
+    use crate::core::session_launch::{launch_keys::OUTPUT_STYLE_KEY, launch_keys_record_path};
     let keys = crate::core::session_launch::read_launch_keys(project)
         .map_err(|e| DoctorCheck::new("output_style", CheckStatus::Fail, e.to_string()))?;
     Ok(keys

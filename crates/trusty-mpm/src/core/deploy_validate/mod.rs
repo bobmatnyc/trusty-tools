@@ -588,7 +588,7 @@ fn effective_output_style(
 ) -> Result<Option<String>, String> {
     let style = |value: &serde_json::Value| {
         value
-            .get(crate::core::session_launch::OUTPUT_STYLE_KEY)
+            .get(crate::core::session_launch::launch_keys::OUTPUT_STYLE_KEY)
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };

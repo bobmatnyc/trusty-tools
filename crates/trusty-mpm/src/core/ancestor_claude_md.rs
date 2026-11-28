@@ -141,9 +141,7 @@ pub fn scan(
     let mut excludes = crate::core::claude_md_excludes::merged_excludes(&layers);
     // #12077 row 13: `tm doctor --fix` records the exclude on the root's
     // launch-settings record, which a tm launch there passes as `--settings`.
-    excludes.extend(crate::core::session_launch::recorded_claude_md_excludes(
-        &root,
-    ));
+    excludes.extend(crate::core::session_launch::launch_keys::recorded_claude_md_excludes(&root));
     scan_with_excludes(&root, &excludes)
 }
 

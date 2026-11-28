@@ -40,7 +40,7 @@ pub const ANCESTOR_CHECK: &str = "ancestor_claude_md";
 /// handed the process cwd, which may be any subdirectory — then emits one step
 /// per finding that is not already excluded. #12077 row 13: the exclude is
 /// added to the resolved root's launch-settings record
-/// ([`crate::core::session_launch::add_launch_exclude`]); no Claude settings
+/// ([`crate::core::session_launch::launch_keys::add_launch_exclude`]); no Claude settings
 /// file is written. A failed resolution or scan is ONE `Failed` step naming the
 /// error, never an empty plan that reads as "nothing to fix". `today` is
 /// injected (`%Y%m%d`) so the rename target is assertable; `home` and
@@ -139,7 +139,7 @@ fn exclude_step(found: &AncestorMemoryFile, root: &Path, mode: RepairMode) -> Re
     let status = if mode == RepairMode::DryRun {
         StepStatus::Planned
     } else {
-        match crate::core::session_launch::add_launch_exclude(root, &found.path) {
+        match crate::core::session_launch::launch_keys::add_launch_exclude(root, &found.path) {
             // The record is tm's own, and the step adds one array entry.
             Ok(true) => StepStatus::Applied { backup: None },
             Ok(false) => StepStatus::Refused(

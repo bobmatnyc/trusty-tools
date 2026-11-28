@@ -109,14 +109,13 @@ pub use system_prompt::{
 // #8453: the supervisor model key, written and removed by ownership.
 mod architect_model;
 // #12127: the four launch keys, recorded for the `--settings` flag tier.
-mod launch_keys;
+pub mod launch_keys;
 // #12077: the legacy global `trusty-memory` hook strip (row 11).
 mod legacy_memory_hooks;
 #[cfg(test)]
 pub(crate) use launch_keys::effective_settings;
 pub use launch_keys::{
-    LaunchKeysError, OUTPUT_STYLE_KEY, add_launch_exclude, read_launch_keys,
-    record_path as launch_keys_record_path, recorded_claude_md_excludes, set_launch_key,
+    LaunchKeysError, read_launch_keys, record_path as launch_keys_record_path, set_launch_key,
 };
 #[cfg(test)]
 mod tests;
