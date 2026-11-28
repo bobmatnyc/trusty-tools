@@ -32,3 +32,13 @@ Read by `tests/dashboard_pending.rs` and the `isotime` unit test.
 so `cases.json` and the `pending`, `stale_tasks` and `last_activity`
 goldens are no longer read; the `dashboard_derive` and `owner_answers`
 replay recordings cover the port.
+
+#12029 P2g (Architect ruling 17:06Z): the port's `pending` follows the
+bundled copy's `_with_note` (#10765) on purpose: an `answered` event's text
+is the answer, then `: <trimmed answer_note>` when the note is a non-blank
+string, as the Architect Do text already was. The frozen
+`dashboard_derive.py` (architect `0fbbc81eed`, line 491) drops the note on a
+plain answer, so this is an intended divergence from the frozen reference,
+not from these goldens (they were captured from the bundled copy). Pinned by
+`answered_text_carries_the_trimmed_answer_note`; the `owner_answers` replay
+records it as `ANSWER_NOTE_DIVERGENCE` in `tests/replay_owner_answers.rs`.

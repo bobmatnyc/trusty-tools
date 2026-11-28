@@ -25,6 +25,8 @@ pub(crate) mod counts; // #12029 P2e: the live `dashboard::tally` runs these rul
 pub(crate) mod ids; // #12029 P2d: the live `dashboard::ids` runs these rules
 mod order;
 pub(crate) mod pending; // #12029 P2e: the poller and `pending-answers` run these rules
+#[cfg(test)]
+mod pending_tests; // #12029 P2g: the answer-note rule
 pub(crate) mod stale;
 
 use std::collections::BTreeMap;
