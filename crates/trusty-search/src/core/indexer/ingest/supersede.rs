@@ -94,7 +94,7 @@ impl PathWriteLocks {
 /// a path write that lands between the two is missing from staging (#839).
 /// What: holds the path's stripe; on drop, counts one finished path write, so
 /// the swap can tell whether one finished after its copy began.
-/// Test: `a_write_in_the_carryover_window_raises_the_generation`.
+/// Test: `a_write_and_a_delete_in_the_carryover_window_stop_the_run`.
 pub(crate) struct PathWriteGuard<'a> {
     _stripe: tokio::sync::MutexGuard<'a, ()>,
     released: &'a std::sync::atomic::AtomicU64,
@@ -106,6 +106,17 @@ impl Drop for PathWriteGuard<'_> {
         // indexer guard can drop, so a swap under the write lock sees it.
         self.released
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Counts one finished live-corpus write on drop (#12064).
+pub(crate) struct LiveWriteGuard<'a>(&'a std::sync::atomic::AtomicU64);
+
+impl Drop for LiveWriteGuard<'_> {
+    fn drop(&mut self) {
+        // #12064: dropped inside the writer's call, while its indexer read
+        // guard is still held, as `PathWriteGuard` is.
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -121,15 +132,37 @@ impl CodeIndexer {
         self.path_write_locks.lock(path).await
     }
 
-    /// Path writes finished on this indexer since it was built (#10738).
+    /// Live-corpus writes finished on this indexer since it was built (#10738).
     ///
-    /// Why: every path write holds the indexer's read guard for its whole call,
+    /// Why: every live write holds the indexer's read guard for its whole call,
     /// so a reader of this under the write guard sees every finished write.
-    /// Test: `a_write_in_the_carryover_window_raises_the_generation`.
-    pub(crate) fn path_writes_finished(&self) -> u64 {
+    /// #12064: puts, deletes and hash rows all count, not only path puts.
+    /// Test: `a_write_and_a_delete_in_the_carryover_window_stop_the_run`.
+    pub(crate) fn live_writes_finished(&self) -> u64 {
         self.path_write_locks
             .released
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Count one live-corpus write when the returned guard drops (#12064).
+    ///
+    /// Why: a delete or a hash-row change that commits during a staged run's
+    /// carryover copy is missing from staging just as a put is; the swap must
+    /// see it to stop the run.
+    /// What: a guard that adds one to [`Self::live_writes_finished`] on drop,
+    /// whatever the write's outcome. Bind it before the write's first mutation.
+    /// Test: `a_write_and_a_delete_in_the_carryover_window_stop_the_run`.
+    pub(crate) fn count_live_write(&self) -> LiveWriteGuard<'_> {
+        LiveWriteGuard(&self.path_write_locks.released)
+    }
+
+    /// [`Self::refuse_if_corpus_detached`], then [`Self::count_live_write`].
+    ///
+    /// Why (#12064): every live-corpus writer already passes the #10738
+    /// detach check first, so this is the one place each of them is counted.
+    pub(crate) fn admit_live_write(&self) -> Result<LiveWriteGuard<'_>> {
+        self.refuse_if_corpus_detached()?;
+        Ok(self.count_live_write())
     }
 
     /// Chunk ids the corpus holds for `file_path` that `fresh` does not reuse.

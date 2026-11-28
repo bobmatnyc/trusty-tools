@@ -452,21 +452,18 @@ pub(super) async fn run_reindex(
             {
                 Ok(path) => path,
                 Err(e) => {
+                    // #12064: a window write stops the run; name it, not a copy fault.
+                    let reason = super::corpus_swap::begin_failure_reason(&e);
                     tracing::error!(
-                        "reindex[{}]: ABORTING incremental reindex — carryover copy \
-                         from live corpus failed ({e}); live corpus is intact",
+                        "reindex[{}]: ABORTING incremental reindex — {reason} ({e:#})",
                         index_id.0
                     );
-                    mark_reindex_failed(&handle, "carryover copy failed — live corpus intact")
-                        .await;
+                    mark_reindex_failed(&handle, reason).await;
                     // #6386: status and frame in one hold — see `push_terminal`.
                     let frame = serde_json::json!({
                         "event": "error",
                         "index_id": index_id.0,
-                        "message": format!(
-                            "incremental reindex aborted: failed to copy live corpus \
-                             into staging store ({e}) — live corpus is intact"
-                        ),
+                        "message": format!("incremental reindex aborted: {reason} ({e:#})"),
                         "fatal": true,
                     });
                     progress.push_terminal(ReindexStatus::Failed, frame).await;

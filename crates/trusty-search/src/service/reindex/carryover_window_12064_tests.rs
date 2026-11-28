@@ -1,11 +1,12 @@
-//! #12064: a write and a delete that commit to the live corpus during an
-//! incremental run's carryover copy survive the promotion.
+//! #12064: a write or a delete that commits to the live corpus during an
+//! incremental run's carryover copy stops the run before its swap; the next
+//! run promotes a corpus that holds it.
 
 use std::sync::Arc;
 
-use super::identity_10738_tests::{resolve, staged_index, PUSHED, PUSHED_BODY};
-use crate::core::indexer::VectorCoverage;
+use super::identity_10738_tests::{begin, resolve, staged_index, PUSHED, PUSHED_BODY};
 use crate::core::registry::IndexHandle;
+use crate::service::storage_layout::REDB_TMP_FILE;
 
 const A_V2: &str = "pub fn alpha_12064(x: u8) -> u8 {\n    let y = x + 1;\n    y * 2\n}\n";
 const DOOMED: &str = "src/doomed_12064.rs";
@@ -31,7 +32,7 @@ async fn begin_until_swap_queued(
                 false,
                 None,
                 None,
-                crate::service::storage_layout::REDB_TMP_FILE,
+                REDB_TMP_FILE,
             )
             .await
         })
@@ -60,43 +61,120 @@ async fn seed(id: &str) -> (tempfile::TempDir, Arc<IndexHandle>) {
     (dir, handle)
 }
 
-/// Why: #12064 — a rewrite, a new file and a delete committed to live in the
-/// carryover window were dropped or resurrected by the promotion, and the
-/// rewritten file's old chunk ids stayed in the corpus with no vector.
-/// What: in the window, rewrite `a.rs`, put `PUSHED` and remove `DOOMED`;
-/// promote; assert the corpus holds the new `a.rs` and `PUSHED`, not
-/// `DOOMED`, and every corpus chunk has a vector.
+/// The files the attached corpus lists.
+async fn attached_files(handle: &Arc<IndexHandle>) -> Vec<String> {
+    let indexer = handle.indexer.read().await;
+    let corpus = indexer.corpus_store().expect("a corpus is attached");
+    corpus.list_indexed_files().expect("list")
+}
+
+/// Assert the run stopped: `Err`, the #12064 stop reason, no staging file.
+async fn assert_stopped(
+    handle: &Arc<IndexHandle>,
+    outcome: anyhow::Result<Option<std::path::PathBuf>>,
+) {
+    let err = match outcome {
+        Err(e) => e,
+        Ok(path) => panic!("a write in the carryover window must stop the run, got Ok({path:?})"),
+    };
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("during the carryover copy") && text.contains("#12064"),
+        "the stop names the window write: {text}"
+    );
+    let tmp = super::corpus_swap::staging_corpus_path(handle, &handle.id, REDB_TMP_FILE)
+        .await
+        .expect("staging path");
+    assert!(
+        !tmp.exists(),
+        "the stale copy is removed: {}",
+        tmp.display()
+    );
+}
+
+/// Why: #12064 — a delete in the window was resurrected by the promotion,
+/// and the #10738 counter counted puts only, so a delete alone was not seen.
+/// What: in the window, remove `DOOMED` and nothing else; assert the run
+/// stops with live attached and the delete kept.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::parallel]
-async fn a_write_and_a_delete_in_the_carryover_window_survive_the_promotion() {
-    let id = "carryover-window-12064";
-    let (_dir, handle) = seed(id).await;
+async fn a_delete_alone_in_the_carryover_window_stops_the_run() {
+    let (_dir, handle) = seed("carryover-delete-12064").await;
 
     let guard = handle.indexer.read().await;
     let run = begin_until_swap_queued(&handle).await;
-    guard.index_file("a.rs", A_V2).await.expect("rewrite in the window");
-    guard
-        .index_file(PUSHED, PUSHED_BODY)
-        .await
-        .expect("put in the window");
     let (removed, committed) = guard
         .remove_file_committed(DOOMED)
         .await
         .expect("delete in the window");
     assert!(removed > 0 && committed, "the delete hit live");
     drop(guard);
-    let tmp = run.await.expect("begin task").expect("staging").expect("staged");
+
+    assert_stopped(&handle, run.await.expect("begin task")).await;
+    let files = attached_files(&handle).await;
+    assert!(!files.iter().any(|f| f == DOOMED), "delete kept: {files:?}");
+}
+
+/// Why: #12064 — a rewrite, a new file and a delete committed to live in the
+/// carryover window were dropped or resurrected by the promotion.
+/// What: in the window, rewrite `a.rs`, put `PUSHED` and remove `DOOMED`;
+/// assert the run stops with live attached and holding all three. Then a
+/// later run with no window write promotes, and the promoted corpus holds
+/// them too: nothing from the stopped run's copy carries over.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_write_and_a_delete_in_the_carryover_window_stop_the_run() {
+    let (_dir, handle) = seed("carryover-window-12064").await;
+
+    let guard = handle.indexer.read().await;
+    let run = begin_until_swap_queued(&handle).await;
+    guard
+        .index_file("a.rs", A_V2)
+        .await
+        .expect("rewrite in the window");
+    guard
+        .index_file(PUSHED, PUSHED_BODY)
+        .await
+        .expect("put in the window");
+    guard
+        .remove_file_committed(DOOMED)
+        .await
+        .expect("delete in the window");
+    drop(guard);
+
+    assert_stopped(&handle, run.await.expect("begin task")).await;
+    let live = attached_files(&handle).await;
     assert!(
-        !resolve(&handle, &tmp, &super::staging::StagingResolution::Commit, false).await,
-        "the promotion lands"
+        live.iter().any(|f| f == PUSHED),
+        "live keeps the put: {live:?}"
+    );
+    assert!(
+        !live.iter().any(|f| f == DOOMED),
+        "live keeps the delete: {live:?}"
     );
 
+    // The retry: nothing writes in this run's window, so it promotes.
+    let tmp = begin(&handle, false).await;
+    assert!(
+        !resolve(
+            &handle,
+            &tmp,
+            &super::staging::StagingResolution::Commit,
+            false
+        )
+        .await,
+        "the retried promotion lands"
+    );
     let indexer = handle.indexer.read().await;
     let corpus = indexer.corpus_store().expect("promoted");
     let files = corpus.list_indexed_files().expect("list");
-    assert!(files.iter().any(|f| f == PUSHED), "put kept: {files:?}");
-    assert!(!files.iter().any(|f| f == DOOMED), "delete kept: {files:?}");
+    assert!(files.iter().any(|f| f == PUSHED), "put promoted: {files:?}");
+    assert!(
+        !files.iter().any(|f| f == DOOMED),
+        "delete promoted: {files:?}"
+    );
     let a_rows: Vec<String> = corpus
         .load_all_chunks()
         .expect("chunks")
@@ -106,12 +184,6 @@ async fn a_write_and_a_delete_in_the_carryover_window_survive_the_promotion() {
         .collect();
     assert!(
         !a_rows.is_empty() && a_rows.iter().all(|c| c.contains("alpha_12064")),
-        "only the rewritten a.rs survives: {a_rows:?}"
+        "only the rewritten a.rs is promoted: {a_rows:?}"
     );
-    match indexer.vector_coverage().await {
-        VectorCoverage::Measured { missing, .. } => {
-            assert!(missing.is_empty(), "corpus chunks without a vector: {missing:?}");
-        }
-        other => panic!("coverage must be measured: {other:?}"),
-    }
 }

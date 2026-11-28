@@ -1,0 +1,2 @@
+Fixed
+- An incremental reindex no longer promotes a staging corpus that misses a write, or brings back a delete, committed to the live corpus while the carryover copy ran. Such a run now stops before its swap: the staging copy is deleted, the live corpus stays attached with every write, and the reindex is reported failed with a reason naming the window write. The next reindex, from the next daemon start's reconcile or the next reindex request, runs it again. Deletes and content-hash changes now count as live writes, as puts already did (#12064).

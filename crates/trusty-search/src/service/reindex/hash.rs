@@ -127,6 +127,8 @@ pub(crate) async fn forget_file_hash(
     indexer: &crate::core::CodeIndexer,
     rel: &str,
 ) -> anyhow::Result<()> {
+    // #12064: a hash row is live state; seen by the carryover check.
+    let _live_write = indexer.count_live_write();
     hashes_for(index_id).remove(std::path::Path::new(rel));
     let Some(corpus) = indexer.corpus_store() else {
         return Ok(());
@@ -159,6 +161,8 @@ pub(crate) async fn record_file_hash(
     rel: &str,
     hash: &str,
 ) -> anyhow::Result<()> {
+    // #12064: a hash row is live state; seen by the carryover check.
+    let _live_write = indexer.count_live_write();
     hashes_for(index_id).insert(PathBuf::from(rel), hash.to_string());
     let Some(corpus) = indexer.corpus_store() else {
         return Ok(());

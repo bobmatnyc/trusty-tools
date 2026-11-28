@@ -180,7 +180,7 @@ async fn begin_staged_corpus_swap_with_schema_reader(
         // no chunks — still has to carry the contributed overlay across the
         // swap (ADR-0009), because nothing in the pipeline can regenerate it.
         // #10738: the finished-write count, taken before the copy begins.
-        (indexer.corpus_store(), indexer.path_writes_finished())
+        (indexer.corpus_store(), indexer.live_writes_finished())
     };
     // Whether this is an incremental (carryover) reindex — tracked so the
     // error path can distinguish a copy failure from a staging-open failure.
@@ -316,10 +316,10 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     // dropped here; reads during the reindex are served from the in-memory
     // `chunks` HashMap, so dropping the durable handle does not affect search.
     let mut indexer = handle.indexer.write().await;
-    // #10738: mark the promotion to bump if a path write finished after the
-    // copy began (#839), and the outgoing live corpus so a restart or a
-    // re-attach bumps; either write failing abandons the run.
-    index_identity::mark_before_swap(&indexer, &staged, &tmp_path, writes_before, force)?;
+    // #12064: a live write finished after the copy began (#839) stops the
+    // run with live attached. #10738: otherwise mark the outgoing live corpus
+    // so a restart or a re-attach bumps; a failed mark abandons the run too.
+    index_identity::mark_before_swap(&indexer, &tmp_path, writes_before, force)?;
     let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
     drop(indexer);
     tracing::info!(
@@ -335,6 +335,22 @@ async fn begin_staged_corpus_swap_with_schema_reader(
         adopt::write_checkpoint(handle, index_id, cp).await;
     }
     Ok(Some(tmp_path))
+}
+
+/// The failed-stage reason for a staged swap that did not begin (#12064).
+///
+/// Why: a run stopped by a live write in the carryover copy is not a copy
+/// fault; the status and the stream must say which one happened.
+/// Test: `a_write_and_a_delete_in_the_carryover_window_stop_the_run`.
+pub(super) fn begin_failure_reason(e: &anyhow::Error) -> &'static str {
+    if e.chain()
+        .any(|c| c.is::<index_identity::CarryoverWindowWrite>())
+    {
+        "a live write landed during the carryover copy — run stopped, live corpus intact, \
+         retried by the next reindex"
+    } else {
+        "carryover copy failed — live corpus intact"
+    }
 }
 
 /// Proof that a staging corpus was released for promotion with its resume
