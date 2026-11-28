@@ -1,0 +1,2 @@
+Fixed
+- tm now removes, once, the sandbox keys and list entries tm 1.14.14 and 1.14.15 wrote into a project's `.claude/settings.json`. At the next launch it deletes only the keys whose value still equals the workspace's `.trusty-mpm/sandbox-roles.json` record, keeps every other key and every entry you added, then records `.trusty-mpm/sandbox-cleanup.json` and never writes that file for sandbox reasons again. A workspace with no record is not touched; a failed cleanup is logged, does not stop the launch, and is retried on the next launch (#12077).

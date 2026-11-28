@@ -84,12 +84,14 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
     .collect()
 }
 
-/// The launch-time sandbox step: a no-op while enforcement is off (#12077).
+/// The launch-time sandbox step: writes no sandbox policy (#12077).
 ///
 /// Why: #12077 — tm never writes the sandbox into a Claude settings file; an
 /// opted-in launch carries it inline (`crate::core::claude_sandbox`).
-/// What: returns `Ok` before any write or refusal. It writes no project tier,
-/// no user tier and no role record, and refuses no config dir. Every launch
+/// What: runs the one-time project-key cleanup
+/// ([`crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch`]), then
+/// returns `Ok`. It writes no sandbox policy into any tier and no role
+/// record, and refuses no config dir. Every launch
 /// path (`tm launch`/`tm connect`, `tm run`, the managed spawn, resume and
 /// relaunch, the divert worker) reaches the sandbox only through here.
 ///
@@ -98,12 +100,16 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
 /// None while enforcement is off; the `Result` keeps the callers unchanged.
 ///
 /// Test: `a_default_launch_writes_no_sandbox_key_12077`,
-/// `a_launch_with_no_config_dir_is_not_refused_12077`.
+/// `a_launch_with_no_config_dir_is_not_refused_12077`,
+/// `the_shared_launch_step_runs_the_cleanup_and_never_refuses_12077`.
 pub fn apply_launch_sandbox(
     role: SandboxRole,
     inputs: &SandboxInputs,
     _config_dir: Option<&Path>,
 ) -> Result<(), SandboxSettingsError> {
+    // #12077 slice 3: remove tm's 1.14.14/1.14.15 project keys once; a failure
+    // is logged and never refuses the launch. Runs whatever the opt-in switch.
+    crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch(&inputs.workspace);
     tracing::debug!(
         ?role,
         workspace = %inputs.workspace.display(),
