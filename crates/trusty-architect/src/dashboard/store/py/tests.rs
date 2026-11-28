@@ -66,7 +66,7 @@ fn a_failed_replace_is_an_error_and_restores_the_batch() -> Result<(), Box<dyn s
         std::fs::set_permissions(&items, std::fs::Permissions::from_mode(0o555))?;
         let ops = loads(
             r#"[{"op": "update", "collection": "fresh", "id": "F01", "data": {"a": 2}},
-                {"op": "update", "collection": "items", "id": "A01", "data": {"status": "done"}}]"#,
+                {"op": "set", "collection": "items", "id": "A02", "data": {"status": "done"}}]"#,
         )
         .map_err(|e| e.py_str())?;
         let got = store.batch(&ops, None);
@@ -77,6 +77,7 @@ fn a_failed_replace_is_an_error_and_restores_the_batch() -> Result<(), Box<dyn s
         );
         assert_eq!(read(&item_file), item_before, "{fmt}");
         if fmt == "dir" {
+            assert!(!items.join("A02.json").exists());
             // The earlier write in another directory was restored.
             assert_eq!(read(&fresh), fresh_before, "{fmt}");
         }
