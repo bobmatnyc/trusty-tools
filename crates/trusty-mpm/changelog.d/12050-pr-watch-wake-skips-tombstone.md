@@ -1,0 +1,2 @@
+Fixed
+- The PR watch wake no longer types into a deleted or decommissioned session record that shares the owner's tmux name. It picked whichever record the store listed first, so a tombstone's dead pane id made the pane gate refuse the wake ("recorded pane … no longer exists") until the order changed, about two minutes late. The wake now targets the one live record of that name, and refuses, naming every candidate, when two live records share it (#12050).

@@ -391,3 +391,98 @@ async fn tmux_session_id_round_trips_and_old_records_load() {
     let back: SessionRecord = serde_json::from_str(&json).expect("reloads");
     assert_eq!(back.tmux_session_id.as_deref(), Some(LIVE_SESSION));
 }
+
+/// A manager over `tmux` holding a `Deleted` tombstone bound to dead `%23`
+/// and `live`, both named `tm-trusty-tools`, as the 2026-11-27 store did.
+async fn tombstone_and(
+    tmux: Arc<ReresolveTmux>,
+    live: &[(&str, ManagedSessionState)],
+) -> (
+    tempfile::TempDir,
+    Arc<SessionManager>,
+    Vec<ManagedSessionId>,
+) {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mgr = SessionManager::new(dir.path(), tmux)
+        .await
+        .expect("manager");
+    let seeds = std::iter::once(("%23", ManagedSessionState::Deleted)).chain(live.iter().cloned());
+    let mut ids = Vec::new();
+    for (pane, state) in seeds {
+        let mut record = make_active_test_record("tm-trusty-tools", "t", "/tmp");
+        record.pane_id = Some(pane.into());
+        record.tmux_server = Some(SERVER.into());
+        record.tmux_session_id = Some(LIVE_SESSION.into());
+        record.state = state;
+        ids.push(record.id);
+        mgr.store.write().await.upsert(record).await.expect("seed");
+    }
+    (dir, Arc::new(mgr), ids)
+}
+
+/// #12050 acceptance: a deleted tombstone still names `tm-trusty-tools` and
+/// its dead pane `%23`; the live record names `%18`. The PR watch wake picked
+/// whichever record the store's hash map listed first, so it was refused
+/// (`a deleted record cannot be rebound`) until the order changed. Every wake
+/// must reach `%18` on the first try; fresh managers vary the map order.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_pr_watch_wake_skips_a_deleted_record_and_delivers_to_the_live_pane() {
+    use crate::daemon::services::pr_watch_loop::Waker as _;
+    use crate::daemon::services::pr_watch_ports::PaneWaker;
+    for attempt in 0..16 {
+        let tmux = Arc::new(ReresolveTmux::new(
+            &["tm-trusty-tools"],
+            &[("%18", "tm-trusty-tools", "/tmp")],
+        ));
+        let (_dir, mgr, _ids) =
+            tombstone_and(Arc::clone(&tmux), &[("%18", ManagedSessionState::Active)]).await;
+        let waker = PaneWaker {
+            state: Arc::new(crate::daemon::state::DaemonState::with_session_manager(mgr)),
+        };
+
+        let woke = waker.wake("tm-trusty-tools", "ci green").await;
+
+        assert!(woke.is_ok(), "attempt {attempt}: wake refused: {woke:?}");
+        assert_eq!(
+            tmux.sends(),
+            vec!["tm-trusty-tools %18 ci green".to_string()],
+            "attempt {attempt}"
+        );
+    }
+}
+
+/// #12050 fail-open check: two live records share the name, so the wake
+/// cannot tell which owns the PR; it refuses, names both, and types nothing.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_pr_watch_wake_to_two_live_records_of_one_name_refuses_and_names_both() {
+    use crate::daemon::services::pr_watch_loop::Waker as _;
+    use crate::daemon::services::pr_watch_ports::PaneWaker;
+    let tmux = Arc::new(ReresolveTmux::new(
+        &["tm-trusty-tools"],
+        &[("%18", "tm-trusty-tools", "/tmp")],
+    ));
+    let (_dir, mgr, ids) = tombstone_and(
+        Arc::clone(&tmux),
+        &[
+            ("%18", ManagedSessionState::Active),
+            ("%18", ManagedSessionState::Active),
+        ],
+    )
+    .await;
+    let waker = PaneWaker {
+        state: Arc::new(crate::daemon::state::DaemonState::with_session_manager(mgr)),
+    };
+
+    let woke = waker.wake("tm-trusty-tools", "ci green").await;
+
+    let why = format!("{:#}", woke.expect_err("an ambiguous wake must refuse"));
+    for id in &ids[1..] {
+        assert!(why.contains(&id.to_string()), "{id} not named: {why}");
+    }
+    assert!(!why.contains(&ids[0].to_string()), "tombstone named: {why}");
+    assert!(tmux.sends().is_empty(), "typed into {:?}", tmux.sends());
+}
