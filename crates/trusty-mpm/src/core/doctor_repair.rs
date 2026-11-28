@@ -35,9 +35,9 @@
 //!
 //! What: [`RepairMode`], the [`RepairStep`] outcome model, and the repairs
 //! `--fix` drives — [`repair_build_tree_binary`] (#7262, the repoint that runs
-//! first), [`repair_hooks_contamination`], [`repair_missing_hook_group`]
-//! (#7490 — runs after that strip; #12077: reports the gap and refuses, as tm
-//! does not write the project file),
+//! first), [`repair_hooks_contamination`] (#12077 part 4c retired the
+//! missing-hook-group repair that ran after it: a project file owes tm no
+//! hook group),
 //! [`repair_push_guard`], [`repair_output_style`] (#5866 — the one check whose
 //! remedy string named a command with no such step), and (via
 //! [`crate::core::skill_repair`]) the skill redeploy — plus

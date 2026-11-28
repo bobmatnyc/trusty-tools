@@ -117,8 +117,8 @@ fn an_architect_body_carries_the_exec_form_guard_12077() {
 #[test]
 fn the_strip_predicate_claims_every_tm_shape_and_no_memory_prefix_12077() {
     for cmd in [
-        "/Users/u/.cargo/bin/tm hook",
-        "/Users/u/.local/share/mise/shims/tm hook",
+        "/Users/user/.cargo/bin/tm hook",
+        "/Users/user/.local/share/mise/shims/tm hook",
         "/usr/local/bin/tm hook --pm-guard",
         "tm hook --pm-guard",
         "/usr/local/bin/tm hook --egress-guard",
@@ -157,17 +157,17 @@ fn a_launch_removes_only_tms_entries_12077() {
         "hooks": {
             "PreToolUse": [
                 { "matcher": "", "hooks": [
-                    { "type": "command", "command": "/Users/u/.cargo/bin/tm hook --pm-guard", "timeout": 10 },
+                    { "type": "command", "command": "/Users/user/.cargo/bin/tm hook --pm-guard", "timeout": 10 },
                     foreign.clone()
                 ]},
                 { "matcher": "", "hooks": [
                     { "type": "command", "command": "/opt/tm", "args": ["hook", "--pm-guard"] }
                 ]},
-                tm_group("/Users/u/.local/share/mise/shims/tm hook --egress-guard")
+                tm_group("/Users/user/.local/share/mise/shims/tm hook --egress-guard")
             ],
             "SessionStart": [
                 tm_group("trusty-memory inbox-check"),
-                tm_group("/Users/u/.cargo/bin/tm hook")
+                tm_group("/Users/user/.cargo/bin/tm hook")
             ]
         }
     });
