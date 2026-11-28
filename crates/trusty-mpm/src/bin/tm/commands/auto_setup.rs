@@ -420,7 +420,7 @@ impl NotSigned {
 /// Sign the trusty-browser binaries this run installed, with `tctl sign
 /// trusty-browser`.
 ///
-/// Why (#11587, owner ruling Dsf "sign at install only"): `tm install` is the
+/// Why (#11587: sign at install only): `tm install` is the
 /// path that installs trusty-browser, and before this the binaries stayed
 /// ad-hoc until `install-service` / `install-host` signed them. tctl owns
 /// every codesign flag and identifier and attests the result fail-closed, so

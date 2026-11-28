@@ -1,7 +1,7 @@
 //! The install-time sign step: every installed trusty binary, one report line
 //! each.
 //!
-//! Why (#11587, owner ruling Dsf "sign at install only; no CI signing"): a
+//! Why (#11587: sign at install only; no CI signing): a
 //! Keychain item trusts the binary that created it by designated requirement.
 //! An ad-hoc `cargo install` binary has its cdhash as that requirement, so
 //! every upgrade re-prompts. Before this step `tctl install` signed only the

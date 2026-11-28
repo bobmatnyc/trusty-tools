@@ -94,7 +94,7 @@
 //! shells out to instead of duplicating codesign flags in bash. #11587:
 //! `trusty-secrets` joins as [`SECRETS_SET`], and `sign_set_strict` now reads
 //! each signature back and fails closed on an ad-hoc or wrong-team result
-//! (`strict`). #11587 (sign at install only, owner ruling Dsf): the browser,
+//! (`strict`). #11587 (sign at install only): the browser,
 //! console, review and installer sets join, and both paths share
 //! `strict::sign_one`.
 //!
