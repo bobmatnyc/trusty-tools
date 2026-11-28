@@ -1,0 +1,2 @@
+Fixed
+- `tm hook --pm-guard` now refuses `op item get`, `op document get` and `op inject` when their output reaches the tool output (stdout, `-o -`, or `--out-file /dev/stdout`), and refuses `op run --no-masking`. A read captured into a variable or written to a file with `-o`/`--out-file` or a redirect is still allowed, as is `op run` with its default masking. `op item $SUB …`, where the second subcommand word is chosen at run time, is now refused like `op $SUB …`.

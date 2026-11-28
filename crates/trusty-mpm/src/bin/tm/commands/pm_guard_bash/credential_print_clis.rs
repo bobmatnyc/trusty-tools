@@ -17,7 +17,10 @@
 //! `credential_print_tests::refuses_an_unclassifiable_interactive_security_8677`,
 //! `credential_print_tests::denies_a_verbose_curl_carrying_a_credential_8677`,
 //! `credential_print_tests::denies_the_sibling_credential_clis_8677`,
-//! `credential_print_tests::allows_the_8677_neighbours`.
+//! `credential_print_tests::allows_the_8677_neighbours`,
+//! `credential_print_tests::denies_the_1password_stdout_reads_11959`,
+//! `credential_print_tests::denies_the_11959_fail_open_spellings`,
+//! `credential_print_tests::allows_the_11959_neighbours`.
 
 // #10734: a sibling credential call written as an argv list.
 #[path = "credential_print_argv.rs"]
@@ -35,6 +38,12 @@ const WORD_TRIGGERS: &[&[&str]] = &[
     &["gh", "auth", "--show-token"],
     &["gh", "auth", "-t"],
     &["op", "read"],
+    // #11959: 1Password reads that print a value on stdout; `op run` prints
+    // one only with masking off (on by default, `op run --help`).
+    &["op", "item", "get"],
+    &["op", "document", "get"],
+    &["op", "inject"],
+    &["op", "run", "--no-masking"],
     &["aws", "configure", "get"],
     &["aws", "configure", "export-credentials"],
 ];
@@ -88,9 +97,16 @@ fn names_trigger_words(words: &[String]) -> bool {
         .iter()
         .enumerate()
         .any(|(at, w)| w == "security" && security_is_interactive(&words[at + 1..]));
+    // #11959: a flag word also matches its `--flag=value` spelling, so
+    // `--no-masking=true` still makes the command worth parsing.
+    let is = |w: &str, want: &str| {
+        w == want
+            || (want.starts_with("--") && w.strip_prefix(want).is_some_and(|r| r.starts_with('=')))
+    };
     let in_order = |seq: &[&str], then_dynamic: bool| {
         let mut rest = words.iter();
-        seq.iter().all(|want| rest.any(|w| w == want)) && (!then_dynamic || rest.any(|w| w == "$"))
+        seq.iter().all(|want| rest.any(|w| is(w.as_str(), want)))
+            && (!then_dynamic || rest.any(|w| w == "$"))
     };
     interactive
         || WORD_TRIGGERS.iter().any(|seq| in_order(seq, false))
@@ -162,7 +178,8 @@ pub(super) fn judge_cli_echoes(
         let slots = match basename(word).as_str() {
             "gcloud" => 3,
             "gh" | "aws" => 2,
-            "op" => 1,
+            // #11959: `op item $S ref` picks `get` at run time.
+            "op" => 1 + usize::from(args.iter().any(|a| is_any(a, &["item", "document"]))),
             _ => 0,
         };
         if subcommand_is_dynamic(args, slots) {
@@ -217,10 +234,12 @@ fn subcommand_is_dynamic(args: &[String], slots: usize) -> bool {
 
 /// The values a sibling credential CLI prints.
 ///
-/// What: `gcloud secrets … access`, `op read` and `aws configure get <key>`
-/// with a key naming a secret or token, or `export-credentials`, print on
-/// stdout; `gcloud`'s `--out-file` and `op`'s `--out-file`/`-o` write the
-/// named path instead. `gh auth token` prints on stdout; `gh auth status` with
+/// What: `gcloud secrets … access`, `op read`, `op item get`, `op document
+/// get`, `op inject` and `aws configure get <key>` with a key naming a secret
+/// or token, or `export-credentials`, print on stdout; `gcloud`'s
+/// `--out-file` and `op`'s `--out-file`/`-o` (not on `item get`) write the
+/// named path instead. `op run --no-masking` passes its child's unmasked
+/// stdout and stderr through. `gh auth token` prints on stdout; `gh auth status` with
 /// `-t`/`--show-token` is read as both descriptors, as its stream changed
 /// between gh releases.
 fn cli_echoes<'a>(program: &str, args: &'a [String]) -> Vec<Echo<'a>> {
@@ -235,6 +254,13 @@ fn cli_echoes<'a>(program: &str, args: &'a [String]) -> Vec<Echo<'a>> {
     match program {
         "gcloud" if follows("secrets", &["access"]) => out_or_file(args, &["--out-file"]),
         "op" if after("read").is_some() => out_or_file(args, &["--out-file", "-o"]),
+        // #11959: `op item get` has no out-file flag; `op document get` and
+        // `op inject` write stdout unless `-o`/`--out-file` names a path.
+        "op" if subcommand_pair(args, "item", "get") => vec![Echo::Out],
+        "op" if subcommand_pair(args, "document", "get") || after("inject").is_some() => {
+            out_or_file(args, &["--out-file", "-o"])
+        }
+        "op" if after("run").is_some() && unmasked_run(args) => vec![Echo::Out, Echo::Err],
         "gh" if follows("auth", &["token"]) => vec![Echo::Out],
         "gh" if follows("auth", &["status"]) && follows("auth", &["-t", "--show-token"]) => {
             vec![Echo::Out, Echo::Err]
@@ -249,6 +275,56 @@ fn cli_echoes<'a>(program: &str, args: &'a [String]) -> Vec<Echo<'a>> {
         }
         _ => Vec::new(),
     }
+}
+
+/// Whether `a` is one of `words`, ignoring ASCII case.
+fn is_any(a: &str, words: &[&str]) -> bool {
+    words.iter().any(|w| a.eq_ignore_ascii_case(w))
+}
+
+/// Whether `first` then `second` are adjacent subcommand words in `args`
+/// (#11959), so `op item list --vault get` is not `op item get`.
+///
+/// What: true when either reading holds the pair: the non-dash words, or the
+/// non-dash words with the value after a dash word that has no `=` dropped
+/// (`op item --vault V get`). A pair found in either reading counts, so a
+/// boolean flag the second reading wrongly takes a value for
+/// (`op item --reveal get`) still matches.
+/// Test: `credential_print_tests::denies_the_1password_stdout_reads_11959`,
+/// `credential_print_tests::allows_the_11959_neighbours`.
+fn subcommand_pair(args: &[String], first: &str, second: &str) -> bool {
+    let pair = |words: &[&str]| {
+        words
+            .windows(2)
+            .any(|w| w[0].eq_ignore_ascii_case(first) && w[1].eq_ignore_ascii_case(second))
+    };
+    let raw: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(String::as_str)
+        .collect();
+    let mut valued = Vec::new();
+    let mut skip = false;
+    for a in args {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        if a.starts_with('-') {
+            skip = !a.contains('=');
+        } else {
+            valued.push(a.as_str());
+        }
+    }
+    pair(&raw) || pair(&valued)
+}
+
+/// Whether an `op run` turns masking off (#11959): a `--no-masking` word, or
+/// any `--no-masking=` spelling, among `op`'s own words before `--`. Read
+/// closed: `--no-masking=false` also counts.
+fn unmasked_run(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| a.to_ascii_lowercase().starts_with("--no-masking"))
 }
 
 /// Stdout, or the path an out-file flag in `flags` names (`--flag=PATH`,
