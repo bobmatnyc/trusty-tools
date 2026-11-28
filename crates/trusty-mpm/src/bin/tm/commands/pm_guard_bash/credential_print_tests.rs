@@ -1890,6 +1890,23 @@ fn denies_an_unmasked_op_run_read_by_position_11959() {
     );
 }
 
+/// 🔴 REGRESSION (#11959 delta review): a flag with no value, then a flag
+/// with a value, before the subcommand words. Neither all-valued nor
+/// no-value reading leads with the subcommand. Each row was allowed at
+/// 9e8438a6a8.
+#[test]
+fn denies_the_11959_mixed_flag_spellings() {
+    check(
+        true,
+        &[
+            "op --debug --account fake-acct item get fake-item",
+            "op --no-color --account fake-acct read op://fake-vault/fake-item/f",
+            "op item --vault fake-vault --debug get fake-item",
+            "op --cache --account fake-acct run --no-masking -- env",
+        ],
+    );
+}
+
 /// #11959: captured or file-bound reads, masked `op run`, other `op`
 /// subcommands, and prose mentions stay allowed.
 #[test]

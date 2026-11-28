@@ -287,6 +287,7 @@ fn is_any(a: &str, words: &[&str]) -> bool {
 /// Test: `credential_print_tests::denies_the_1password_stdout_reads_11959`,
 /// `credential_print_tests::denies_the_11959_fail_open_spellings`,
 /// `credential_print_tests::denies_an_unmasked_op_run_read_by_position_11959`,
+/// `credential_print_tests::denies_the_11959_mixed_flag_spellings`,
 /// `credential_print_tests::allows_the_11959_neighbours`.
 fn op_echoes(args: &[String]) -> Vec<Echo<'_>> {
     // #11959: `op run -- cat read -o F` must not read the child as `op read`.
@@ -308,37 +309,34 @@ fn op_echoes(args: &[String]) -> Vec<Echo<'_>> {
 /// Whether `verb` is the leading positional words of `op`'s own words `own`
 /// (#11959), so `op item list --vault inject` is not `op inject`.
 ///
-/// What: true when either reading starts with `verb`: the non-dash words, or
-/// the non-dash words with the value after a dash word that has no `=`
-/// dropped (`op --account work read`, `op item --vault V get`). Either reading
-/// counts, so a boolean flag the second reading wrongly takes a value for
-/// (`op item --reveal get`) still matches.
+/// What: true when some reading starts with `verb`. A reading drops the dash
+/// words, and each dash word with no `=` may or may not take the next word as
+/// its value, chosen per word (`op --debug --account X item get`,
+/// `op item --vault V --reveal get`). A search over (word, verb words
+/// matched) states tries every choice, so a reading is never missed.
 fn op_leads(own: &[String], verb: &[&str]) -> bool {
-    let leads = |words: &[&str]| {
-        words.len() >= verb.len()
-            && words
-                .iter()
-                .zip(verb)
-                .all(|(w, v)| w.eq_ignore_ascii_case(v))
-    };
-    let raw: Vec<&str> = own
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(String::as_str)
-        .collect();
-    let mut valued = Vec::new();
-    let mut skip = false;
-    for a in own {
-        if std::mem::take(&mut skip) {
+    // #11959: fail closed; any per-flag choice of value or no value counts.
+    let width = verb.len() + 1;
+    let mut seen = vec![false; (own.len() + 2) * width];
+    let mut todo = vec![(0, 0)];
+    while let Some((i, k)) = todo.pop() {
+        if k == verb.len() {
+            return true;
+        }
+        if std::mem::replace(&mut seen[i * width + k], true) {
             continue;
         }
+        let Some(a) = own.get(i) else { continue };
         if a.starts_with('-') {
-            skip = !a.contains('=');
-        } else {
-            valued.push(a.as_str());
+            todo.push((i + 1, k));
+            if !a.contains('=') {
+                todo.push((i + 2, k));
+            }
+        } else if a.eq_ignore_ascii_case(verb[k]) {
+            todo.push((i + 1, k + 1));
         }
     }
-    leads(&raw) || leads(&valued)
+    false
 }
 
 /// Whether an `op run` may turn masking off (#11959), given `op`'s own words.
