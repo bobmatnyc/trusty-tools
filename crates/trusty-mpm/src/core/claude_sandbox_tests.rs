@@ -63,16 +63,72 @@ fn the_process_switch_reads_the_env_var() {
     assert!(sandbox_opted_in());
 }
 
-/// #12077 (a): a default launch gets no sandbox payload in any role, and an
-/// opted-in launch with no home gets none either.
+/// #12077 (a): a default launch gets no sandbox payload in any role, with or
+/// without a home.
 #[test]
 fn a_default_launch_gets_no_sandbox_payload() {
     let (_dir, ws, home) = fixture();
     for role in [SandboxRole::Pm, SandboxRole::Agent, SandboxRole::Architect] {
-        assert_eq!(opted_in_launch_sandbox(false, role, &ws, Some(&home)), None);
-        assert_eq!(opted_in_launch_sandbox(true, role, &ws, None), None);
+        for home in [Some(home.as_path()), None] {
+            let payload = opted_in_launch_sandbox(false, role, &ws, home).expect("never refused");
+            assert_eq!(payload, None);
+        }
     }
     assert!(!ws.join(".claude").exists(), "nothing written");
+}
+
+/// #12077 Fail-Open Check: an explicit opt-in with no home is refused with an
+/// error naming the switch and the missing home, in every role; it is never
+/// a silent unsandboxed launch.
+#[test]
+fn an_opt_in_with_no_home_refuses_naming_the_switch_12077() {
+    let (_dir, ws, _home) = fixture();
+    for role in [SandboxRole::Pm, SandboxRole::Agent, SandboxRole::Architect] {
+        let err = opted_in_launch_sandbox(true, role, &ws, None).expect_err("refused");
+        let text = err.to_string();
+        assert!(text.contains("TM_CLAUDE_SANDBOX"), "{text}");
+        assert!(text.contains("home"), "{text}");
+        assert!(text.contains(&ws.display().to_string()), "{text}");
+    }
+}
+
+/// #12077: with no payload the spec unsets the switch, so a stale `1` from
+/// the tmux server cannot turn a session's relaunch or divert worker on; with
+/// one it assigns `1` exactly once. A `tm run` command removes it the same way.
+#[test]
+fn an_off_launch_unsets_a_stale_switch_12077() {
+    let switch = SANDBOX_OPT_IN_ENV.to_owned();
+    let stale = (switch.clone(), "1".to_owned());
+    let mut off = crate::runtime::cli_launch::client_spec(Path::new("/w"), None, false);
+    off.env_set.push(stale.clone());
+    Lockdown::PRODUCTION.scrub_spec_env(SessionProfile::Pm, &mut off);
+    assert!(off.env_unset.contains(&switch), "{:?}", off.env_unset);
+    assert!(
+        off.env_set.iter().all(|(k, _)| k != &switch),
+        "{:?}",
+        off.env_set
+    );
+
+    let payload = json!({ "sandbox": { "enabled": true } });
+    let mut on = crate::runtime::cli_launch::client_spec(Path::new("/w"), None, false);
+    on.env_set.push(stale.clone());
+    Lockdown::PRODUCTION
+        .with_sandbox(Some(&payload))
+        .scrub_spec_env(SessionProfile::Pm, &mut on);
+    assert!(!on.env_unset.contains(&switch), "{:?}", on.env_unset);
+    let set: Vec<_> = on.env_set.iter().filter(|(k, _)| k == &switch).collect();
+    assert_eq!(set, vec![&stale], "assigned once: {:?}", on.env_set);
+
+    let mut cmd = std::process::Command::new("claude");
+    cmd.env(SANDBOX_OPT_IN_ENV, "1");
+    Lockdown::PRODUCTION
+        .apply_to_command(SessionProfile::Pm, None, &mut cmd)
+        .expect("command");
+    assert!(
+        cmd.get_envs()
+            .any(|(k, v)| k == SANDBOX_OPT_IN_ENV && v.is_none()),
+        "the switch is removed from the child"
+    );
 }
 
 /// #12077: an opted-in PM payload holds the project tier and the user tier
@@ -81,7 +137,9 @@ fn a_default_launch_gets_no_sandbox_payload() {
 #[test]
 fn an_opted_in_pm_payload_carries_both_tiers() {
     let (_dir, ws, home) = fixture();
-    let pm = opted_in_launch_sandbox(true, SandboxRole::Pm, &ws, Some(&home)).expect("pm");
+    let pm = opted_in_launch_sandbox(true, SandboxRole::Pm, &ws, Some(&home))
+        .expect("not refused")
+        .expect("pm");
     assert_eq!(pm.pointer("/sandbox/enabled"), Some(&json!(true)));
     assert_eq!(
         pm.pointer("/sandbox/allowUnsandboxedCommands"),
@@ -97,8 +155,9 @@ fn an_opted_in_pm_payload_carries_both_tiers() {
     assert!(pm.pointer("/sandbox/credentials/envVars").is_some());
     assert_eq!(pm.pointer("/env/RUSTC_WRAPPER"), Some(&json!("")));
 
-    let architect =
-        opted_in_launch_sandbox(true, SandboxRole::Architect, &ws, Some(&home)).expect("arch");
+    let architect = opted_in_launch_sandbox(true, SandboxRole::Architect, &ws, Some(&home))
+        .expect("not refused")
+        .expect("arch");
     assert_eq!(architect.pointer("/sandbox/enabled"), Some(&json!(false)));
     assert!(architect.pointer("/sandbox/credentials").is_none());
 }
@@ -170,7 +229,12 @@ fn an_opted_in_launch_carries_the_sandbox_inline_12077() {
     Lockdown::PRODUCTION
         .apply_to_command(SessionProfile::Pm, None, &mut plain_cmd)
         .expect("command");
-    assert!(plain_cmd.get_envs().all(|(k, _)| k != SANDBOX_OPT_IN_ENV));
+    // #12077: with no payload the switch is removed, never inherited.
+    assert!(
+        plain_cmd
+            .get_envs()
+            .any(|(k, v)| k == SANDBOX_OPT_IN_ENV && v.is_none())
+    );
 }
 
 /// #12077 (e): with no role record tm owns nothing in the project files, even
@@ -178,7 +242,9 @@ fn an_opted_in_launch_carries_the_sandbox_inline_12077() {
 #[test]
 fn no_role_record_means_tm_owns_nothing_in_the_project() {
     let (_dir, ws, home) = fixture();
-    let pm = opted_in_launch_sandbox(true, SandboxRole::Pm, &ws, Some(&home)).expect("pm");
+    let pm = opted_in_launch_sandbox(true, SandboxRole::Pm, &ws, Some(&home))
+        .expect("not refused")
+        .expect("pm");
     write_json(&ws.join(".claude/settings.json"), &pm);
     write_json(&ws.join(".claude/settings.local.json"), &pm);
     let user_tier = home.join("claude-config");

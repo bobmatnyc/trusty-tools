@@ -415,6 +415,7 @@ fn an_opted_in_launch_puts_the_client_sockets_on_inline_settings_12077() {
         &ws,
         Some(&home),
     )
+    .expect("not refused")
     .expect("an opted-in launch has a payload");
     let argv = crate::core::architect_lockdown::Lockdown::PRODUCTION
         .with_sandbox(Some(&payload))

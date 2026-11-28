@@ -412,3 +412,36 @@ async fn an_opted_in_worker_carries_the_agent_sandbox_inline_12077() {
         assert!(!file.exists(), "{} was written", file.display());
     }
 }
+
+/// #12077 Fail-Open Check: an opted-in worker with no home is refused with an
+/// error naming the switch, before the worker starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_opted_in_worker_with_no_home_is_refused_12077() {
+    let (tmp, ws, _home, config) = sandbox_fixture();
+    let fake = tmp.path().join("claude");
+    let ran = tmp.path().join("ran");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
+            ran.display()
+        ),
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: None,
+        config_dir: Some(&config),
+        opted_in: true,
+    };
+    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect_err("an opt-in with no home is refused");
+    assert!(err.contains("TM_CLAUDE_SANDBOX"), "{err}");
+    assert!(!ran.exists(), "the worker never started");
+    assert!(
+        !ws.join(".claude/settings.json").exists(),
+        "no project write"
+    );
+}

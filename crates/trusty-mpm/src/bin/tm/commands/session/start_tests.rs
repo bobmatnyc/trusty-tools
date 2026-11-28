@@ -1583,3 +1583,48 @@ fn launch_files_carry_the_sandbox_only_when_opted_in_12077() {
             .exists()
     );
 }
+
+/// #12077 (criterion 4): an in-place start that is not opted in unsets the
+/// switch, so a stale `TM_CLAUDE_SANDBOX=1` in the tmux server cannot turn
+/// the session's relaunch or divert worker on.
+#[test]
+fn an_off_session_start_spec_unsets_a_stale_switch_12077() {
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let switch = trusty_mpm::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned();
+    let spec = super::inplace_session_spec(
+        std::path::Path::new("/w"),
+        root.path(),
+        &probe_prompt("/p.txt"),
+        None,
+        None,
+    )
+    .expect("a PM spec builds");
+    assert!(spec.env_unset.contains(&switch), "{:?}", spec.env_unset);
+    assert!(
+        spec.env_set.iter().all(|(k, _)| k != &switch),
+        "{:?}",
+        spec.env_set
+    );
+}
+
+/// #12077 Fail-Open Check: `tm session start`, `tm launch`, `tm connect` and
+/// the Architect launch share this step; with the switch on and no home it
+/// refuses with an error naming the switch, and with the switch off it does
+/// not.
+#[test]
+fn a_cli_launch_refuses_an_opt_in_with_no_home_12077() {
+    use crate::commands::launch_home::launch_sandbox_with;
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let workspace = crate::test_support::hermetic_temp_dir();
+    for profile in [SessionProfile::Pm, SessionProfile::Architect] {
+        let err = launch_sandbox_with(workspace.path(), None, profile, true)
+            .expect_err("an opt-in with no home is refused");
+        assert!(err.to_string().contains("TM_CLAUDE_SANDBOX"), "{err}");
+        let off = launch_sandbox_with(workspace.path(), None, profile, false).expect("default");
+        assert_eq!(off, None);
+    }
+    assert!(
+        !workspace.path().join(".claude").exists(),
+        "nothing written"
+    );
+}

@@ -2393,7 +2393,9 @@ fn managed_sandbox_goes_ahead_with_no_home_12077() {
     std::fs::create_dir_all(&ws).expect("mkdir ws");
     let config = tmp.path().join("claude-config");
     let pm = crate::core::session_profile::SessionProfile::Pm;
-    super::managed_sandbox_at(&ws, None, &config, pm).expect("no home is not refused");
+    let payload =
+        super::managed_sandbox_at(&ws, None, &config, pm, false).expect("no home is not refused");
+    assert_eq!(payload, None);
     assert_no_sandbox_in(&ws);
     assert!(!config.join("settings.json").exists(), "no user-tier write");
 }
@@ -2555,4 +2557,81 @@ fn an_opted_in_inplace_relaunch_carries_the_sandbox_inline_12077() {
         Some(&serde_json::json!(true))
     );
     assert_no_sandbox_in(&ws);
+}
+
+/// #12077 Fail-Open Check: a managed spawn, resume or relaunch that opted in
+/// with no home is refused with an error naming the switch, and writes
+/// nothing; the same launch not opted in goes ahead.
+#[test]
+fn a_managed_launch_refuses_an_opt_in_with_no_home_12077() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("mkdir ws");
+    let config = tmp.path().join("claude-config");
+    let pm = crate::core::session_profile::SessionProfile::Pm;
+    let err = super::managed_sandbox_at(&ws, None, &config, pm, true).expect_err("refused");
+    let text = err.to_string();
+    assert!(text.contains("TM_CLAUDE_SANDBOX"), "{text}");
+    assert!(text.contains("home"), "{text}");
+    assert_no_sandbox_in(&ws);
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+}
+
+/// #12077 (criterion 4): a record that says OFF yields a spawn and resume
+/// spec that unset the switch, even with `TM_CLAUDE_SANDBOX=1` in the
+/// daemon's (and so the tmux server's) environment, so the pane's relaunch
+/// and divert worker see the record's choice.
+#[test]
+#[serial_test::serial]
+fn an_off_record_spec_unsets_a_stale_switch_12077() {
+    use crate::secret_source::test_env::EnvVarGuard;
+    // #9123: the spawn resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let _stale = EnvVarGuard::set(crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV, "1");
+    let root = home.home().join(MPM_DIR_NAME);
+    let record: crate::session_manager::SessionRecord = serde_json::from_value(serde_json::json!({
+        "id": "0708af71-2b5e-5dab-8c92-739ebdb04941",
+        "task": "PM",
+        "tmux_name": "tm-sess",
+        "cwd": "/",
+        "state": "stopped",
+        "created_at": "2026-09-30T00:00:00Z",
+    }))
+    .expect("an OFF record");
+    let spawned = FakeTmux::new();
+    crate::runtime::build_record_adapter(&record, spawned.clone(), &root)
+        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect("spawn");
+    let resumed = FakeTmux::new();
+    crate::runtime::build_record_adapter(&record, resumed.clone(), &root)
+        .spawn_resume(
+            "tm-sess",
+            None,
+            home.home(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("resume");
+    let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned();
+    for fake in [&spawned, &resumed] {
+        let spec = sent_spec(&only_line(fake));
+        assert!(spec.env_unset.contains(&switch), "{:?}", spec.env_unset);
+        assert!(
+            spec.env_set.iter().all(|(k, _)| k != &switch),
+            "{:?}",
+            spec.env_set
+        );
+        assert!(
+            inline_settings(&spec.args).is_none_or(|v| v.get("sandbox").is_none()),
+            "{:?}",
+            spec.args
+        );
+    }
 }

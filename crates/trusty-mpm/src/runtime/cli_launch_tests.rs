@@ -95,9 +95,11 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
 
     assert_eq!(spec.cwd, Path::new("/work"));
     assert_eq!(spec.program, "claude");
+    // #12077: plus the sandbox switch, unset last so a stale value never leaks.
+    let mut scrub = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
+    scrub.push(crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV);
     assert_eq!(
-        spec.env_unset,
-        crate::core::claude_env_scrub::parse_env_unset_vars(&line),
+        spec.env_unset, scrub,
         "the same scrub, in the same order: {line}"
     );
     assert_eq!(
@@ -538,4 +540,30 @@ fn an_opted_in_isolated_spec_carries_the_sandbox_inline_12077() {
     assert_eq!(plain.args, same.args);
     assert!(!plain.env_set.contains(&switch));
     assert!(plain.args.contains(&carrier.display().to_string()));
+}
+
+/// #12077 (criterion 4): a `tm launch`/`tm connect` spec that is not opted in
+/// unsets the switch and drops any assignment of it, so the pane never runs
+/// under a stale `TM_CLAUDE_SANDBOX=1`.
+#[test]
+fn an_off_isolated_spec_unsets_a_stale_switch_12077() {
+    let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned();
+    let env = [(switch.clone(), "1".to_owned())];
+    let launch = CliLaunch {
+        model: None,
+        prompt_file: None,
+        config_dir: None,
+        oauth_token: None,
+        mcp_env: &env,
+        scoped_mcp: None,
+        settings: None,
+        alternate_screen: false,
+    };
+    let spec = super::isolated_spec(Path::new("/work"), &launch).expect("spec");
+    assert_eq!(spec.env_unset.last(), Some(&switch), "{:?}", spec.env_unset);
+    assert!(
+        spec.env_set.iter().all(|(k, _)| k != &switch),
+        "{:?}",
+        spec.env_set
+    );
 }

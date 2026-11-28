@@ -65,14 +65,12 @@ fn run_sandbox_goes_ahead_with_no_home_12077() {
 fn run_carries_the_sandbox_inline_only_when_opted_in_12077() {
     let (_tmp, repo, home, config) = fixture();
     assert_eq!(
-        super::run_sandbox_payload(false, &repo, Some(&home), SessionProfile::Pm),
-        None
-    );
-    assert_eq!(
-        super::run_sandbox_payload(true, &repo, None, SessionProfile::Pm),
+        super::run_sandbox_payload(false, &repo, Some(&home), SessionProfile::Pm)
+            .expect("never refused"),
         None
     );
     let payload = super::run_sandbox_payload(true, &repo, Some(&home), SessionProfile::Pm)
+        .expect("not refused")
         .expect("an opted-in payload");
     let files = crate::core::launch_policy::LaunchFiles {
         mcp_config: None,
@@ -120,4 +118,35 @@ fn run_carries_the_sandbox_inline_only_when_opted_in_12077() {
     ] {
         assert!(!file.exists(), "{} was written", file.display());
     }
+}
+
+/// #12077 Fail-Open Check: `tm run` with the switch on and no home is refused
+/// with an error naming the switch, and a default run with no home is not; a
+/// default run's `claude` never inherits the switch.
+#[test]
+fn run_refuses_an_opt_in_with_no_home_12077() {
+    let (_tmp, repo, _home, config) = fixture();
+    let err = super::run_sandbox_payload(true, &repo, None, SessionProfile::Pm)
+        .expect_err("an opt-in with no home is refused");
+    assert!(err.to_string().contains("TM_CLAUDE_SANDBOX"), "{err}");
+    assert_eq!(
+        super::run_sandbox_payload(false, &repo, None, SessionProfile::Pm).expect("default"),
+        None
+    );
+    let files = crate::core::launch_policy::LaunchFiles::default();
+    let cmd = super::run_launch_command(
+        None,
+        &repo,
+        &config,
+        None,
+        &files,
+        &repo.join("p.txt"),
+        SessionProfile::Pm,
+    )
+    .expect("the command builds");
+    let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
+    assert!(
+        cmd.get_envs().any(|(k, v)| k == switch && v.is_none()),
+        "a default run removes the switch"
+    );
 }
