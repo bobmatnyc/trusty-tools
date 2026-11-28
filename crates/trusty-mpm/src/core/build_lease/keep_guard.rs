@@ -129,6 +129,11 @@ mod tests {
     use crate::core::build_lease::marker_seal::seal_marker;
     use crate::core::build_lease::stale_guard::LAST_CHECKOUT_MARKER;
 
+    // #10429: a parallel test's fork can hold a just-dropped lease's open file
+    // description for a moment, so a call that expects to acquire polls up to
+    // this bound; calls that expect a refusal keep `Duration::ZERO`.
+    const ACQUIRE_WAIT: Duration = Duration::from_secs(5);
+
     fn fingerprint(dir: &Path) -> std::path::PathBuf {
         let fp = dir.join("debug/.fingerprint/pkg-0123456789abcdef");
         std::fs::create_dir_all(&fp).expect("fingerprint");
@@ -145,19 +150,19 @@ mod tests {
         let dir = tmp.path().join("target");
         let fp = fingerprint(&dir);
         let a = Path::new("/work/a");
-        let (lock, got) = lock_for_checkout(&dir, a, Duration::ZERO, pkgs).expect("first");
+        let (lock, got) = lock_for_checkout(&dir, a, ACQUIRE_WAIT, pkgs).expect("first");
         assert!(matches!(got, Invalidation::Cleared { previous: None, .. }));
         assert!(!fp.exists(), "a missing marker clears");
         // The lease's own build, then its seal (#11661).
         let fp = fingerprint(&dir);
         assert_eq!(seal_marker(&dir, a), Ok(true));
         drop(lock);
-        let (lock, got) = lock_for_checkout(&dir, a, Duration::ZERO, pkgs).expect("same");
+        let (lock, got) = lock_for_checkout(&dir, a, ACQUIRE_WAIT, pkgs).expect("same");
         assert_eq!(got, Invalidation::SameCheckout);
         assert!(fp.exists(), "the same checkout keeps its fingerprints");
         drop(lock);
         let b = Path::new("/work/b");
-        let (_lock, got) = lock_for_checkout(&dir, b, Duration::ZERO, pkgs).expect("other");
+        let (_lock, got) = lock_for_checkout(&dir, b, ACQUIRE_WAIT, pkgs).expect("other");
         assert!(
             matches!(&got, Invalidation::Cleared { previous: Some(p), removed: 1, .. } if p == "/work/a"),
             "{got:?}"
@@ -175,7 +180,7 @@ mod tests {
             .expect_err("the lock is held");
         assert!(err.contains("/work/a") && err.contains("#11661"), "{err}");
         drop(held);
-        assert!(lock_for_checkout(&dir, Path::new("/work/b"), Duration::ZERO, pkgs).is_ok());
+        assert!(lock_for_checkout(&dir, Path::new("/work/b"), ACQUIRE_WAIT, pkgs).is_ok());
     }
 
     #[test]
@@ -183,9 +188,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("target");
         let a = Path::new("/work/a");
-        let (first, _) = lock_for_checkout(&dir, a, Duration::ZERO, pkgs).expect("first");
+        let (first, _) = lock_for_checkout(&dir, a, ACQUIRE_WAIT, pkgs).expect("first");
         let fp = fingerprint(&dir);
-        let (second, got) = lock_for_checkout(&dir, a, Duration::ZERO, pkgs)
+        let (second, got) = lock_for_checkout(&dir, a, ACQUIRE_WAIT, pkgs)
             .expect("a second lease of the same checkout shares the directory");
         assert_eq!(got, Invalidation::SameCheckout);
         assert!(fp.exists(), "nothing is cleared for the same checkout");
@@ -198,7 +203,7 @@ mod tests {
             "one holder still builds /work/a"
         );
         drop(second);
-        assert!(lock_for_checkout(&dir, Path::new("/work/b"), Duration::ZERO, pkgs).is_ok());
+        assert!(lock_for_checkout(&dir, Path::new("/work/b"), ACQUIRE_WAIT, pkgs).is_ok());
         assert!(!fp.exists(), "/work/b clears /work/a's fingerprints");
     }
 
