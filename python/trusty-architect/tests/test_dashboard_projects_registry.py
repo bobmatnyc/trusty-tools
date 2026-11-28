@@ -144,6 +144,23 @@ class NoBridge(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TRUSTY_MPM_ROOT": root}):
             self.assertEqual([r["name"] for r in dp.registered_projects()], ["web"])
 
+    def test_an_alias_only_row_is_labelled_owner_repo_from_its_project_key_10350(self):
+        # #10350 AC1: a checkout registered by path has no GitHub repo_url; its project_key carries owner/repo.
+        root = os.path.join(ac.install_mpm_root({"HOME": self.home}), "project-registry")
+        os.makedirs(root)
+        recs = {"wdg": {"name": "wdg", "repo_url": "/srv/checkouts/widget", "project_key": "acme/widget"},
+                "loose": {"name": "loose", "repo_url": "/srv/checkouts/loose", "project_key": "local:0f0e0d0c"},
+                "bare": {"name": "bare", "repo_url": "file:///srv/bare"},
+                "odd": {"name": "odd", "repo_url": "/srv/odd", "project_key": "acme/"}}
+        with open(os.path.join(root, "projects.json"), "w") as f:
+            json.dump({"projects": recs}, f)
+        out = {p["id"]: p for p in dp.build(dp.registered_projects(), {}, {}, {})["projects"]}
+        self.assertEqual(out["wdg"]["label"], "acme/widget")
+        # No derivable owner (local: key, no key, malformed key): the alias, flagged, never a guessed owner.
+        self.assertEqual([(out[a]["label"], out[a]["owner"]) for a in ("loose", "bare", "odd")],
+                         [("loose", None), ("bare", None), ("odd", None)])
+        self.assertTrue(all(out[a]["no_github_url"] for a in ("wdg", "loose", "bare", "odd")))
+
     def test_absent_registry_is_empty_and_malformed_is_a_plain_error(self):
         self.assertEqual(dp.registered_projects(), [])
         root = os.path.join(ac.install_mpm_root({"HOME": self.home}), "project-registry")

@@ -7,7 +7,8 @@ What: build() joins the tm registry, the server's doc allowlist, live tmux panes
   project   {id, label, no_github_url, registered_path, roots, root, owner, repo}  the list = exactly the projects that
             `tm project list` prints: the records of tm's project-registry/projects.json (registered_projects); a path-only
             entry (project-paths.json, doc allowlist) never makes a row. id = the tm alias; label = `owner/project` from the
-            registered GitHub URL, else the alias with no_github_url=true (an owner is never guessed); rows sort by label.
+            registered GitHub URL, else from the record's project_key when it is `owner/repo` (#10350), else the alias;
+            no_github_url=true whenever the URL is not GitHub (an owner is never guessed); rows sort by label.
             registered_path = the alias's row in project-paths.json when it has one. The doc allowlist (load_projects) only
             ADDS roots (`roots`) to a registered row, where the tmux sessions actually run. `root` = the directory scanned:
             the first extra root, else the registered path;
@@ -315,12 +316,15 @@ def project_rows(registry, allow):
     registry = [{name, path, owner, repo}] (registered_projects; path None when project-paths.json has no row); allow =
     {name: root} from the doc allowlist, matched by case-insensitive name: it only ADDS a root (and the reader's doc name) to a
     registered project; an allowlist name the registry lacks gets no row (the owner 2026-10-27: only trusty-mpm projects).
-    label = owner/repo from the registered GitHub URL, else the alias (no_github_url); sorted by label."""
+    label = owner/repo from the registered GitHub URL, else key_label(project_key), else the alias; no_github_url follows the
+    URL only, so owner and repo stay None for a key-labelled row; sorted by label."""
     rows, by = [], {}
     for r in registry:
         owner, repo = r.get("owner"), r.get("repo")
         has_url = bool(owner and repo)
-        row = {"id": r["name"], "label": "%s/%s" % (owner, repo) if has_url else r["name"], "no_github_url": not has_url,
+        # #10350 AC1: a checkout registered by path is labelled from its stable owner/repo project_key.
+        label = "%s/%s" % (owner, repo) if has_url else (key_label(r.get("project_key")) or r["name"])
+        row = {"id": r["name"], "label": label, "no_github_url": not has_url,
                "registered_path": r.get("path"), "roots": [], "root": r.get("path"), "owner": owner, "repo": repo, "doc": None,
                "note": r.get("note"), "session_alias": r.get("alias")}
         rows.append(row)
@@ -403,6 +407,18 @@ def build(registry, allow, panes, sess_ids, scans=None, lifecycle=None, watch=No
 
 
 GITHUB_URL = re.compile(r"github\.com[/:]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+OWNER_REPO_KEY = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
+
+
+def key_label(key):
+    """`owner/repo` from a registry project_key, None for `local:<uuid>`, no key, or any other shape (#10350).
+
+    tm assigns project_key once at register: canonical lowercase owner/repo when the checkout had an origin, else
+    local:<uuid> (src/project/record.rs, Project::project_key). Only the first is an owner; nothing else is guessed.
+    Test: tests/test_dashboard_projects_registry.py
+    """
+    m = OWNER_REPO_KEY.match(key) if isinstance(key, str) else None
+    return "%s/%s" % m.groups() if m else None
 
 
 class RegistryError(ValueError):
@@ -442,7 +458,7 @@ def registered_projects(root=None):
     Why: #10571, the Projects view must work on any install, with no secrets module: listing projects reads no secret.
     What: one row per record of <root>/project-registry/projects.json, the file tm's ProjectStore writes
     ({"projects": {name: {name, repo_url, default_branch, ...}}}); name = the record key (the alias). owner and repo come
-    from a github.com repo_url, None otherwise. path is the alias's row in <root>/project-paths.json ([{alias, path}],
+    from a github.com repo_url, None otherwise; project_key is the record's, passed through for the label. path is the alias's row in <root>/project-paths.json ([{alias, path}],
     tm's ProjectAliasEntry; dashboard_watch.alias_for: exact alias, else ASCII case-insensitive, else the row whose path is
     the managed checkout), kept when absolute, else None; `alias` = that row's alias (the session alias, None with no row);
     that file never adds a project. When the map gives no path, the managed checkout is used: an absolute repo_url, else
@@ -478,7 +494,7 @@ def registered_projects(root=None):
         if not path and checkout:
             path, source = checkout, "canonical layout"
         out.append({"name": name, "path": path, "path_source": source if path else None, "owner": owner, "repo": repo,
-                    "alias": hit["alias"] if hit else None})
+                    "alias": hit["alias"] if hit else None, "project_key": rec.get("project_key")})
     return out
 
 
