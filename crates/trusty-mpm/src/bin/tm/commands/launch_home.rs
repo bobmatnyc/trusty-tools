@@ -181,14 +181,30 @@ pub(crate) fn launch_files_with(
     })
 }
 
-/// Strip trusty-mpm hooks from `home`'s two `~/.claude/settings*.json` files.
+/// Report tm's old hook entries left in `home`'s two `~/.claude/settings*.json`
+/// files (#12077 row 12).
 ///
-/// #5875: those two files only, never a walk of the home tree. Best-effort: a
-/// failure warns and the launch continues; no home resolved means nothing to strip.
-pub(crate) fn strip_global_hooks(home: Option<&Path>) {
+/// Why: tm does not write the generic Claude settings files, so the launch no
+/// longer strips them; the operator is told instead. #5875: those two files
+/// only, never a walk of the home tree.
+/// What: one stderr warning per file holding tm's exact old entries, or that
+/// cannot be read; silent for a clean or absent file, or no home.
+/// Test: `the_launch_leaves_the_home_settings_file_untouched_12077`.
+pub(crate) fn report_global_hooks(home: Option<&Path>) {
+    use trusty_mpm::core::standalone::hooks::legacy_global::legacy_global_mpm_hooks_at;
     let Some(home) = home else { return };
-    if let Err(e) = trusty_mpm::core::standalone::hooks::remove_global_trusty_mpm_hooks_at(home) {
-        eprintln!("warning: could not remove global MPM hooks: {e:#}");
+    for file in legacy_global_mpm_hooks_at(home) {
+        match file.found {
+            Ok(n) => eprintln!(
+                "warning: {} still carries {n} of tm's old hook entries; tm no longer \
+                 edits this file (#12077) — remove them by hand",
+                file.path.display()
+            ),
+            Err(e) => eprintln!(
+                "warning: could not read {} to check for tm's old hook entries: {e}",
+                file.path.display()
+            ),
+        }
     }
 }
 
@@ -328,7 +344,7 @@ mod tests {
         std::fs::write(&settings, doc.to_string()).expect("write");
         let before = std::fs::read(&settings).expect("read");
 
-        super::strip_global_hooks(Some(home.path()));
+        super::report_global_hooks(Some(home.path()));
 
         assert_eq!(std::fs::read(&settings).expect("read"), before);
     }

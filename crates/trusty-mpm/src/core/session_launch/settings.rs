@@ -5,8 +5,8 @@
 //! keeps `mod.rs` focused on the top-level preparation sequence and makes
 //! each individual helper easy to test in isolation.
 //! What: constants and functions for writing the output style, spinner tips,
-//! `trusty-memory` project hooks, `trusty-memory` MCP server injection, and
-//! global-hook cleanup.
+//! `trusty-memory` project hooks and `trusty-memory` MCP server injection. The
+//! global-hook cleanup is in `legacy_memory_hooks` (#12077).
 //! Test: each public(super) function is covered by a dedicated test in `tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -105,19 +105,6 @@ pub(super) const TRUSTY_MEMORY_HOOKS: &str = r#"{
     }
   ]
 }"#;
-
-/// Hook event types the global `trusty-memory` entries may have been registered
-/// under (across current and legacy trusty-mpm builds).
-///
-/// Why: [`clean_global_trusty_memory_hooks`] strips trusty-mpm's
-/// `trusty-memory` hook entries from `~/.claude/settings.json` so they stop
-/// firing for unrelated sessions. It must cover every event trusty-mpm has ever
-/// written globally: the new canonical pair (`UserPromptSubmit`, `SessionStart`)
-/// AND the legacy `hooks fire` events (`PostToolUse`, `Stop`) so an upgrade
-/// cleans up the old entries too.
-/// What: the union of current and legacy global hook event keys.
-pub(super) const GLOBAL_TRUSTY_MEMORY_EVENTS: &[&str] =
-    &["UserPromptSubmit", "SessionStart", "PostToolUse", "Stop"];
 
 /// Deploy ALL bundled output styles under `<root>/.claude/output-styles/`.
 ///
@@ -992,81 +979,11 @@ pub(super) fn preseed_workspace_trust_home(
     preseed_workspace_trust(&tier.claude_json, workspace)
 }
 
-/// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.
-///
-/// Why: `trusty-memory` hooks were previously registered globally, so they
-/// fired for every Claude Code session. Now that [`write_project_hooks`]
-/// scopes them to trusty-mpm projects, the global entries must be removed to
-/// stop them double-firing (and firing for unrelated sessions like claude-mpm).
-///
-/// #5544: the home arrives as a PARAMETER — see [`preseed_workspace_trust_home`]
-/// for why it is not read off `FrameworkPaths`. Pointing this at a managed
-/// workspace was the worse half of that bug: the file does not exist there, a
-/// missing file is success by contract, so the operator's REAL global hooks were
-/// never removed and kept double-firing with nothing to show for it. No second
-/// implementation of this cleanup exists to catch it.
-/// What: reads the user-tier `settings.json` — under `config_dir` when one is
-/// named (#9846), else `<home>/.claude/settings.json` — and for each event in
-/// [`GLOBAL_TRUSTY_MEMORY_EVENTS`] filters out handler groups whose `hooks`
-/// array contains a command matching `trusty-memory hooks fire`. An event key
-/// whose array becomes empty is removed entirely. Writes the file back. A
-/// missing or malformed file is treated as success (nothing to clean up).
-/// Test: `remove_global_hooks_removes_trusty_memory_entries`,
-/// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
-pub(super) fn remove_global_trusty_memory_hooks(
-    home: Option<&Path>,
-    config_dir: Option<&Path>,
-) -> Result<(), PrepError> {
-    // #9846: strip the file sessions read — `CLAUDE_CONFIG_DIR` when set.
-    let Some(tier) = super::user_tier::resolve_for_write(home, config_dir) else {
-        return Ok(());
-    };
-    // #8545: the operator's `~/.claude/settings.json`; fenced in tests.
-    crate::core::home_write_fence::check(&tier.dir);
-    clean_global_trusty_memory_hooks(&tier.settings_json())
-}
-
-/// Filter `trusty-memory` hook entries out of the settings file at `settings_path`.
-///
-/// Why: split from [`remove_global_trusty_memory_hooks`] so tests can target a
-/// temp file instead of the operator's real `~/.claude/settings.json`.
-/// What: see [`remove_global_trusty_memory_hooks`]. A missing or malformed
-/// file is a no-op success.
-/// Test: `remove_global_hooks_removes_trusty_memory_entries`.
-pub(super) fn clean_global_trusty_memory_hooks(settings_path: &Path) -> Result<(), PrepError> {
-    let text = match std::fs::read_to_string(settings_path) {
-        Ok(text) => text,
-        // Missing file: nothing to clean up.
-        Err(_) => return Ok(()),
-    };
-    let mut settings = match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(value) if value.is_object() => value,
-        // Malformed or non-object: leave it untouched rather than risk loss.
-        _ => return Ok(()),
-    };
-
-    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return Ok(());
-    };
-
-    for event in GLOBAL_TRUSTY_MEMORY_EVENTS {
-        let Some(groups) = hooks.get_mut(*event).and_then(|g| g.as_array_mut()) else {
-            continue;
-        };
-        groups.retain(|group| !group_is_trusty_memory(group));
-        if groups.is_empty() {
-            hooks.remove(*event);
-        }
-    }
-
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
-}
+// #12077: the legacy global `trusty-memory` hook strip lives in
+// `legacy_memory_hooks`; re-exported so callers keep their paths.
+#[cfg(test)]
+pub(super) use super::legacy_memory_hooks::clean_global_trusty_memory_hooks;
+pub(super) use super::legacy_memory_hooks::remove_global_trusty_memory_hooks;
 
 /// Inject `"statusLine": {"type":"command","command":"<abs-path> statusline","padding":0}`
 /// into `<project>/.claude/settings.json` when the key is absent, or upgrade a
@@ -1309,29 +1226,4 @@ pub(super) fn resolve_statusline_binary_with(
         return s.to_string();
     }
     "tm".to_string()
-}
-
-/// Whether a hook handler group is a `trusty-memory` entry.
-///
-/// Why: identifies the groups [`clean_global_trusty_memory_hooks`] must drop.
-/// Matching on the broad `trusty-memory` prefix (rather than the old, narrow
-/// `trusty-memory hooks fire` substring) cleans up BOTH the legacy global
-/// entries and the canonical `prompt-context` / `inbox-check` entries should
-/// either ever have been written globally (issue #1270).
-/// What: returns `true` when any command in the group's `hooks` array invokes
-/// the `trusty-memory` binary (the command string starts with `trusty-memory `
-/// or is exactly `trusty-memory`).
-/// Test: covered indirectly by `remove_global_hooks_removes_trusty_memory_entries`.
-pub(super) fn group_is_trusty_memory(group: &serde_json::Value) -> bool {
-    group
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .is_some_and(|handlers| {
-            handlers.iter().any(|handler| {
-                handler
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|cmd| cmd == "trusty-memory" || cmd.starts_with("trusty-memory "))
-            })
-        })
 }

@@ -275,8 +275,8 @@ fn toggle_driven_gaps(settings_path: &Path, hook_exe: Option<&Path>) -> Vec<Stri
 /// is invisible from the file itself. It also has to name the repair, because
 /// a finding whose remedy the operator has to guess is how #4948 happened.
 /// What: `Ok` when `gaps` is empty. Otherwise `Warn`, listing up to 5
-/// `<path>: <event>, <event>` pairs plus an overflow count, and naming
-/// `tm doctor --fix`.
+/// `<path>: <event>, <event>` pairs plus an overflow count, and naming the
+/// next managed launch as the repair (#12077: `--fix` reports only).
 /// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
 /// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
 /// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`,
@@ -308,8 +308,9 @@ fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
              for, so `tm hook` never fires for it — a missing `SessionStart` costs the \
              session its savings row and the 💸 statusline segment, and a missing \
              `Stop (asks for … --prompt-feedback)` costs it every prompt-feedback row \
-             (#7849). `tm doctor --fix` previews merging the groups back in and `--yes` \
-             applies it, preserving every other entry (issue #7490); \
+             (#7849). `tm doctor --fix` reports the gap but does not write the project \
+             file (#12077); the project's next managed `tm` launch merges the groups back \
+             in, preserving every other entry (issue #7490), and \
              `tm validate --repair --path <project>` resyncs one project in place. {}{}",
             gaps.len(),
             if gaps.len() == 1 { "" } else { "s" },

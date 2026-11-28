@@ -224,34 +224,34 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
     );
 }
 
-/// The global hook cleanup reaches the real home, on an OVERRIDDEN managed root.
+/// The launch never writes the real home's `settings.json`, on an OVERRIDDEN
+/// managed root (#5544, #12077).
 ///
-/// Why (#5544): `--root` / `TRUSTY_MPM_ROOT` / config relocate the framework
-/// INSTALL (`core/standalone/load.rs` passes the result straight to
-/// `for_managed_project`), and an earlier revision derived the home from that
-/// base — so an override outside the home retargeted this cleanup at a file that
-/// does not exist. A missing file is success by contract, so the operator's real
-/// global `trusty-memory` hooks were never removed and nothing reported it.
-/// Asserting the EFFECT rather than a resolved path is what makes that
-/// indistinguishable-from-clean case visible.
-///
-/// FAILS BEFORE THE FIX: the seeded entry survives the cleanup untouched.
-///
-/// What: seeds `<home>/.claude/settings.json` with a `trusty-memory hooks fire`
-/// handler, builds the managed layout over a root deliberately outside any home,
-/// runs the cleanup with that home, and asserts the entry is gone.
+/// Why: #5544 pinned that this cleanup reached the real home under a relocated
+/// install. #12077 reverses the target: tm does not write the generic
+/// `~/.claude/settings.json`, so with no config dir named the strip leaves its
+/// hooks alone.
+/// What: seeds `<home>/.claude/settings.json` with tm's own old
+/// `prompt-context` group, prepares a session over a root outside any home, and
+/// asserts its hooks are unchanged.
 /// Test: this function IS the test.
 #[test]
-fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
+fn global_hook_cleanup_never_writes_the_real_home_under_an_overridden_root_12077() {
     let home = tempdir().unwrap();
     let workspace = tempdir().unwrap();
     let settings = home.path().join(".claude").join("settings.json");
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     std::fs::write(
         &settings,
-        r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"trusty-memory hooks fire UserPromptSubmit"}]}]}}"#,
+        r#"{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"trusty-memory prompt-context","timeout":60}]}]}}"#,
     )
     .unwrap();
+    let hooks_of = |path: &std::path::Path| -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap()).unwrap()
+            ["hooks"]
+            .clone()
+    };
+    let before = hooks_of(&settings);
 
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(
         std::path::Path::new("/opt/tm-roots/team-a/.trusty-mpm"),
@@ -261,23 +261,12 @@ fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
     prepare_session_with_home(&fw, workspace.path(), None, true, Some(home.path()))
         .expect("prep succeeds");
 
-    let after = std::fs::read_to_string(&settings).expect("settings still readable");
-    assert!(
-        !after.contains("trusty-memory hooks fire"),
-        "the global trusty-memory hook entry must actually be removed — a cleanup \
-         pointed at a nonexistent file returns Ok(()) and looks identical (#5544). \
-         Settings after: {after}"
-    );
-    assert!(
-        !workspace
-            .path()
-            .join(".claude")
-            .join("settings.json")
-            .exists()
-            || !std::fs::read_to_string(workspace.path().join(".claude").join("settings.json"))
-                .unwrap_or_default()
-                .contains("trusty-memory hooks fire"),
-        "and the overridden install root must not have redirected it into the workspace"
+    // The user-tier statusLine seed (#12127 row 10, slice 5) still writes this
+    // file; the hook strip must not.
+    assert_eq!(
+        hooks_of(&settings),
+        before,
+        "#12077: the strip must leave the home file's hooks as they were"
     );
 }
 
@@ -1622,13 +1611,13 @@ fn remove_global_hooks_removes_trusty_memory_entries() {
           "hooks": {
             "PostToolUse": [
               { "matcher": "*", "hooks": [ { "type": "command", "command": "bash track.sh" } ] },
-              { "matcher": "Write|Edit|Bash", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.post-tool-use" } ] }
+              { "matcher": "Write|Edit|Bash", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.post-tool-use", "timeout": 60 } ] }
             ],
             "Stop": [
-              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.stop" } ] }
+              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.stop", "timeout": 60 } ] }
             ],
             "UserPromptSubmit": [
-              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.user-prompt" } ] }
+              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.user-prompt", "timeout": 60 } ] }
             ]
           }
         }"#,

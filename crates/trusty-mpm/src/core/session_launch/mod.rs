@@ -110,6 +110,8 @@ pub use system_prompt::{
 mod architect_model;
 // #12127: the four launch keys, recorded for the `--settings` flag tier.
 mod launch_keys;
+// #12077: the legacy global `trusty-memory` hook strip (row 11).
+mod legacy_memory_hooks;
 #[cfg(test)]
 pub(crate) use launch_keys::effective_settings;
 pub use launch_keys::{

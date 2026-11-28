@@ -7,8 +7,10 @@
 //!   it. tm wrote it, tm recognises it, and it is pure token cost — so it is
 //!   renamed aside, reversibly, out of the name Claude Code loads.
 //! * A file with REAL CONTENT is someone's notes. Renaming it is not tm's call.
-//!   Claude Code's own `claudeMdExcludes` key keeps it out of THIS project's
-//!   sessions while leaving the file, and every other project, untouched.
+//!   Claude Code's own `claudeMdExcludes` key keeps it out of tm's sessions
+//!   while leaving the file untouched. #12077: the key goes into tm's managed
+//!   config dir (`CLAUDE_CONFIG_DIR`), never a project settings file, so it
+//!   reaches every tm session below that ancestor, and no bare `claude`.
 //!
 //! What: [`repair_ancestor_claude_md`] produces one
 //! [`crate::core::doctor_repair::RepairStep`] per finding, `Planned` in dry run.
@@ -36,9 +38,10 @@ pub const ANCESTOR_CHECK: &str = "ancestor_claude_md";
 /// Why: see the module header.
 /// What: resolves `project_root` through [`resolve_project_root`] — `--fix` is
 /// handed the process cwd, which may be any subdirectory — then emits one step
-/// per finding that is not already excluded. The exclude is written into the
-/// RESOLVED root's `.claude/settings.local.json`, the operator's own
-/// uncommitted per-project layer. A failed resolution or scan is ONE `Failed`
+/// per finding that is not already excluded. #12077: the exclude is written
+/// into `<managed_config_dir>/settings.json`, the tm-owned user tier every tm
+/// session reads; with no managed config dir it is refused, and no project
+/// settings file is ever written. A failed resolution or scan is ONE `Failed`
 /// step naming the error, never an empty plan that reads as "nothing to fix".
 /// `today` is injected (`%Y%m%d`) so the rename target is assertable; `home` and
 /// `managed_config_dir` are injected for the same reason the scan takes them —
@@ -46,8 +49,11 @@ pub const ANCESTOR_CHECK: &str = "ancestor_claude_md";
 /// Test: `a_seed_ancestor_is_renamed_aside`,
 /// `a_content_ancestor_is_excluded_not_renamed`,
 /// `dry_run_writes_nothing`, `an_already_excluded_ancestor_yields_no_step`,
-/// `the_exclude_lands_in_the_resolved_roots_settings_under_a_dotfiles_home`,
-/// `a_missing_project_root_is_a_failed_step`.
+/// `the_exclude_from_a_subdirectory_lands_in_the_managed_config_under_a_dotfiles_home`,
+/// `a_missing_project_root_is_a_failed_step`,
+/// `the_exclude_lands_in_the_managed_config_dir_12077`,
+/// `no_managed_config_dir_refuses_the_exclude_12077`,
+/// `a_malformed_managed_settings_file_refuses_the_exclude_12077`.
 pub fn repair_ancestor_claude_md(
     project_root: &Path,
     home: Option<&Path>,
@@ -55,12 +61,12 @@ pub fn repair_ancestor_claude_md(
     today: &str,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
-    // #7673: resolve once, before deriving `settings`, so the exclude lands in
-    // the project's root and not in whichever subdirectory `--fix` ran from.
+    // #7673: scan from the resolved root, not whichever subdirectory `--fix`
+    // ran from.
     let scanned = resolve_project_root(project_root, home)
-        .and_then(|root| Ok((scan(&root, home, managed_config_dir)?.found, root)));
-    let (found, root) = match scanned {
-        Ok(pair) => pair,
+        .and_then(|root| Ok(scan(&root, home, managed_config_dir)?.found));
+    let found = match scanned {
+        Ok(found) => found,
         Err(err) => {
             return vec![RepairStep {
                 check: ANCESTOR_CHECK,
@@ -70,11 +76,12 @@ pub fn repair_ancestor_claude_md(
             }];
         }
     };
-    let settings = root.join(".claude").join("settings.local.json");
+    // #12077: the tm-owned target, never `<root>/.claude/settings.local.json`.
+    let settings = managed_config_dir.map(|dir| dir.join("settings.json"));
     found
         .into_iter()
         .filter(|found| !found.excluded)
-        .map(|found| step_for(&found, &settings, today, mode))
+        .map(|found| step_for(&found, settings.as_deref(), today, mode))
         .collect()
 }
 
@@ -83,7 +90,7 @@ pub fn repair_ancestor_claude_md(
 /// Test: see [`repair_ancestor_claude_md`].
 fn step_for(
     found: &AncestorMemoryFile,
-    settings: &Path,
+    settings: Option<&Path>,
     today: &str,
     mode: RepairMode,
 ) -> RepairStep {
@@ -122,8 +129,25 @@ fn seed_step(found: &AncestorMemoryFile, target: PathBuf, mode: RepairMode) -> R
     }
 }
 
-/// Keep a content-carrying ancestor out of this project's sessions.
-fn exclude_step(found: &AncestorMemoryFile, settings: &Path, mode: RepairMode) -> RepairStep {
+/// Keep a content-carrying ancestor out of tm's sessions.
+fn exclude_step(
+    found: &AncestorMemoryFile,
+    settings: Option<&Path>,
+    mode: RepairMode,
+) -> RepairStep {
+    // #12077: no managed config dir means no tm-owned file to write.
+    let Some(settings) = settings else {
+        return RepairStep {
+            check: ANCESTOR_CHECK,
+            path: found.path.clone(),
+            what: "add it to `claudeMdExcludes` in tm's managed config dir".to_string(),
+            status: StepStatus::Refused(
+                "no managed CLAUDE_CONFIG_DIR resolved, and tm does not write a project \
+                 settings file (#12077); add the path to `claudeMdExcludes` yourself"
+                    .to_string(),
+            ),
+        };
+    };
     let what = format!(
         "add it to `claudeMdExcludes` in {} (the file itself is left alone; \
          ~{} tokens per turn recovered)",

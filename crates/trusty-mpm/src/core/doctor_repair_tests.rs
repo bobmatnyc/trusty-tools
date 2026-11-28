@@ -809,7 +809,7 @@ fn write_missing_group_settings(project: &Path) -> PathBuf {
 /// prompt-context group. A test deriving it read the operator's real config,
 /// and a concurrent `#[serial]` test redirecting `$HOME` flipped that answer
 /// between two merges — the parallel-run flake in
-/// `contamination_strip_then_missing_group_merge_restores_the_launch_state`.
+/// `contamination_strip_then_the_next_launch_restores_the_launch_state`.
 /// What: `for_managed_workspace_under(base, project)` with
 /// `[hooks] prompt_context = true` written to its root, so every merge in a
 /// test resolves the same toggles whatever `$HOME` holds.
@@ -818,44 +818,6 @@ fn hermetic_fw(base: &Path, project: &Path) -> crate::core::paths::FrameworkPath
     fs::create_dir_all(&fw.root).unwrap();
     fs::write(fw.config_toml(), "[hooks]\nprompt_context = true\n").unwrap();
     fw
-}
-
-/// The `--fix --yes` arm merges the missing lifecycle group back in (#7490).
-#[test]
-fn missing_group_repair_merges_the_sessionstart_group_back() {
-    let project = tempfile::tempdir().unwrap();
-    let path = write_missing_group_settings(project.path());
-    let base = tempfile::tempdir().unwrap();
-    let fw = hermetic_fw(base.path(), project.path());
-
-    let steps = repair_missing_hook_group_with(
-        &fw,
-        project.path(),
-        Some(Path::new("/usr/local/bin/tm")),
-        RepairMode::Apply,
-    );
-    assert_eq!(
-        steps.len(),
-        1,
-        "one step for the one gapped file: {steps:?}"
-    );
-    assert_eq!(steps[0].check, "hooks_missing_tm_group");
-    assert!(
-        matches!(steps[0].status, StepStatus::Applied { .. }),
-        "the merge must apply: {steps:?}"
-    );
-
-    let after: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    let text = after["hooks"]["SessionStart"].to_string();
-    assert!(
-        text.contains("/usr/local/bin/tm hook\""),
-        "SessionStart must gain the lifecycle entry: {text}"
-    );
-    assert!(
-        text.contains("trusty-memory inbox-check"),
-        "the project's own entry must survive: {text}"
-    );
 }
 
 /// The dry run reports the gap and writes nothing (#7490).
@@ -867,7 +829,11 @@ fn missing_group_repair_dry_run_changes_nothing() {
 
     let steps = repair_missing_hook_group(project.path(), RepairMode::DryRun);
     assert_eq!(steps.len(), 1, "{steps:?}");
-    assert_eq!(steps[0].status, StepStatus::Planned);
+    // #12077: refused in both modes; the next managed launch re-renders it.
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "{steps:?}"
+    );
     assert!(
         steps[0].what.contains("SessionStart"),
         "the preview must name the event: {}",
@@ -880,24 +846,23 @@ fn missing_group_repair_dry_run_changes_nothing() {
     );
 }
 
-/// The driver's repair ORDER leaves a healthy project in the state a launch
-/// would write (#7490).
+/// After the contamination strip, the gap is reported and the next launch's
+/// merge restores the launch state (#7490, #12077).
 ///
 /// Why: on a tm-provisioned project `repair_hooks_contamination` strips only a
 /// build-tree `<exe> hook` entry (#10565 — the installed triad is the
-/// session's own), and the re-merge runs after that strip so the strip cannot
-/// leave the event unwired. Reversing the two calls, or dropping the second,
-/// must fail here.
+/// session's own). #12077: the missing-group repair no longer writes the
+/// project file, so it must report the gap it leaves, and the launch's own
+/// merge is what puts the group back.
 /// What: seeds a settings file carrying the full triad (produced by the merge
 /// itself), points its `SessionStart` lifecycle entry into a Cargo build tree,
-/// then runs the two repairs in Apply mode in the SAME order `run_repairs`
-/// uses, and asserts the resulting bytes equal what `ensure_project_hooks`
-/// alone produces for the same input. Every merge runs under one
-/// [`hermetic_fw`] layout, so the toggles cannot change between the expected
-/// and the actual merge.
+/// runs the two repairs in Apply mode in the order `run_repairs` uses, asserts
+/// the second refused and wrote nothing, then runs `ensure_project_hooks` and
+/// asserts the bytes equal what it alone produces for the same input. Every
+/// merge runs under one [`hermetic_fw`] layout.
 /// Test: itself.
 #[test]
-fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
+fn contamination_strip_then_the_next_launch_restores_the_launch_state() {
     let exe = Some(Path::new("/usr/local/bin/tm"));
     let base = tempfile::tempdir().unwrap();
 
@@ -934,20 +899,28 @@ fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
         "the fixture must actually carry entries the strip removes, or this \
          test proves nothing about the ordering: {strip:?}"
     );
+    let stripped = fs::read(&actual_path).unwrap();
     let merge =
         repair_missing_hook_group_with(&actual_fw, actual_project.path(), exe, RepairMode::Apply);
     assert!(
         matches!(
             merge.first().map(|s| &s.status),
-            Some(StepStatus::Applied { .. })
+            Some(StepStatus::Refused(_))
         ),
-        "the re-merge must run after the strip and apply: {merge:?}"
+        "the strip's gap must be reported and refused: {merge:?}"
     );
+    assert_eq!(
+        fs::read(&actual_path).unwrap(),
+        stripped,
+        "#12077: no write"
+    );
+    crate::core::session_launch::ensure_project_hooks_with(&actual_fw, actual_project.path(), exe)
+        .unwrap();
 
     assert_eq!(
         String::from_utf8_lossy(&expected),
         String::from_utf8_lossy(&fs::read(&actual_path).unwrap()),
-        "strip-then-merge must land on the state a managed launch writes"
+        "strip-then-launch must land on the state a managed launch writes"
     );
 }
 
@@ -971,7 +944,7 @@ fn missing_group_repair_is_silent_for_a_complete_file() {
     );
 }
 
-/// `--fix` closes a toggle-driven gap, not only a lifecycle one (#7849).
+/// `--fix` reports a toggle-driven gap, not only a lifecycle one (#7849).
 ///
 /// Why: `hooks_missing_tm_group` now also reports the group a flipped
 /// `prompt_self_improvement` asks for, and its remediation line names
@@ -979,11 +952,11 @@ fn missing_group_repair_is_silent_for_a_complete_file() {
 /// remediation a dead end — the check would warn forever after a `--fix` that
 /// produced no step.
 /// What: writes the file through the launch-path merge with the committed flag
-/// OFF, flips it ON, and asserts `--fix --yes` produces one applied step naming
-/// `Stop` and that the capture command lands in the file.
+/// OFF, flips it ON, and asserts `--fix --yes` produces one step naming `Stop`.
+/// #12077: the step is refused and the file is not written.
 /// Test: itself.
 #[test]
-fn missing_group_repair_closes_a_toggle_driven_gap() {
+fn missing_group_repair_reports_a_toggle_driven_gap() {
     let project = tempfile::tempdir().unwrap();
     let exe = Some(Path::new("/usr/local/bin/tm"));
     let path = write_missing_group_settings(project.path());
@@ -1009,14 +982,14 @@ fn missing_group_repair_closes_a_toggle_driven_gap() {
         steps[0].what
     );
     assert!(
-        matches!(steps[0].status, StepStatus::Applied { .. }),
-        "the merge must apply: {steps:?}"
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "#12077: the merge is refused: {steps:?}"
     );
     assert!(
-        fs::read_to_string(&path)
+        !fs::read_to_string(&path)
             .unwrap()
             .contains("/usr/local/bin/tm hook --prompt-feedback"),
-        "the capture command must land in the file"
+        "#12077: the project file is not written"
     );
 }
 

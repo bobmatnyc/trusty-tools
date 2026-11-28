@@ -221,10 +221,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Why a rewrite outside tm's managed config dir is refused (#12077).
+const NOT_TM_OWNED: &str = "a generic Claude settings file; tm writes only its managed \
+     config dir (#12077) — add the interpreter by hand";
+
 /// The `--fix` steps that add the interpreter to bare table scripts.
 ///
 /// Why (#10263): the repair the `hook-interpreter` row names. It writes only in
 /// [`RepairMode::Apply`], and every shape the row refuses stays a refused step.
+/// #12077: it writes only a file under `owned_root`, tm's managed config dir;
+/// a rewrite any other file needs is [`StepStatus::Refused`] in both modes and
+/// the file is only read.
 /// What: per file — one `Planned`/`Applied` step for its rewrites (with the
 /// backup path), one `Refused` step per refused command and per session-less
 /// `datg-hook.sh` entry, `Refused` for an unparseable file and `Failed` for an
@@ -232,17 +239,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// second run after an apply plans nothing.
 /// Test: `repair_applies_backs_up_and_is_idempotent`,
 /// `repair_dry_run_writes_nothing`, `repair_refuses_an_unparseable_file`,
-/// `out_of_scope_scripts_leave_the_row_ok_and_plan_no_step`.
-pub fn repair_hook_interpreter(files: &[PathBuf], mode: RepairMode) -> Vec<RepairStep> {
+/// `out_of_scope_scripts_leave_the_row_ok_and_plan_no_step`,
+/// `a_generic_settings_file_is_refused_not_rewritten_12077`.
+pub fn repair_hook_interpreter(
+    files: &[PathBuf],
+    owned_root: Option<&Path>,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
     let mut steps = Vec::new();
     for path in files {
+        // #12077: only tm's managed config dir is written.
+        let owned = owned_root.is_some_and(|root| path.starts_with(root));
         let step = |what: String, status: StepStatus| RepairStep {
             check: HOOK_INTERPRETER_CHECK,
             path: path.clone(),
             what,
             status,
         };
-        match repair_settings_file(path, mode == RepairMode::Apply) {
+        match repair_settings_file(path, owned && mode == RepairMode::Apply) {
             Ok(None) => {}
             Ok(Some((findings, backup))) => {
                 if let Some((old, new)) = findings.rewrites.first() {
@@ -251,6 +265,7 @@ pub fn repair_hook_interpreter(files: &[PathBuf], mode: RepairMode) -> Vec<Repai
                         findings.rewrites.len()
                     );
                     let status = match mode {
+                        _ if !owned => StepStatus::Refused(NOT_TM_OWNED.to_string()),
                         RepairMode::Apply => StepStatus::Applied { backup },
                         RepairMode::DryRun => StepStatus::Planned,
                     };

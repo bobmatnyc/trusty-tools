@@ -49,7 +49,7 @@ use super::{start_session, start_session_in_place};
 // target's tests as threads in ONE process, so `$HOME` was repointed for every
 // sibling for the duration, and `#[serial]` excludes only other `#[serial]`
 // tests. `prepare_session_does_not_seed_the_workspace_on_the_managed_path` and
-// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`
+// `global_hook_cleanup_never_writes_the_real_home_under_an_overridden_root_12077`
 // (`core::session_launch::tests`) are the regression tests for the escape.
 
 /// Run `git <args>` in `dir`, panicking with full context on failure.

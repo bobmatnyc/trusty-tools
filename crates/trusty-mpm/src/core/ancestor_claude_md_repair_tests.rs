@@ -64,8 +64,16 @@ fn a_content_ancestor_is_excluded_not_renamed() {
     let (_tmp, ancestor, project) = fixture();
     let notes = ancestor.join("CLAUDE.md");
     std::fs::write(&notes, "# Monorepo\n\nAll packages use pnpm.\n").unwrap();
+    // #12077: the exclude target is tm's managed config dir.
+    let managed = ancestor.parent().unwrap().join("claude-config");
 
-    let steps = repair_ancestor_claude_md(&project, None, None, "20260912", RepairMode::Apply);
+    let steps = repair_ancestor_claude_md(
+        &project,
+        None,
+        Some(&managed),
+        "20260912",
+        RepairMode::Apply,
+    );
 
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert!(
@@ -74,7 +82,8 @@ fn a_content_ancestor_is_excluded_not_renamed() {
     );
     assert!(notes.is_file(), "a file with real content is never renamed");
     let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(settings_of(&project)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(managed.join("settings.json")).unwrap())
+            .unwrap();
     assert_eq!(
         value["claudeMdExcludes"],
         serde_json::json!([notes.display().to_string()])
@@ -87,8 +96,15 @@ fn dry_run_writes_nothing() {
     let seed = ancestor.join("CLAUDE.md");
     std::fs::write(&seed, CLAUDE_MD_STUB).unwrap();
     std::fs::write(ancestor.join("CLAUDE.local.md"), "# notes\n").unwrap();
+    let managed = ancestor.parent().unwrap().join("claude-config");
 
-    let steps = repair_ancestor_claude_md(&project, None, None, "20260912", RepairMode::DryRun);
+    let steps = repair_ancestor_claude_md(
+        &project,
+        None,
+        Some(&managed),
+        "20260912",
+        RepairMode::DryRun,
+    );
 
     assert_eq!(steps.len(), 2, "{steps:?}");
     assert!(
@@ -100,7 +116,7 @@ fn dry_run_writes_nothing() {
         "dry run leaves the seed exactly where it was"
     );
     assert!(
-        !settings_of(&project).exists(),
+        !settings_of(&project).exists() && !managed.join("settings.json").exists(),
         "dry run seeds no settings file"
     );
 }
@@ -212,7 +228,7 @@ fn fix_from_a_nested_linked_worktree_writes_no_exclude() {
 /// `.claude/settings.local.json` — `myproject`, the nearest boundary — and not
 /// in the subdirectory `--fix` ran from, nor at `$HOME`.
 #[test]
-fn the_exclude_lands_in_the_resolved_roots_settings_under_a_dotfiles_home() {
+fn the_exclude_from_a_subdirectory_lands_in_the_managed_config_under_a_dotfiles_home() {
     let tmp = TempDir::new().unwrap();
     let home = std::fs::canonicalize(tmp.path()).unwrap().join("home");
     let project = home.join("projects").join("myproject");
@@ -226,15 +242,24 @@ fn the_exclude_lands_in_the_resolved_roots_settings_under_a_dotfiles_home() {
     let file = home.join("CLAUDE.md");
     std::fs::write(&file, "# Dotfiles\n\nMy shell notes.\n").unwrap();
 
-    let steps = repair_ancestor_claude_md(&cwd, None, None, "20260912", RepairMode::Apply);
+    let managed = tmp.path().join("claude-config");
+
+    let steps =
+        repair_ancestor_claude_md(&cwd, None, Some(&managed), "20260912", RepairMode::Apply);
 
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert!(
         matches!(steps[0].status, StepStatus::Applied { .. }),
         "{steps:?}"
     );
+    // #12077: tm's managed config, never a project settings file.
     let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(settings_of(&project)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(managed.join("settings.json")).unwrap())
+            .unwrap();
+    assert!(
+        !settings_of(&project).exists(),
+        "never the project's settings"
+    );
     assert_eq!(
         value["claudeMdExcludes"],
         serde_json::json!([file.display().to_string()])
