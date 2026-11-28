@@ -131,6 +131,67 @@ fn a_launch_applies_and_verifies_the_policy() {
     assert!(resolved.tmux_socket.is_some(), "the workspace tmux socket");
 }
 
+/// #12077: a PM launch allows exactly the tmux socket, `trusty-mpm.sock` and
+/// the client daemon sockets — no other file in a daemon's data dir, no data
+/// dir, and none of the daemons kept out.
+#[test]
+#[serial_test::serial]
+fn a_launch_allows_exactly_the_client_daemon_sockets() {
+    use crate::core::session_launch::tests::EnvVarGuard;
+    let fx = Fx::new();
+    let data = fx.root.join("data");
+    let _data = EnvVarGuard::set(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV, &data);
+    // Socket overrides would bypass the data-dir rule this test pins.
+    let _cleared = [
+        trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV,
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV,
+        trusty_agents_common::health::TRUSTY_AGENTS_SOCKET_ENV,
+    ]
+    .map(EnvVarGuard::clear);
+    let inputs = launch_sandbox_inputs(&fx.root.join("ws"), &fx.root.join("home"));
+    let mut got = sockets(&project_policy(SandboxRole::Pm, &inputs));
+    got.sort();
+    let sock = |app: &str| data.join(app).join(format!("{app}.sock"));
+    let tmux = inputs
+        .tmux_socket
+        .clone()
+        .expect("the workspace tmux socket");
+    let mut want: Vec<String> = [
+        "trusty-mpm",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-code",
+        "trusty-agents",
+    ]
+    .map(sock)
+    .into_iter()
+    .chain([tmux])
+    .map(|p| p.display().to_string())
+    .collect();
+    want.sort();
+    assert_eq!(got, want, "exactly the client sockets");
+    let memory_dir = data.join("trusty-memory");
+    let denied = [
+        memory_dir.join("palace.db"),
+        memory_dir,
+        data.clone(),
+        sock("trusty-secrets"),
+        sock("trusty-events"),
+        sock("trusty-console"),
+        sock("trusty-embedderd"),
+    ];
+    for path in denied {
+        assert!(
+            !got.iter().any(|entry| path.starts_with(entry)),
+            "`{}` must not be allowed: {got:?}",
+            path.display()
+        );
+    }
+}
+
 /// #10102 Fail-Open Check: a read-back that does not verify refuses the launch.
 #[test]
 fn a_verify_failure_refuses_the_launch() {

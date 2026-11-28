@@ -32,10 +32,12 @@ pub fn sandbox_role_for(profile: SessionProfile) -> SandboxRole {
 /// The paths a policy for `workspace` under `home` names.
 ///
 /// What: the workspace's private tmux socket (#10101), the daemon's
-/// `trusty-mpm.sock` when it resolves, an absolute `CARGO_TARGET_DIR`, and
-/// the sccache socket when `home`'s config opts in (`build.sccache: true`).
-/// A config that cannot be read leaves sccache off.
-/// Test: `a_launch_applies_and_verifies_the_policy`.
+/// `trusty-mpm.sock` when it resolves, the [`client_daemon_sockets`]
+/// (#12077), an absolute `CARGO_TARGET_DIR`, and the sccache socket when
+/// `home`'s config opts in (`build.sccache: true`). A config that cannot be
+/// read leaves sccache off.
+/// Test: `a_launch_applies_and_verifies_the_policy`,
+/// `a_launch_allows_exactly_the_client_daemon_sockets`.
 pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
     let mut inputs = SandboxInputs::new(workspace, home);
     let server = crate::core::tmux_server::workspace_server_name(workspace);
@@ -44,6 +46,7 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
         &server,
     ));
     inputs.mpm_socket = crate::client::http_client::resolve_daemon_socket().ok();
+    inputs.daemon_sockets = client_daemon_sockets();
     inputs.cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_absolute());
@@ -51,6 +54,32 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
         .unwrap_or(false)
         .then(|| crate::core::sccache_socket::socket_path_at(home));
     inputs
+}
+
+/// The daemon sockets a sandboxed role's CLI clients dial, besides
+/// `trusty-mpm.sock`.
+///
+/// Why: #12077 — the trusty daemons are socket-only, so a sandbox that names
+/// only `trusty-mpm.sock` breaks `tm memory`, `trusty-search`, `tcode`,
+/// `trusty-review` (it dials trusty-analyze) and `ta` from Bash, while MCP
+/// already reaches the same daemons.
+/// What: each path from the dial-side resolver its client uses: trusty-memory,
+/// trusty-search, trusty-analyze, trusty-code and trusty-agents. A resolver
+/// that fails leaves its socket out and refuses nothing. Never trusty-secrets,
+/// trusty-events, trusty-console, trusty-embedderd or sccache.
+/// Test: `a_launch_allows_exactly_the_client_daemon_sockets`.
+fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
+    [
+        trusty_common::memory_rpc::resolve_memory_dial_socket().ok(),
+        trusty_common::search_rpc::search_dial_socket().ok(),
+        // No shared name constant reaches this crate; same rule as `tm tui`.
+        trusty_common::daemon_socket_path_no_create("trusty-analyze").ok(),
+        trusty_common::daemon_socket_path_no_create("trusty-code").ok(),
+        trusty_agents_common::health::agents_dial_socket().ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// The launch-time sandbox step: a no-op while enforcement is off (#12077).

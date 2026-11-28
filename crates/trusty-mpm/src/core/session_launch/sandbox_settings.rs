@@ -57,6 +57,9 @@ pub struct SandboxInputs {
     pub tmux_socket: Option<PathBuf>,
     /// The daemon's `trusty-mpm.sock`.
     pub mpm_socket: Option<PathBuf>,
+    /// #12077: the other daemon sockets a sandboxed role's CLI clients dial,
+    /// each an exact socket path; never a directory or a glob.
+    pub daemon_sockets: Vec<PathBuf>,
     /// The shared `CARGO_TARGET_DIR`, which cargo must be able to write.
     pub cargo_target_dir: Option<PathBuf>,
     /// The sccache server socket, when the operator runs one. Only the
@@ -109,8 +112,9 @@ pub const DENIED_ENV_VARS: [&str; 11] = [
 /// `autoAllowBashIfSandboxed` and `enableWeakerNetworkIsolation` true,
 /// `allowUnsandboxedCommands` false, the secret `denyRead` and trust-anchor
 /// `denyWrite` lists, cargo/npm `allowWrite` entries plus the target dir, the
-/// [`ALLOWED_DOMAINS`], `allowUnixSockets` naming `trusty-mpm.sock` and — PM
-/// only — the tmux socket, and `env.RUSTC_WRAPPER` set to `""`.
+/// [`ALLOWED_DOMAINS`], `allowUnixSockets` naming `trusty-mpm.sock`, the
+/// [`SandboxInputs::daemon_sockets`] (#12077) and — PM only — the tmux
+/// socket, and `env.RUSTC_WRAPPER` set to `""`.
 /// `allowLocalBinding`, `allowAllUnixSockets`, `allowAppleEvents` and
 /// `filesystem.disabled` are pinned `false` (#10107), and there is no blanket
 /// `.claude/**` rule (#8928 rulings). Never
@@ -158,7 +162,12 @@ pub fn project_policy(role: SandboxRole, inputs: &SandboxInputs) -> Value {
         .then_some(inputs.tmux_socket.as_ref())
         .flatten();
     // #8928 fix round: never the sccache socket — see the doc above.
-    let sockets: Vec<&PathBuf> = tmux.into_iter().chain(inputs.mpm_socket.as_ref()).collect();
+    // #12077: the daemon sockets the role's CLI clients dial, by exact path.
+    let sockets: Vec<&PathBuf> = tmux
+        .into_iter()
+        .chain(inputs.mpm_socket.as_ref())
+        .chain(&inputs.daemon_sockets)
+        .collect();
     let mut deny: Vec<String> = Vec::new();
     deny.extend(
         secrets[..2]
