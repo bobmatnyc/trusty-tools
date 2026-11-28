@@ -554,3 +554,52 @@ $R record --clock 1795784400 --out $D/dashboard_derive/ids.json --seed $S/ids.js
 $R replay $D/dashboard_jsonl/*.json -- <target>/debug/examples/replay_port dashboard_jsonl
 $R replay $D/dashboard_derive/*.json -- <target>/debug/examples/replay_port dashboard_derive
 ```
+
+## dashboard_store (#12029 P2c)
+
+Five runs of the frozen Python reference (architect commit `0fbbc81eed`),
+recorded on 2026-11-28 with `--clock 1795784400` and replayed in
+`tests/replay_store.rs` against `examples/replay_port.rs`, which hands each
+to the library's driver mirror (`dashboard::store::py`, `replay_cases`).
+Every store, document and schema is synthetic. No recording declares fakes:
+the module starts no process.
+
+- `dashboard_store/`: `driver.py CASES.json`, copied beside
+  `dashboard_store.py`, `dashboard_jsonl.py` and `dashboard_schema.py` as
+  `dst_driver.py`, which points `dashboard_schema.SCHEMA_DIR` at the
+  sandbox's `schemas/`. `dir` covers versions, `if_version` (0, stale, a
+  string, a bool, a float), every id refusal (a trailing newline passes, as
+  Python's `$` does), bodies, the old mirror shape and bad `version` values,
+  all-or-nothing batches, timestamp normalization (Unicode digits included),
+  float and big-integer bytes, `order_by` across every value kind, the
+  collection listing, the brief and status-update refusals, `seed_meta`,
+  `add`, the prune log and the `DASHBOARD_*` environment. `jsonl` covers the
+  collection files, the change log (read back, since `changes*` files are
+  left out of the written-file comparison), schema warn, enforce and off,
+  `NaN` refused, reserved names, the other-format and migrate guards, corrupt
+  collection files, a change log that cannot be opened and a torn one.
+  `errors` covers a missing root, a root that is a file, a lock file that is
+  a directory, corrupt documents, a prune log that cannot be written (the
+  delete is refused) and a replace that fails midway in both formats,
+  including a rollback that fails on the same read-only directory and
+  leaves an earlier write in place, as the prototype does. `lock` holds the
+  store lock from another open file description for a few hundred
+  milliseconds: a write waits for it, a read does not.
+
+Not recorded: `add` on a jsonl store (its id is random; the dir case removes
+the file after reading it back); a lock held past the port's bounded wait
+(the prototype waits forever;
+`a_lock_that_cannot_be_taken_is_an_error_and_writes_nothing` covers the
+port); the pytest live-store refusal. The port also writes its writer-class
+claim (#12029 AC2) into `.lock`, which the comparison leaves out. Regenerate
+with the modules and driver copied to a sandbox directory `P` (a canonical
+path, e.g. under `/private/tmp` on macOS) and the case lists and `schemas/`
+in `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/dashboard_store/dir.json --seed $S/schemas=schemas \
+  --seed $S/dir.json=cases.json -- $P/dst_driver.py cases.json
+$R record --clock 1795784400 --out $D/dashboard_store/driver-usage.json -- $P/dst_driver.py
+$R replay $D/dashboard_store/*.json -- <target>/debug/examples/replay_port dashboard_store
+```

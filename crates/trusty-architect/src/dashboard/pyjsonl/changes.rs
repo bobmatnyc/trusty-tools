@@ -118,7 +118,7 @@ fn seq_of(entry: Option<&PyValue>) -> PyInt {
 }
 
 /// `seq + 1`, past `i64` as decimal text.
-fn bump(seq: &PyInt) -> PyInt {
+pub(crate) fn bump(seq: &PyInt) -> PyInt {
     match seq {
         PyInt::Small(n) => n.checked_add(1).map_or_else(
             || PyInt::Big(format!("{}", i128::from(*n) + 1)),

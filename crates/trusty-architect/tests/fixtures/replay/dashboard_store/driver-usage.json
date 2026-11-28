@@ -1,0 +1,15 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: driver.py CASES.json\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -66,6 +66,10 @@ pub enum DashError {
     /// The store lock was not granted within the wait.
     #[error("{0}")]
     Unavailable(String),
+    /// A batch would write a collection another writer class owns: one
+    /// writer class per collection (#12029 AC2). Nothing was written.
+    #[error("{0}")]
+    WriterClass(String),
     /// An op holds a secret-shaped value (LDG-2.3.5); the text names the
     /// op and the shape, never the value (#10063 PR 2).
     #[error("{0}")]

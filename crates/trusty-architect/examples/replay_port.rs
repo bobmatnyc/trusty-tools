@@ -14,7 +14,8 @@
 //! `brief-id` (#12028 P1e), `il_agent` (#12028 P1f) and `verify_claim`
 //! (#12028 P1g) and `ruling_pack` (#12028 P1i), `ids36` and
 //! `dashboard_schema` (#12029 P2a), `dashboard_jsonl` and `dashboard_derive`
-//! (#12029 P2b, mirrored in the library). `gh-session-track` (#12087)
+//! (#12029 P2b, mirrored in the library), `dashboard_store` (#12029 P2c,
+//! mirrored in the library). `gh-session-track` (#12087)
 //! runs the script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
@@ -28,8 +29,9 @@
 //! `ruling_pack_recordings_replay_clean_against_the_port`,
 //! `ids36_recordings_replay_clean_against_the_port`,
 //! `dashboard_schema_recordings_replay_clean_against_the_port`,
-//! `dashboard_jsonl_recordings_replay_clean_against_the_port` and
-//! `dashboard_derive_recordings_replay_clean_against_the_port`.
+//! `dashboard_jsonl_recordings_replay_clean_against_the_port`,
+//! `dashboard_derive_recordings_replay_clean_against_the_port` and
+//! `dashboard_store_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -482,6 +484,14 @@ fn main() -> ExitCode {
         // See #12029 P2b: the library holds each `driver.py` mirror.
         "dashboard_jsonl" => pyjsonl::replay_cases(&rest),
         "dashboard_derive" => pyderive::replay_cases(&rest, clock.as_ref()),
+        // See #12029 P2c: the store's `driver.py` mirror, on the frozen clock.
+        "dashboard_store" => {
+            let at = frozen.map_or_else(|| SystemClock.now_unix(), |t| t as f64);
+            trusty_architect::dashboard::store::py::replay_cases(
+                &rest,
+                Arc::new(FakeClock::new(at)),
+            )
+        }
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
@@ -490,7 +500,7 @@ fn main() -> ExitCode {
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
                  il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
                  gh-session-track, ruling_pack, ids36, dashboard_schema, dashboard_jsonl, \
-                 dashboard_derive"
+                 dashboard_derive, dashboard_store"
             );
             return ExitCode::from(2);
         }
