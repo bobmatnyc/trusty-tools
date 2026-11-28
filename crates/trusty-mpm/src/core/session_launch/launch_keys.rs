@@ -19,6 +19,9 @@
 //! values earlier releases wrote into the project file
 //! (`crate::core::claude_sandbox::clean_tm_launch_keys_on_launch`), then the
 //! record write, whose failure refuses the launch.
+//! #12077 row 13: the record also carries the `claudeMdExcludes` `tm doctor
+//! --fix` adds for an ancestor `CLAUDE.md` ([`add_launch_exclude`]), so the
+//! exclude reaches only this directory's tm launches; a launch keeps them.
 //! Test: `launch_keys_tests.rs`.
 
 use std::collections::BTreeSet;
@@ -28,6 +31,7 @@ use serde_json::{Map, Value, json};
 
 use super::PrepError;
 use super::settings::AUTO_MEMORY_KEY;
+use crate::core::claude_md_excludes::EXCLUDES_KEY;
 use crate::core::claude_sandbox::{TmLaunchKeys, clean_tm_launch_keys_on_launch};
 use crate::core::session_profile::{ARCHITECT_MODEL, SessionProfile};
 use crate::core::skill_overrides::{OFF, SKILL_OVERRIDES_KEY, planned_skill_overrides};
@@ -245,25 +249,89 @@ pub fn set_launch_key(dir: &Path, key: &str, value: Value) -> Result<PathBuf, La
     write_launch_keys(dir, &keys)
 }
 
-/// The prep step for the four keys (#12127).
+/// Add `absolute` to `claudeMdExcludes` on the record for `dir` (#12077 row 13).
 ///
-/// Why: see the module doc.
-/// What: removes, once, the values earlier releases wrote into the project
-/// file (an unreadable model record skips the pass, unmarked, so a later launch
-/// retries), then records [`launch_keys_for`] for the launch.
+/// Why: an ancestor `CLAUDE.md` exclude written into a settings file reaches
+/// every session that file reaches; on the record it reaches only this
+/// directory's tm launches, which pass the record as `--settings`. Claude Code
+/// unions the array with the file layers' entries.
+/// What: reads the record (absent reads as empty), appends `absolute`'s
+/// display form when it is not listed, and stores it through
+/// [`write_launch_keys`]. `Ok(false)` when it was already listed.
 ///
 /// # Errors
 ///
-/// [`PrepError::LaunchKeys`] when the record cannot be written; it is fatal,
-/// so the launch is refused rather than run without the keys.
+/// Every [`read_launch_keys`] error, so a broken record is never overwritten;
+/// [`LaunchKeysError::Malformed`] when the recorded key is not an array;
+/// [`LaunchKeysError::Write`] when the store fails.
+///
+/// Test: `the_exclude_lands_on_the_launch_settings_record_12077`,
+/// `an_unreadable_launch_record_fails_the_exclude_12077`.
+pub fn add_launch_exclude(dir: &Path, absolute: &Path) -> Result<bool, LaunchKeysError> {
+    let mut keys = read_launch_keys(dir)?.unwrap_or_default();
+    let wanted = absolute.display().to_string();
+    let entry = keys
+        .entry(EXCLUDES_KEY.to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(list) = entry.as_array_mut() else {
+        return Err(LaunchKeysError::Malformed {
+            path: record_path(dir),
+            reason: format!("`{EXCLUDES_KEY}` is not an array"),
+        });
+    };
+    if list.iter().any(|v| v.as_str() == Some(wanted.as_str())) {
+        return Ok(false);
+    }
+    list.push(Value::String(wanted));
+    write_launch_keys(dir, &keys)?;
+    Ok(true)
+}
+
+/// The `claudeMdExcludes` strings on the record for `dir`, best effort.
+///
+/// What: an absent or unreadable record, or a key that is not an array,
+/// contributes nothing, as an unreadable settings layer does in
+/// [`crate::core::claude_md_excludes::merged_excludes`]: the read can only
+/// under-report, which shows the operator a finding rather than hiding one.
+/// Test: `a_recorded_exclude_yields_no_step_12077`.
+pub fn recorded_claude_md_excludes(dir: &Path) -> Vec<String> {
+    let Ok(Some(keys)) = read_launch_keys(dir) else {
+        return Vec::new();
+    };
+    keys.get(EXCLUDES_KEY)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The prep step for the four keys (#12127).
+///
+/// Why: see the module doc.
+/// What: reads the `claudeMdExcludes` the current record carries (#12077 row
+/// 13), removes, once, the values earlier releases wrote into the project
+/// file (an unreadable model record skips the pass, unmarked, so a later launch
+/// retries), then records [`launch_keys_for`] for the launch with those
+/// excludes kept.
+///
+/// # Errors
+///
+/// [`PrepError::LaunchKeys`] when the current record cannot be read or the new
+/// one cannot be written; it is fatal, so the launch is refused rather than
+/// run without the keys or with the recorded excludes dropped.
 ///
 /// Test: `prepare_session_writes_none_of_the_four_keys_12127`,
-/// `an_unwritable_record_refuses_the_prepared_launch_12127`.
+/// `an_unwritable_record_refuses_the_prepared_launch_12127`,
+/// `deliver_keeps_the_recorded_claude_md_excludes_12077`,
+/// `deliver_refuses_over_an_unreadable_record_12077`.
 pub(super) fn deliver_launch_keys(
     project_dir: &Path,
     style_id: &str,
     profile: SessionProfile,
 ) -> Result<(), PrepError> {
+    // #12077 row 13: read before any write, so a refusal changes nothing.
+    let excludes = read_launch_keys(project_dir)?.and_then(|mut keys| keys.remove(EXCLUDES_KEY));
     let skills_off = planned_skill_overrides(project_dir);
     match super::architect_model::recorded_model(project_dir) {
         Ok(model) => clean_tm_launch_keys_on_launch(
@@ -282,7 +350,10 @@ pub(super) fn deliver_launch_keys(
             "#12127: cannot read tm's model record; the launch-key cleanup waits for a later launch"
         ),
     }
-    let keys = launch_keys_for(project_dir, style_id, profile, skills_off.as_ref());
+    let mut keys = launch_keys_for(project_dir, style_id, profile, skills_off.as_ref());
+    if let Some(excludes) = excludes {
+        keys.insert(EXCLUDES_KEY.to_owned(), excludes);
+    }
     write_launch_keys(project_dir, &keys)?;
     Ok(())
 }

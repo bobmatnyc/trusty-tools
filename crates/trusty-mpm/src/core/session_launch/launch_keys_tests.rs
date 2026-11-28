@@ -213,8 +213,10 @@ fn an_unwritable_record_refuses_the_prepared_launch_12127() {
     let err =
         super::super::prepare_session_with_home(&fw, project, None, false, Some(tmp_home.path()))
             .expect_err("an unwritable record must refuse the launch");
+    // #12077 row 13: the launch reads the current record first, to keep its
+    // excludes, so the blocker now refuses at the read.
     assert!(
-        matches!(err, PrepError::LaunchKeys(LaunchKeysError::Write { .. })),
+        matches!(err, PrepError::LaunchKeys(LaunchKeysError::Read { .. })),
         "{err}"
     );
     assert!(err.is_fatal(), "{err}");
