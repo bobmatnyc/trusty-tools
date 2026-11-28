@@ -47,6 +47,9 @@ pub(crate) struct SendHooks {
     /// #12077: make this directory writable again when a session is killed, so
     /// a test can fail one store write and let the teardown's own write land.
     pub(crate) restore_on_kill: Option<PathBuf>,
+    /// #12077: the same, on a session-list probe — the first tmux call a
+    /// teardown makes, so a teardown that kills nothing still gets its write.
+    pub(crate) restore_on_list: Option<PathBuf>,
 }
 
 /// The longest a parked send waits for [`AnswerDriver::release`].
@@ -148,6 +151,16 @@ impl ManagedTmuxDriver for AnswerDriver {
         self.inner.kill_session(name)
     }
 
+    // #12077: a proven teardown kills by `$N` id; without this override the
+    // trait default refuses, so nothing was killed and `restore_on_kill` never ran.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        let restore = self.hooks.lock().unwrap().restore_on_kill.clone();
+        if let Some(dir) = restore {
+            set_mode(&dir, 0o755);
+        }
+        self.inner.kill_session_id(name, session_id)
+    }
+
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
         self.inner.send_line(name, text)
     }
@@ -157,6 +170,10 @@ impl ManagedTmuxDriver for AnswerDriver {
     }
 
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        let restore = self.hooks.lock().unwrap().restore_on_list.clone();
+        if let Some(dir) = restore {
+            set_mode(&dir, 0o755);
+        }
         self.inner.list_sessions()
     }
 
