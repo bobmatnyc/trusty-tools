@@ -62,6 +62,29 @@ pub fn repair_ancestor_claude_md(
     today: &str,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
+    let state_root = crate::core::launch_policy::state_root();
+    repair_ancestor_claude_md_in(
+        project_root,
+        home,
+        managed_config_dir,
+        state_root.as_deref(),
+        today,
+        mode,
+    )
+}
+
+/// [`repair_ancestor_claude_md`] with tm's state root named by the caller
+/// (#12077), so a test never reaches the operator's `~/.trusty-tools`.
+///
+/// Test: `a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077`.
+pub fn repair_ancestor_claude_md_in(
+    project_root: &Path,
+    home: Option<&Path>,
+    managed_config_dir: Option<&Path>,
+    _state_root: Option<&Path>,
+    today: &str,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
     // #7673: scan from the resolved root, not whichever subdirectory `--fix`
     // ran from.
     let scanned = resolve_project_root(project_root, home)

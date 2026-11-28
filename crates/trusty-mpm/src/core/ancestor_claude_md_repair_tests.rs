@@ -424,3 +424,100 @@ fn an_unreadable_launch_record_fails_the_exclude_12077() {
     assert_eq!(std::fs::read_to_string(&record).unwrap(), "{ not json");
     assert!(!managed.join("settings.json").exists());
 }
+
+/// `git init` `dir` with `origin` set to `url`; `false` when git is absent.
+fn git_with_origin(dir: &Path, url: &str) -> bool {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    };
+    run(&["init", "-q"]) && run(&["remote", "add", "origin", url])
+}
+
+/// #12077 row 13: `tm doctor --fix` in one checkout of a project, then a
+/// launch of the same project in its managed clone: the clone's launch
+/// settings carry the exclude, as they did when it sat in the managed dir.
+#[test]
+fn a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077() {
+    let tmp = TempDir::new().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let ancestor = base.join("home");
+    let checkout = ancestor.join("work").join("app");
+    let repos = ancestor.join("repos");
+    let clone = repos.join("acme").join("app");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::create_dir_all(&clone).unwrap();
+    let url = "https://github.com/acme/app.git";
+    if !git_with_origin(&checkout, url) || !git_with_origin(&clone, url) {
+        eprintln!("#12077 tests: git unavailable, skipping");
+        return;
+    }
+    let notes = ancestor.join("CLAUDE.md");
+    std::fs::write(&notes, "# My notes\n\nShell aliases.\n").unwrap();
+    let state = base.join("state");
+
+    let steps = repair_ancestor_claude_md_in(
+        &checkout,
+        None,
+        None,
+        Some(&state),
+        "20260912",
+        RepairMode::Apply,
+    );
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Applied { .. }),
+        "{steps:?}"
+    );
+
+    let launch = crate::core::launch_policy::carrier::provision_settings_at(
+        &crate::core::launch_policy::carrier::CarrierInputs {
+            cwd: &clone,
+            repos_root: &repos,
+            state_root: &state,
+            claude_json_dir: None,
+            profile: crate::core::session_profile::SessionProfile::Pm,
+        },
+    )
+    .expect("the clone's launch provisions");
+    let file = launch.file.expect("a --settings file carrying the exclude");
+    let body: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    assert_eq!(
+        body["claudeMdExcludes"],
+        serde_json::json!([notes.display().to_string()]),
+        "{body}"
+    );
+}
+
+/// #12077 row 13, Fail-Open Check: when the project identity cannot be
+/// resolved, the repair fails the step rather than record the exclude where
+/// the project's other checkouts never read it.
+#[test]
+fn an_unresolvable_project_identity_fails_the_exclude_12077() {
+    let (tmp, ancestor, project) = fixture();
+    std::fs::write(ancestor.join("CLAUDE.md"), "# Monorepo\n").unwrap();
+    // A `.git` file naming no git dir: git cannot read this checkout at all.
+    std::fs::write(project.join(".git"), "gitdir: /nonexistent/12077\n").unwrap();
+    let state = tmp.path().join("state");
+
+    let steps = repair_ancestor_claude_md_in(
+        &project,
+        None,
+        None,
+        Some(&state),
+        "20260912",
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Failed(_)),
+        "{steps:?}"
+    );
+    assert!(!crate::core::session_launch::launch_keys_record_path(&project).exists());
+}

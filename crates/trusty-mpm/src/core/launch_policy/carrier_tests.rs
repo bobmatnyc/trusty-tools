@@ -718,3 +718,17 @@ fn the_carrier_payload_carries_the_recorded_claude_md_excludes_12077() {
         json!(["/anc/CLAUDE.md"])
     );
 }
+
+/// #12077 row 13, Fail-Open Check: a launch whose project identity cannot be
+/// resolved refuses, rather than start without the excludes recorded for that
+/// project.
+#[test]
+fn an_unresolvable_project_identity_refuses_the_carrier_12077() {
+    let fx = Fx::new(USER);
+    // A `.git` file naming no git dir: git cannot read this checkout at all.
+    std::fs::write(fx.project.join(".git"), "gitdir: /nonexistent/12077\n").unwrap();
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("an unresolvable identity must refuse");
+    assert!(err.to_string().contains("refusing the launch"), "{err}");
+}
