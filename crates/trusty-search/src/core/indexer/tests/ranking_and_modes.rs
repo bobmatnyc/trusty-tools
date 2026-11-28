@@ -526,6 +526,49 @@ async fn test_conceptual_does_not_demote_docs() {
     );
 }
 
+/// #11349: a natural-language question whose best answer is a prose doc
+/// ranks that doc first at the default mode. Before the fix the Code→All
+/// upgrade still applied Code's 0.1x prose penalty, so the doc that tops
+/// both lanes fell below a weaker source chunk.
+#[tokio::test]
+#[serial_test::parallel]
+async fn conceptual_default_mode_ranks_best_matching_doc_first() {
+    use crate::core::classifier::{QueryClassifier, QueryIntent};
+
+    let query = "how non-comment lines are counted for the source file size cap";
+    assert_eq!(
+        QueryClassifier::classify(query),
+        QueryIntent::Conceptual,
+        "fixture query must classify as Conceptual to take the Code→All upgrade"
+    );
+    let idx = make_indexer();
+    // The doc's text is the query itself: BM25 rank 1 and vector rank 1.
+    idx.add_chunk(raw("doc:1", "docs/reference/sloc-cap.md", query))
+        .await
+        .unwrap();
+    idx.add_chunk(raw(
+        "src:1",
+        "src/cap.rs",
+        "fn count_lines(file: &str) -> usize { file.lines().count() } // size cap",
+    ))
+    .await
+    .unwrap();
+
+    let q = SearchQuery {
+        text: query.to_string(),
+        top_k: 10,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results = idx.search(&q).await.unwrap();
+    let files: Vec<&str> = results.iter().map(|c| c.file.as_str()).collect();
+    assert!(
+        files.first().is_some_and(|f| f.ends_with("sloc-cap.md")),
+        "the doc that tops both lanes must rank first at the default mode: {files:?}"
+    );
+}
+
 /// Issue #72 regression: in explicit `SearchMode::Code`, a high-BM25-TF
 /// prose chunk must not crowd a genuine source-file match out of `top_k`
 /// before the post-RRF hard filter runs.

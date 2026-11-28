@@ -276,3 +276,31 @@ fn test_sql_allowed_in_code_and_data() {
         );
     }
 }
+
+/// #11349: the `All` row multiplies nothing. The Code→All upgrade for a
+/// natural-language query lands here, and the old `All`→`Code` remap gave a
+/// prose target 0.1x — enough to bury it under every code chunk, because RRF
+/// scores sit within a few percent of each other. The labels stay, so the
+/// exact-match floor still orders a doc after live code.
+#[test]
+fn test_doc_score_penalty_all_mode_lifts_prose_and_data_penalty() {
+    for (path, label) in [
+        ("docs/reference/sloc-cap.md", "text:sloc-cap.md"),
+        ("CHANGELOG", "text:changelog"),
+        ("config/app.yaml", "data:app.yaml"),
+    ] {
+        let (mult, reason) = doc_score_penalty(path, SearchMode::All);
+        assert_eq!(mult, 1.0, "{path}: `All` must not penalise");
+        assert_eq!(reason.as_deref(), Some(label), "{path}: label kept");
+    }
+    assert_eq!(
+        doc_score_penalty("src/main.rs", SearchMode::All),
+        (1.0, None)
+    );
+    // `Code` keeps its matrix row.
+    assert_eq!(doc_score_penalty("docs/a.md", SearchMode::Code).0, 0.1);
+    assert_eq!(
+        doc_score_penalty("config/app.yaml", SearchMode::Code).0,
+        0.2
+    );
+}

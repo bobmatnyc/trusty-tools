@@ -862,4 +862,3 @@ crates/trusty-review/src/service/handlers.rs	review_endpoint_*
 crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_provider_*
 crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_python_provider_*
 crates/trusty-search/src/core/indexer/archive.rs	archive_downranking_*
-crates/trusty-search/src/core/indexer/docs_penalty.rs	test_doc_score_penalty_*
