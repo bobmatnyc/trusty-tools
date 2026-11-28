@@ -374,7 +374,7 @@ fn browser_installed() -> Vec<Outcome> {
 
 /// Why (#11587): `tm install` signs the browser binaries through `tctl sign`,
 /// and each binary's line follows tctl's exit code; only exit 0 is "signed",
-/// and only exit 3 (no identity) is not a failure of the run.
+/// and exit 2 (tctl too old) and exit 3 (no identity) do not fail the run.
 /// What: with both binaries present, a fake tctl exiting 0, 3, 2 and 1 gives
 /// one line per binary each time; asserts the call is `sign trusty-browser
 /// --dir <cargo_bin>`, the wording and the `failed` flag per exit code.
@@ -387,7 +387,7 @@ fn browser_signing_reports_each_binary_by_tctl_exit_code() {
         (
             2,
             "NOT signed: this tctl has no `trusty-browser` sign target",
-            true,
+            false,
         ),
         (1, "NOT signed: `tctl sign trusty-browser` failed", true),
     ] {
@@ -412,10 +412,10 @@ fn browser_signing_reports_each_binary_by_tctl_exit_code() {
     }
 }
 
-/// Why (#11587): Fail-Open Check. No tctl is a NOT-signed line and a failed
-/// run, not silence and not success; a browser that did not install signs
-/// nothing.
-/// What: no tctl gives a `NOT signed` line naming tctl and `failed`; a
+/// Why (#11587): Fail-Open Check. No tctl is a NOT-signed warning line, not
+/// silence and not success, and not a failed run (a clean-config `tm install`
+/// exits 0); a browser that did not install signs nothing.
+/// What: no tctl gives a `NOT signed` line naming tctl and not `failed`; a
 /// `Missing` browser install, or no binary on disk, gives nothing and no tctl
 /// call.
 /// Test: This is the test.
@@ -430,7 +430,7 @@ fn browser_signing_never_claims_signed_without_tctl_or_a_binary() {
         signing.lines[0].contains("NOT signed: no `tctl` found"),
         "{signing:?}"
     );
-    assert!(signing.failed);
+    assert!(!signing.failed, "{signing:?}");
 
     env.tctl = Some(fake_tctl(tmp.path(), 0));
     let missing = vec![Outcome {
@@ -470,18 +470,26 @@ fn a_present_browser_is_not_signed_again() {
 
 /// Why (#11587, code-critic on PR #12137): `tm install` exited 0 when the
 /// browser it had just installed failed to sign.
-/// What: a fake cargo installs the browser and a fake tctl exits 1: `run_with`
-/// is `Err`. The same run with tctl exiting 3 (no identity) is `Ok`, as is a
-/// run with signing off (not macOS).
+/// What: a fake cargo installs the browser and a fake tctl exits 1 (identity
+/// configured, sign failed): `run_with` is `Err`. The same run with no tctl,
+/// tctl exiting 2 (too old) or 3 (no identity), or signing off (not macOS)
+/// is `Ok`.
 /// Test: This is the test.
 #[test]
 fn a_failed_browser_sign_fails_the_run() {
-    for (code, sign, fails) in [(1, true, true), (3, true, false), (1, false, false)] {
+    let cases = [
+        (Some(1), true, true),
+        (None, true, false),
+        (Some(2), true, false),
+        (Some(3), true, false),
+        (Some(1), false, false),
+    ];
+    for (code, sign, fails) in cases {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = env_in(tmp.path(), Some(fake_cargo(tmp.path())));
-        env.tctl = Some(fake_tctl(tmp.path(), code));
+        env.tctl = code.map(|c| fake_tctl(tmp.path(), c));
         let run = run_with(&env, sign);
-        assert_eq!(run.is_err(), fails, "exit {code}, sign {sign}: {run:?}");
+        assert_eq!(run.is_err(), fails, "exit {code:?}, sign {sign}: {run:?}");
         if let Err(e) = run {
             assert!(e.to_string().contains("not signed"), "{e}");
         }

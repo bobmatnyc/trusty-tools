@@ -389,15 +389,15 @@ pub(crate) const BROWSER_BINS: [&str; 2] = ["trusty-browser", "trusty-browser-mc
 pub(crate) struct BrowserSigning {
     /// One report line per present browser binary.
     pub lines: Vec<String>,
-    /// The binaries are not signed for a reason other than "no identity".
+    /// tctl ran with an identity configured and the sign itself failed.
     pub failed: bool,
 }
 
 /// Why the browser binaries are not signed, and whether that fails the run.
 struct NotSigned {
     why: String,
-    /// `false` only for "no identity configured", which tctl itself treats as
-    /// a warning (its exit 3).
+    /// `false` when signing could not be attempted: no tctl, a tctl too old
+    /// to sign the browser (exit 2), or no identity configured (exit 3).
     fails_run: bool,
 }
 
@@ -406,6 +406,13 @@ impl NotSigned {
         Self {
             why,
             fails_run: true,
+        }
+    }
+
+    fn warning(why: String) -> Self {
+        Self {
+            why,
+            fails_run: false,
         }
     }
 }
@@ -423,9 +430,9 @@ impl NotSigned {
 /// signed again and the identity is not looked up (code-critic on PR
 /// #12137). Otherwise runs `<tctl> sign trusty-browser --dir <cargo_bin>`
 /// (stdin null, bounded by `install_timeout`), one line per present binary.
-/// Only exit 0 reads as signed. Exit 3 ("no identity") is a warning; no
-/// tctl, exit 2 (this tctl predates the target), a timeout and any other end
-/// set `failed`.
+/// Only exit 0 reads as signed. No tctl, exit 2 (this tctl predates the
+/// target) and exit 3 ("no identity") are warnings; a timeout, a spawn error
+/// and any other exit set `failed`.
 /// Test: `browser_signing_reports_each_binary_by_tctl_exit_code`,
 /// `browser_signing_never_claims_signed_without_tctl_or_a_binary`,
 /// `a_present_browser_is_not_signed_again`.
@@ -441,7 +448,8 @@ pub(crate) fn sign_browser(env: &Env, outcomes: &[Outcome]) -> BrowserSigning {
         return BrowserSigning::default();
     }
     let verdict = match &env.tctl {
-        None => Err(NotSigned::failure(
+        // #11587: a clean-config `tm install` exits 0; no tctl only warns.
+        None => Err(NotSigned::warning(
             "no `tctl` found; install trusty-installer".to_string(),
         )),
         Some(tctl) => run_tctl_sign(env, tctl),
@@ -475,13 +483,13 @@ fn run_tctl_sign(env: &Env, tctl: &Path) -> Result<(), NotSigned> {
         .and_then(|c| wait_bounded(c, env.install_timeout));
     match status {
         Ok(st) if st.success() => Ok(()),
-        Ok(st) if st.code() == Some(3) => Err(NotSigned {
-            why: "no Developer ID Application identity is configured (install the \
-                  certificate or set TRUSTY_SIGN_IDENTITY)"
+        Ok(st) if st.code() == Some(3) => Err(NotSigned::warning(
+            "no Developer ID Application identity is configured (install the \
+             certificate or set TRUSTY_SIGN_IDENTITY)"
                 .to_string(),
-            fails_run: false,
-        }),
-        Ok(st) if st.code() == Some(2) => Err(NotSigned::failure(
+        )),
+        // #11587: a tctl too old to sign the browser only warns, like no tctl.
+        Ok(st) if st.code() == Some(2) => Err(NotSigned::warning(
             "this tctl has no `trusty-browser` sign target; upgrade trusty-installer".to_string(),
         )),
         Ok(st) => Err(NotSigned::failure(format!(
