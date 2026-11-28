@@ -4,9 +4,6 @@
 globalThis.TrustyCodes = deps => {
   const {bootstrap, identity, reconnect, online} = deps;
   const ALL_HTTPS = {origins:["https://*/*"]};
-  // RECONNECT_GRACE (45 s) plus a minute. A broker this worker has not reached for that long holds no grant of
-  // the profile: a lost port ends every grant of its pairing generation after the grace.
-  const QUIET_MS = 105000;
   // The one wait before Connect retries after a fresh pair (owner ruling Dqw 2026-11-16).
   const PAIR_RETRY_MS = 750;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -95,27 +92,13 @@ globalThis.TrustyCodes = deps => {
     // A row left beside `last` is a connect racing this end or a missed end; the broker's list tells which.
     if (last && (next === null || Object.keys(next).length)) void reconcile();
   }
-  const offline = {
-    lost:() => serial(async () => {
-      const {offline_since:since} = await chrome.storage.session.get("offline_since");
-      if (!Number.isFinite(since)) await chrome.storage.session.set({offline_since:Date.now()});
-    }).catch(() => {}),
-    minted:() => serial(async () => {
-      const {offline_since:since} = await chrome.storage.session.get("offline_since");
-      if (Number.isFinite(since)) await chrome.storage.session.set({offline_since:Date.now()});
-    }).catch(() => {}),
-  };
-  // The service.sock acknowledgement: `live` lists every unredeemed code and live grant of the profile.
+  // Why: only the broker ends a grant, and an unreachable broker still holds it (#11570), so no clock here
+  //   empties the table; the next acknowledgement is the only prune.
+  // What: `live` lists every unredeemed code and live grant of the profile; the table keeps only those.
+  // Test: tests/js/grants.test.mjs `a quiet broker link alone never ends a grant while the browser is open`,
+  //   `a broker that returns without the grant ends the row and the permission`.
   async function acknowledged(live, fresh) {
-    await serial(() => chrome.storage.session.set({offline_since:null})).catch(() => {});
     await keepListed(new Set(live), fresh, live.length === 0);
-  }
-  // Why: a broker that stays unreachable sends no acknowledgement, yet then holds nothing of this profile.
-  // What: after QUIET_MS without an acknowledgement and without a connect, empties the table and the permission.
-  // Test: tests/test_worker.mjs `an unreachable broker ends the table and the permission after the code lifetime`.
-  async function tick() {
-    const {offline_since:since} = await chrome.storage.session.get("offline_since");
-    if (Number.isFinite(since) && Date.now() - since >= QUIET_MS) await changeTable(() => ({}), true);
   }
 
   // Why: one Connect click grants the whole profile to local agents (#11239 owner ruling 03:37Z).
@@ -157,7 +140,6 @@ globalThis.TrustyCodes = deps => {
       throw error;
     }
     minting--;
-    await offline.minted();
     return {ok:true, grant, profile:cred.profile};
   }
 
@@ -259,5 +241,5 @@ globalThis.TrustyCodes = deps => {
     return {ok:true, revoked};
   }
   return {setup, credential, stored, readTable, ended, acknowledged, watchMints,
-    unwatch:fresh => watchers.delete(fresh), offline, tick};
+    unwatch:fresh => watchers.delete(fresh)};
 };

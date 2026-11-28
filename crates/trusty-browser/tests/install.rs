@@ -22,8 +22,8 @@ use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 // #11529, #11284, #11371, #11808: the tree published before #11211, as an upgraded install still carries it.
 const PY_SIGNATURE: &str = "d2544c740b32cff7d25f3594ccfa88643eda6b5d56cfa22aef97ba3fbdb3cf69";
 /// #11211: pins the embedded Rust tree (tabs, screenshots and coordinate input in pages.js);
-/// update it with every extension change.
-const EMBEDDED_SIGNATURE: &str = "2e615abe8b7053512f1abca59e607f96c0ee351deb9350cde169e3659aa44e2b";
+/// update it with every extension change (#11570: the worker lost its quiet-period table wipe).
+const EMBEDDED_SIGNATURE: &str = "b8cafb5a851145dbd6d5ea4c9b39d5b8f8c53201b03b4a11854e88aa2ffd0e17";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";
