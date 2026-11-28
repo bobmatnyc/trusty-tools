@@ -42,6 +42,14 @@ pub use cleanup_user::{
     USER_CLEANUP_MARKER_FILE, UserCleanupOutcome, clean_tm_user_sandbox_keys_once,
 };
 
+// #12127: the same one-time pass for the four launch keys tm moved inline.
+#[path = "claude_settings_keys_cleanup.rs"]
+mod launch_keys_cleanup;
+pub use launch_keys_cleanup::{
+    LAUNCH_KEYS_CLEANUP_MARKER_FILE, LaunchKeysCleanupOutcome, TmLaunchKeys,
+    clean_tm_launch_keys_on_launch, clean_tm_launch_keys_once,
+};
+
 /// The one opt-in switch: `TM_CLAUDE_SANDBOX=1` turns the sandbox on.
 ///
 /// Why: #12077 — an env var reaches every launch path (`tm launch`, `tm run`,
@@ -179,3 +187,7 @@ mod cleanup_tests;
 #[cfg(test)]
 #[path = "claude_sandbox_cleanup_user_tests.rs"]
 mod cleanup_user_tests;
+
+#[cfg(test)]
+#[path = "claude_settings_keys_cleanup_tests.rs"]
+mod launch_keys_cleanup_tests;

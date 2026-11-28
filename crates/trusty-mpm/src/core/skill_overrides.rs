@@ -177,6 +177,26 @@ pub fn irrelevant_skills(stacks: &BTreeSet<String>) -> BTreeSet<&'static str> {
         .collect()
 }
 
+/// The skills tm turns off for `project_dir`'s detected stack, written nowhere
+/// (#12127: the launch carries them on the `--settings` flag tier).
+///
+/// What: [`irrelevant_skills`] of [`detected_stack_engineers`]; empty for an
+/// unknown stack, `None` (after one warning) when a scan bound cut detection
+/// short, the same fail-closed rule [`write_skill_overrides_for`] applies (#7781).
+/// Test: `prepare_session_writes_none_of_the_four_keys_12127`.
+pub fn planned_skill_overrides(project_dir: &Path) -> Option<BTreeSet<&'static str>> {
+    let detection = detected_stack_engineers(project_dir);
+    if detection.truncated {
+        tracing::warn!(
+            "stack detection for {} stopped at a scan bound, so the detected \
+             stack may be partial; no stack-profile skillOverrides delivered",
+            project_dir.display()
+        );
+        return None;
+    }
+    Some(irrelevant_skills(&detection.engineers))
+}
+
 /// What one [`write_skill_overrides`] call did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SkillOverridesOutcome {

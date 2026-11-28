@@ -387,6 +387,43 @@ pub(crate) fn record_compiled_prompt(dest: &Path, bytes: &[u8]) -> std::io::Resu
     Ok(true)
 }
 
+/// Record that tm just wrote the harness file `dest` under `ws` (#12127).
+///
+/// Why: the launch-key record and its cleanup marker live under `.trusty-mpm/`,
+/// which the dirt check counts as work unless the ledger vouches for the
+/// bytes; without this every provisioned clone would be kept.
+/// What: [`record_compiled_prompt`] for any `dest` whose path relative to `ws`
+/// starts with `.trusty-mpm/`: its current bytes join the ledger's
+/// `harness_files`. `Ok(false)`, writing nothing, for any other path, a
+/// missing file, no git admin dir, or no ledger yet.
+/// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`.
+pub(crate) fn record_harness_file(ws: &Path, dest: &Path) -> std::io::Result<bool> {
+    let Some(rel) = dest
+        .strip_prefix(ws)
+        .ok()
+        .and_then(Path::to_str)
+        .filter(|rel| rel.starts_with(".trusty-mpm/"))
+    else {
+        return Ok(false);
+    };
+    let bytes = match std::fs::read(dest) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    let Some(path) = ledger_path(ws) else {
+        return Ok(false);
+    };
+    let Some(mut ledger) = read_ledger(&path) else {
+        return Ok(false);
+    };
+    ledger
+        .harness_files
+        .insert(rel.to_owned(), sha256_hex(&bytes));
+    write_atomic(&path, &serde_json::to_vec_pretty(&ledger)?)?;
+    Ok(true)
+}
+
 /// Write `bytes` to `path` through a uniquely named sibling temp file and a
 /// rename; the temp file is removed when the rename fails.
 // #8663 critic round 2: a pid-keyed temp name collided between two launches in

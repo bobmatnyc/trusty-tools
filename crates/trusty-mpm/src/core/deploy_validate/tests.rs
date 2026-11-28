@@ -701,9 +701,8 @@ fn repair_writes_auto_memory_off() {
 
     super::validate_and_repair_under(&fw, &workspace, None, Some(fake_home.path()), None);
 
-    let settings = workspace.join(".claude").join("settings.json");
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    // #12127: auto memory rides the launch's `--settings` flag tier.
+    let value = crate::core::session_launch::effective_settings(&workspace);
     // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14).
     assert_eq!(
         value["autoMemoryEnabled"],

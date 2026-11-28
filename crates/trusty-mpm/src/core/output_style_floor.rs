@@ -219,9 +219,18 @@ pub fn native_style_id(
 /// What: `settings.local.json`, then `settings.json`; the first that sets a
 /// string `outputStyle` wins, as `daemon::doctor_output_style` resolves the
 /// project scope. `None` when neither sets it, or when a layer is unreadable
-/// or not JSON — an unknown value is never taken for the composite.
-/// Test: `a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt`.
+/// or not JSON — an unknown value is never taken for the composite. #12127:
+/// the style the launch records for the `--settings` flag tier comes first.
+/// Test: `a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt`,
+/// `the_record_carries_each_key_with_the_old_value_12127`.
 fn project_output_style(project_dir: &Path) -> Option<String> {
+    // #12127: the launch carries the style on the `--settings` flag tier, which
+    // outranks both files; the record left it out when a local value wins.
+    if let Ok(Some(keys)) = crate::core::session_launch::read_launch_keys(project_dir)
+        && let Some(id) = keys.get("outputStyle").and_then(serde_json::Value::as_str)
+    {
+        return Some(id.to_string());
+    }
     let paths = ClaudeConfigReader::paths_for_project(project_dir);
     for path in [paths.project_local_settings, paths.project_settings] {
         let raw = match std::fs::read_to_string(&path) {

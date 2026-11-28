@@ -1115,8 +1115,8 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
 /// branch.
 /// What: points trusty-memory's socket at a path nothing listens on, drives the
 /// real `spawn_managed_on_main` (preparation, deployment gate and its repair),
-/// and reads the project-tier `autoMemoryEnabled` the launch left in the
-/// checkout.
+/// and reads the `autoMemoryEnabled` the launch recorded for its `--settings`
+/// flag tier (#12127).
 /// Test: itself.
 #[tokio::test]
 #[serial_test::serial]
@@ -1174,10 +1174,8 @@ async fn spawn_managed_on_main_writes_auto_memory_off_with_trusty_memory_down() 
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
 
-    let settings = local_path.join(".claude").join("settings.json");
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings written"))
-            .expect("settings parse");
+    // #12127: auto memory rides the launch's `--settings` flag tier.
+    let value = crate::core::session_launch::effective_settings(local_path);
     // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14).
     assert_eq!(
         value["autoMemoryEnabled"],
