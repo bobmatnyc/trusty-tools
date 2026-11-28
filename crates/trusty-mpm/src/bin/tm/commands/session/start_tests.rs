@@ -1382,7 +1382,10 @@ fn session_start_refuses_a_malformed_install_toml_12048() {
     let tools = home.join(trusty_common::install_paths::TOOLS_DIR_NAME);
     std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
     let missing = super::start_framework_paths(Some(&home)).expect("no install.toml resolves");
-    assert_eq!(missing.root, home.join(".trusty-mpm"));
+    assert_eq!(
+        missing.root,
+        home.join(trusty_common::install_paths::MPM_DIR_NAME)
+    );
     std::fs::write(
         tools.join("install.toml"),
         "config_dir = \"/elsewhere\"\nbogus = 1\n",
@@ -1390,7 +1393,12 @@ fn session_start_refuses_a_malformed_install_toml_12048() {
     .expect("write install.toml");
     let err = super::start_framework_paths(Some(&home)).expect_err("malformed refuses");
     assert!(err.to_string().contains("install.toml"), "{err}");
-    assert!(!home.join(".trusty-mpm").exists(), "nothing deployed");
+    assert!(
+        !home
+            .join(trusty_common::install_paths::MPM_DIR_NAME)
+            .exists(),
+        "nothing deployed"
+    );
 }
 
 /// #10102 Fail-Open Check: a `tm connect` whose sandbox does not verify — a

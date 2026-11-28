@@ -261,7 +261,9 @@ async fn launch_session_deploys_under_the_config_dir_launch_reads_12048() {
         "prep wrote nothing under the config dir"
     );
     assert!(
-        !home.join(".trusty-mpm").exists(),
+        !home
+            .join(trusty_common::install_paths::MPM_DIR_NAME)
+            .exists(),
         "prep deployed under <home>/.trusty-mpm"
     );
 }
