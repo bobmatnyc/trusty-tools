@@ -128,8 +128,10 @@ fn a_user_value_keeps_winning_where_it_used_to_12127() {
 #[test]
 #[serial_test::serial]
 fn prepare_session_writes_none_of_the_four_keys_12127() {
-    let tmp_home = crate::test_support::hermetic_temp_dir();
-    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    // #12077: the body names `LAUNCH_KEYS_CLEANUP_MARKER_FILE`, so the #9123
+    // scan counts it as a credential test; the sandbox moves `$HOME` itself.
+    let sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let sandbox_home = sandbox.home();
     let tmp = crate::test_support::hermetic_temp_dir();
     let project = tmp.path();
     std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"demo\"\n").expect("marker");
@@ -150,13 +152,19 @@ fn prepare_session_writes_none_of_the_four_keys_12127() {
     );
     let local = claude.join("settings.local.json");
     write_text(&local, r#"{"spinnerTipsEnabled": false}"#);
-    let home_settings = tmp_home.path().join(".claude").join("settings.json");
+    let home_settings = sandbox_home.join(".claude").join("settings.json");
     write_text(&home_settings, r#"{"theme": "light"}"#);
     let local_before = hash(&local);
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    let fw = crate::core::paths::FrameworkPaths::under(&sandbox_home);
 
-    super::super::prepare_session_with_home(&fw, project, None, false, Some(tmp_home.path()))
-        .expect("prep succeeds");
+    super::super::prepare_session_with_home(
+        &fw,
+        project,
+        None,
+        false,
+        Some(sandbox_home.as_path()),
+    )
+    .expect("prep succeeds");
 
     assert_eq!(
         hash(&local),
