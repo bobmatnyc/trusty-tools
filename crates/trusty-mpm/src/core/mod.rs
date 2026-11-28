@@ -37,8 +37,8 @@ pub mod artifact;
 // and the `tm pr open` body validator.
 pub mod attribution;
 pub mod auto_resume;
-// #5069: the base checkout behind a worktree owns the embedding lane that
-// `worktree_index` deliberately skips; this module is what creates it.
+// #5069: the base checkout behind a worktree owns the embedding lane that a
+// worktree index deliberately skips; this module is what creates it.
 pub mod base_facet_index;
 pub mod binary_provenance;
 // #7965: the one kill-on-timeout subprocess runner every background sweep uses,

@@ -275,16 +275,16 @@ fn gitdir_outside_a_worktrees_directory_resolves_to_nothing() {
 ///
 /// Why: three tests below need the params a registration puts on the wire, and
 /// one `ensure_project_indexed_reporting` call makes three calls (create,
-/// status, reindex). The two call-site tests also need to observe BOTH
-/// registrations a worktree path triggers and pick out the one they care about,
-/// so the rig records rather than answering one request.
+/// status, reindex). The session-launch test must pick its registration out of
+/// the two a worktree launch triggers, and the creation test must see that none
+/// arrive, so the rig records rather than answering one request.
 /// What: binds a mock daemon at `<socket_dir>/s.sock`, answers every method
 /// `{}` (an empty status body is not fresh, so the reindex trigger proceeds as
 /// it would in production), and pushes the params of each `search.index.create`
 /// into the returned buffer. The daemon stops when the returned handle drops.
 /// Test: used by `base_facet_posts_the_base_checkout_with_the_vector_lane_on`,
 /// `session_launch_registers_the_base_facet_for_a_worktree`,
-/// `worktree_creation_registers_the_base_facet`.
+/// `worktree_creation_registers_no_index`.
 type CapturedCreates = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
 
 fn fake_daemon(
@@ -436,17 +436,23 @@ fn session_launch_registers_the_base_facet_for_a_worktree() {
     assert_base_facet_body(&body);
 }
 
-/// Worktree creation registers the base facet (#5069).
+/// Worktree creation registers no trusty-search index (#10534).
 ///
-/// Why: the other call site. `index_new_worktree_in_background` is what both
-/// worktree-minting paths invoke, so this covers `provisioner::workspace` and
-/// `daemon::managed_routes::inproject` at their shared entry point.
-/// What: as above, through the background entry point — which returns
-/// immediately, so the assertion waits on the daemon rather than on a join.
+/// Why (regression): the owner removed the creation-time index path. Before
+/// #10534, `create_session_worktree_unchecked` posted two creates from detached
+/// threads — the worktree's own BM25+KG index and its base facet. A worktree now
+/// gets an index only when a session launches in it
+/// (`session_launch_registers_the_base_facet_for_a_worktree` pins that path).
+/// What: creates a real session worktree through the production function with
+/// discovery pointed at the fake daemon and the #4255 suppression lifted, then
+/// watches for 3 s — far longer than the detached posts took — and requires no
+/// create naming any path under the fixture. Filtering by root keeps a create
+/// from an unrelated concurrent test from failing this one.
 /// Test: this test.
 #[test]
 #[serial_test::serial]
-fn worktree_creation_registers_the_base_facet() {
+fn worktree_creation_registers_no_index() {
+    let _env = crate::core::trusty_tools_config::env_test_lock();
     let Some(fx) = fixture() else {
         eprintln!("skipping: git unavailable in this environment");
         return;
@@ -456,10 +462,33 @@ fn worktree_creation_registers_the_base_facet() {
     let (socket, seen, _daemon) = fake_daemon(socket_dir.path());
     let _guards = point_discovery_at(data_dir.path(), &socket);
 
-    crate::core::worktree_index::index_new_worktree_in_background(fx.worktree.clone());
+    let created = crate::daemon::managed_routes::inproject::create_session_worktree_unchecked(
+        &fx.base,
+        "tm-no-index-01",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("worktree creation must succeed on a real repo");
+    assert!(created.is_dir(), "fixture precondition: the worktree exists");
 
-    let expected_root = trusty_common::resolve_project_root(&fx.base);
-    let body = wait_for_create_index(&seen, &expected_root)
-        .expect("creating a worktree must also register its base facet");
-    assert_base_facet_body(&body);
+    let fixture_root = fx.base.parent().expect("base has a parent").to_path_buf();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        let ours: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|params| {
+                params
+                    .get("root_path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|root| Path::new(root).starts_with(&fixture_root))
+            })
+            .cloned()
+            .collect();
+        assert!(
+            ours.is_empty(),
+            "worktree creation must register no index (#10534); got {ours:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
