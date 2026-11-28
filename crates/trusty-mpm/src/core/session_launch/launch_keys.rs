@@ -394,26 +394,89 @@ pub fn add_launch_exclude(
     Ok(true)
 }
 
+/// What a launch in a directory adds from its project's exclude record.
+#[derive(Debug, Default)]
+pub struct ProjectExcludes {
+    /// The recorded `claudeMdExcludes` array, if any.
+    pub excludes: Option<Value>,
+    /// Set when git could not name the project and no project record exists,
+    /// so the launch goes ahead on the directory's own record; names the error.
+    pub warning: Option<String>,
+}
+
 /// The project-record `claudeMdExcludes` a launch in `dir` adds (#12077 row 13).
 ///
-/// What: `None` for a directory with no identity (its own record already
-/// rides the launch) or a project with no record; else the recorded array.
+/// What: none for a directory with no identity (its own record already rides
+/// the launch) or a project with no record; else the recorded array. On a git
+/// error (Architect ruling 13:24Z): with any `project-*.json` under
+/// `<state_root>/launch-settings/` the error stands, since that record may be
+/// this project's; with none, there is nothing to miss, so the result carries
+/// a warning naming the error and no excludes.
 ///
 /// # Errors
 ///
-/// [`LaunchKeysError::Identity`] and every read error: a launch that cannot
-/// find them refuses rather than drop them.
+/// [`LaunchKeysError::Identity`] when git fails and a project record exists,
+/// or the record directory cannot be listed; every read error of the
+/// project's record. A launch refuses rather than drop them.
 ///
 /// Test: `a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077`,
-/// `an_unresolvable_project_identity_refuses_the_carrier_12077`.
+/// `an_unresolvable_project_identity_refuses_the_carrier_when_a_project_record_exists_12077`,
+/// `an_unresolvable_project_identity_warns_and_launches_with_no_project_record_12077`.
 pub fn project_excludes_for_launch(
     dir: &Path,
     state_root: &Path,
-) -> Result<Option<Value>, LaunchKeysError> {
-    let ExcludesHome::Project { path, .. } = excludes_home(dir, Some(state_root))? else {
-        return Ok(None);
+) -> Result<ProjectExcludes, LaunchKeysError> {
+    let path = match excludes_home(dir, Some(state_root)) {
+        Ok(ExcludesHome::Dir) => return Ok(ProjectExcludes::default()),
+        Ok(ExcludesHome::Project { path, .. }) => path,
+        Err(LaunchKeysError::Identity { dir: at, reason }) => {
+            return match any_project_record(state_root) {
+                Ok(false) => Ok(ProjectExcludes {
+                    excludes: None,
+                    warning: Some(format!(
+                        "#12077: cannot resolve the project identity of {} ({reason}); no \
+                         project exclude record exists, so this launch goes ahead with this \
+                         directory's own launch settings",
+                        at.display()
+                    )),
+                }),
+                Ok(true) => Err(LaunchKeysError::Identity { dir: at, reason }),
+                Err(listing) => Err(LaunchKeysError::Identity {
+                    dir: at,
+                    reason: format!("{reason}; and {listing}"),
+                }),
+            };
+        }
+        Err(err) => return Err(err),
     };
-    Ok(read_record_at(path)?.and_then(|mut keys| keys.remove(EXCLUDES_KEY)))
+    Ok(ProjectExcludes {
+        excludes: read_record_at(path)?.and_then(|mut keys| keys.remove(EXCLUDES_KEY)),
+        warning: None,
+    })
+}
+
+/// Whether any project exclude record exists under `state_root`.
+///
+/// # Errors
+///
+/// The record directory exists and cannot be listed: whether one exists is
+/// unknown, which the caller treats as "one may".
+fn any_project_record(state_root: &Path) -> Result<bool, String> {
+    let dir = state_root.join(LAUNCH_KEYS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("cannot list {}: {err}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("cannot list {}: {err}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("project-") && name.ends_with(".json") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The `claudeMdExcludes` strings kept for `dir` — its own record and its
