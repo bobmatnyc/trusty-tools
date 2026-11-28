@@ -42,8 +42,8 @@ pub struct TmSandboxKey {
 /// Every sandbox key tm wrote into the project tier of `workspace` and into
 /// tm's user tier under `user_tier_dir`.
 ///
-/// Why/What: see the module doc. Nothing in tm calls this to write or delete;
-/// the cleanup mode waits on the owner (#12077).
+/// Why/What: see the module doc. It writes nothing; the one-time cleanup
+/// (`claude_sandbox_cleanup.rs`) shares its record read and matching rule.
 ///
 /// # Errors
 ///
@@ -60,19 +60,11 @@ pub fn detect_tm_sandbox_keys(
     user_tier_dir: &Path,
 ) -> Result<Vec<TmSandboxKey>, SandboxSettingsError> {
     let mut found = Vec::new();
-    let record_path = workspace.join(".trusty-mpm").join(super::ROLE_RECORD_FILE);
-    if let Some(record) = read_object(&record_path)? {
-        // #10102: tm merged every recorded role's policy into the project file.
-        let mut ours = Value::Object(serde_json::Map::new());
-        if let Value::Object(roles) = &record {
-            for policy in roles.values() {
-                super::merge_settings_payload(&mut ours, policy);
-            }
-        }
+    if let Some(ours) = recorded_project_policy(workspace)? {
         for name in ["settings.json", "settings.local.json"] {
             let file = workspace.join(".claude").join(name);
             if let Some(settings) = read_object(&file)? {
-                collect(&file, &settings, &ours, "", &[], &mut found);
+                found.extend(project_keys_in(&file, &settings, &ours));
             }
         }
     }
@@ -81,6 +73,41 @@ pub fn detect_tm_sandbox_keys(
         collect(&file, &settings, &ours, "", &["allowedDomains"], &mut found);
     }
     Ok(found)
+}
+
+/// The union of every role policy in `workspace`'s role record; `None` when
+/// there is no record.
+///
+/// Why: #10102 — tm merged every recorded role's policy into the project
+/// file, so the union is what tm wrote there. #12077: the cleanup reads the
+/// same union.
+///
+/// # Errors
+///
+/// [`SandboxSettingsError::Unreadable`] for a record that exists but cannot
+/// be read or is not a JSON object.
+pub(super) fn recorded_project_policy(
+    workspace: &Path,
+) -> Result<Option<Value>, SandboxSettingsError> {
+    let record_path = workspace.join(".trusty-mpm").join(super::ROLE_RECORD_FILE);
+    let Some(record) = read_object(&record_path)? else {
+        return Ok(None);
+    };
+    let mut ours = Value::Object(serde_json::Map::new());
+    if let Value::Object(roles) = &record {
+        for policy in roles.values() {
+            super::merge_settings_payload(&mut ours, policy);
+        }
+    }
+    Ok(Some(ours))
+}
+
+/// Each project-tier key or list entry of `settings` (read from `file`) that
+/// equals the recorded policy `ours`: the one matching rule (#12077).
+pub(super) fn project_keys_in(file: &Path, settings: &Value, ours: &Value) -> Vec<TmSandboxKey> {
+    let mut found = Vec::new();
+    collect(file, settings, ours, "", &[], &mut found);
+    found
 }
 
 /// Record in `out` each leaf of `ours` that `have` holds with the same value.
@@ -151,7 +178,7 @@ fn entry_label(entry: &Value) -> String {
 }
 
 /// The JSON object in `path`; `None` when the file does not exist.
-fn read_object(path: &Path) -> Result<Option<Value>, SandboxSettingsError> {
+pub(super) fn read_object(path: &Path) -> Result<Option<Value>, SandboxSettingsError> {
     let bad = |why: String| SandboxSettingsError::Unreadable {
         path: path.to_path_buf(),
         why,
