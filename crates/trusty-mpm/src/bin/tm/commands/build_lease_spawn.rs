@@ -59,17 +59,19 @@ pub(super) fn write_record(guard: &mut SlotGuard, record: &HolderRecord) -> std:
 /// so a SIGTERM that lands between the spawn and the handler cannot kill this
 /// holder with the default action and orphan the build.
 /// `dir` is the `--chdir` directory the build runs in (#8969). #8692: with a
-/// lease that has a `lock_dir` (a slot-owned plan), every [`PHASE_POLL`] the
+/// lease that has a `lock_dir` (a directory it owns: a slot, or since PR B a
+/// kept or cargo's own one under its dir lock), every [`PHASE_POLL`] the
 /// [`PhaseTracker`] reads cargo's build lock there; once compilation is over
 /// the record is rewritten as
 /// [`Phase::Run`], which frees compile capacity while this process keeps the
-/// slot's flock — and so its directory — until the command exits.
+/// slot's flock and the dir lock — and so its directory — until the command
+/// exits.
 /// #11661: an unfiltered `cargo test` ([`wants_empty_target_check`]) has its
 /// stdout and stderr piped, forwarded line by line to this process's own, and
 /// read by an [`EmptyTargetScan`].
 /// Test: `a_second_build_is_admitted_while_the_first_ones_test_binary_runs_8692`,
 /// `a_running_cargo_run_server_does_not_hold_capacity_8692`,
-/// `a_shared_dir_lease_keeps_its_capacity_while_its_test_binary_runs_8692`.
+/// `a_kept_or_unset_dir_lease_frees_capacity_while_its_test_binary_runs_8692`.
 pub(super) async fn spawn_and_wait(
     command: &[String],
     target_dir: Option<&str>,
