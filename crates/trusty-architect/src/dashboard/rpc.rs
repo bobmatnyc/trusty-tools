@@ -128,11 +128,11 @@ pub struct FsckResponse {
 pub struct IdsResponse {
     /// The prefix asked for.
     pub prefix: String,
-    /// The next free id; `None` when all 256 are used.
+    /// The next free id (base 34); `None` when all 1,155 are used.
     pub next: Option<String>,
     /// Ids of the prefix still free.
     pub free: usize,
-    /// The oldest `done` ids to retire so 64 stay free (LDG-2.2.4).
+    /// The oldest finished ids to retire so 289 stay free (LDG-2.2.4, #12029).
     pub retire: Vec<String>,
 }
 

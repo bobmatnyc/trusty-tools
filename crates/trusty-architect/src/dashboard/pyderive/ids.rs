@@ -2,8 +2,8 @@
 //!
 //! Why: ids recycle, so the next id and the retire list come from the
 //! store itself; the digits are base 34, never hex, and
-//! `00` is never issued. The serde [`crate::dashboard::ids`] still does hex
-//! arithmetic over 256 ids; moving it to these rules is #12029 P2d.
+//! `00` is never issued. The live [`crate::dashboard::ids`] runs these
+//! rules on its serde snapshot (#12029 P2d).
 //! What: over [`ID_COLLECTIONS`], ids matching `^[A-Z][0-9a-km-np-z]{2}$`
 //! (Python's `$` also before one final `\n`): [`used_ids`], [`free_count`],
 //! [`next_id`] (lowest free after the issue point, the higher of the top id
@@ -40,7 +40,7 @@ pub(crate) const KEEP_FREE: i64 = SPACE / 4;
 const DAY_US: f64 = 86_400_000_000.0;
 
 /// `ID_RE.match(id)`: the prefix letter and the number of its two digits.
-fn id_number(id: &str) -> Option<(char, i64)> {
+pub(crate) fn id_number(id: &str) -> Option<(char, i64)> {
     let id = id.strip_suffix('\n').unwrap_or(id);
     let mut c = id.chars();
     let p = c.next().filter(char::is_ascii_uppercase)?;

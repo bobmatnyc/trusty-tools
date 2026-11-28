@@ -152,13 +152,9 @@ fn media_ids(media_dir: &Path) -> Result<HashSet<u32>, String> {
     Ok(out)
 }
 
-/// `allocate()`: the next id, `MB` + four lowercase hex digits.
-///
-/// Why: ids are never reused, so the next one is past every id ever used.
-/// What: the highest number in the registry (`B` or `MB` ids) or the media
-/// store, plus one; `MB0000` when none; an error past `MBffff`.
-/// Test: the `brief-id/next-*` recordings.
-pub fn allocate(paths: &Paths) -> Result<String, String> {
+/// `used()`: the brief numbers taken in the registry (`B` or `MB` ids) and the media store.
+// #12029 P2d: `dashboard_ids.brief_used` counts these.
+pub(crate) fn used(paths: &Paths) -> Result<HashSet<u32>, String> {
     let mut used = media_ids(&paths.media_dir())?;
     for r in read_registry(&paths.registry())? {
         let id = id_str(&r)?;
@@ -166,6 +162,17 @@ pub fn allocate(paths: &Paths) -> Result<String, String> {
             used.insert(number(id));
         }
     }
+    Ok(used)
+}
+
+/// `allocate()`: the next id, `MB` + four lowercase hex digits.
+///
+/// Why: ids are never reused, so the next one is past every id ever used.
+/// What: the highest number in the registry (`B` or `MB` ids) or the media
+/// store, plus one; `MB0000` when none; an error past `MBffff`.
+/// Test: the `brief-id/next-*` recordings.
+pub fn allocate(paths: &Paths) -> Result<String, String> {
+    let used = used(paths)?;
     let n = used.iter().max().map_or(0, |m| m + 1);
     if n >= SPACE {
         return Err("RuntimeError: brief ids exhausted (MBffff reached); ids never wrap".into());

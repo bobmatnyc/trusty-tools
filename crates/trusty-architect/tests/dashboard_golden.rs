@@ -219,7 +219,7 @@ fn derived_values_match_prototype() -> R {
                     "{name} free {p}"
                 );
                 assert_eq!(
-                    Value::from(retire_candidates(&snap, p, KEEP_FREE)),
+                    Value::from(retire_candidates(&snap, p, KEEP_FREE, NOW)),
                     want["retire"][&key]
                 );
             }
