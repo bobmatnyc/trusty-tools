@@ -1,7 +1,7 @@
 //! The one-time removal of the sandbox keys tm 1.14.14 and 1.14.15 wrote into
 //! a project's `<ws>/.claude/settings.json` (#12077 slice 3).
 //!
-//! Why: owner ruling 2026-11-28 — "tm removes its own keys once. At the next
+//! Why (#12077): "tm removes its own keys once. At the next
 //! launch tm deletes only the keys it wrote, then never writes that file
 //! again. This is the one allowed write to the generic file."
 //! What: [`clean_tm_sandbox_keys_once`] removes, from the project settings
