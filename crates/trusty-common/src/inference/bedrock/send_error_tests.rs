@@ -262,7 +262,8 @@ fn stream_error_unreadable_frame_maps_to_other() {
 /// with ARN account ids masked (#9200), so the display text does not change.
 #[test]
 fn stream_error_keeps_mid_stream_message_and_masks_arns() {
-    let err = SdkError::dispatch_failure(ConnectorError::io("connection reset".into()));
+    let err: SdkError<ConverseStreamOutputError, RawMessage> =
+        SdkError::dispatch_failure(ConnectorError::io("connection reset".into()));
     let text = classify_stream_error(ARN_MODEL, REGION, &err).to_string();
     assert!(
         text.starts_with("ConverseStream failed mid-stream (model="),
