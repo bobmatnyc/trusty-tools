@@ -7,10 +7,11 @@
 //! now live in its managed `CLAUDE_CONFIG_DIR`, which carries the same entries
 //! on purpose, so there is no tm-owned target left for this strip. The launch
 //! reports what it finds instead, so the operator can remove it.
-//! What: [`legacy_global_mpm_hooks_at`] reads the two files and counts the
+//! What: [`legacy_global_mpm_hooks_at`] reads the two files and lists the
 //! handler entries that equal, field for field, one tm wrote: a tm hook
 //! command, in a `matcher: "*"` group, with the type, timeout and `async` flag
 //! [`super::mpm_hook_block`] gives that event. It never writes.
+//! [`LegacyGlobalHooks::warning`] is the launch's text for one file.
 //! Test: `tm_exact_old_global_hook_is_reported_12077`,
 //! `a_user_hook_that_differs_from_tm_old_hook_is_not_reported_12077`,
 //! `project_settings_below_home_are_not_read_12077`,
@@ -20,32 +21,65 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+/// One of tm's old handler entries, by hook event and command.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LegacyHookEntry {
+    /// The hook event the entry sits under, e.g. `PreToolUse`.
+    pub event: String,
+    /// The entry's `command`.
+    pub command: String,
+}
+
 /// One global settings file that holds tm's old entries, or cannot be read.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LegacyGlobalHooks {
     /// The file.
     pub path: PathBuf,
-    /// How many of tm's exact old handler entries it holds, or why it could
-    /// not be read.
-    pub found: Result<usize, String>,
+    /// tm's exact old handler entries it holds, in file order, or why it
+    /// could not be read.
+    pub found: Result<Vec<LegacyHookEntry>, String>,
 }
 
 impl LegacyGlobalHooks {
-    /// The stderr warning `tm launch` prints for this file.
+    /// The stderr warning `tm launch` prints for this file (#12077 row 12).
     ///
+    /// What: names each entry (file, event, command); gives `tm hooks clean
+    /// --path ~`, first without `--force` as a dry run, then with it, and says
+    /// that it backs up first and matches any plain `tm hook` entry, wider than
+    /// the list; and gives the manual alternative. For an unreadable file, the
+    /// error.
     /// Test: `the_legacy_global_hook_warning_names_each_entry_and_the_removal_12077`.
     pub fn warning(&self) -> String {
-        match &self.found {
-            Ok(n) => format!(
-                "warning: {} still carries {n} of tm's old hook entries; tm no longer \
-                 edits this file (#12077) — remove them by hand",
-                self.path.display()
-            ),
-            Err(e) => format!(
-                "warning: could not read {} to check for tm's old hook entries: {e}",
-                self.path.display()
-            ),
+        let file = self.path.display();
+        let entries = match &self.found {
+            Ok(entries) => entries,
+            Err(e) => {
+                return format!(
+                    "warning: could not read {file} to check for tm's old hook entries: {e}"
+                );
+            }
+        };
+        let mut text = format!(
+            "warning: {file} still holds {} of tm's old hook entries. tm no longer edits \
+             this file (#12077), so it does not remove them:",
+            entries.len()
+        );
+        for entry in entries {
+            text.push_str(&format!(
+                "\n  - {file}: {} runs `{}`",
+                entry.event, entry.command
+            ));
         }
+        text.push_str(
+            "\n  To remove them, run `tm hooks clean --path ~` first without `--force`, as a \
+             dry run that lists what it would remove, then run `tm hooks clean --path ~ \
+             --force`, which backs up each file before it writes. `tm hooks clean` matches \
+             more widely than the entries above: it removes any plain `tm hook` entry in \
+             ~/.claude/settings.json and ~/.claude/settings.local.json.\
+             \n  Or delete those handlers under `hooks` in ~/.claude/settings.json / \
+             ~/.claude/settings.local.json yourself.",
+        );
+        text
     }
 }
 
@@ -75,20 +109,21 @@ pub fn legacy_global_mpm_hooks_at(home: &Path) -> Vec<LegacyGlobalHooks> {
                 Err(err) => Err(err.to_string()),
                 Ok(text) if text.trim().is_empty() => return None,
                 Ok(text) => match serde_json::from_str::<Value>(&text) {
-                    Ok(value) if value.is_object() => Ok(count_tm_old_entries(&value)),
+                    Ok(value) if value.is_object() => Ok(tm_old_entries(&value)),
                     Ok(_) => Err("not a JSON object".to_string()),
                     Err(err) => Err(err.to_string()),
                 },
             };
-            (found != Ok(0)).then_some(LegacyGlobalHooks { path, found })
+            let clean = found.as_ref().is_ok_and(Vec::is_empty);
+            (!clean).then_some(LegacyGlobalHooks { path, found })
         })
         .collect()
 }
 
-/// How many handler entries in `settings` equal tm's own, field for field.
-fn count_tm_old_entries(settings: &Value) -> usize {
+/// The handler entries in `settings` that equal tm's own, field for field.
+fn tm_old_entries(settings: &Value) -> Vec<LegacyHookEntry> {
     let Some(events) = settings.get("hooks").and_then(Value::as_object) else {
-        return 0;
+        return Vec::new();
     };
     events
         .iter()
@@ -100,7 +135,15 @@ fn count_tm_old_entries(settings: &Value) -> usize {
             handlers.into_iter().flatten().map(move |h| (event, h))
         })
         .filter(|(event, handler)| is_tm_old_handler(event, handler))
-        .count()
+        .map(|(event, handler)| LegacyHookEntry {
+            event: event.clone(),
+            command: handler
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .collect()
 }
 
 /// Whether `handler` under `event` is exactly the entry tm wrote there.

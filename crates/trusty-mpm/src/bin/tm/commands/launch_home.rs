@@ -188,8 +188,11 @@ pub(crate) fn launch_files_with(
 /// longer strips them; the operator is told instead. #5875: those two files
 /// only, never a walk of the home tree.
 /// What: one stderr warning per file holding tm's exact old entries, or that
-/// cannot be read; silent for a clean or absent file, or no home.
-/// Test: `the_launch_leaves_the_home_settings_file_untouched_12077`.
+/// cannot be read; silent for a clean or absent file, or no home. #12077: the
+/// text, which names each entry and the removal, is
+/// `LegacyGlobalHooks::warning`.
+/// Test: `the_launch_leaves_the_home_settings_file_untouched_12077`,
+/// `the_legacy_global_hook_warning_names_each_entry_and_the_removal_12077`.
 pub(crate) fn report_global_hooks(home: Option<&Path>) {
     use trusty_mpm::core::standalone::hooks::legacy_global::legacy_global_mpm_hooks_at;
     let Some(home) = home else { return };

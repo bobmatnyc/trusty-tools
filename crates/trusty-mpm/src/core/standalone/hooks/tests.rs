@@ -1189,7 +1189,7 @@ fn plant(path: &Path, value: &serde_json::Value) {
 /// neither file is written.
 #[test]
 fn tm_exact_old_global_hook_is_reported_12077() {
-    use super::legacy_global::{LegacyGlobalHooks, legacy_global_mpm_hooks_at};
+    use super::legacy_global::{LegacyGlobalHooks, LegacyHookEntry, legacy_global_mpm_hooks_at};
     let home = TempDir::new().expect("tempdir");
     let global = home.path().join(".claude").join("settings.json");
     let local = home.path().join(".claude").join("settings.local.json");
@@ -1203,16 +1203,20 @@ fn tm_exact_old_global_hook_is_reported_12077() {
 
     let found = legacy_global_mpm_hooks_at(home.path());
 
+    let entry = || LegacyHookEntry {
+        event: "PreToolUse".to_owned(),
+        command: "/opt/bin/trusty-mpm hook".to_owned(),
+    };
     assert_eq!(
         found,
         vec![
             LegacyGlobalHooks {
                 path: global.clone(),
-                found: Ok(1)
+                found: Ok(vec![entry()])
             },
             LegacyGlobalHooks {
                 path: local,
-                found: Ok(1)
+                found: Ok(vec![entry()])
             },
         ]
     );
