@@ -33,6 +33,39 @@ use super::decision::{DecisionId, locked_get};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState};
 
+/// A refused spawn: the original error plus a note about the pane (#12077).
+///
+/// Why: a pane tm could not prove its own stays up after the refusal. Folding
+/// that into the error would change the [`ManagedError`] variant callers
+/// match, so the note rides beside it.
+/// What: `source` is the untouched error; `note` is `Some("pane left
+/// running ...")` only when the pane was not killed. `Display` is the source
+/// text, then `; <note>` when there is one.
+/// Test: `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`.
+#[derive(Debug)]
+pub struct RefusedSpawn {
+    /// The original refusal, unchanged.
+    pub source: ManagedError,
+    /// Set when a pane was left running.
+    pub note: Option<String>,
+}
+
+impl std::fmt::Display for RefusedSpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)?;
+        if let Some(note) = &self.note {
+            write!(f, "; {note}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RefusedSpawn {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl SessionManager {
     /// Mark a session as errored with a message.
     ///
@@ -153,22 +186,48 @@ impl SessionManager {
     /// spawn; [`crate::runtime::build_record_adapter`] reads it off the record.
     /// What: `on == false` (the default) changes and writes nothing. `true`
     /// sets `claude_sandbox` on a fresh read of the stored record and upserts
-    /// it. FAIL-CLOSED: a failed write marks the record errored (best-effort,
-    /// so no automatic path resumes it) and is the caller's error, which
-    /// refuses the spawn — a record that says off must never sit behind a
-    /// session that ran sandboxed.
+    /// it. FAIL-CLOSED: a failed write marks the record errored (best-effort)
+    /// and is the caller's error, which refuses the spawn — a record that says
+    /// off must never sit behind a session that ran sandboxed.
     ///
     /// # Errors
     ///
     /// The [`ManagedError`] of the read or the write.
     ///
+    /// #12077: the refusal also tears the session down (kills its tmux
+    /// session, removes a worktree the spawn reserved), so nothing runs behind
+    /// the refused spawn.
+    ///
     /// Test: `set_claude_sandbox_persists_only_an_opt_in_12077`,
-    /// `an_unpersisted_opt_in_refuses_the_spawn_12077`.
+    /// `an_unpersisted_opt_in_refuses_the_spawn_12077`,
+    /// `a_refused_opt_in_removes_the_worktree_the_spawn_reserved_12077`,
+    /// `a_refused_opt_in_session_is_neither_adopted_nor_resumable_12077`,
+    /// `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`.
     pub async fn set_claude_sandbox(
+        &self,
+        record: super::record::SessionRecord,
+        on: bool,
+    ) -> Result<super::record::SessionRecord, ManagedError> {
+        self.set_claude_sandbox_noted(record, on)
+            .await
+            .map_err(|refused| refused.source)
+    }
+
+    /// [`Self::set_claude_sandbox`], with a `pane left running` note kept
+    /// beside the refusal rather than inside it (#12077).
+    ///
+    /// Why: a pane tm could not prove its own stays up after the refusal and
+    /// the operator must be told; rewrapping the error would change the
+    /// variant callers match.
+    /// What: the same write and teardown; the error is a [`RefusedSpawn`]
+    /// whose `source` is the original [`ManagedError`], untouched.
+    /// Test: `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`,
+    /// `a_failed_teardown_still_returns_the_original_refusal_12077`.
+    pub async fn set_claude_sandbox_noted(
         &self,
         mut record: super::record::SessionRecord,
         on: bool,
-    ) -> Result<super::record::SessionRecord, ManagedError> {
+    ) -> Result<super::record::SessionRecord, RefusedSpawn> {
         if !on {
             return Ok(record);
         }
@@ -186,11 +245,81 @@ impl SessionManager {
                  resume would run unsandboxed; refusing the spawn (#12077): {e}"
             );
             error!(id = %record.id, "set_claude_sandbox: {why}");
-            // #12077: an Errored record is never auto-resumed.
+            // #12077: Errored surfaces the refusal; it is not a hold, since
+            // reconcile re-adopts a live Errored record, so the reap below
+            // must also tombstone it.
             let _ = self.mark_errored(&record.id, &why).await;
-            return Err(e);
+            // #12077: the tmux session `create_with_reserved_name` made would
+            // otherwise stay up as a bare shell, and reconcile re-adopts a live
+            // session as Active. A teardown failure is logged; the refusal is
+            // still the original error.
+            let note = self.reap_refused_spawn(&record.id).await;
+            // #12077: the note rides beside the original error, never in it.
+            return Err(RefusedSpawn { source: e, note });
         }
         Ok(record)
+    }
+
+    /// Tear down the session of a spawn refused after its tmux session exists.
+    ///
+    /// Why: see [`Self::set_claude_sandbox`] (#12077). The runtime never ran,
+    /// the same case as a denied front gate.
+    /// What: the [`Self::decommission_denied_front_gate`] teardown — kills the
+    /// proven pane, removes an in-project session worktree holding only tm's
+    /// provisioning files (never the operator's main checkout), tombstones the
+    /// record. When that teardown fails, a fallback with no workspace guards
+    /// kills the proven pane ([`Self::terminate_proven_runtime`]) and
+    /// tombstones the record only ([`Self::decommission_record_only`]), which
+    /// removes nothing. Reconcile never adopts a terminal record, so the
+    /// tombstone holds even when the pane is unproven and stays up. Every
+    /// failure is logged, never returned. Returns a `pane left running` note
+    /// (#12077) when the pane was not killed, `None` when it was killed or
+    /// absent; the caller appends it to the refusal.
+    /// Test: `a_refused_opt_in_reaps_the_session_and_keeps_the_main_checkout_12077`,
+    /// `a_failed_teardown_still_returns_the_original_refusal_12077`,
+    /// `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`.
+    async fn reap_refused_spawn(&self, id: &ManagedSessionId) -> Option<String> {
+        // #12077: reuse the front-gate deny teardown; do not hand-roll a kill.
+        let Err(e) = self.decommission_denied_front_gate(id).await else {
+            return None;
+        };
+        let mut left_running = None;
+        error!(id = %id, "refused spawn: teardown failed, falling back to kill and tombstone: {e}");
+        // #12077: the teardown can fail before its kill; kill the proven pane
+        // with no workspace guards, and never remove a workspace here.
+        match self.get(id).await {
+            Ok(record) => match self
+                .terminate_proven_runtime(&record, "refused spawn")
+                .await
+            {
+                Ok(teardown) => {
+                    if let Some(note) = teardown.left_running() {
+                        error!(id = %id, "refused spawn: {note}");
+                        left_running = Some(format!(
+                            "pane left running (tmux session '{}'): {note}",
+                            record.tmux_name
+                        ));
+                    }
+                }
+                Err(e) => {
+                    error!(id = %id, "refused spawn: the pane was not killed: {e}");
+                    left_running = Some(format!(
+                        "pane left running (tmux session '{}'): not killed: {e}",
+                        record.tmux_name
+                    ));
+                }
+            },
+            Err(e) => {
+                error!(id = %id, "refused spawn: no record to kill the pane of: {e}");
+                left_running = Some(format!("pane left running (no record to prove it by): {e}"));
+            }
+        }
+        // #12077: a terminal record is never adopted or resumed, so tombstone
+        // it even when the pane could not be killed.
+        if let Err(e) = self.decommission_record_only(id).await {
+            error!(id = %id, "refused spawn: the record was not tombstoned, a restart may adopt it: {e}");
+        }
+        left_running
     }
 
     /// Record a source project identity on a session, with a bounded retry

@@ -312,6 +312,9 @@ mod server_up_tests;
 mod set_source_id_tests;
 
 #[cfg(test)]
+mod refused_spawn_tests;
+
+#[cfg(test)]
 mod set_deliverable_id_tests;
 
 #[cfg(test)]
