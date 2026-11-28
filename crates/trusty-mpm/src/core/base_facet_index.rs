@@ -1,36 +1,33 @@
 //! Register the BASE CHECKOUT behind a worktree with trusty-search (#5069).
 //!
-//! Why: #5060 registers every new worktree BM25+KG-only (`skip_vector: true`),
-//! on the ruling that exact text and the symbol graph are branch-specific while
+//! Why: a worktree index is BM25+KG-only (`skip_vector: true`), on the
+//! ruling that exact text and the symbol graph are branch-specific while
 //! conceptual similarity is not — so the embedding lane is built ONCE, on the
-//! base checkout. Nothing built it. `worktree_index` refuses a plain clone by
-//! design and session launch only ever registers the directory the session runs
-//! in, which under `tm` is always a worktree. The result on this machine: 8
+//! base checkout. Nothing built it. Session launch only ever registers the
+//! directory the session runs in, which under `tm` is always a worktree. The result on this machine: 8
 //! worktrees registered, the checkout they were cut from absent from the
 //! registry entirely, and no index anywhere carrying vectors for this repo.
 //! Every worktree session got BM25 and KG and never semantic search.
 //!
 //! What: [`ensure_base_facet_indexed`] resolves the primary checkout a worktree
 //! was cut from and registers ITS index with the vector lane ON
-//! (`skip_vector: false`, the default). Two call sites reach it — worktree
-//! creation (`core::worktree_index`) and session launch
-//! (`core::session_launch::register_project_index`) — because the ~59 worktrees
-//! that already exist never run the creation path again.
+//! (`skip_vector: false`, the default). One call site reaches it: session
+//! launch (`core::session_launch::register_project_index`). #10534 removed the
+//! worktree-creation call site.
 //!
 //! Eager, not lazy (#2611 open question 1, "base-facet ownership"): the base
-//! index is created as a side effect of trusty-mpm cutting a worktree in that
-//! repo, not on first semantic query. A lazy path would need a query to fail
+//! index is created as a side effect of trusty-mpm launching a session in a
+//! worktree of that repo, not on first semantic query. A lazy path would need a query to fail
 //! first, then wait ~35 s plus the embed pass before it could answer — so the
 //! first semantic query of every session would still miss.
 //!
 //! Opt-in model (#767): this adds no new grant. The only paths that reach here
-//! are a worktree trusty-mpm itself created and a session trusty-mpm itself
-//! launched, both inside a repo the operator is already running `tm` in and
+//! are sessions trusty-mpm itself launched, inside a repo the operator is already running `tm` in and
 //! already registering indexes for. The target is that same repo's primary
 //! checkout, `allow_sensitive_path` stays `false`, and `POST /indexes` enforces
 //! the daemon's denylist unchanged.
 //!
-//! Not silent: like `worktree_index`, every outcome is a typed value plus a log
+//! Not silent: every outcome is a typed value plus a log
 //! line, so "the base facet was registered" is never inferred from the absence
 //! of an error. #5068 made the trusty-search half loud already — a semantic
 //! query pinned against a `skip_vector` index answers `503 vector_unavailable`
@@ -50,8 +47,7 @@ use tracing::{debug, info, warn};
 ///
 /// Why: the work runs on a detached thread where a return value would be
 /// dropped, so each refusal has to be distinguishable in a test rather than
-/// only in a log. Same reasoning, and same shape, as
-/// [`crate::core::worktree_index::WorktreeIndexOutcome`].
+/// only in a log.
 /// What: `Registered` means the daemon CONFIRMED the base checkout's index with
 /// a 2xx; every other variant names the specific reason nothing is known to have
 /// been registered.
