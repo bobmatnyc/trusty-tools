@@ -718,7 +718,7 @@ impl CodeIndexer {
         // window the batch would land in memory only and answer `Ok`, so the
         // rescan recorded fingerprints for content live never got. The
         // reindex's own batches call `commit_parsed_batch` on staging directly.
-        self.refuse_if_corpus_detached()?;
+        let _live_write = self.admit_live_write()?; // #12064: seen by the carryover check
         let parsed = self.parse_and_embed_files(files.to_vec()).await?;
         let timings = self
             .commit_parsed_batch(parsed, defer_graph_rebuild)

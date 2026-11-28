@@ -73,8 +73,8 @@ async fn generation_changes_when_a_force_reindex_resets_the_index() {
     );
 }
 
-const PUSHED: &str = "src/pushed_10738.rs";
-const PUSHED_BODY: &str = "pub fn pushed_10738(x: u32) -> u32 {\n    x + 1\n}\n";
+pub(super) const PUSHED: &str = "src/pushed_10738.rs";
+pub(super) const PUSHED_BODY: &str = "pub fn pushed_10738(x: u32) -> u32 {\n    x + 1\n}\n";
 
 /// A colocated index whose live corpus holds one file, under a fresh identity,
 /// and the put surface mounted on it.
@@ -82,7 +82,7 @@ const PUSHED_BODY: &str = "pub fn pushed_10738(x: u32) -> u32 {\n    x + 1\n}\n"
 /// Why: the corpus swap resolves its staging and live paths from the storage
 /// layout, so the fixture builds the real `<root>/.trusty-search/` layout.
 /// Test: used by the discarded-write cases below.
-async fn staged_index(
+pub(super) async fn staged_index(
     id: &str,
 ) -> (
     tempfile::TempDir,
@@ -122,7 +122,7 @@ async fn staged_index(
 }
 
 /// Begin a staged run the way `run_reindex` does, returning the staging path.
-async fn begin(handle: &Arc<IndexHandle>, force: bool) -> std::path::PathBuf {
+pub(super) async fn begin(handle: &Arc<IndexHandle>, force: bool) -> std::path::PathBuf {
     super::corpus_swap::begin_staged_corpus_swap(
         handle,
         &handle.id,
@@ -137,7 +137,7 @@ async fn begin(handle: &Arc<IndexHandle>, force: bool) -> std::path::PathBuf {
 }
 
 /// Settle the staged run the way `finish_reindex` does.
-async fn resolve(
+pub(super) async fn resolve(
     handle: &Arc<IndexHandle>,
     tmp: &std::path::Path,
     resolution: &super::staging::StagingResolution,
@@ -245,72 +245,8 @@ async fn a_deferred_promotion_raises_the_generation() {
     );
 }
 
-/// Why: HIGH 1 — an incremental run copies the live corpus into staging, then
-/// swaps staging in (#839). A put that commits to the live corpus between the
-/// copy and the swap is missing from staging, and the promotion drops it.
-/// What: hold a read guard on the indexer so the swap queues behind it after
-/// the copy, write through the shared write core while it waits (the core the
-/// watcher, reconcile and put all use), release, promote, and assert the put
-/// is absent from the promoted corpus and the generation rose. Deterministic:
-/// the write starts only once the swap is observed queued (`try_read` fails).
-/// Test: this function IS the test.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial_test::parallel]
-async fn a_write_in_the_carryover_window_raises_the_generation() {
-    let id = "identity-carryover-window-10738";
-    let (_dir, handle, _state, _live) = staged_index(id).await;
-    let before = identity(id);
-
-    let guard = handle.indexer.read().await;
-    let staging = {
-        let handle = Arc::clone(&handle);
-        tokio::spawn(async move { begin(&handle, false).await })
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while handle.indexer.try_read().is_ok() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the swap never queued for the write lock"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    guard
-        .index_file_outcome(PUSHED, PUSHED_BODY)
-        .await
-        .expect("a write while the swap waits");
-    drop(guard);
-    let tmp = staging.await.expect("begin task");
-
-    assert!(
-        !resolve(
-            &handle,
-            &tmp,
-            &super::staging::StagingResolution::Commit,
-            false
-        )
-        .await,
-        "the promotion lands"
-    );
-    let corpus = handle
-        .indexer
-        .read()
-        .await
-        .corpus_store()
-        .expect("promoted");
-    assert!(
-        !corpus
-            .list_indexed_files()
-            .expect("list")
-            .iter()
-            .any(|f| f == PUSHED),
-        "the write in the window is missing from the promoted corpus"
-    );
-    let after = identity(id);
-    assert!(
-        after.generation > before.generation,
-        "a write the promotion dropped must raise the generation: {before:?} -> {after:?}"
-    );
-}
+// #12064: a write in the carryover window now stops the run; see
+// `carryover_window_12064_tests`.
 
 const LATE: &str = "src/late_10738.rs";
 const LATE_BODY: &str = "pub fn late_10738(x: u32) -> u32 {\n    x + 2\n}\n";
@@ -320,7 +256,7 @@ const LATE_BODY: &str = "pub fn late_10738(x: u32) -> u32 {\n    x + 2\n}\n";
 /// Why: the restart and prune cases run real reindexes, which walk the root;
 /// the corpus directory must not be walked as source.
 /// Test: used by the restart and prune cases below.
-fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
+pub(super) fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
     Arc::new(walkable_handle(id, root))
 }
 

@@ -328,55 +328,68 @@ fn bump_and_stamp(
     true
 }
 
-/// Mark the corpora a staged run is about to swap, so every way the run can
-/// lose a write bumps the generation (#10738).
+/// A live-corpus write finished during an incremental run's carryover copy,
+/// so the run stopped before its swap (#12064).
+///
+/// Why: staging misses that write, so promoting it would drop the write or
+/// resurrect a delete (#839). The owner ruled the run stops and is retried
+/// later (2026-11-28) rather than patching staging.
+/// What: the error [`mark_before_swap`] returns; the runner reports the run
+/// `Failed` with this message.
+/// Test: `a_write_and_a_delete_in_the_carryover_window_stop_the_run`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "reindex[{index_id}]: {writes} live-corpus write(s) finished during the carryover copy; \
+     the run stopped with the live corpus attached and is retried by the next reindex (#12064)"
+)]
+pub(crate) struct CarryoverWindowWrite {
+    pub(crate) index_id: String,
+    pub(crate) writes: u64,
+}
+
+/// Stop a staged run whose carryover copy saw a live write, then mark the
+/// outgoing live corpus so every way the run can lose a write bumps (#10738).
 ///
 /// Why: puts during a staged run land in staging only. A rollback, a deferral
 /// or a restart re-attaches the live corpus, whose stamp still matches, so
 /// nothing bumped (SPEC-OKF-01 §5.6 D1). And an incremental run copies the
-/// live corpus into staging, then swaps it in (#839): a path write that
-/// commits to the live corpus in between is missing from staging, and the
-/// promotion drops it.
-/// What: called under the indexer's write guard, so no path write is in
-/// flight. Writes the pending marker into `staging` when a path write finished
-/// since `before` on an incremental run (the promotion's attach bumps), then
-/// into the outgoing live corpus (any later attach of it bumps; a promotion
-/// renames over it, so the marker leaves with the old file). A failed write
-/// removes the staging file and is returned, so the caller abandons the run
-/// with the live corpus still attached.
-/// Test: `a_write_in_the_carryover_window_raises_the_generation`,
+/// live corpus into staging, then swaps it in (#839): a write that commits to
+/// the live corpus in between is missing from staging.
+/// What: called under the indexer's write guard, so no live write is in
+/// flight. #12064: on an incremental run, when a live write finished since
+/// `before`, removes the staging file and returns [`CarryoverWindowWrite`];
+/// live stays attached and holds every write, so nothing bumps. Otherwise
+/// writes the pending marker into the outgoing live corpus (any later attach
+/// of it bumps; a promotion renames over it). A failed marker write removes
+/// the staging file and is returned. Either `Err` abandons the run.
+/// Test: `a_write_and_a_delete_in_the_carryover_window_stop_the_run`,
 /// `a_restart_mid_staged_reindex_raises_the_generation`.
 pub(crate) fn mark_before_swap(
     indexer: &crate::core::CodeIndexer,
-    staging: &crate::core::corpus::CorpusStore,
     staging_path: &Path,
     before: u64,
     force: bool,
 ) -> Result<()> {
     let index_id = indexer.index_id.as_str();
-    let window_write = !force && indexer.path_writes_finished() != before;
-    if window_write {
-        tracing::warn!(
-            index_id,
-            "a path write finished during the carryover copy; the promotion bumps (#10738)"
-        );
-    }
-    // #10738: fail closed; a run that can drop a write must not start unmarked.
-    let marked = if window_write {
-        staging
-            .mark_identity_bump_pending_sync("carryover_window_write")
-            .context("mark the carryover-window write for a bump")
-    } else {
-        Ok(())
-    }
-    .and_then(|()| mark_live_before_swap(indexer));
-    if let Err(e) = marked {
+    let writes = indexer.live_writes_finished().saturating_sub(before);
+    // #12064: stop rather than promote a copy that misses a live write.
+    let stopped = (!force && writes > 0).then(|| {
+        anyhow::Error::new(CarryoverWindowWrite {
+            index_id: index_id.to_string(),
+            writes,
+        })
+    });
+    let result = match stopped {
+        Some(e) => Err(e),
+        None => mark_live_before_swap(indexer)
+            .map_err(|e| e.context(format!("reindex[{index_id}]: staged swap not marked"))),
+    };
+    if result.is_err() {
         if let Err(rm) = std::fs::remove_file(staging_path) {
             tracing::warn!(index_id, error = %rm, "staging corpus not removed (#10738)");
         }
-        return Err(e.context(format!("reindex[{index_id}]: staged swap not marked")));
     }
-    Ok(())
+    result
 }
 
 /// Write the pending marker into the live corpus a staged run is about to

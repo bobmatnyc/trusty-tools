@@ -93,7 +93,7 @@ impl CodeIndexer {
         self.refuse_if_closed_for_shutdown()?;
         // #10738: a delete in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back.
-        self.refuse_if_corpus_detached()?;
+        let _live_write = self.admit_live_write()?; // #12064: seen by the carryover check
         let removed = self.purge_file_with(index_id, rel).await?;
         Ok((removed, removed > 0))
     }
@@ -115,7 +115,7 @@ impl CodeIndexer {
     pub(crate) async fn remove_file_committed(&self, file_path: &str) -> Result<(usize, bool)> {
         // #10738: a delete in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back.
-        self.refuse_if_corpus_detached()?;
+        let _live_write = self.admit_live_write()?; // #12064: seen by the carryover check
         let ids = self.file_chunk_ids(file_path).await?;
         // #8959: as `remove_file_with`, the durable mark precedes the removal.
         let _graph_write = if !ids.is_empty() || self.entities.read().await.contains_key(file_path)
@@ -177,7 +177,7 @@ impl CodeIndexer {
         // #10738: a removal in a staged swap's detach window misses redb, and
         // the re-attached corpus brings the file back; refuse before memory
         // changes so the watcher keeps the ids for a retry.
-        self.refuse_if_corpus_detached()?;
+        let _live_write = self.admit_live_write()?; // #12064: seen by the carryover check
         self.remove_chunks_from_stores(ids, RedbChunkDelete::FailClosed)
             .await?;
         Ok(true)

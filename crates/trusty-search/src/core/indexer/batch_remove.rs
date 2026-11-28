@@ -207,8 +207,10 @@ impl CodeIndexer {
         self.refuse_if_closed_for_shutdown()
             .map_err(|e| fail(BatchRemoveCounts::default(), e))?;
         // #10738: a delete in a staged swap's detach window misses redb, and
-        // the re-attached corpus brings the files back.
-        self.refuse_if_corpus_detached()
+        // the re-attached corpus brings the files back. #12064: counted for
+        // the carryover check on every outcome.
+        let _live_write = self
+            .admit_live_write()
             .map_err(|e| fail(BatchRemoveCounts::default(), e))?;
         // #10110 Q4: the race check runs under the lock the batch then holds.
         let Ok(_scan_gate) = self.corpus_scan_gate.try_write() else {

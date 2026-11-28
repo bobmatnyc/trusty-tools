@@ -452,28 +452,27 @@ pub(super) async fn run_reindex(
             {
                 Ok(path) => path,
                 Err(e) => {
+                    // #12064: a window stop names itself, keeps the pre-run
+                    // stages and does not count toward quarantine.
+                    let (reason, counts) =
+                        super::corpus_swap::settle_begin_failure(&handle, &e, &pre_walk_stages)
+                            .await;
                     tracing::error!(
-                        "reindex[{}]: ABORTING incremental reindex — carryover copy \
-                         from live corpus failed ({e}); live corpus is intact",
+                        "reindex[{}]: ABORTING incremental reindex — {reason} ({e:#})",
                         index_id.0
                     );
-                    mark_reindex_failed(&handle, "carryover copy failed — live corpus intact")
-                        .await;
                     // #6386: status and frame in one hold — see `push_terminal`.
                     let frame = serde_json::json!({
                         "event": "error",
                         "index_id": index_id.0,
-                        "message": format!(
-                            "incremental reindex aborted: failed to copy live corpus \
-                             into staging store ({e}) — live corpus is intact"
-                        ),
+                        "message": format!("incremental reindex aborted: {reason} ({e:#})"),
                         "fatal": true,
                     });
                     progress.push_terminal(ReindexStatus::Failed, frame).await;
                     // term_guard drops here → broadcasts error event via Drop.
                     drop(term_guard);
                     schedule_progress_cleanup(cleanup_map, cleanup_id);
-                    if let Some(ref q) = quarantine {
+                    if let Some(q) = quarantine.as_ref().filter(|_| counts) {
                         q.record_failure(&index_id);
                     }
                     return;

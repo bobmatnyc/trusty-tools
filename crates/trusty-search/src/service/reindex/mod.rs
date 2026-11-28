@@ -307,6 +307,12 @@ mod hash_withhold_tests;
 // #10738: a force reindex raises the index generation.
 #[cfg(test)]
 mod identity_10738_tests;
+// #12064: a write or a delete in the carryover window stops the run.
+#[cfg(test)]
+mod carryover_window_12064_tests;
+// #12064: the runner reports that stop as a stop.
+#[cfg(test)]
+mod carryover_stop_reason_12064_tests;
 
 // #6524: the embedding pause, end to end.
 #[cfg(test)]
