@@ -5,6 +5,12 @@ Each `*.json` file is one scrubbed recording written by
 (`committed_replay_fixtures_pass_the_refusal_check`) loads every file here, so
 a fixture holding a home path or a secret-shaped value fails the suite.
 
+`tests/replay_case_fold.rs` refuses a recording naming two paths that differ
+only by letter case (#12029): on macOS they are one file, on the Linux CI
+runner two, so the recording replays differently there. It reads the
+recorded channels and the path-shaped strings of the seeded inputs, because
+macOS merges the two writes before the recorder sees them.
+
 ## level_lint
 
 Sixteen runs of the Architect's `level_lint.py`, replayed in
@@ -621,7 +627,7 @@ sandbox root: the default store is `local/owner-queue`, the brief registry
   `dashboard_jsonl.py` and `dashboard_schema.py` as `di_driver.py`, three
   recordings. `functions` covers `next_id` per prefix across every id
   collection (and a collection outside them), `used` and `free_count` with
-  odd ids (`A1`, `a01`, `A0o`, `A0l`, `A0F`, `A00`, `Azz`), the counter
+  odd ids (`A1`, `a02`, `A0o`, `A0l`, `A0F`, `A00`, `Azz`), the counter
   file (`record_issued` past the top id and at `zz`, so `next` wraps to
   `01`; refused digits; a hex-era `int` counter; a string with a final
   newline; non-object and broken files), a corrupt document, the
