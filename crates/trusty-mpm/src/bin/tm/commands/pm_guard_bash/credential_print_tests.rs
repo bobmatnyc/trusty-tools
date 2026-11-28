@@ -1919,6 +1919,10 @@ fn denies_an_out_file_flag_taken_as_a_value_11959() {
             "op document get --account -o fake-doc",
             "op inject --account -o -i fake.tpl",
             "op read op://fake-vault/fake-item/f --out-file /tmp/fake-out --out-file=",
+            // #11959 review: an empty out-file value writes to stdout.
+            "op read op://fake-vault/fake-item/f --out-file=",
+            "op read op://fake-vault/fake-item/f -o ''",
+            "op inject -i fake.tpl -o \"\"",
         ],
     );
 }

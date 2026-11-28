@@ -359,8 +359,8 @@ fn unmasked_run(own: &[String]) -> bool {
 ///
 /// What: a path only when exactly one out-file word is present, the word
 /// before it is not a dash word with no `=` that may take it as its value,
-/// and the path does not start with `-` (`-` is stdout). Anything else is
-/// stdout.
+/// and the path is not empty and does not start with `-` (an empty value and
+/// `-` are stdout). Anything else is stdout.
 /// Test: `credential_print_tests::denies_an_out_file_flag_taken_as_a_value_11959`,
 /// `credential_print_tests::allows_the_11959_neighbours`.
 fn out_or_file<'a>(args: &'a [String], flags: &[&str]) -> Vec<Echo<'a>> {
@@ -379,7 +379,7 @@ fn out_or_file<'a>(args: &'a [String], flags: &[&str]) -> Vec<Echo<'a>> {
                 .checked_sub(1)
                 .and_then(|m| args.get(m))
                 .is_some_and(|w| w.starts_with('-') && !w.contains('='));
-            (!taken && !p.starts_with('-')).then_some(p)
+            (!taken && !p.is_empty() && !p.starts_with('-')).then_some(p)
         }
         _ => None,
     };
