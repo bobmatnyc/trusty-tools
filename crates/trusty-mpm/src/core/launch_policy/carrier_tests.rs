@@ -59,6 +59,14 @@ impl Fx {
         claude_json_dir: Option<&Path>,
         profile: SessionProfile,
     ) -> LaunchSettings {
+        self.try_provision(claude_json_dir, profile)
+            .expect("the carrier provisions")
+    }
+    fn try_provision(
+        &self,
+        claude_json_dir: Option<&Path>,
+        profile: SessionProfile,
+    ) -> Result<LaunchSettings, ProvisionError> {
         provision_settings_at(&CarrierInputs {
             cwd: &self.project,
             repos_root: &self.repos,
@@ -66,6 +74,12 @@ impl Fx {
             claude_json_dir,
             profile,
         })
+    }
+    /// #12127: plant the launch-settings record `prepare_session` leaves.
+    fn record(&self, body: &str) {
+        let path = crate::core::session_launch::launch_keys_record_path(&self.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
     }
     /// Plant `acme`'s last-good record as raw JSON, as an older tm wrote it.
     fn plant_last_good(&self, policy: Value) {
@@ -609,4 +623,84 @@ fn the_project_tier_skill_overrides_file_is_never_touched() {
     );
     assert!(!settings.file.unwrap().starts_with(&fx.project));
     assert_eq!(std::fs::read(&project_settings).unwrap(), before);
+}
+
+/// The record a PM launch's preparation leaves (#12127).
+const LAUNCH_KEYS: &str = r#"{"issue": 12127, "settings": {
+    "outputStyle": "trusty-mpm",
+    "autoMemoryEnabled": false,
+    "skillOverrides": {"xlsx": "off"}
+}}"#;
+
+/// #12127 (b): the recorded launch keys ride the one settings file, with no
+/// owner file at all, and merge into an owner body when one resolves.
+#[test]
+fn the_carrier_payload_carries_the_launch_keys_12127() {
+    let fx = Fx::new(USER);
+    fx.record(LAUNCH_KEYS);
+    let alone = fx.provision();
+    assert_eq!(
+        body_of(&alone),
+        json!({
+            "outputStyle": "trusty-mpm",
+            "autoMemoryEnabled": false,
+            "skillOverrides": {"xlsx": "off"}
+        })
+    );
+    assert_eq!(
+        alone.argv().len(),
+        2,
+        "one --settings pair: {:?}",
+        alone.argv()
+    );
+
+    fx.owner("[mcp]\ndeny = [\"heygen\"]\n[skills]\noff = [\"pdf\"]\n");
+    let merged = fx.provision();
+    assert_eq!(
+        body_of(&merged),
+        json!({
+            "deniedMcpServers": [{"serverName": "heygen"}],
+            "outputStyle": "trusty-mpm",
+            "autoMemoryEnabled": false,
+            "skillOverrides": {"pdf": "off", "xlsx": "off"}
+        })
+    );
+}
+
+/// #12127 (d), Fail-Open Check: a record that is not JSON refuses the launch
+/// rather than launching without the keys.
+#[test]
+fn a_malformed_record_refuses_the_carrier_12127() {
+    let fx = Fx::new(USER);
+    fx.record("{ not json");
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("a malformed record must refuse");
+    assert!(matches!(err, ProvisionError::LaunchKeys(_)), "{err}");
+    assert!(err.to_string().contains("refusing the launch"), "{err}");
+    assert!(!fx.settings_dir().exists(), "nothing written");
+}
+
+/// #12127 (d), Fail-Open Check: a body carrying launch keys that cannot be
+/// written refuses the launch; an owner-only body keeps the #8988 notice.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_launch_key_body_refuses_the_carrier_12127() {
+    let fx = Fx::new(USER);
+    fx.record(LAUNCH_KEYS);
+    // A file where the settings directory goes, so the write cannot create it.
+    std::fs::create_dir_all(&fx.state).unwrap();
+    std::fs::write(fx.settings_dir(), "not a directory").unwrap();
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("the keys must not be dropped");
+    assert!(matches!(err, ProvisionError::Write { .. }), "{err}");
+
+    let owner_only = Fx::new(USER);
+    owner_only.owner("[mcp]\ndeny = [\"heygen\"]\n");
+    std::fs::create_dir_all(&owner_only.state).unwrap();
+    std::fs::write(owner_only.settings_dir(), "not a directory").unwrap();
+    let settings = owner_only.provision();
+    assert_eq!(settings.file, None);
+    assert!(settings.notice.is_some_and(|n| n.contains("NOT applied")));
 }
