@@ -76,7 +76,7 @@ fn top_keys(value: &Value) -> Vec<String> {
 }
 
 /// #12077: only the keys and list entries that equal the record go; every
-/// operator key and entry stays, in its original order.
+/// operator key and entry stays, list entries in their original order.
 #[test]
 fn only_matching_keys_and_entries_are_removed_12077() {
     let (_tmp, ws) = fixture();
@@ -108,9 +108,21 @@ fn only_matching_keys_and_entries_are_removed_12077() {
             "outputStyle": "tm"
         })
     );
-    // The writer keeps the file's own key order (serde_json preserve_order).
-    let before: Value = serde_json::from_str(SETTINGS).expect("json");
-    assert_eq!(top_keys(&after), top_keys(&before));
+    // #12077: `preserve_order` is off for this crate, so a parsed `Value`
+    // cannot show key order; read it from the written text. The rewrite
+    // sorts the keys; this goes red if that ever changes.
+    let text = std::fs::read_to_string(settings_path(&ws)).expect("read");
+    let mut by_position: Vec<(usize, String)> = top_keys(&after)
+        .into_iter()
+        .map(|k| (text.find(&format!("\n  \"{k}\":")).expect("top key"), k))
+        .collect();
+    by_position.sort();
+    let written: Vec<String> = by_position.into_iter().map(|(_, k)| k).collect();
+    assert_eq!(
+        written,
+        ["env", "model", "outputStyle", "permissions", "sandbox"],
+        "{text}"
+    );
     // The detector, the one matching rule, now finds nothing of tm's here.
     let left = detect_tm_sandbox_keys(&ws, &ws.join("no-user-tier")).expect("detect");
     assert!(left.is_empty(), "{left:?}");
@@ -206,25 +218,40 @@ fn a_parse_failure_writes_no_marker_and_retries_12077() {
     assert!(marker_path(&ws).exists());
 }
 
-/// #12077 Fail-Open Check: a write that fails is an error naming the file and
-/// writes no marker.
+/// Make `dir` read-only; `false` on a root runner, which ignores the mode, so
+/// the arm cannot be exercised there.
+#[cfg(unix)]
+fn read_only(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    if std::fs::write(dir.join("probe"), b"x").is_ok() {
+        eprintln!("skipped: this runner can write a read-only directory");
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// #12077 Fail-Open Check: a lock that cannot be taken (its sidecar cannot be
+/// created) is an error naming the file, and writes no marker.
 #[cfg(unix)]
 #[test]
-fn a_write_failure_writes_no_marker_12077() {
-    use std::os::unix::fs::PermissionsExt;
+fn a_lock_failure_writes_no_marker_12077() {
     let (_tmp, ws) = fixture();
     plant(&ws, SETTINGS);
     let claude = ws.join(".claude");
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-    // A root runner ignores the mode; the arm cannot be exercised there.
-    if std::fs::write(claude.join("probe"), b"x").is_ok() {
-        eprintln!("skipped: this runner can write a read-only directory");
+    if !read_only(&claude) {
         return;
     }
     let result = clean_tm_sandbox_keys_once(&ws);
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let err = result.expect_err("a write failure is an error");
-    assert!(err.to_string().contains("settings.json"), "{err}");
+    writable(&claude);
+    let err = result.expect_err("a lock failure is an error");
+    assert!(err.to_string().contains("lock sidecar"), "{err}");
     assert!(
         !marker_path(&ws).exists(),
         "a failure must not finish the cleanup"
@@ -235,8 +262,104 @@ fn a_write_failure_writes_no_marker_12077() {
     );
 }
 
+/// #12077 Fail-Open Check: with the lock sidecar already there the lock is
+/// taken, so the failure lands on the rewrite (`publish` cannot stage its temp
+/// sibling); an error, no marker, the original file intact.
+#[cfg(unix)]
+#[test]
+fn a_publish_failure_writes_no_marker_12077() {
+    let (_tmp, ws) = fixture();
+    plant(&ws, SETTINGS);
+    let claude = ws.join(".claude");
+    write_text(
+        &crate::core::settings_lock::lock_sidecar(&settings_path(&ws)),
+        "",
+    );
+    if !read_only(&claude) {
+        return;
+    }
+    let result = clean_tm_sandbox_keys_once(&ws);
+    writable(&claude);
+    let err = result.expect_err("a publish failure is an error");
+    let message = err.to_string();
+    assert!(
+        matches!(err, SandboxCleanupError::Write { .. }),
+        "{message}"
+    );
+    assert!(message.contains("settings.json"), "{message}");
+    assert!(
+        !message.contains("lock sidecar"),
+        "the lock was taken; the publish arm failed: {message}"
+    );
+    assert!(
+        !marker_path(&ws).exists(),
+        "a failure must not finish the cleanup"
+    );
+    assert_eq!(
+        std::fs::read_to_string(settings_path(&ws)).expect("read"),
+        SETTINGS
+    );
+}
+
+/// #12077 Fail-Open Check: a role record that cannot be parsed is an error
+/// naming the record, not "no record"; no marker, the settings untouched.
+#[test]
+fn a_record_parse_failure_writes_no_marker_12077() {
+    let (_tmp, ws) = fixture();
+    plant(&ws, SETTINGS);
+    let record = ws.join(".trusty-mpm/sandbox-roles.json");
+    write_text(&record, "{ not json");
+    let err = clean_tm_sandbox_keys_once(&ws).expect_err("a bad record is an error");
+    assert!(
+        err.to_string().contains(&record.display().to_string()),
+        "{err}"
+    );
+    assert!(matches!(err, SandboxCleanupError::Read(_)), "{err}");
+    assert!(
+        !marker_path(&ws).exists(),
+        "a failure must not finish the cleanup"
+    );
+    assert_eq!(
+        std::fs::read_to_string(settings_path(&ws)).expect("read"),
+        SETTINGS
+    );
+}
+
+/// #12077 Fail-Open Check: a marker that cannot be written is an error after
+/// the prune landed; the retry writes the marker and removes nothing more.
+#[cfg(unix)]
+#[test]
+fn a_marker_write_failure_leaves_the_prune_and_retries_once_12077() {
+    let (_tmp, ws) = fixture();
+    plant(&ws, SETTINGS);
+    let tm_dir = ws.join(".trusty-mpm");
+    if !read_only(&tm_dir) {
+        return;
+    }
+    let result = clean_tm_sandbox_keys_once(&ws);
+    writable(&tm_dir);
+    let err = result.expect_err("a marker write failure is an error");
+    assert!(matches!(err, SandboxCleanupError::Marker { .. }), "{err}");
+    assert!(!marker_path(&ws).exists());
+    let pruned = std::fs::read(settings_path(&ws)).expect("read");
+    let value: Value = serde_json::from_slice(&pruned).expect("json");
+    assert!(value.pointer("/sandbox/enabled").is_none(), "{value}");
+    assert_eq!(value.pointer("/env/KEEP"), Some(&json!("1")));
+    let outcome = clean_tm_sandbox_keys_once(&ws).expect("the retry runs");
+    assert!(
+        matches!(&outcome, CleanupOutcome::Cleaned(removed) if removed.is_empty()),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read(settings_path(&ws)).expect("read"),
+        pruned,
+        "the retry removes nothing more"
+    );
+    assert!(marker_path(&ws).exists());
+}
+
 /// #12077: a missing project settings file is never created, and the cleanup
-/// is not marked done.
+/// is marked done as absent.
 #[test]
 fn a_missing_settings_file_is_not_created_12077() {
     let (_tmp, ws) = fixture();
@@ -250,7 +373,52 @@ fn a_missing_settings_file_is_not_created_12077() {
         "{outcome:?}"
     );
     assert!(!ws.join(".claude").exists(), "no `.claude` dir is created");
-    assert!(!marker_path(&ws).exists());
+    assert_eq!(
+        read_json(&marker_path(&ws)),
+        json!({"issue": 12077, "removed": [], "settings": "absent"})
+    );
+}
+
+/// #12077: after a run found no settings file, a file the user writes later
+/// is never cleaned, even when its values equal the record.
+#[test]
+fn a_settings_file_written_after_an_absent_run_is_never_cleaned_12077() {
+    let (_tmp, ws) = fixture();
+    write_text(
+        &ws.join(".trusty-mpm/sandbox-roles.json"),
+        &record().to_string(),
+    );
+    clean_tm_sandbox_keys_once(&ws).expect("first launch");
+    let user = r#"{"sandbox":{"enabled":true}}"#;
+    write_text(&settings_path(&ws), user);
+    let outcome = clean_tm_sandbox_keys_once(&ws).expect("second launch");
+    assert!(
+        matches!(outcome, CleanupOutcome::AlreadyDone),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(settings_path(&ws)).expect("read"),
+        user
+    );
+}
+
+/// #12077: a symlinked settings file is skipped: the link stays a link, its
+/// target is untouched, and no marker is written.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_settings_file_is_skipped_12077() {
+    let (_tmp, ws) = fixture();
+    plant(&ws, SETTINGS);
+    let file = settings_path(&ws);
+    let target = ws.parent().expect("root").join("dotfiles-settings.json");
+    std::fs::rename(&file, &target).expect("move");
+    std::os::unix::fs::symlink(&target, &file).expect("symlink");
+    let outcome = clean_tm_sandbox_keys_once(&ws).expect("cleanup");
+    assert_eq!(outcome, CleanupOutcome::SymlinkedSettings(file.clone()));
+    let meta = std::fs::symlink_metadata(&file).expect("lstat");
+    assert!(meta.file_type().is_symlink(), "the link is kept");
+    assert_eq!(std::fs::read_to_string(&target).expect("read"), SETTINGS);
+    assert!(!marker_path(&ws).exists(), "a skip is not a finish");
 }
 
 /// #12077: `settings.local.json` was never written by 1.14.14 or 1.14.15, so
