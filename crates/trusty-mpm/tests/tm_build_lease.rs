@@ -1527,6 +1527,57 @@ fn an_unreadable_target_dir_lock_refuses_the_build_8692() {
     assert!(!ran.exists(), "the build never runs on a guess: {err}");
 }
 
+/// #8692 (Architect condition 2): an `Unset` lease whose `target/` dir lock
+/// another process holds waits `--wait-secs`, then exits 75 naming the lock
+/// file and the holder's pid and command — or `holder unknown` when the lock
+/// file records no live holder. The build never runs.
+#[test]
+fn a_held_target_dir_lock_exits_75_naming_its_holder_8692() {
+    use std::os::fd::AsRawFd;
+    let me = std::process::id();
+    for (record, want) in [
+        (
+            format!("pid={me}\ncommand=tm build-lease -- cargo test -p held\n"),
+            format!("holder pid {me} running `tm build-lease -- cargo test -p held`"),
+        ),
+        (String::new(), "holder unknown".to_string()),
+    ] {
+        let home = home_with_ceiling(2, "");
+        let krate = home.path().join("probe");
+        std::fs::create_dir_all(krate.join("target")).expect("target dir");
+        std::fs::write(
+            krate.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .expect("manifest");
+        let lock = krate.join("target/.trusty-checkout.lock");
+        std::fs::write(&lock, &record).expect("holder record");
+        let held = std::fs::File::open(&lock).expect("open the lock");
+        // SAFETY: valid descriptor; stands in for the holding lease.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let ran = home.path().join("ran");
+        let started = Instant::now();
+        let out = build_lease(home.path())
+            .current_dir(&krate)
+            .args(["--wait-secs", "1", "--", "touch"])
+            .arg(&ran)
+            .output()
+            .expect("run");
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(75), "{err}");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "it waits for the bound"
+        );
+        assert!(
+            err.contains(".trusty-checkout.lock") && err.contains(&want),
+            "the refusal names the lock and {want:?}: {err}"
+        );
+        assert!(!ran.exists(), "the build never runs: {err}");
+        drop(held);
+    }
+}
+
 /// #8692: a slot-owned leased `cargo run` whose program is running (a server)
 /// does not hold compile capacity; a second leased build is admitted beside it.
 #[test]

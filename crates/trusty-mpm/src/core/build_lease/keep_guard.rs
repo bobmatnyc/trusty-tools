@@ -19,12 +19,16 @@
 //! owner is then unknown (#8692 Q1, owner ruling: refuse). A directory a
 //! build outside any lease is compiling in (cargo's lock held) is refused by
 //! [`lock_for_checkout`]: what it writes cannot be verified or cleared.
+//! The wait is the lease wait, at most 600 s; the lock file records its
+//! holder's pid and command, and a refusal names them, or `holder unknown`.
 //! Test: `a_kept_dir_last_built_by_another_checkout_is_cleared`,
 //! `a_kept_dir_held_by_another_lease_is_refused_naming_its_checkout`,
 //! `a_second_lease_of_one_checkout_waits_for_a_kept_dir_8692`,
 //! `a_kept_dir_compiled_by_an_unleased_build_of_another_checkout_is_refused`,
 //! `an_unopenable_dir_lock_refuses_naming_the_lock_file_8692`,
 //! `a_held_dir_lock_refuses_naming_the_lock_file_8692`,
+//! `a_held_dir_lock_names_its_holder_pid_and_command_8692`,
+//! `a_held_dir_lock_with_no_live_holder_record_says_holder_unknown_8692`,
 //! and `a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661` in
 //! `tests/tm_build_lease.rs`.
 
@@ -41,10 +45,20 @@ pub const CHECKOUT_LOCK: &str = ".trusty-checkout.lock";
 /// How often a held [`CHECKOUT_LOCK`] is retried.
 const LOCK_POLL: Duration = Duration::from_millis(200);
 
-/// The held [`CHECKOUT_LOCK`]; dropping it releases the `flock`.
+/// The held [`CHECKOUT_LOCK`]; dropping it clears the holder record, then
+/// releases the `flock`.
 #[derive(Debug)]
 pub struct CheckoutLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for CheckoutLock {
+    fn drop(&mut self) {
+        // #8692: a released lock records no holder, so a waiter never names
+        // a build that has ended. A failure leaves a record whose pid
+        // [`read_holder`] checks for life.
+        let _ = self.file.set_len(0);
+    }
 }
 
 /// Lock `dir` for `checkout` and clear its fingerprints if another checkout
@@ -90,15 +104,20 @@ pub fn lock_for_checkout(
 /// or a program would replace the binaries they use. What: creates `dir` and
 /// the lock file, then retries a non-blocking exclusive `flock` every
 /// [`LOCK_POLL`] until `wait` ends. Only "held by another" is retried; any
-/// other open or `flock` error refuses at once (#8692 Q1).
+/// other open or `flock` error refuses at once (#8692 Q1). `wait` is the
+/// lease wait (`--wait-secs`, else `builders.lease_wait_secs`, clamped to
+/// 1..=600 s). Once taken, the lock file records this process's pid and
+/// command ([`record_holder`]), and the refusal names them ([`holder`]).
 ///
 /// # Errors
 ///
 /// A description naming the lock file: it could not be created, opened or
-/// locked, or another lease still held it when `wait` ended. The caller must
-/// not build.
+/// locked, or another lease still held it when `wait` ended, with that
+/// holder's pid and command, or `holder unknown`. The caller must not build.
 /// Test: `an_unopenable_dir_lock_refuses_naming_the_lock_file_8692`,
-/// `a_held_dir_lock_refuses_naming_the_lock_file_8692`.
+/// `a_held_dir_lock_refuses_naming_the_lock_file_8692`,
+/// `a_held_dir_lock_names_its_holder_pid_and_command_8692`,
+/// `a_held_dir_lock_with_no_live_holder_record_says_holder_unknown_8692`.
 pub fn lock_dir(dir: &Path, wait: Duration) -> Result<CheckoutLock, String> {
     let path = dir.join(CHECKOUT_LOCK);
     // #8692 Q1: an unreadable lock never lets the build run on a guess.
@@ -120,19 +139,74 @@ pub fn lock_dir(dir: &Path, wait: Duration) -> Result<CheckoutLock, String> {
     while !try_lock_exclusive(&file).map_err(unreadable)? {
         if Instant::now() >= deadline {
             return Err(format!(
-                "CARGO_TARGET_DIR={} is held by another lease (lock {}) for over {}s (it last \
-                 built {}); a build here now could replace binaries that lease's tests or \
-                 program run, or run another checkout's (#8692, #11661). Re-run when it ends, \
-                 or give this build its own CARGO_TARGET_DIR",
+                "CARGO_TARGET_DIR={} is held by another lease (lock {}, {}) for over {}s (it \
+                 last built {}); a build here now could replace binaries that lease's tests \
+                 or program run, or run another checkout's (#8692, #11661). Re-run when it \
+                 ends, or give this build its own CARGO_TARGET_DIR",
                 dir.display(),
                 path.display(),
+                holder(&path),
                 wait.as_secs(),
                 last_checkout(dir),
             ));
         }
         std::thread::sleep(LOCK_POLL);
     }
-    Ok(CheckoutLock { _file: file })
+    let lock = CheckoutLock { file };
+    if let Err(err) = record_holder(&lock.file) {
+        // The lock is held, so the build is safe; a waiter reads `holder unknown`.
+        eprintln!(
+            "tm build-lease: WARNING could not record this build as the holder of {} \
+             ({err}); a waiting build will report `holder unknown` (#8692)",
+            path.display()
+        );
+    }
+    Ok(lock)
+}
+
+/// The holder-record keys in [`CHECKOUT_LOCK`].
+const PID_KEY: &str = "pid=";
+const COMMAND_KEY: &str = "command=";
+
+/// Replace the lock file's contents with this process's pid and command.
+///
+/// Why (#8692): a refused build must name who owns the directory. What: the
+/// `tm` process holds the `flock` (the descriptor is close-on-exec, so the
+/// build it spawns does not), so its pid and argv are the holder.
+fn record_holder(file: &File) -> std::io::Result<()> {
+    use std::io::Write;
+    let command = std::env::args().collect::<Vec<_>>().join(" ");
+    file.set_len(0)?;
+    let mut file = file;
+    write!(
+        file,
+        "{PID_KEY}{}\n{COMMAND_KEY}{}\n",
+        std::process::id(),
+        command.replace('\n', " ")
+    )
+}
+
+/// The holder phrase a refusal carries: its pid and command, or `holder unknown`.
+///
+/// Test: `a_held_dir_lock_names_its_holder_pid_and_command_8692`,
+/// `a_held_dir_lock_with_no_live_holder_record_says_holder_unknown_8692`.
+fn holder(path: &Path) -> String {
+    match read_holder(path) {
+        Some((pid, command)) => format!("holder pid {pid} running `{command}`"),
+        None => "holder unknown: the lock file records no live holder".to_string(),
+    }
+}
+
+/// The pid and command [`record_holder`] wrote to `path`, or `None` when the
+/// file cannot be read, records no pid or command, or names a dead pid (a
+/// record a crashed holder left). Never a guess.
+fn read_holder(path: &Path) -> Option<(u32, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key));
+    let pid = field(PID_KEY)?.trim().parse::<u32>().ok()?;
+    let command = field(COMMAND_KEY)?.trim();
+    (!command.is_empty() && crate::core::daemon_identity::pid_alive(pid))
+        .then(|| (pid, command.to_string()))
 }
 
 /// A non-blocking exclusive `flock` on `file`: `Ok(true)` taken, `Ok(false)`
@@ -277,6 +351,59 @@ mod tests {
         );
         drop(held);
         assert!(lock_dir(&dir, Duration::ZERO).is_ok());
+    }
+
+    /// #8692 (Architect condition 2): the wait is bounded, and the refusal
+    /// names the lock file and the holder's pid and command.
+    #[test]
+    fn a_held_dir_lock_names_its_holder_pid_and_command_8692() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("target");
+        let lock = dir.join(CHECKOUT_LOCK);
+        let held = lock_dir(&dir, Duration::ZERO).expect("first");
+        let started = Instant::now();
+        let err = lock_dir(&dir, Duration::from_millis(500)).expect_err("held");
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "it waits for the bound"
+        );
+        let argv0 = std::env::args().next().expect("argv0");
+        assert!(
+            err.contains(&lock.display().to_string())
+                && err.contains(&format!("holder pid {} running `", std::process::id()))
+                && err.contains(&argv0),
+            "{err}"
+        );
+        drop(held);
+        assert_eq!(
+            std::fs::read_to_string(&lock).expect("lock"),
+            "",
+            "a released lock records no holder"
+        );
+    }
+
+    /// #8692 (Architect condition 2): a holder the lock file does not record —
+    /// garbage, or a dead pid a crashed holder left — is `holder unknown`,
+    /// never a guess, and the file is still named.
+    #[test]
+    fn a_held_dir_lock_with_no_live_holder_record_says_holder_unknown_8692() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("target");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let lock = dir.join(CHECKOUT_LOCK);
+        // i32::MAX is above every platform's pid range (Linux caps at 2^22).
+        let dead = format!("pid={}\ncommand=tm build-lease\n", i32::MAX);
+        for record in ["", "not a record\n", dead.as_str()] {
+            std::fs::write(&lock, record).expect("record");
+            let raw = File::open(&lock).expect("open");
+            // SAFETY: valid descriptor; stands in for a holder that wrote no record.
+            assert_eq!(unsafe { libc::flock(raw.as_raw_fd(), libc::LOCK_EX) }, 0);
+            let err = lock_dir(&dir, Duration::ZERO).expect_err("held");
+            assert!(
+                err.contains(&lock.display().to_string()) && err.contains("holder unknown"),
+                "{record:?}: {err}"
+            );
+        }
     }
 
     #[test]
