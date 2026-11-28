@@ -201,19 +201,21 @@ pub(crate) fn is_allowed_for_mode(chunk_file: &str, mode: SearchMode) -> bool {
 /// extension lists as the hard-filter classifier) and returns the
 /// multiplier from the 3x3 penalty matrix for the requested mode plus
 /// an optional `archive_reason`-style label naming the matching bucket.
-/// `SearchMode::All` is treated as `Code` for compatibility with the
-/// existing default direction.
-/// Test: see the `tests` submodule (`test_doc_score_penalty_*`).
+/// `SearchMode::All` multiplies nothing but keeps `Code`'s labels, which the
+/// exact-match floor reads as its live-before-downranked key.
+/// Test: `test_doc_score_penalty_all_mode_lifts_prose_and_data_penalty`,
+/// `conceptual_default_mode_ranks_best_matching_doc_first`.
 pub(crate) fn doc_score_penalty(chunk_file: &str, mode: SearchMode) -> (f32, Option<String>) {
     // Penalty matrix (file class x mode):
-    //                 code   text   data
-    //  Source         1.0    0.5    0.3
-    //  Text/Prose     0.1    1.0    0.3
-    //  Data/Config    0.2    0.3    1.0
-    let mode = match mode {
-        SearchMode::All => SearchMode::Code,
-        other => other,
-    };
+    //                 code   text   data   all
+    //  Source         1.0    0.5    0.3    1.0
+    //  Text/Prose     0.1    1.0    0.3    1.0
+    //  Data/Config    0.2    0.3    1.0    1.0
+    // #11349: `All` (also the Code→All upgrade of an NL query) used to take
+    // Code's row, so a prose target got 0.1x and fell below every code chunk.
+    if matches!(mode, SearchMode::All) {
+        return (1.0, doc_score_penalty(chunk_file, SearchMode::Code).1);
+    }
 
     // Classify: text wins over data wins over code (a `.md` file is text
     // even though it also tokenises like source).
