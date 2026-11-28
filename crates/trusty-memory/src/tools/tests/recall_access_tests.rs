@@ -376,3 +376,108 @@ async fn access_count_and_boost_follow_the_exact_recall_sequence() {
         );
     }
 }
+
+/// The rulings-palace fixture for #11348: a project palace `ro-proj` and a
+/// configured rulings palace `ro-rule`, one on-topic drawer each. Returns the
+/// state, its root, and the (project drawer, ruling) ids.
+async fn read_only_fixture() -> (AppState, tempfile::TempDir, String, String) {
+    let (state, tmp) = test_state();
+    let state = state.with_rulings_palaces(vec!["ro-rule".to_string()]);
+    for palace in ["ro-proj", "ro-rule"] {
+        dispatch_tool(&state, "palace_create", json!({"name": palace}))
+            .await
+            .expect("palace_create");
+    }
+    let lane = remember(
+        &state,
+        "ro-proj",
+        "issue titles name the symptom in this project",
+    )
+    .await;
+    let ruling = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "ro-rule",
+            "text": "issue titles name the symptom, never the proposed fix",
+            "room": "General",
+            "tags": ["bob-ruling", "standing-rule"],
+        }),
+    )
+    .await
+    .expect("memory_remember ruling")["drawer_id"]
+        .as_str()
+        .expect("drawer_id")
+        .to_string();
+    (state, tmp, lane, ruling)
+}
+
+/// The ordered drawer ids of a recall response.
+fn served_ids(out: &Value) -> Vec<String> {
+    out["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|r| r["drawer_id"].as_str().expect("drawer_id").to_string())
+        .collect()
+}
+
+const RO_QUERY: &str = "issue titles name the symptom";
+
+/// Why (#11348): an evaluation run must query live palaces without changing
+/// their rankings, and a recall on palace X also records access in every
+/// rulings palace whose ruling it folds in.
+/// What: `memory_recall` and `memory_recall_deep` on `ro-proj`, and
+/// `memory_recall_all`, each with `read_only: true`. The project drawer and
+/// the folded ruling are both served, yet after the state is dropped both
+/// read back from disk with `access_count` 0 and no `last_accessed_at`.
+/// Test: this function.
+#[tokio::test]
+async fn a_read_only_recall_leaves_access_count_unchanged_on_x_and_rulings() {
+    let (state, tmp, lane, ruling) = read_only_fixture().await;
+    let single = json!({"palace": "ro-proj", "query": RO_QUERY, "top_k": 5, "read_only": true});
+    for tool in ["memory_recall", "memory_recall_deep"] {
+        let out = dispatch_tool(&state, tool, single.clone())
+            .await
+            .expect("recall");
+        let ids = served_ids(&out);
+        assert!(ids.contains(&lane), "{tool} serves the lane hit: {out:#}");
+        assert!(ids.contains(&ruling), "{tool} folds the ruling: {out:#}");
+    }
+    let all = json!({"q": RO_QUERY, "top_k": 5, "read_only": true});
+    let out = dispatch_tool(&state, "memory_recall_all", all)
+        .await
+        .expect("memory_recall_all");
+    assert!(served_ids(&out).contains(&lane), "{out:#}");
+    drop(state);
+
+    assert_eq!(persisted_access(tmp.path(), "ro-proj", &lane), (0, false));
+    assert_eq!(persisted_access(tmp.path(), "ro-rule", &ruling), (0, false));
+}
+
+/// Why (#11348): the flag is opt-in. A default recall must still count, and a
+/// read-only recall must rank exactly as the default one does.
+/// What: one read-only `memory_recall`, then one default `memory_recall` with
+/// the same arguments. Both return the same ids in the same order; on disk the
+/// project drawer and the ruling each carry `access_count` 1, from the
+/// default recall alone.
+/// Test: this function.
+#[tokio::test]
+async fn a_default_recall_after_a_read_only_one_ranks_the_same_and_still_counts() {
+    let (state, tmp, lane, ruling) = read_only_fixture().await;
+    let args = json!({"palace": "ro-proj", "query": RO_QUERY, "top_k": 5});
+    let mut ro_args = args.clone();
+    ro_args["read_only"] = json!(true);
+    let read_only = dispatch_tool(&state, "memory_recall", ro_args)
+        .await
+        .expect("read-only recall");
+    let default = dispatch_tool(&state, "memory_recall", args)
+        .await
+        .expect("default recall");
+    assert_eq!(served_ids(&read_only), served_ids(&default));
+    assert!(served_ids(&default).contains(&ruling), "{default:#}");
+    drop(state);
+
+    assert_eq!(persisted_access(tmp.path(), "ro-proj", &lane), (1, true));
+    assert_eq!(persisted_access(tmp.path(), "ro-rule", &ruling), (1, true));
+}

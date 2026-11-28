@@ -37,7 +37,7 @@ use super::palace_index::{PalaceScope, resolve_palace_or_index};
 // #8246 / #9143: typed temporal ranking and the user-scope rulings leg.
 use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across, ranking_window};
 // #9881: the served hits record an access in their owning palace.
-use super::recall_access::{ServedHits, record_served_across};
+use super::recall_access::{ServedHits, read_only_arg, record_served_across};
 use super::recall_rulings::{RulingsFold, fetch_user_rulings, fold_rulings};
 use super::recall_rulings_floor::apply_rulings_floor;
 // #9421: drawers superseded through a `superseded_by` edge rank below their
@@ -196,6 +196,8 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // so the warming short-circuit below and the fused path answer identically.
     let include_creator_tags = include_creator_tags_arg(&args);
     let include_superseded = include_superseded_arg(&args);
+    // #11348: an evaluation recall ranks the same but records no access.
+    let read_only = read_only_arg(&args);
     let min_score = min_score_arg(&args, "memory_recall")?;
     // A floored recall asks the lanes for a wider candidate set, so hits the
     // floor removes are backfilled instead of leaving the caller short.
@@ -225,7 +227,9 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
         let (out, served) =
             cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup);
-        served.record(state, &handle); // #9881
+        if !read_only {
+            served.record(state, &handle); // #9881
+        }
         return Ok(out);
     }
 
@@ -264,7 +268,9 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // would judge a hit on a number the response never shows.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
     let (out, served) = cut.rank_and_serialize(&palace, query, results, fold, sup);
-    served.record(state, &handle); // #9881
+    if !read_only {
+        served.record(state, &handle); // #9881
+    }
     Ok(out)
 }
 
@@ -284,6 +290,8 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // `room`/`wing` — two spellings of one option is how these two drift.
     let include_creator_tags = include_creator_tags_arg(&args);
     let include_superseded = include_superseded_arg(&args);
+    // #11348: an evaluation recall ranks the same but records no access.
+    let read_only = read_only_arg(&args);
     let min_score = min_score_arg(&args, "memory_recall_deep")?;
     // #8246: same widened window as `memory_recall`.
     let fetch_k = ranking_window(top_k, min_score);
@@ -305,7 +313,9 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
         let (out, served) =
             cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup);
-        served.record(state, &handle); // #9881
+        if !read_only {
+            served.record(state, &handle); // #9881
+        }
         return Ok(out);
     }
 
@@ -331,7 +341,9 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
     let (out, served) = cut.rank_and_serialize(&palace, query, results, fold, sup);
-    served.record(state, &handle); // #9881
+    if !read_only {
+        served.record(state, &handle); // #9881
+    }
     Ok(out)
 }
 
@@ -460,8 +472,9 @@ async fn recall_all_without_embedder(
 ///
 /// Why: the default searched every palace on disk by cold-opening it, and the
 /// response could not say what it had missed.
-/// What: parses `q`, `top_k`, `deep` and `scope` (`resident` by default,
-/// `all` for the streamed walk; anything else is an error), runs
+/// What: parses `q`, `top_k`, `deep`, `read_only` (#11348) and `scope`
+/// (`resident` by default, `all` for the streamed walk; anything else is an
+/// error), runs
 /// `recall_all_scoped`, leaves superseded drawers out unless
 /// `include_superseded` (#10609), demotes stale snapshots and any superseded
 /// drawer kept (#9421) in either scope, cuts to `top_k`, and returns
@@ -488,6 +501,8 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // would mean different things per palace.
     let include_creator_tags = include_creator_tags_arg(&args);
     let include_superseded = include_superseded_arg(&args);
+    // #11348: an evaluation recall ranks the same but records no access.
+    let read_only = read_only_arg(&args);
     // #8246: fetch about 2 * top_k so demotion can lift a hit past the cut.
     let window = ranking_window(top_k, None);
 
@@ -546,7 +561,9 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
     results.truncate(top_k);
     // #9881 (Q4): per owning palace. #11255: no reopen after a deadline hit.
-    record_served_across(state, &results, !outcome.coverage.deadline_exceeded);
+    if !read_only {
+        record_served_across(state, &results, !outcome.coverage.deadline_exceeded);
+    }
 
     let payload: Vec<Value> = results
         .iter()
