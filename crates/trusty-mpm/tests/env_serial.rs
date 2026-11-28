@@ -29,6 +29,8 @@ mod fleet_status_sync_assets_11700;
 mod architect_floor_host;
 // #10459: every Architect launch seam refuses an old Claude Code before any write.
 mod architect_version_refusal_10459;
+// #12048: session start and connect deploy under the configured config dir.
+mod config_dir_deploy_12048;
 mod daemon_env_isolation;
 mod inproject_cold_start;
 // #11821 P2: a broken install.toml fails clone and delete paths closed.
