@@ -19,7 +19,8 @@
 //! wakes only in `il_cron_excluded` (unmeasurable in a dry run); `ctxwatch`
 //! alerts and wakes only in `ctxwatch_excluded` (the two pollers share one
 //! debounce file, so whichever runs first raises it); the [`UNRAISED`] kinds
-//! only in `unraised_excluded` (#11826). `idle` pairs on the
+//! only in `unraised_excluded` (#11826); the [`KNOWN_ABSENT`] owner kinds
+//! only in `known_absent` (#11826, window 8). `idle` pairs on the
 //! screen hash, since-epochs within 300 s; `idle_relaxed` counts those. The report
 //! keeps both numbers, identity-only and identity plus fallback, and the
 //! pairs each method made; [`Report::passes`] uses identity plus fallback
@@ -36,7 +37,8 @@
 //! `parity_pairs_idle_alerts_whose_epochs_differ`,
 //! `parity_excludes_ctxwatch_with_its_reason`,
 //! `window6_excludes_kinds_a_dry_run_poll_never_raises`,
-//! `window6_fixture_moves_toward_the_projection`.
+//! `window6_fixture_moves_toward_the_projection`,
+//! `window8_known_absent_owner_kinds_are_counted_apart`.
 
 use std::collections::HashMap;
 
@@ -96,6 +98,9 @@ pub struct Report {
     /// [`UNRAISED`] alerts and wakes on either side, per kind, left out
     /// (#11826).
     pub unraised_excluded: [u64; 3],
+    /// [`KNOWN_ABSENT`] alerts and wakes on either side, per kind, left out
+    /// of the percentages and shown apart (#11826, window 8).
+    pub known_absent: [u64; 6],
     /// `idle` events folded into their episode's previous event (a transient
     /// screen within two polls), alerts plus wakes: (shadow, live) (#11826).
     pub idle_folded: (u64, u64),
@@ -110,6 +115,18 @@ pub struct Report {
 /// not a poll step; `factory_send_maxed` comes only from a live auto-send
 /// (`fleet-poll.py:967-981`), which a dry run skips.
 pub const UNRAISED: [&str; 3] = ["meta_due", "meta_miss", "factory_send_maxed"];
+
+/// Owner kinds the scheduler does not raise yet, by their `fleet-poll.py`
+/// alert names: kept out of the verdict and counted apart (#11826 window-8
+/// ruling; #11881 raises them later).
+pub const KNOWN_ABSENT: [&str; 6] = [
+    "owner_feedback",
+    "owner_unpark_due",
+    "owner_command",
+    "owner_interactive",
+    "owner_effort",
+    "steer",
+];
 
 /// One live `alerts.jsonl` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,17 +265,20 @@ pub fn compute_full(
         .collect();
     // MB1595 fix round: il_cron is unmeasurable in a dry run (il-cron.py:249).
     // MB1595 window 4: ctxwatch shares live debounce state (C4), likewise out.
-    // #11826: and the kinds a dry-run poll never raises (UNRAISED).
-    let mut excluded = [0u64; 5];
+    // #11826: and the kinds a dry-run poll never raises (UNRAISED), and the
+    // window-8 known-absent owner kinds (KNOWN_ABSENT).
+    let mut excluded = [0u64; 11];
     let mut drop_il = |v: Vec<Event>, live_side: bool| -> Vec<Event> {
         let mut rest = Vec::with_capacity(v.len());
         for e in v {
             let kind = e.sk.as_ref().map(|(_, k)| k.as_str());
             let unraised = kind.and_then(|k| UNRAISED.iter().position(|u| *u == k));
-            let slot = match (kind, unraised) {
-                (Some(IL_CRON), _) => 0,
-                (Some(CTXWATCH), _) => 1,
-                (_, Some(i)) => 2 + i,
+            let absent = kind.and_then(|k| KNOWN_ABSENT.iter().position(|u| *u == k));
+            let slot = match (kind, unraised, absent) {
+                (Some(IL_CRON), ..) => 0,
+                (Some(CTXWATCH), ..) => 1,
+                (_, Some(i), _) => 2 + i,
+                (.., Some(i)) => 5 + i,
                 _ => {
                     rest.push(e);
                     continue;
@@ -272,6 +292,7 @@ pub fn compute_full(
     let (sw, lw) = (drop_il(sw, false), drop_il(lw, true));
     [rep.il_cron_excluded, rep.ctxwatch_excluded] = [excluded[0], excluded[1]];
     rep.unraised_excluded = [excluded[2], excluded[3], excluded[4]];
+    rep.known_absent.copy_from_slice(&excluded[5..]);
     let both = |s: &[Event], l: &[Event]| -> (Joined, Joined) {
         (join(s, l, &in_scope, false), join(s, l, &in_scope, true))
     };
@@ -471,6 +492,16 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
         UNRAISED[0],
         UNRAISED[1],
         UNRAISED[2],
+    );
+    let absent: Vec<String> = KNOWN_ABSENT
+        .iter()
+        .zip(r.known_absent)
+        .map(|(k, n)| format!("{k} {n}"))
+        .collect();
+    s += &format!(
+        "known absent, out of the percentages: {} ({}: owner kinds the scheduler does not raise yet, #11881)\n",
+        r.known_absent.iter().sum::<u64>(),
+        absent.join(", "),
     );
     s += &format!(
         "alert match: {:.1}% (identity only {:.1}%)\nwake match: {:.1}% (identity only {:.1}%)\n",
