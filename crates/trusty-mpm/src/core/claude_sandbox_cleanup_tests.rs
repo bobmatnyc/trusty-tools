@@ -375,7 +375,7 @@ fn a_missing_settings_file_is_not_created_12077() {
     assert!(!ws.join(".claude").exists(), "no `.claude` dir is created");
     assert_eq!(
         read_json(&marker_path(&ws)),
-        json!({"issue": 12077, "removed": [], "settings": "absent"})
+        json!({"issue": 12077, "tier": "project", "removed": [], "settings": "absent"})
     );
 }
 

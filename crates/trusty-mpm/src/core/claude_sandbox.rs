@@ -167,3 +167,7 @@ mod tests;
 #[cfg(test)]
 #[path = "claude_sandbox_cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "claude_sandbox_cleanup_user_tests.rs"]
+mod cleanup_user_tests;
