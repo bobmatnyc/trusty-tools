@@ -128,8 +128,8 @@ pub(super) fn check_ancestor_claude_md(
         (
             CheckStatus::Warn,
             "each one loads into EVERY session started under that directory. \
-             `tm doctor --fix --yes` adds them to `claudeMdExcludes` on this project's \
-             launch-settings record, which `tm launch` passes as `--settings` (#12077), \
+             `tm doctor --fix --yes` adds them to the `claudeMdExcludes` tm keeps for this \
+             project, which every `tm launch` of it passes as `--settings` (#12077), \
              leaving the files alone"
                 .to_string(),
         )

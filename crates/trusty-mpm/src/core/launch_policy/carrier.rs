@@ -275,11 +275,21 @@ pub fn settings_path_at(state_root: &Path, body: &str) -> PathBuf {
 ///
 /// Test: every test in `carrier_tests.rs`;
 /// `the_carrier_payload_carries_the_launch_keys_12127`,
+/// `an_unresolvable_project_identity_refuses_the_carrier_12077`,
 /// `a_malformed_record_refuses_the_carrier_12127`,
 /// `an_unwritable_launch_key_body_refuses_the_carrier_12127`.
 pub fn provision_settings_at(inputs: &CarrierInputs<'_>) -> Result<LaunchSettings, ProvisionError> {
     // #12127: before the owner lookup, so a bad record refuses with nothing recorded.
-    let launch = crate::core::session_launch::read_launch_keys(inputs.cwd)?.unwrap_or_default();
+    let mut launch = crate::core::session_launch::read_launch_keys(inputs.cwd)?.unwrap_or_default();
+    // #12077 row 13: plus the excludes `tm doctor --fix` kept for this project,
+    // from whichever checkout it ran in; an unresolvable identity refuses.
+    use crate::core::session_launch::launch_keys::project_excludes_for_launch;
+    if let Some(excludes) = project_excludes_for_launch(inputs.cwd, inputs.state_root)? {
+        let slot = launch
+            .entry(crate::core::claude_md_excludes::EXCLUDES_KEY.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        crate::core::claude_sandbox::merge_settings_payload(slot, &excludes);
+    }
     let resolution = resolve_and_record(&OwnerInputs {
         cwd: inputs.cwd,
         repos_root: inputs.repos_root,

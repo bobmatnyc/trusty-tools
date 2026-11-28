@@ -19,9 +19,12 @@
 //! values earlier releases wrote into the project file
 //! (`crate::core::claude_sandbox::clean_tm_launch_keys_on_launch`), then the
 //! record write, whose failure refuses the launch.
-//! #12077 row 13: the record also carries the `claudeMdExcludes` `tm doctor
-//! --fix` adds for an ancestor `CLAUDE.md` ([`add_launch_exclude`]), so the
-//! exclude reaches only this directory's tm launches; a launch keeps them.
+//! #12077 row 13: `tm doctor --fix` adds an ancestor `CLAUDE.md` exclude
+//! ([`add_launch_exclude`]) to the record of the PROJECT, keyed by its
+//! `owner/repo` ([`project_identity`]) under tm's state root, so every checkout
+//! of it — the operator's and the managed clone — reads the same entry; a
+//! directory with no identity keeps it on its own record. The carrier adds it
+//! to each launch ([`project_excludes_for_launch`]).
 //! Test: `launch_keys_tests.rs`.
 
 use std::collections::BTreeSet;
@@ -73,6 +76,19 @@ pub enum LaunchKeysError {
         /// The record file.
         path: PathBuf,
         /// What was wrong with it.
+        reason: String,
+    },
+    /// #12077 row 13: git could not say which project `dir` belongs to, so
+    /// the excludes recorded for that project cannot be found.
+    #[error(
+        "#12077 launch settings: cannot resolve the project identity of {dir} ({reason}), \
+         so the claudeMdExcludes recorded for that project cannot be read or written; \
+         refusing the launch"
+    )]
+    Identity {
+        /// The directory.
+        dir: PathBuf,
+        /// What git said, or why there is no store.
         reason: String,
     },
     /// The record could not be written.
@@ -211,7 +227,11 @@ pub(super) fn write_launch_keys(
 /// Test: `a_record_round_trips_through_its_dir_12127`,
 /// `a_malformed_record_refuses_the_carrier_12127`.
 pub fn read_launch_keys(dir: &Path) -> Result<Option<Map<String, Value>>, LaunchKeysError> {
-    let path = record_path(dir);
+    read_record_at(record_path(dir))
+}
+
+/// [`read_launch_keys`] for a record file named directly.
+fn read_record_at(path: PathBuf) -> Result<Option<Map<String, Value>>, LaunchKeysError> {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -249,33 +269,111 @@ pub fn set_launch_key(dir: &Path, key: &str, value: Value) -> Result<PathBuf, La
     write_launch_keys(dir, &keys)
 }
 
-/// Add `absolute` to `claudeMdExcludes` on the record for `dir` (#12077 row 13).
+/// The lowercase `owner/repo` of the checkout holding `dir` (#12077 row 13).
 ///
-/// Why: an ancestor `CLAUDE.md` exclude written into a settings file reaches
-/// every session that file reaches; on the record it reaches only this
-/// directory's tm launches, which pass the record as `--settings`. Claude Code
-/// unions the array with the file layers' entries.
-/// What: reads the record (absent reads as empty), appends `absolute`'s
-/// display form when it is not listed, and stores it through
-/// [`write_launch_keys`]. `Ok(false)` when it was already listed.
+/// Why: the operator's checkout and the managed clone of one project are two
+/// directories with two records; the project is what they share.
+/// What: the `origin` of [`crate::core::harness_root::harness_root`]`(dir)`
+/// (a linked worktree reads its main checkout), parsed as a GitHub path.
+/// `Ok(None)` for a directory outside git, with no `origin`, or whose `origin`
+/// names no owner.
 ///
 /// # Errors
 ///
-/// Every [`read_launch_keys`] error, so a broken record is never overwritten;
-/// [`LaunchKeysError::Malformed`] when the recorded key is not an array;
-/// [`LaunchKeysError::Write`] when the store fails.
+/// git could not answer ([`crate::core::git_origin::get_origin_url`]).
+///
+/// Test: `a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077`,
+/// `an_unresolvable_project_identity_fails_the_exclude_12077`.
+pub fn project_identity(dir: &Path) -> Result<Option<String>, String> {
+    let root = crate::core::harness_root::harness_root(dir);
+    let Some(url) = crate::core::git_origin::get_origin_url(&root)? else {
+        return Ok(None);
+    };
+    Ok(trusty_common::github_path::parse_github_path(&url)
+        .filter(|gh| {
+            !gh.owner.is_empty()
+                && !gh.repo.is_empty()
+                && gh.owner != trusty_common::github_path::UNKNOWN_OWNER
+        })
+        .map(|gh| {
+            format!(
+                "{}/{}",
+                gh.owner.to_ascii_lowercase(),
+                gh.repo.to_ascii_lowercase()
+            )
+        }))
+}
+
+/// Where the `claudeMdExcludes` of a launch in `dir` are kept.
+enum ExcludesHome {
+    /// `dir` has no project identity: its own record.
+    Dir,
+    /// The project record `<state_root>/launch-settings/project-<hash>.json`.
+    Project { path: PathBuf, key: String },
+}
+
+/// Resolve [`ExcludesHome`] for `dir`.
+///
+/// # Errors
+///
+/// [`LaunchKeysError::Identity`] when git cannot answer, or `dir` has an
+/// identity and there is no state root to keep its record under.
+fn excludes_home(dir: &Path, state_root: Option<&Path>) -> Result<ExcludesHome, LaunchKeysError> {
+    use sha2::{Digest as _, Sha256};
+    let identity = |reason: String| LaunchKeysError::Identity {
+        dir: dir.to_path_buf(),
+        reason,
+    };
+    let Some(key) = project_identity(dir).map_err(identity)? else {
+        return Ok(ExcludesHome::Dir);
+    };
+    let state_root = state_root.ok_or_else(|| identity("no tm state root".to_owned()))?;
+    let digest = Sha256::digest(key.as_bytes());
+    let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    let path = state_root
+        .join(LAUNCH_KEYS_DIR)
+        .join(format!("project-{hex}.json"));
+    Ok(ExcludesHome::Project { path, key })
+}
+
+/// Add `absolute` to the `claudeMdExcludes` kept for `dir` (#12077 row 13).
+///
+/// Why: an exclude written into a settings file reaches every session that
+/// file reaches. Kept for the project, it reaches only that project's tm
+/// launches, from any checkout, which pass it as `--settings`; Claude Code
+/// unions the array with the file layers' entries.
+/// What: reads the [`ExcludesHome`] record (absent reads as empty), appends
+/// `absolute`'s display form when it is not listed, and stores it. `Ok(false)`
+/// when it was already listed.
+///
+/// # Errors
+///
+/// [`LaunchKeysError::Identity`] from [`excludes_home`]; every read error, so
+/// a broken record is never overwritten; [`LaunchKeysError::Malformed`] when
+/// the recorded key is not an array; [`LaunchKeysError::Write`].
 ///
 /// Test: `the_exclude_lands_on_the_launch_settings_record_12077`,
-/// `an_unreadable_launch_record_fails_the_exclude_12077`.
-pub fn add_launch_exclude(dir: &Path, absolute: &Path) -> Result<bool, LaunchKeysError> {
-    let mut keys = read_launch_keys(dir)?.unwrap_or_default();
+/// `an_unreadable_launch_record_fails_the_exclude_12077`,
+/// `a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077`,
+/// `an_unresolvable_project_identity_fails_the_exclude_12077`.
+pub fn add_launch_exclude(
+    dir: &Path,
+    state_root: Option<&Path>,
+    absolute: &Path,
+) -> Result<bool, LaunchKeysError> {
+    let home = excludes_home(dir, state_root)?;
+    let path = match &home {
+        ExcludesHome::Dir => record_path(dir),
+        ExcludesHome::Project { path, .. } => path.clone(),
+    };
+    let mut keys = read_record_at(path.clone())?.unwrap_or_default();
     let wanted = absolute.display().to_string();
     let entry = keys
         .entry(EXCLUDES_KEY.to_owned())
         .or_insert_with(|| Value::Array(Vec::new()));
     let Some(list) = entry.as_array_mut() else {
         return Err(LaunchKeysError::Malformed {
-            path: record_path(dir),
+            path,
             reason: format!("`{EXCLUDES_KEY}` is not an array"),
         });
     };
@@ -283,24 +381,59 @@ pub fn add_launch_exclude(dir: &Path, absolute: &Path) -> Result<bool, LaunchKey
         return Ok(false);
     }
     list.push(Value::String(wanted));
-    write_launch_keys(dir, &keys)?;
+    match home {
+        ExcludesHome::Dir => {
+            write_launch_keys(dir, &keys)?;
+        }
+        ExcludesHome::Project { path, key } => {
+            let body = json!({ "issue": 12077, "project": key, "settings": keys });
+            crate::core::settings_lock::publish(&path, &body)
+                .map_err(|source| LaunchKeysError::Write { path, source })?;
+        }
+    }
     Ok(true)
 }
 
-/// The `claudeMdExcludes` strings on the record for `dir`, best effort.
+/// The project-record `claudeMdExcludes` a launch in `dir` adds (#12077 row 13).
 ///
-/// What: an absent or unreadable record, or a key that is not an array,
-/// contributes nothing, as an unreadable settings layer does in
-/// [`crate::core::claude_md_excludes::merged_excludes`]: the read can only
-/// under-report, which shows the operator a finding rather than hiding one.
-/// Test: `a_recorded_exclude_yields_no_step_12077`.
-pub fn recorded_claude_md_excludes(dir: &Path) -> Vec<String> {
-    let Ok(Some(keys)) = read_launch_keys(dir) else {
-        return Vec::new();
+/// What: `None` for a directory with no identity (its own record already
+/// rides the launch) or a project with no record; else the recorded array.
+///
+/// # Errors
+///
+/// [`LaunchKeysError::Identity`] and every read error: a launch that cannot
+/// find them refuses rather than drop them.
+///
+/// Test: `a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077`,
+/// `an_unresolvable_project_identity_refuses_the_carrier_12077`.
+pub fn project_excludes_for_launch(
+    dir: &Path,
+    state_root: &Path,
+) -> Result<Option<Value>, LaunchKeysError> {
+    let ExcludesHome::Project { path, .. } = excludes_home(dir, Some(state_root))? else {
+        return Ok(None);
     };
-    keys.get(EXCLUDES_KEY)
-        .and_then(Value::as_array)
+    Ok(read_record_at(path)?.and_then(|mut keys| keys.remove(EXCLUDES_KEY)))
+}
+
+/// The `claudeMdExcludes` strings kept for `dir` — its own record and its
+/// project's — best effort.
+///
+/// What: an unresolvable identity, an absent or unreadable record, or a key
+/// that is not an array contributes nothing, as an unreadable settings layer
+/// does in [`crate::core::claude_md_excludes::merged_excludes`]: the read can
+/// only under-report, which shows the operator a finding rather than hiding one.
+/// Test: `a_recorded_exclude_yields_no_step_12077`.
+pub fn recorded_claude_md_excludes(dir: &Path, state_root: Option<&Path>) -> Vec<String> {
+    let mut records = vec![read_launch_keys(dir)];
+    if let Ok(ExcludesHome::Project { path, .. }) = excludes_home(dir, state_root) {
+        records.push(read_record_at(path));
+    }
+    records
         .into_iter()
+        .filter_map(|record| record.ok().flatten())
+        .filter_map(|mut keys| keys.remove(EXCLUDES_KEY))
+        .filter_map(|value| value.as_array().cloned())
         .flatten()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect()

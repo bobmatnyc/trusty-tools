@@ -8,10 +8,11 @@
 //!   renamed aside, reversibly, out of the name Claude Code loads.
 //! * A file with REAL CONTENT is someone's notes. Renaming it is not tm's call.
 //!   Claude Code's own `claudeMdExcludes` key keeps it out of tm's sessions
-//!   while leaving the file untouched. #12077 row 13: the key goes on this
-//!   project's launch-settings record, which its tm launches pass as
-//!   `--settings`, never into a Claude settings file, so it reaches only this
-//!   project's tm sessions: no other project, and no bare `claude`.
+//!   while leaving the file untouched. #12077 row 13: the key is kept for the
+//!   PROJECT (its `owner/repo`, under tm's state root), which every tm launch
+//!   of it passes as `--settings` from any checkout, never in a Claude settings
+//!   file, so it reaches only this project's tm sessions: no other project, and
+//!   no bare `claude`. A directory with no identity keeps it on its own record.
 //!
 //! What: [`repair_ancestor_claude_md`] produces one
 //! [`crate::core::doctor_repair::RepairStep`] per finding, `Planned` in dry run.
@@ -22,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::ancestor_claude_md::{
-    AncestorMemoryFile, resolve_project_root, scan, stale_seed_name,
+    AncestorMemoryFile, resolve_project_root, scan_in, stale_seed_name,
 };
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 
@@ -39,9 +40,9 @@ pub const ANCESTOR_CHECK: &str = "ancestor_claude_md";
 /// What: resolves `project_root` through [`resolve_project_root`] — `--fix` is
 /// handed the process cwd, which may be any subdirectory — then emits one step
 /// per finding that is not already excluded. #12077 row 13: the exclude is
-/// added to the resolved root's launch-settings record
-/// ([`crate::core::session_launch::launch_keys::add_launch_exclude`]); no Claude settings
-/// file is written. A failed resolution or scan is ONE `Failed` step naming the
+/// kept for the resolved root's project
+/// ([`crate::core::session_launch::launch_keys::add_launch_exclude`]); no Claude
+/// settings file is written, and an unresolvable identity is a `Failed` step. A failed resolution or scan is ONE `Failed` step naming the
 /// error, never an empty plan that reads as "nothing to fix". `today` is
 /// injected (`%Y%m%d`) so the rename target is assertable; `home` and
 /// `managed_config_dir` (read by the scan only) are injected for the same
@@ -81,14 +82,18 @@ pub fn repair_ancestor_claude_md_in(
     project_root: &Path,
     home: Option<&Path>,
     managed_config_dir: Option<&Path>,
-    _state_root: Option<&Path>,
+    state_root: Option<&Path>,
     today: &str,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
     // #7673: scan from the resolved root, not whichever subdirectory `--fix`
     // ran from.
-    let scanned = resolve_project_root(project_root, home)
-        .and_then(|root| Ok((scan(&root, home, managed_config_dir)?.found, root)));
+    let scanned = resolve_project_root(project_root, home).and_then(|root| {
+        Ok((
+            scan_in(&root, home, managed_config_dir, state_root)?.found,
+            root,
+        ))
+    });
     let (found, root) = match scanned {
         Ok(scanned) => scanned,
         Err(err) => {
@@ -103,18 +108,24 @@ pub fn repair_ancestor_claude_md_in(
     found
         .into_iter()
         .filter(|found| !found.excluded)
-        .map(|found| step_for(&found, &root, today, mode))
+        .map(|found| step_for(&found, &root, state_root, today, mode))
         .collect()
 }
 
 /// One finding's worth of [`repair_ancestor_claude_md`].
 ///
 /// Test: see [`repair_ancestor_claude_md`].
-fn step_for(found: &AncestorMemoryFile, root: &Path, today: &str, mode: RepairMode) -> RepairStep {
+fn step_for(
+    found: &AncestorMemoryFile,
+    root: &Path,
+    state_root: Option<&Path>,
+    today: &str,
+    mode: RepairMode,
+) -> RepairStep {
     if found.seed_template {
         seed_step(found, stale_seed_name(&found.path, today), mode)
     } else {
-        exclude_step(found, root, mode)
+        exclude_step(found, root, state_root, mode)
     }
 }
 
@@ -150,19 +161,26 @@ fn seed_step(found: &AncestorMemoryFile, target: PathBuf, mode: RepairMode) -> R
 ///
 /// #12077 row 13: the exclude goes on `root`'s launch-settings record. A record
 /// that cannot be read or stored is a `Failed` step and is left as it is.
-fn exclude_step(found: &AncestorMemoryFile, root: &Path, mode: RepairMode) -> RepairStep {
-    let record = crate::core::session_launch::launch_keys_record_path(root);
+fn exclude_step(
+    found: &AncestorMemoryFile,
+    root: &Path,
+    state_root: Option<&Path>,
+    mode: RepairMode,
+) -> RepairStep {
     let what = format!(
-        "add it to `claudeMdExcludes` on this project's launch-settings record {}, which \
-         `tm launch` passes as `--settings` (the file itself is left alone; ~{} tokens per \
-         turn recovered)",
-        record.display(),
+        "add it to the `claudeMdExcludes` tm keeps for this project, which every `tm launch` \
+         of it passes as `--settings` (the file itself is left alone; ~{} tokens per turn \
+         recovered)",
         found.token_estimate()
     );
     let status = if mode == RepairMode::DryRun {
         StepStatus::Planned
     } else {
-        match crate::core::session_launch::launch_keys::add_launch_exclude(root, &found.path) {
+        match crate::core::session_launch::launch_keys::add_launch_exclude(
+            root,
+            state_root,
+            &found.path,
+        ) {
             // The record is tm's own, and the step adds one array entry.
             Ok(true) => StepStatus::Applied { backup: None },
             Ok(false) => StepStatus::Refused(
