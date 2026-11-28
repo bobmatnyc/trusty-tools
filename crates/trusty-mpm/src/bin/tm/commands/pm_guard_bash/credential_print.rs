@@ -368,7 +368,7 @@ fn scan_pass(
     depth: usize,
     lifted: &mut Lifted,
 ) -> Result<(bool, Vec<String>, bool), Refusal> {
-    let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
+    let text = strip_comments_and_heredocs(text, &mut lifted.heredocs)?;
     lifted.changes_dir |= changes_directory(&text);
     let flat = lift_substitutions(&text, stdout, stderr, depth, lifted)?;
     let stages = split_stages(&flat);

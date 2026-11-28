@@ -32,6 +32,8 @@
 // #11262: cuts glued shell operators before `tokenize` hands words to a rule.
 #[path = "operator_split.rs"]
 mod operator_split;
+// #12011: the credential-print rule reads a `{fd}>` prefix too.
+pub(crate) use operator_split::is_redirect_prefix;
 
 /// Why a command's bytes could not be cut into words.
 ///
