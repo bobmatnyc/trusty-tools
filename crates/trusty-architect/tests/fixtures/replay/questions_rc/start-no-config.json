@@ -1,0 +1,54 @@
+{
+  "version": 3,
+  "argv": [
+    "start",
+    "D01"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_INPUT_STATE": "input-state.py",
+    "ARCH_Q_RC": "questions_rc.py",
+    "ARCH_Q_RC_SLEEP": "0",
+    "ARCH_Q_RC_TRIES": "2",
+    "ARCH_Q_RELAY": "relay.sh",
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "queued: D01\n",
+  "stderr": "no Claude config dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "exit": 1,
+  "writes": {
+    "inbox/interactive-queue.txt": "D01\n"
+  },
+  "fakes": {
+    "stubs": {
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 1
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

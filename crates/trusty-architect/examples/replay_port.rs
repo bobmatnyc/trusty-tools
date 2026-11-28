@@ -17,8 +17,9 @@
 //! (#12029 P2b, mirrored in the library), `dashboard_store` (#12029 P2c,
 //! mirrored in the library), `dashboard_ids` and `dashboard_qual` (#12029
 //! P2d, mirrored in the library), `owner_answers` (#12029 P2e, mirrored in
-//! the library). `gh-session-track` (#12087) and `pending-answers` (#12029
-//! P2e) run the script's own command line.
+//! the library), `questions_rc` (#12029 P2f, mirrored in the library).
+//! `gh-session-track` (#12087) and `pending-answers` (#12029 P2e) run the
+//! script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
 //! `technical_level_recordings_replay_clean_against_the_port`,
@@ -36,8 +37,9 @@
 //! `dashboard_store_recordings_replay_clean_against_the_port`,
 //! `dashboard_ids_recordings_replay_clean_against_the_port`,
 //! `dashboard_qual_recordings_replay_clean_against_the_port`,
-//! `owner_answers_recordings_replay_clean_against_the_port` and
-//! `pending_answers_recordings_replay_clean_against_the_port`.
+//! `owner_answers_recordings_replay_clean_against_the_port`,
+//! `pending_answers_recordings_replay_clean_against_the_port` and
+//! `questions_rc_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -534,6 +536,11 @@ fn main() -> ExitCode {
                 )
             }
         }
+        // #12029 P2f: the questions driver mirror, on the frozen clock.
+        "questions_rc" => trusty_architect::questions::cases::replay(
+            &rest,
+            frozen.map_or_else(|| SystemClock.now_unix(), |t| t as f64),
+        ),
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
@@ -543,7 +550,7 @@ fn main() -> ExitCode {
                  il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
                  gh-session-track, ruling_pack, ids36, dashboard_schema, dashboard_jsonl, \
                  dashboard_derive, dashboard_store, dashboard_ids, dashboard_qual, \
-                 owner_answers, pending-answers"
+                 owner_answers, pending-answers, questions_rc"
             );
             return ExitCode::from(2);
         }

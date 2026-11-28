@@ -1,0 +1,97 @@
+{
+  "version": 3,
+  "argv": [
+    "start",
+    "Bz9"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_INPUT_STATE": "input-state.py",
+    "ARCH_Q_RC": "questions_rc.py",
+    "ARCH_Q_RC_SLEEP": "0",
+    "ARCH_Q_RC_TRIES": "2",
+    "ARCH_Q_RELAY": "relay.sh",
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {
+    "inbox/interactive-queue.txt": "B2z"
+  },
+  "reads": [],
+  "stdout": "queued: Bz9\nquestions_rc: count=1 action=rc_on session=up rc=off\nqna-alpha SKIP input=busy\nrunning: qna-alpha prompt not sent; ids stay queued in {ROOT}/inbox/interactive-queue.txt\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "inbox/interactive-queue.txt": "B2zBz9\n"
+  },
+  "fakes": {
+    "stubs": {
+      "python3": [
+        {
+          "argv": [
+            "input-state.py",
+            "=qna-alpha:"
+          ],
+          "stdout": "=qna-alpha: suggestion | try this\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "questions_rc.py"
+          ],
+          "stdout": "questions_rc: count=1 action=rc_on session=up rc=off\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "relay.sh": [
+        {
+          "stdout": "qna-alpha SKIP input=busy\n",
+          "stderr": "",
+          "exit": 1
+        }
+      ],
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "python3",
+        "questions_rc.py"
+      ],
+      [
+        "python3",
+        "input-state.py",
+        "=qna-alpha:"
+      ],
+      [
+        "relay.sh",
+        "--no-task",
+        "qna-alpha",
+        "[Architect 13:00Z] The queue {ROOT}/inbox/interactive-queue.txt has new ids. Re-read it now and ask Bob about each id still in status interactive; after each answered dialog re-read it again until it is empty."
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

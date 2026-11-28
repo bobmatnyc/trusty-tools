@@ -1,0 +1,97 @@
+{
+  "version": 3,
+  "argv": [
+    "rc"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/owner-queue/items/D03.json": "{\"kind\": \"question\", \"status\": \"answered\", \"title\": \"sample\", \"version\": 1}"
+  },
+  "reads": [
+    "local/owner-queue/items/D03.json"
+  ],
+  "stdout": "questions_rc: count=0 action=none session=down rc=off\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "inbox/questions-rc.json": "{\"rc\": \"off\", \"url\": \"\", \"count\": 0, \"time\": \"2026-11-27T13:00:00Z\"}"
+  },
+  "fakes": {
+    "stubs": {
+      "rc-disconnect.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "rc-restore.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "start-architect-questions.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 1
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

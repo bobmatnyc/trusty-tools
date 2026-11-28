@@ -1,0 +1,93 @@
+{
+  "version": 3,
+  "argv": [
+    "start",
+    "D01",
+    "D02",
+    "D01"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_INPUT_STATE": "input-state.py",
+    "ARCH_Q_RC": "questions_rc.py",
+    "ARCH_Q_RC_SLEEP": "0",
+    "ARCH_Q_RC_TRIES": "2",
+    "ARCH_Q_RELAY": "relay.sh",
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {
+    "inbox/interactive-queue.txt": "D02\nB2z\n"
+  },
+  "reads": [],
+  "stdout": "queued: D01 D02 D01\nquestions_rc: count=1 action=rc_on session=up rc=off\nrunning: qna-alpha input=typed; no prompt sent, ids stay queued in {ROOT}/inbox/interactive-queue.txt (it re-reads the queue after each answered dialog)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "inbox/interactive-queue.txt": "D02\nB2z\nD01\n"
+  },
+  "fakes": {
+    "stubs": {
+      "python3": [
+        {
+          "argv": [
+            "input-state.py",
+            "=qna-alpha:"
+          ],
+          "stdout": "=qna-alpha: typed | draft\n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "questions_rc.py"
+          ],
+          "stdout": "questions_rc: count=1 action=rc_on session=up rc=off\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "relay.sh": [
+        {
+          "stdout": "qna-alpha sent\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "python3",
+        "questions_rc.py"
+      ],
+      [
+        "python3",
+        "input-state.py",
+        "=qna-alpha:"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}
