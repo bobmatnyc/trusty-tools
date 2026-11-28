@@ -145,7 +145,8 @@ pub enum InferenceError {
 /// a contract.
 /// What: one variant per failure class the AWS SDK distinguishes. Every
 /// variant carries the full context message
-/// (`<Operation> call failed (model=…, region=…): <AWS source chain>`); `Api`
+/// (`<Operation> call failed (model=…, region=…): <AWS source chain>`, or
+/// `ConverseStream failed mid-stream (…)` for a receive failure); `Api`
 /// also carries the HTTP status and the AWS error code. A failure to resolve
 /// AWS credentials is [`Self::MissingCredential`] whatever SDK phase reported
 /// it, so it is never mistaken for a network fault.
@@ -158,7 +159,9 @@ pub enum InferenceError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum BedrockError {
-    /// AWS answered with a non-2xx service error.
+    /// AWS answered with a service error: a non-2xx response to a send, or
+    /// (#11228) a modeled exception frame mid-stream, whose status is the
+    /// stream's 200.
     #[error("{message}")]
     Api {
         /// HTTP status of the AWS response.

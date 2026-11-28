@@ -15,10 +15,14 @@ use aws_sdk_bedrockruntime::config::retry::RetryConfig;
 use aws_sdk_bedrockruntime::config::{BehaviorVersion, Region};
 use aws_sdk_bedrockruntime::error::{ConnectorError, ErrorMetadata, SdkError};
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
+use aws_sdk_bedrockruntime::types::error::{
+    ConverseStreamOutputError, ModelStreamErrorException, ThrottlingException,
+};
 use aws_smithy_types::body::SdkBody;
+use aws_smithy_types::event_stream::RawMessage;
 
 use super::BedrockAdapter;
-use super::send_error::classify_send_error;
+use super::send_error::{classify_send_error, classify_stream_error};
 use crate::inference::adapter::InferenceAdapter;
 use crate::inference::error::{BedrockError, InferenceError};
 use crate::inference::types::{ChatMessage, ChatRequest};
@@ -183,4 +187,141 @@ fn send_error_message_masks_arn_account_ids() {
         assert!(!text.contains(ACCOUNT), "account id leaked: {text}");
         assert!(text.contains("****"), "mask absent: {text}");
     }
+}
+
+// ── #11228: mid-stream `ConverseStream` errors ─────────────────────────────
+
+/// Classify `err` as a failed `ConverseStream` receive.
+fn classify_stream(err: &SdkError<ConverseStreamOutputError, RawMessage>) -> BedrockError {
+    classify_stream_error(MODEL, REGION, err)
+}
+
+/// An unparseable event-stream frame, the raw value a stream error carries.
+fn frame() -> RawMessage {
+    RawMessage::invalid(None)
+}
+
+/// AWS error metadata carrying `code`, as the SDK's deserializer sets it.
+fn meta(code: &str) -> ErrorMetadata {
+    ErrorMetadata::builder().code(code).message("m").build()
+}
+
+/// A modeled `ThrottlingException`, as the SDK deserializes one.
+fn throttling() -> ThrottlingException {
+    ThrottlingException::builder()
+        .message("m")
+        .meta(meta("ThrottlingException"))
+        .build()
+}
+
+/// A modeled exception frame keeps its AWS error code. The HTTP response
+/// already answered 200 before the stream began, so `status` is 200.
+#[test]
+fn stream_error_service_error_maps_to_api_with_code() {
+    let stream_error = ModelStreamErrorException::builder()
+        .message("m")
+        .meta(meta("ModelStreamErrorException"))
+        .build();
+    for (code, modeled) in [
+        (
+            "ThrottlingException",
+            ConverseStreamOutputError::ThrottlingException(throttling()),
+        ),
+        (
+            "ModelStreamErrorException",
+            ConverseStreamOutputError::ModelStreamErrorException(stream_error),
+        ),
+    ] {
+        let err = SdkError::service_error(modeled, frame());
+        match classify_stream(&err) {
+            BedrockError::Api {
+                status: 200,
+                code: Some(got),
+                ..
+            } => assert_eq!(got, code),
+            other => panic!("{code}: want Api, got {other:?}"),
+        }
+    }
+}
+
+/// df-D37: a mid-stream throttle classifies like a send throttle under every
+/// predicate a caller reads: `is_retryable`, `is_alarm`, the AWS error code,
+/// and the display text trusty-mpm's `map_sdk_error` substring-matches.
+#[test]
+fn stream_throttle_classifies_like_a_send_throttle() {
+    let send = InferenceError::Bedrock(classify(&SdkError::service_error(
+        ConverseError::ThrottlingException(throttling()),
+        response(429),
+    )));
+    let stream = InferenceError::Bedrock(classify_stream(&SdkError::service_error(
+        ConverseStreamOutputError::ThrottlingException(throttling()),
+        frame(),
+    )));
+    assert_eq!(send.is_retryable(), stream.is_retryable());
+    assert_eq!(send.is_alarm(), stream.is_alarm());
+    for err in [&send, &stream] {
+        match err {
+            InferenceError::Bedrock(BedrockError::Api { code, .. }) => {
+                assert_eq!(code.as_deref(), Some("ThrottlingException"), "{err:?}");
+            }
+            other => panic!("want Bedrock Api, got {other:?}"),
+        }
+        let text = err.to_string().to_lowercase();
+        assert!(text.contains("throttlingexception"), "{text}");
+    }
+}
+
+#[test]
+fn stream_error_dispatch_io_maps_to_transport() {
+    let err = SdkError::dispatch_failure(ConnectorError::io("connection reset".into()));
+    assert!(
+        matches!(classify_stream(&err), BedrockError::Transport(_)),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn stream_error_timeouts_map_to_timeout() {
+    let operation = SdkError::timeout_error("operation timeout after 1ms");
+    let read = SdkError::dispatch_failure(ConnectorError::timeout("read timeout".into()));
+    for err in [operation, read] {
+        assert!(
+            matches!(classify_stream(&err), BedrockError::Timeout(_)),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn stream_error_credentials_error_maps_to_missing_credential() {
+    let source = CredentialsError::not_loaded("credentials expired");
+    let err = SdkError::dispatch_failure(ConnectorError::other(Box::new(source), None));
+    assert!(
+        matches!(classify_stream(&err), BedrockError::MissingCredential(_)),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn stream_error_unreadable_frame_maps_to_other() {
+    let err: SdkError<ConverseStreamOutputError, RawMessage> =
+        SdkError::response_error("frame checksum mismatch", frame());
+    assert!(
+        matches!(classify_stream(&err), BedrockError::Other(_)),
+        "{err:?}"
+    );
+}
+
+/// The typed error keeps the mid-stream message the `Provider` string had,
+/// with ARN account ids masked (#9200), so the display text does not change.
+#[test]
+fn stream_error_keeps_mid_stream_message_and_masks_arns() {
+    let err: SdkError<ConverseStreamOutputError, RawMessage> =
+        SdkError::dispatch_failure(ConnectorError::io("connection reset".into()));
+    let text = classify_stream_error(ARN_MODEL, REGION, &err).to_string();
+    assert!(
+        text.starts_with("ConverseStream failed mid-stream (model="),
+        "{text}"
+    );
+    assert!(!text.contains(ACCOUNT), "account id leaked: {text}");
 }

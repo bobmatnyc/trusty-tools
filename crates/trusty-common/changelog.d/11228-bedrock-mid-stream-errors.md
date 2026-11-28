@@ -1,0 +1,2 @@
+Changed
+- A Bedrock `chat_stream` that fails after the stream opened now returns `InferenceError::Bedrock(BedrockError)`, not `InferenceError::Provider(String)`, so a caller can tell a throttle (`Api` with the AWS error code), a timeout, a transport fault, a missing credential and an unreadable frame apart (#11228). The display text and the `is_retryable`/`is_alarm` results are unchanged. An identity-resolution timeout still surfaces as `Transport`.
