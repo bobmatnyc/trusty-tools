@@ -22,18 +22,12 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::Parser as _;
 use trusty_common::embedder::{Embedder, MockEmbedder, EMBED_DIM};
 use trusty_common::embedder_client::{EmbedderClient, UdsEmbedderClient};
 use trusty_embedderd::batch_queue::{BatchConfig, BatchQueue};
 use trusty_embedderd::{uds_server, Args, Transport};
-
-/// The port `--http` defaulted to before #6289 retired it.
-///
-/// Why: named once so the assertion and its failure message cannot drift apart.
-const RETIRED_HTTP_PORT: u16 = 7890;
 
 /// Parse an argv the way the binary does.
 ///
@@ -48,6 +42,95 @@ fn parse(argv: &[&str]) -> Args {
 fn mock_queue() -> Arc<BatchQueue> {
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(EMBED_DIM));
     Arc::new(BatchQueue::new(embedder, BatchConfig::default()))
+}
+
+/// Local addresses of every listening TCP socket this test process holds.
+///
+/// Why (#10674): the daemon runs in-process here, so its listeners are this
+/// process's sockets. Asking the process, rather than probing a fixed port,
+/// keeps an unrelated listener on the host (the dashboard on 7890) out of it.
+/// What: walks `/dev/fd`; keeps each `SOCK_STREAM` fd whose `getsockname`
+/// family is `AF_INET`/`AF_INET6` and which has no peer (`getpeername` gives
+/// `ENOTCONN`) — a listener, or a bound socket that never connected. Darwin
+/// refuses `SO_ACCEPTCONN` reads (`ENOPROTOOPT`), so that test is not used.
+/// Test: `daemon_serves_a_hardened_socket_and_no_tcp_port` proves it finds a
+/// real listener before trusting its empty answer.
+fn listening_tcp_sockets() -> Vec<std::net::SocketAddr> {
+    use std::mem::{size_of, zeroed};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    let fds: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")
+        .expect("list /dev/fd")
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    let mut found = Vec::new();
+    for fd in fds {
+        let mut sock_type: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: plain syscalls on an integer fd with correctly sized
+        // out-buffers. A closed or non-socket fd returns an error, not UB.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut sock_type as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 || sock_type != libc::SOCK_STREAM {
+            continue;
+        }
+        // SAFETY: `sockaddr_storage` is plain data; all-zero is a valid value.
+        let mut storage: libc::sockaddr_storage = unsafe { zeroed() };
+        let mut slen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        // SAFETY: as above; `slen` bounds the write into `storage`.
+        let rc = unsafe {
+            libc::getsockname(
+                fd,
+                (&mut storage as *mut libc::sockaddr_storage).cast(),
+                &mut slen,
+            )
+        };
+        if rc != 0 {
+            continue;
+        }
+        // SAFETY: as above; the peer address is discarded.
+        let mut peer: libc::sockaddr_storage = unsafe { zeroed() };
+        let mut plen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let has_peer = unsafe {
+            libc::getpeername(
+                fd,
+                (&mut peer as *mut libc::sockaddr_storage).cast(),
+                &mut plen,
+            )
+        } == 0;
+        if has_peer {
+            continue;
+        }
+        match libc::c_int::from(storage.ss_family) {
+            libc::AF_INET => {
+                // SAFETY: the family says the storage holds a `sockaddr_in`.
+                let sin: libc::sockaddr_in =
+                    unsafe { std::ptr::read((&storage as *const libc::sockaddr_storage).cast()) };
+                found.push(SocketAddr::from((
+                    Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)),
+                    u16::from_be(sin.sin_port),
+                )));
+            }
+            libc::AF_INET6 => {
+                // SAFETY: the family says the storage holds a `sockaddr_in6`.
+                let sin6: libc::sockaddr_in6 =
+                    unsafe { std::ptr::read((&storage as *const libc::sockaddr_storage).cast()) };
+                found.push(SocketAddr::from((
+                    Ipv6Addr::from(sin6.sin6_addr.s6_addr),
+                    u16::from_be(sin6.sin6_port),
+                )));
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 #[test]
@@ -121,9 +204,21 @@ async fn daemon_serves_a_hardened_socket_and_no_tcp_port() {
     // left listening on the port the retired mode held.
     // What: binds the daemon's real socket in a scratch directory, serves it
     // with the real accept loop, embeds through the one shared UDS client in
-    // trusty-common, asserts 0700/0600, and asserts 127.0.0.1:7890 refuses a
-    // connection.
+    // trusty-common, asserts 0700/0600, and asserts this process holds no
+    // listening TCP socket.
     // Test: this test.
+
+    // #10674: prove the probe can fail before trusting its empty answer. No
+    // other test in this binary opens TCP, so the only listener is this one.
+    let canary = std::net::TcpListener::bind("127.0.0.1:0").expect("bind canary");
+    let canary_addr = canary.local_addr().expect("canary addr");
+    assert!(
+        listening_tcp_sockets().contains(&canary_addr),
+        "the probe must see a real TCP listener ({canary_addr}); it found {:?}",
+        listening_tcp_sockets()
+    );
+    drop(canary);
+
     let tmp = tempfile::tempdir().expect("tempdir");
     // Short path: `sockaddr_un.sun_path` holds 104 bytes on macOS.
     let dir = tmp.path().join("s");
@@ -146,16 +241,14 @@ async fn daemon_serves_a_hardened_socket_and_no_tcp_port() {
     assert_eq!(vectors.len(), 2);
     assert_eq!(vectors[0].len(), EMBED_DIM);
 
-    // The retired listener: nothing answers on it. A connect (rather than a
-    // bind) keeps this assertion from taking a resource a sibling test target
-    // might want.
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], RETIRED_HTTP_PORT));
-    let connected = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+    // #10674: ask this process's own sockets, not a fixed port — an unrelated
+    // listener on 127.0.0.1:7890 (the retired `--http` port) belongs to another
+    // process and must not fail this test.
+    let listeners = listening_tcp_sockets();
     assert!(
-        connected.is_err(),
-        "something is listening on 127.0.0.1:{RETIRED_HTTP_PORT}; trusty-embedderd retired \
-         that listener in #6289, so either a stale pre-#6289 daemon is still running on this \
-         host or the listener came back"
+        listeners.is_empty(),
+        "the running daemon holds TCP listener(s) {listeners:?}; trusty-embedderd binds no \
+         TCP port (#6289, ADR-0032)"
     );
 }
 
