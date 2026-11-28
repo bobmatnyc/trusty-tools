@@ -135,7 +135,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn ollama_provider_streams_sse_deltas() {
+        // #12082: `chat_stream` builds a client that honours HTTP_PROXY.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use crate::chat::ChatProvider;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -197,7 +202,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn ollama_provider_emits_tool_call() {
+        // #12082: `chat_stream` builds a client that honours HTTP_PROXY.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use crate::chat::ChatProvider;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

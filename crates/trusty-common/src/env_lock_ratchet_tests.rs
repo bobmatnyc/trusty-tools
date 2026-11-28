@@ -95,7 +95,6 @@ const SERIAL_WITHOUT_ENV_LOCK: &[(&str, &str)] = &[
         "src/inference/providers/local.rs",
         "OLLAMA_HOST, TRUSTY_LOCAL_API_KEY",
     ),
-    ("src/local_probe.rs", "OLLAMA_HOST"),
     ("src/palace_resolve_tests.rs", "TRUSTY_MEMORY_PALACE"),
     ("src/uds/on_demand_tests.rs", "TRUSTY_ANALYZE_EXTERNAL"),
     (
