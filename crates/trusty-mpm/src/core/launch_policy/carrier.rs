@@ -492,6 +492,9 @@ pub enum ProvisionError {
     /// #12077 part 4c: tm's old hooks could not be removed from a project file.
     #[error(transparent)]
     Strip(#[from] crate::core::session_launch::launch_hooks::StripError),
+    /// #12077 part 4c: an Architect's Claude Code is below the hook floor (#10459).
+    #[error(transparent)]
+    ArchitectVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
     /// #12077 part 4c: no home resolves, so no body could carry tm's hooks.
     #[error("#12077 refusing the launch: no tm state root resolves (no home directory)")]
     StateRoot,

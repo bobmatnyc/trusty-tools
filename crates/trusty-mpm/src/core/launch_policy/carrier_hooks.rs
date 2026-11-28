@@ -48,25 +48,28 @@ pub fn resolve_launch_hooks(
 /// The `hooks` object this launch's body carries; `None` when the inputs name
 /// no [`LaunchHooks`].
 ///
-/// What: tm's old entries leave `<cwd>/.claude/settings{,.local}.json`
+/// What: an Architect first passes the Claude Code version floor (#10459);
+/// then tm's old entries leave `<cwd>/.claude/settings{,.local}.json`
 /// ([`crate::core::session_launch::launch_hooks::strip_tm_project_hooks`]);
 /// then the groups are built for `inputs.profile`.
 ///
 /// # Errors
 ///
-/// [`ProvisionError::Strip`] or [`ProvisionError::HookExe`]; each refuses
-/// the launch.
+/// [`ProvisionError::ArchitectVersion`], [`ProvisionError::Strip`] or
+/// [`ProvisionError::HookExe`]; each refuses the launch.
 ///
 /// Test: `the_carrier_body_carries_the_hooks_12077`,
-/// `an_unwritable_project_file_refuses_the_carrier_12077`.
+/// `an_unwritable_project_file_refuses_the_carrier_12077`,
+/// `the_carrier_refuses_an_architect_below_the_claude_floor_12077`.
 pub(super) fn hooks_for_launch(
     inputs: &CarrierInputs<'_>,
 ) -> Result<Option<Value>, ProvisionError> {
     let Some(hooks) = inputs.hooks else {
         return Ok(None);
     };
-    // The Architect's Claude Code floor (#10459) is checked by every Architect
-    // launch seam before it reaches here (prep, prompt build, `tm launch`).
+    // #12077 part 4c: the one floor check every launch path reaches, `tm run`
+    // and the control-plane worker included.
+    crate::core::architect_claude_version::require_for_profile(inputs.profile)?;
     use crate::core::session_launch::launch_hooks;
     let removed = launch_hooks::strip_tm_project_hooks(inputs.cwd)?;
     for path in &removed {
