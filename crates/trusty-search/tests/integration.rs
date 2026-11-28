@@ -38,6 +38,7 @@ mod freshness_probe;
 // #9450: compaction cost at 150K (ignored measurement).
 mod hnsw_compact_9450;
 mod hnsw_recall_9414;
+mod index_flag_with_path_12161;
 mod index_remove_env_conflict_8175;
 mod integration_tests;
 mod launcher_packaging_9468;
