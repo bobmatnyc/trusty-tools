@@ -108,10 +108,15 @@ flip is one-way: a later rebuild inside the same command (`cargo watch`) is
 counted by the census as a foreign build. `builders.max_run_slots` (default:
 the ceiling) caps the run-phase slots, since each keeps a full target
 directory. `cargo watch -s ./script` runs the script's own builds without a
-lease. A lease that keeps a private `CARGO_TARGET_DIR`, or leaves it unset,
-keeps its capacity until it exits, because another build can share that
-directory; [#9223](https://github.com/bobmatnyc/trusty-tools/issues/9223)
-adds the lock that lifts this.
+lease. A lease that keeps a private `CARGO_TARGET_DIR`, or leaves it unset
+(cargo's own `<workspace>/target`), holds an exclusive lock on that directory
+(`.trusty-checkout.lock`) for its whole life, so it releases capacity the same
+way. A second leased build into that directory, from the same checkout too,
+waits and then exits 75 naming the lock
+([#9223](https://github.com/bobmatnyc/trusty-tools/issues/9223)). A lock or
+`Cargo.toml` that cannot be read refuses the build with exit 75. A raw cargo
+outside the lease cannot be refused; `tm doctor`'s `raw_cargo` row warns when
+one is compiling in the shared `CARGO_TARGET_DIR`.
 
 `.envrc` is the operator's local mechanism. The declarative one that tm itself
 ships is the `build:` section of `~/.trusty-tools/trusty-mpm/config.yaml`,

@@ -88,6 +88,10 @@ pub(crate) async fn doctor(
         super::doctor_session_target_dir::session_target_dir_row(project_dir.as_deref());
     overall = overall.worst(session_target.status);
     print_check(&session_target);
+    // #8692: a raw cargo the lease cannot refuse, in a shared target directory.
+    let raw_cargo = super::doctor_raw_cargo::raw_cargo_row(project_dir.as_deref());
+    overall = overall.worst(raw_cargo.status);
+    print_check(&raw_cargo);
     // #11058: a kept core fleet script lacking this release's sibling wiring.
     let wiring = match dirs::home_dir() {
         Some(home) => super::fleet::seed_wiring_doctor_row(&home),

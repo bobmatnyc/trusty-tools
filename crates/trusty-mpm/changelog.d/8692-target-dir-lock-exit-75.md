@@ -1,0 +1,2 @@
+Changed
+- A second `tm build-lease` build into a kept `CARGO_TARGET_DIR` (or cargo's own `<workspace>/target`) now exits 75 once the lease wait runs out, where before it ran alongside the first. A long-lived cargo process under a lease (`cargo watch`, a `cargo run` server) holds that directory's lock for its whole life, so it needs its own `CARGO_TARGET_DIR`. The exit-75 message names the remedies: wait longer with `--wait-secs` or `builders.lease_wait_secs`, or use a separate `CARGO_TARGET_DIR` (#8692).

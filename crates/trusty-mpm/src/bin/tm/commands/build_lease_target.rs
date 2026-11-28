@@ -11,12 +11,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use trusty_mpm::core::build_lease::keep_guard::{CheckoutLock, lock_for_checkout};
+use trusty_mpm::core::build_lease::keep_guard::{CheckoutLock, lock_dir, lock_for_checkout};
 use trusty_mpm::core::build_lease::marker_seal::seal_marker;
 use trusty_mpm::core::build_lease::stale_guard::{
     Invalidation, checkout_root, invalidate_if_checkout_changed, workspace_packages,
 };
-use trusty_mpm::core::build_lease::target_dir::TargetPlan;
+use trusty_mpm::core::build_lease::target_dir::{TargetPlan, cargo_own_target_dir};
 use trusty_mpm::core::builder_slot_pool::SlotPool;
 
 /// Name the slot directory that replaced a shared `CARGO_TARGET_DIR`.
@@ -138,29 +138,46 @@ fn slot_dir(
     Ok(dir.display().to_string())
 }
 
-/// Lock a kept `CARGO_TARGET_DIR` for this checkout and clear another
-/// checkout's fingerprints in it (#11661).
+/// Own the directory a non-slot build runs in, exclusively, for its life.
 ///
-/// Why: a slot is guarded in [`slot_dir`]; a [`TargetPlan::Keep`] directory
-/// was not, so two worktrees pinning one directory could hand each other's
-/// test binaries to a gate. What: `Ok(None)` for every other plan;
-/// `Ok(Some(lock))` holds the directory until the build exits; `Err` names
-/// why the build must not run there.
-/// Test: `a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661`.
-pub(super) fn guard_kept_dir(
+/// Why: a slot is guarded in [`slot_dir`] and owned by its flock; a kept
+/// directory (#11661) or cargo's own `target/` (#8692, #9223) was not, so a
+/// second build could replace binaries the first's tests run, or hand another
+/// checkout's test binaries to a gate.
+/// What: a [`TargetPlan::Keep`] directory is locked by [`lock_for_checkout`],
+/// which also clears another checkout's fingerprints. An `Unset` plan, or an
+/// `UnsetSlot` that fell back to cargo's own directory (`target` is `None`),
+/// locks [`cargo_own_target_dir`] with [`lock_dir`]; no `Cargo.toml` above
+/// `cwd` owns nothing. `Ok(Some((dir, lock)))` holds `dir` until the build
+/// exits; `Ok(None)` for every other plan; `Err` names why the build must not
+/// run there, an unreadable lock or manifest included (#8692 Q1).
+/// Test: `a_kept_target_dir_last_built_by_another_checkout_rebuilds_11661`,
+/// `an_unreadable_target_dir_lock_refuses_the_build_8692`.
+pub(super) fn guard_owned_dir(
     plan: &TargetPlan,
+    target: Option<&str>,
     cwd: &Path,
     wait: Duration,
-) -> Result<Option<CheckoutLock>, String> {
-    let TargetPlan::Keep(dir) = plan else {
-        return Ok(None);
-    };
-    let root = checkout_root(cwd);
-    let (lock, invalidation) = tokio::task::block_in_place(|| {
-        lock_for_checkout(Path::new(dir), &root, wait, || workspace_packages(&root))
-    })?;
-    report_cleared(Path::new(dir), &invalidation);
-    Ok(Some(lock))
+) -> Result<Option<(String, CheckoutLock)>, String> {
+    match plan {
+        TargetPlan::Keep(dir) => {
+            let root = checkout_root(cwd);
+            let (lock, invalidation) = tokio::task::block_in_place(|| {
+                lock_for_checkout(Path::new(dir), &root, wait, || workspace_packages(&root))
+            })?;
+            report_cleared(Path::new(dir), &invalidation);
+            Ok(Some((dir.clone(), lock)))
+        }
+        // #8692: cargo's own `target/` is owned like a kept directory.
+        TargetPlan::Unset | TargetPlan::UnsetSlot { .. } if target.is_none() => {
+            let Some(dir) = cargo_own_target_dir(cwd)? else {
+                return Ok(None);
+            };
+            let lock = tokio::task::block_in_place(|| lock_dir(&dir, wait))?;
+            Ok(Some((dir.display().to_string(), lock)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Seal the target directory's last-checkout marker once the build ended.
