@@ -103,13 +103,16 @@ pub(crate) async fn start_session(
 ///
 /// Why (#11077): `FrameworkPaths::default()` reads the process home, so a
 /// sandboxed start wrote `crate_config_root()` outside the sandbox.
-/// What: `FrameworkPaths::under(home)`; no home keeps `default()`.
-/// Test: `sandboxed_session_start_paths_stay_under_the_sandbox_home`.
+/// What: `FrameworkPaths::under_home(home)`, the layout `tm launch` reads;
+/// no home keeps `default()`.
+/// Test: `sandboxed_session_start_paths_stay_under_the_sandbox_home`,
+/// `session_start_deploys_under_the_config_dir_launch_reads_12048`.
 pub(crate) fn start_framework_paths(
     home: Option<&std::path::Path>,
 ) -> trusty_mpm::core::paths::FrameworkPaths {
     use trusty_mpm::core::paths::FrameworkPaths;
-    home.map_or_else(FrameworkPaths::default, FrameworkPaths::under)
+    // #12048: `under` ignored `install.toml` `config_dir`; launch honours it.
+    home.map_or_else(FrameworkPaths::default, FrameworkPaths::under_home)
 }
 
 /// The launch spec `tm session start` starts its in-place pane with (#8405,

@@ -1341,6 +1341,38 @@ fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
     assert!(fw.root.starts_with(sandbox_home), "{fw:?}");
 }
 
+/// #12048: with `install.toml` moving `config_dir`, `tm session start` deploys
+/// the framework source under the root `tm launch` reads, never `$HOME`.
+#[test]
+fn session_start_deploys_under_the_config_dir_launch_reads_12048() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let home = tmp.path().join("home");
+    let cfg = tmp.path().join("cfg");
+    let tools = home.join(trusty_common::install_paths::TOOLS_DIR_NAME);
+    std::fs::create_dir_all(&tools).expect("mkdir .trusty-tools");
+    std::fs::create_dir_all(&cfg).expect("mkdir cfg");
+    let install = format!("config_dir = {:?}\n", cfg.display().to_string());
+    std::fs::write(tools.join("install.toml"), install).expect("write install.toml");
+
+    let deploy = super::start_framework_paths(Some(&home));
+    // The framework source `tm launch` / `tm connect` prepare from.
+    let launch = trusty_mpm::core::paths::FrameworkPaths::for_managed_workspace_under(
+        trusty_mpm::core::config_base::config_base_under(&home),
+        tmp.path().join("ws"),
+    );
+    assert_eq!(deploy.root, launch.root, "deploy and launch roots differ");
+    assert_eq!(deploy.agents, launch.agents);
+    assert_eq!(deploy.skills, launch.skills);
+    let framework = cfg.join(".trusty-mpm").join("framework");
+    assert_eq!(deploy.agents, framework.join("agents"));
+    assert_eq!(deploy.skills, framework.join("skills"));
+    assert!(
+        !deploy.root.starts_with(&home),
+        "{:?} is under $HOME",
+        deploy.root
+    );
+}
+
 /// #10102 Fail-Open Check: a `tm connect` whose sandbox does not verify — a
 /// `settings.local.json` turning it off — is refused after registering, rolls
 /// the registration back, and types nothing into the pane.
