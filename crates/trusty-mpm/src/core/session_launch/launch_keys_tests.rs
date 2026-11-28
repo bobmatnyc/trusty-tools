@@ -46,7 +46,9 @@ fn a_record_round_trips_through_its_dir_12127() {
     assert_eq!(read_launch_keys(&dir).expect("no record"), None);
     let keys = launch_keys_for(&dir, "trusty-mpm", SessionProfile::Pm, None);
     let path = write_launch_keys(&dir, &keys).expect("the record writes");
-    assert!(path.starts_with(crate::core::harness_root::harness_dir(&dir)));
+    // The record sits under the canonical dir's harness (`/tmp` is a link on macOS).
+    let canonical = std::fs::canonicalize(&dir).expect("canonical");
+    assert!(path.starts_with(crate::core::harness_root::harness_dir(&canonical)));
     assert_eq!(path, record_path(&dir));
     assert_eq!(read_launch_keys(&dir).expect("readable"), Some(keys));
 }
