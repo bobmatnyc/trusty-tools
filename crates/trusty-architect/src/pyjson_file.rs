@@ -33,7 +33,7 @@ impl LoadError {
 }
 
 /// `str(UnicodeDecodeError)` for bytes that are not UTF-8.
-fn decode_error(bytes: &[u8], e: &std::str::Utf8Error) -> String {
+pub(crate) fn decode_error(bytes: &[u8], e: &std::str::Utf8Error) -> String {
     let at = e.valid_up_to();
     let b = bytes.get(at).copied().unwrap_or(0);
     let why = match e.error_len() {

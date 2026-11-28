@@ -6,8 +6,9 @@
 //! The crate's leaf dependency rule (std, serde, thiserror, tracing, libc)
 //! leaves no hash crate, so it is written here, as `sha1.rs` is. It is a
 //! state fingerprint, never a security boundary.
-//! What: FIPS 180-4 SHA-256 over a byte slice, as lowercase hex.
-//! Test: `sha256_known_vectors`.
+//! What: FIPS 180-4 SHA-256 over a byte slice, as lowercase hex, and the
+//! incremental [`Sha256`] it is built on.
+//! Test: `sha256_known_vectors`, `sha256_streamed_matches_one_shot`.
 
 const K: [u32; 64] = [
     0x428a_2f98,
@@ -78,62 +79,122 @@ const K: [u32; 64] = [
 
 /// Lowercase hex SHA-256 digest of `data`.
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
-    let mut h: [u32; 8] = [
-        0x6a09_e667,
-        0xbb67_ae85,
-        0x3c6e_f372,
-        0xa54f_f53a,
-        0x510e_527f,
-        0x9b05_688c,
-        0x1f83_d9ab,
-        0x5be0_cd19,
-    ];
-    let mut msg = data.to_vec();
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-    for block in msg.as_chunks::<64>().0 {
-        let mut w = [0u32; 64];
-        for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
-            w[i] = u32::from_be_bytes(*word);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for (ki, wi) in K.iter().zip(w) {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(*ki)
-                .wrapping_add(wi);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (hv, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-            *hv = hv.wrapping_add(v);
+    let mut s = Sha256::new();
+    s.update(data);
+    s.hex()
+}
+
+/// Why: an upload body is hashed while it streams to disk, so memory per
+/// upload stays one block, not the body's size (#12029 P2h).
+/// What: FIPS 180-4 state fed by [`Sha256::update`] in any split; [`Sha256::hex`]
+/// pads and answers the same digest [`sha256_hex`] gives for the joined bytes.
+/// Test: `sha256_streamed_matches_one_shot`.
+pub(crate) struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    fill: usize,
+    len: u64,
+}
+
+impl Sha256 {
+    /// The initial state.
+    pub(crate) fn new() -> Self {
+        Self {
+            h: [
+                0x6a09_e667,
+                0xbb67_ae85,
+                0x3c6e_f372,
+                0xa54f_f53a,
+                0x510e_527f,
+                0x9b05_688c,
+                0x1f83_d9ab,
+                0x5be0_cd19,
+            ],
+            buf: [0; 64],
+            fill: 0,
+            len: 0,
         }
     }
-    h.iter().map(|v| format!("{v:08x}")).collect()
+
+    /// Feeds `data`; any split of a message gives the same digest.
+    pub(crate) fn update(&mut self, data: &[u8]) {
+        self.len = self.len.wrapping_add(data.len() as u64);
+        self.absorb(data);
+    }
+
+    fn absorb(&mut self, mut data: &[u8]) {
+        if self.fill > 0 {
+            let take = (64 - self.fill).min(data.len());
+            self.buf[self.fill..self.fill + take].copy_from_slice(&data[..take]);
+            self.fill += take;
+            data = &data[take..];
+            if self.fill < 64 {
+                return;
+            }
+            let block = self.buf;
+            compress(&mut self.h, &block);
+            self.fill = 0;
+        }
+        let (blocks, rest) = data.as_chunks::<64>();
+        for block in blocks {
+            compress(&mut self.h, block);
+        }
+        self.buf[..rest.len()].copy_from_slice(rest);
+        self.fill = rest.len();
+    }
+
+    /// Pads, finishes and answers the lowercase hex digest.
+    pub(crate) fn hex(mut self) -> String {
+        let bit_len = self.len.wrapping_mul(8);
+        // 0x80, then zeros to 56 mod 64, then the 8-byte length; `fill` is 0..=63.
+        let zeros = (64 + 55 - self.fill) % 64;
+        let mut pad = vec![0x80u8];
+        pad.resize(1 + zeros, 0);
+        pad.extend_from_slice(&bit_len.to_be_bytes());
+        self.absorb(&pad);
+        debug_assert_eq!(self.fill, 0, "padding ends on a block boundary");
+        self.h.iter().map(|v| format!("{v:08x}")).collect()
+    }
+}
+
+/// One 64-byte block into the state.
+fn compress(h: &mut [u32; 8], block: &[u8; 64]) {
+    let mut w = [0u32; 64];
+    for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*word);
+    }
+    for i in 16..64 {
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = *h;
+    for (ki, wi) in K.iter().zip(w) {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ (!e & g);
+        let t1 = hh
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(*ki)
+            .wrapping_add(wi);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = s0.wrapping_add(maj);
+        hh = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(t1);
+        d = c;
+        c = b;
+        b = a;
+        a = t1.wrapping_add(t2);
+    }
+    for (hv, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+        *hv = hv.wrapping_add(v);
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +233,31 @@ mod tests {
         // A dashboard line, against `hashlib.sha256(line).hexdigest()`.
         let line = "{\"data\":{\"t\":\"é\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n";
         assert_eq!(sha256_hex(line.as_bytes()), PY_LINE);
+    }
+
+    /// Every split of a message, across the block and padding boundaries,
+    /// gives the one-shot digest.
+    #[test]
+    fn sha256_streamed_matches_one_shot() {
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 7 % 251) as u8).collect();
+        for len in [0, 1, 55, 56, 63, 64, 65, 119, 120, 128, 300] {
+            let want = sha256_hex(&data[..len]);
+            for step in [1, 3, 55, 63, 64, 65, 200] {
+                let mut s = Sha256::new();
+                for part in data[..len].chunks(step) {
+                    s.update(part);
+                }
+                assert_eq!(s.hex(), want, "len {len} step {step}");
+            }
+        }
+        let mut s = Sha256::new();
+        s.update(b"ab");
+        s.update(b"");
+        s.update(b"c");
+        assert_eq!(
+            s.hex(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     /// `python3 -c 'import hashlib;print(hashlib.sha256(<line>.encode()).hexdigest())'`.

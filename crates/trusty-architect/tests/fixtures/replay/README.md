@@ -942,3 +942,92 @@ $R record --clock 1795784400 --out $D/footer-reminders.json --seed $S/local=loca
   --fakes $S/datg-rows.json -- $P/scripts/ddb_driver.py --root local/owner-queue footer
 $R replay $D/*.json -- <target>/debug/examples/replay_port dashboard-db
 ```
+
+## dashboard_updates and dashboard_attach (#12029 P2h)
+
+Twenty-four runs (21 updates, 3 attach) of the frozen Python reference (architect commit
+`0fbbc81eed`), recorded on 2026-11-28 with `--clock 1795784400` and
+replayed in `tests/replay_dashboard_updates.rs` against
+`examples/replay_port.rs`, which hands each to the library's driver mirror
+(`dashboard::pyupdates::cases::replay`, `dashboard::pyattach::cases::replay_cases`).
+Every store, inbox line, schedule and upload body is synthetic: task ids are
+`Tq…` samples, sessions `pm-…`. No recording declares fakes. Every
+`ar-` id the public-leak `ARCH_ID` rule matches is the lint's `T01`
+placeholder, written with a trailing `@1127` or as a whole quoted value
+where the rule allows it. The cases no allowed form can carry (the id in parentheses,
+after `é`, before `_`, `é` or a capital, as a whole command-line argument,
+and quoted in the jsonl store's schema warning) are counted in
+`scripts/public_leak_baseline.tsv`.
+
+- `dashboard_updates/`: `driver.py`, copied beside `dashboard_updates.py`,
+  `dashboard_store.py`, `dashboard_jsonl.py` and `dashboard_schema.py` as
+  `du_driver.py`; it points the store root at `local/owner-queue`, the
+  inbox at `inbox` and the schemas at `schemas/dashboard` under the sandbox
+  root. `cli-*` run the script's `main`: the ingest pass on a seeded store
+  and inbox in both formats (tags, bare ids, Unicode spaces and digits,
+  handbacks, task notes, the owner answer, relay and done entries, the
+  72 h floor, duplicates, a numeric `ts`, the 400-character cut), `note`
+  with and without an inbox and with `--by` first, the four bad-usage forms
+  (exit 2), a listing that fails (a corrupt document, a torn jsonl line:
+  an `errors` entry and exit 0), `$DASHBOARD_ROOT` and `$DASHBOARD_INBOX`
+  set and empty, no store, extra arguments, and `updates` values that are a
+  string, a dict and a list holding a `True` `at`. `cases-dir` and
+  `cases-jsonl` run the functions: `one_paragraph`, `TAG`, `BARE`,
+  `HANDBACK` (backtracking, lookarounds, `\b`, Unicode `\d` and `\s`), the
+  three line parsers, `candidates` (CRLF and CR line ends), `item_entries`,
+  `pick_task_items`, `stale_notes`, `annotate_stale`, `ingest` twice (no
+  new entry the second time), a one-hour window, `add_note`, a missing
+  root, and the `TypeError`s of an unhashable `at` and a non-iterable
+  `updates`.
+- `dashboard_attach/`: `driver.py CASES.json`, copied beside
+  `dashboard_attach.py`, `dashboard_il.py`, `dashboard_store.py`,
+  `dashboard_jsonl.py` and `dashboard_schema.py` as `da_driver.py`; an upload
+  body is read from the file the case names. `cases-dir` and `cases-jsonl`
+  cover `clean_name` (NFC composition, a singleton to ASCII, Hangul, the
+  refusals, the 100-character cut), `content_type`, `max_bytes` (every
+  fallback), `ITEM_ID` and `SESSION_RE` (a final newline), `_read_schedule`,
+  `attach_dir` (each placement, a repeated name, the session store, the
+  fallback on a missing or broken schedule), `_safe_dir` (a symlinked base,
+  target and ancestor, a file base: refused with nothing made), `save`
+  (`-2`, `-3`, an empty, oversize and short body), `record` (the cap, a
+  string `attachments`), `handle_upload` (every refusal, each `il` label,
+  a cap of 1 byte, a store that cannot be written: the saved file is
+  removed) and `serve_file`.
+
+The empty directories a case needs are made by `mkdir` cases (the recorder
+keeps files only), and the symlinks are removed at the end of the list
+(the recorder refuses one left in the sandbox). Intended divergence (#12029
+P2h Q5): the owner-answer update text is `Owner answered <id>: ...`, where
+the frozen script names the owner; the recordings were patched to the
+port's text after recording (`answer_text_is_neutral`,
+`item_entries_use_the_neutral_answer_text`). The jsonl recordings seeded the
+frozen `schemas/dashboard`; the seed was removed after recording and
+`tests/replay_dashboard_updates.rs` lays P2g's single copy
+(`../dashboard-db/frozen-schemas.json`) back in (`WITH_SCHEMAS`).
+
+Not recorded: `check_item` (not ported: no case calls it, and the server
+button that does is not ported); a traceback from the command line (the
+probe refuses the script's own frames), so the `TypeError` arms are covered
+by the `cases` lists and the CLI's last-line form by
+`dashboard_updates_writes_take_the_shared_store_lock`; an inbox file that is
+not UTF-8 (the recorder keeps text writes only;
+`an_unparseable_inbox_line_is_skipped`); a conflict between the listing and
+the write (`a_conflict_is_reported_and_writes_nothing`); five record
+conflicts (`record_retries_five_conflicts_then_gives_up`); the `-999` name
+limit (`save_links_without_overwriting_and_numbers_collisions`). The NFC
+tables are generated by `dashboard_attach/regen_nfc.py`. Regenerate with the
+frozen modules and `schemas/` exported to a sandbox directory `P` (a
+canonical path), the drivers copied in as `P/scripts/du_driver.py` and
+`P/scripts/da_driver.py`, and the seed trees and case lists in `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/dashboard_updates/cli-ingest-dir.json --seed $S/dir/local=local \
+  --seed $S/dir/inbox=inbox -- $P/scripts/du_driver.py cli
+$R record --clock 1795784400 --out $D/dashboard_updates/cases-jsonl.json --seed $S/jsonl/local=local \
+  --seed $S/jsonl/inbox=inbox --seed $S/upd-cases.json=cases.json --env DASHBOARD_FORMAT=jsonl \
+  --seed $P/schemas=schemas -- $P/scripts/du_driver.py cases cases.json
+$R record --clock 1795784400 --out $D/dashboard_attach/cases-dir.json --seed $S/att/body=body \
+  --seed $S/att/local=local --seed $S/att-cases.json=cases.json -- $P/scripts/da_driver.py cases.json
+$R replay $D/dashboard_updates/cli-*.json -- <target>/debug/examples/replay_port dashboard_updates
+```
