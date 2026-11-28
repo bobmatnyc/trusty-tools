@@ -107,13 +107,20 @@ impl CodeIndexer {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        // #11964: lap the fetch, blocking-pool queue wait included; recorded on drop.
+        let mut lap = super::timings::FetchLap::start();
         if let Some(corpus) = self.corpus.clone() {
             let owned_ids = ids.to_vec();
             let read = tokio::task::spawn_blocking(move || {
+                let began = std::time::Instant::now(); // #11964: the queue wait ends here
                 let refs: Vec<&str> = owned_ids.iter().map(String::as_str).collect();
-                corpus.get_chunks(&refs)
+                (began, corpus.get_chunks(&refs))
             })
-            .await;
+            .await
+            .map(|(began, read)| {
+                lap.closure_started(began);
+                read
+            });
             // #5917: both failure arms used to `warn` and fall through to the
             // in-memory map — which is EMPTY after an idle eviction whose
             // rehydrate hit the same failing corpus. Every ranked id then

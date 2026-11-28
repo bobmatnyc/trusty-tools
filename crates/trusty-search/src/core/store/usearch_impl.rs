@@ -9,11 +9,13 @@
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use super::super::store_config::VectorQuant;
+use super::search_split::{record, VectorSplit};
 use super::types::StagedSwapOutcome;
 use super::types::VectorHit;
 use super::types::VectorStore;
@@ -91,16 +93,22 @@ impl VectorStore for UsearchStore {
             return Ok(Vec::new());
         }
 
+        // #12108: lap each sub-step so a cold query says where its time went.
+        let mut split = VectorSplit::default();
+        let started = Instant::now();
         // #10303: read before the graph lock (lock order).
         let tombstoned = self.has_tombstones().await;
-        let matches = {
+        let (matches, traverse_at) = {
             let index = self.index.read().await;
             // #8232: checked under the read lock the close's reset waits on.
             self.refuse_if_closed("search")?;
+            split.on_view = self.is_view.load(Ordering::Acquire);
+            let traverse_at = Instant::now();
+            split.lock_wait = traverse_at - started;
             // #9414: ask for at least the size-scaled beam (usearch searches
             // with max(expansion_search, count)); hits are truncated below.
             let count = super::hnsw_tuning::search_count(top_k, index.size());
-            if tombstoned {
+            let matches = if tombstoned {
                 // #10303: a tombstoned key is unmapped; keep it from taking a slot.
                 let key_to_id = self.key_to_id.read().await;
                 index.filtered_search(query, count, |key: usearch::Key| {
@@ -109,8 +117,11 @@ impl VectorStore for UsearchStore {
             } else {
                 index.search(query, count)
             }
-            .map_err(|e| anyhow!("usearch search failed: {e}"))?
+            .map_err(|e| anyhow!("usearch search failed: {e}"))?;
+            (matches, traverse_at)
         };
+        let map_at = Instant::now();
+        split.traverse = map_at - traverse_at;
 
         let key_to_id = self.key_to_id.read().await;
         let mut hits = Vec::with_capacity(matches.keys.len());
@@ -129,6 +140,8 @@ impl VectorStore for UsearchStore {
         }
         // #9414: the floor may have fetched more than the caller asked for.
         hits.truncate(top_k);
+        split.map = map_at.elapsed();
+        record(split);
         Ok(hits)
     }
 
@@ -172,9 +185,14 @@ impl VectorStore for UsearchStore {
             return Ok(Vec::new());
         }
 
+        // #12108: the same split as `search`; the key map is read once, so
+        // its lock wait counts as graph lock wait.
+        let started = Instant::now();
         let index = self.index.read().await;
         self.refuse_if_closed("search")?;
         let key_to_id = self.key_to_id.read().await;
+        let on_view = self.is_view.load(Ordering::Acquire);
+        let traverse_at = Instant::now();
         // `key_to_id` resolves to chunk ids, not bare file paths — use
         // `matches_chunk_id` (see `path_match` module docs for why the
         // colon-suffix allowance it has must not leak into a bare-file-path
@@ -189,6 +207,7 @@ impl VectorStore for UsearchStore {
         let matches = index
             .filtered_search(query, count, filter)
             .map_err(|e| anyhow!("usearch filtered_search failed: {e}"))?;
+        let map_at = Instant::now();
 
         let mut hits = Vec::with_capacity(matches.keys.len());
         for (key, dist) in matches.keys.iter().zip(matches.distances.iter()) {
@@ -201,6 +220,12 @@ impl VectorStore for UsearchStore {
             }
         }
         hits.truncate(top_k);
+        record(VectorSplit {
+            lock_wait: traverse_at - started,
+            traverse: map_at - traverse_at,
+            map: map_at.elapsed(),
+            on_view,
+        });
         Ok(hits)
     }
 

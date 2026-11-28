@@ -258,3 +258,108 @@ async fn a_cold_lazy_load_counts_in_latency_ms() {
         "logged latency_ms spans the load: {line}"
     );
 }
+
+/// #12108: a search served from an mmap view splits `vector_ms` into lock
+/// wait, traversal and mapping, in both `meta.timings` and the log line.
+///
+/// Pre-fix the vector lane reported one number, so a 27 s cold `vector_ms`
+/// could not be attributed.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn search_log_splits_the_vector_lane() {
+    use crate::core::store::{UsearchStore, VectorStore};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    let heap = Arc::new(UsearchStore::new(8).expect("store"));
+    let indexer = CodeIndexer::new("split-12108", tmp.path())
+        .with_components(Arc::clone(&embedder), heap.clone() as Arc<dyn VectorStore>);
+    indexer
+        .index_files_batch(&[("src/a.rs".into(), "fn shared_symbol() {}\n".into())])
+        .await
+        .expect("index batch");
+    let snapshot = tmp.path().join("hnsw.usearch");
+    heap.save(&snapshot).await.expect("save");
+    let view = UsearchStore::load_from(&snapshot)
+        .await
+        .expect("load")
+        .expect("snapshot present");
+    let mut indexer = indexer;
+    indexer.set_store(Arc::new(view));
+
+    let handle = IndexHandle::bare(
+        IndexId::new("split-12108".to_string()),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    );
+    // The vector lane runs only once the semantic stage reads ready.
+    handle.stages.write().await.semantic.status = crate::core::registry::StageStatus::Ready;
+    let registry = IndexRegistry::new();
+    registry.register(handle);
+    let state = SearchAppState::new(registry);
+    state.install_embedder(embedder).await;
+    let state = Arc::new(state);
+
+    let (cap, _guard) = capture(tracing::Level::INFO);
+    let body = super::search::search_report(&state, "split-12108", query("shared symbol lookup"))
+        .await
+        .unwrap_or_else(|(s, b)| panic!("expected 200, got {s}: {b}"));
+
+    let timings = &body["meta"]["timings"];
+    for key in ["vector_lock_ms", "vector_traverse_ms", "vector_map_ms"] {
+        assert!(timings[key].is_u64(), "meta.timings.{key} missing: {body}");
+    }
+    assert_eq!(
+        timings["hnsw_view"], true,
+        "the search ran on the view: {body}"
+    );
+
+    let line = cap.line(": search index_id=split-12108 ");
+    for field in [
+        "vector_lock_ms=",
+        "vector_traverse_ms=",
+        "vector_map_ms=",
+        "hnsw_view=true",
+    ] {
+        assert!(line.contains(field), "missing `{field}` in: {line}");
+    }
+}
+
+/// #11964: `meta.timings` and the search log line split `fusion_ms` into the
+/// chunk fetch (queue wait included), KG expansion and the MMR pass.
+///
+/// Pre-fix `fusion_ms` was one number, so a 1 s fusion spike could not be
+/// attributed.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn search_log_splits_the_fusion_stage() {
+    let registry = IndexRegistry::new();
+    let _tmp = add_index(&registry, "fusion-11964").await;
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let (cap, _guard) = capture(tracing::Level::INFO);
+    let body = super::search::search_report(&state, "fusion-11964", query("shared_symbol"))
+        .await
+        .unwrap_or_else(|(s, b)| panic!("expected 200, got {s}: {b}"));
+
+    let timings = &body["meta"]["timings"];
+    let fields = [
+        "chunk_fetch_ms",
+        "chunk_fetch_queue_ms",
+        "kg_ms",
+        "rerank_ms",
+    ];
+    for key in fields {
+        assert!(timings[key].is_u64(), "meta.timings.{key} missing: {body}");
+    }
+    assert!(timings["fusion_ms"].is_u64(), "fusion_ms stays: {body}");
+
+    let line = cap.line(": search index_id=fusion-11964 ");
+    for key in fields {
+        assert!(
+            line.contains(&format!(" {key}=")),
+            "missing `{key}` in: {line}"
+        );
+    }
+}
