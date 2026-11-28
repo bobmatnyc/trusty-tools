@@ -63,8 +63,7 @@ async fn set_source_id_returns_err_after_retries_for_missing_session() {
 }
 
 /// #12077: an opt-in is stored on the record and survives a reload; the
-/// default writes nothing, and a missing record still returns the opt-in for
-/// this launch.
+/// default writes nothing.
 #[tokio::test]
 async fn set_claude_sandbox_persists_only_an_opt_in_12077() {
     let dir = TempDir::new().unwrap();
@@ -80,7 +79,10 @@ async fn set_claude_sandbox_persists_only_an_opt_in_12077() {
         )
         .await
         .expect("create");
-    let returned = mgr.set_claude_sandbox(off.clone(), false).await;
+    let returned = mgr
+        .set_claude_sandbox(off.clone(), false)
+        .await
+        .expect("off");
     assert!(!returned.claude_sandbox);
     assert!(!mgr.get(&off.id).await.expect("get").claude_sandbox);
 
@@ -95,12 +97,36 @@ async fn set_claude_sandbox_persists_only_an_opt_in_12077() {
         )
         .await
         .expect("create");
-    let returned = mgr.set_claude_sandbox(on.clone(), true).await;
+    let returned = mgr.set_claude_sandbox(on.clone(), true).await.expect("on");
     assert!(returned.claude_sandbox, "the launch sees the opt-in");
     let reloaded = mgr.get(&on.id).await.expect("get after set");
     assert!(reloaded.claude_sandbox, "a resume reads the opt-in");
+}
 
+/// #12077 Fail-Open Check: an opt-in that cannot be stored on the record is
+/// an error, so the spawn is refused; it never reports the opt-in as taken
+/// while the record (and so every later resume) says off.
+#[tokio::test]
+async fn an_unpersisted_opt_in_refuses_the_spawn_12077() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let on = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-gone")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
     let mut gone = on.clone();
     gone.id = ManagedSessionId::new();
-    assert!(mgr.set_claude_sandbox(gone, true).await.claude_sandbox);
+    let result = mgr.set_claude_sandbox(gone, true).await;
+    assert!(
+        matches!(result, Err(ManagedError::SessionNotFound(_))),
+        "an unstored opt-in must refuse, got {result:?}"
+    );
+    assert!(!mgr.get(&on.id).await.expect("get").claude_sandbox);
 }

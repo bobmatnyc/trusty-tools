@@ -169,6 +169,8 @@ fn merging_unions_lists_and_keeps_other_keys() {
     let mut body = json!({
         "deniedMcpServers": [{ "serverName": "x" }],
         "permissions": { "deny": ["Workflow"] },
+        // A carrier scalar the payload overrides.
+        "sandbox": { "enabled": false },
     });
     merge_settings_payload(
         &mut body,

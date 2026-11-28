@@ -676,6 +676,11 @@ pub async fn restart_claude_code_op(
     })
 }
 
+// #12077: the sandbox refusal's tests.
+#[cfg(test)]
+#[path = "claude_config_restart_sandbox_tests.rs"]
+mod restart_sandbox_tests;
+
 #[cfg(test)]
 mod restart_pane_selection_tests {
     use super::*;
