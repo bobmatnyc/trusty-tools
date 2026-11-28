@@ -468,7 +468,10 @@ fn worktree_creation_registers_no_index() {
         &crate::session_manager::ManagedSessionId::new(),
     )
     .expect("worktree creation must succeed on a real repo");
-    assert!(created.is_dir(), "fixture precondition: the worktree exists");
+    assert!(
+        created.is_dir(),
+        "fixture precondition: the worktree exists"
+    );
 
     let fixture_root = fx.base.parent().expect("base has a parent").to_path_buf();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
