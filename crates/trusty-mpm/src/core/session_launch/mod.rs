@@ -142,6 +142,11 @@ mod tests_search_index;
 #[cfg(test)]
 #[path = "tests_launch_trust_3926.rs"]
 mod tests_launch_trust_3926;
+// #12077 row 11: the legacy global `trusty-memory` hook strip writes only the
+// tm-owned config dir, and removes only tm's exact old groups.
+#[cfg(test)]
+#[path = "tests_legacy_hooks_12077.rs"]
+mod tests_legacy_hooks_12077;
 // Issue #4072 — concurrency coverage for the shared `~/.claude.json`
 // read-modify-write cycle both trust seeders perform. Its own file because
 // `settings.rs` (485/500 production SLOC) and `tests.rs` (1482/1500 test

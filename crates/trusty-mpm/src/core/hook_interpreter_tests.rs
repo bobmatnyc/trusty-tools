@@ -402,3 +402,22 @@ fn a_matching_seed_is_ok() {
         CheckStatus::Ok
     );
 }
+
+/// #12077 row 9: a generic Claude settings file (here a project's
+/// `.claude/settings.json`) is never rewritten by `--fix --yes`; the rewrite is
+/// reported as refused.
+#[test]
+fn a_generic_settings_file_is_refused_not_rewritten_12077() {
+    let (dir, notify, _datg) = seeded();
+    let path = settings(dir.path(), &hooks_doc(&[&notify.display().to_string()]));
+    let before = std::fs::read(&path).expect("read");
+
+    let steps = repair_hook_interpreter(std::slice::from_ref(&path), RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "{steps:?}"
+    );
+    assert_eq!(std::fs::read(&path).expect("read"), before);
+}

@@ -287,3 +287,83 @@ fn a_rename_target_that_exists_is_refused() {
         "an earlier rescue copy\n"
     );
 }
+
+/// #12077 row 13: the exclude lands in tm's managed config dir, never in the
+/// project's `.claude/settings.local.json`.
+#[test]
+fn the_exclude_lands_in_the_managed_config_dir_12077() {
+    let (tmp, ancestor, project) = fixture();
+    let notes = ancestor.join("CLAUDE.md");
+    std::fs::write(&notes, "# Monorepo\n\nAll packages use pnpm.\n").unwrap();
+    let managed = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&managed).unwrap();
+
+    let steps = repair_ancestor_claude_md(
+        &project,
+        None,
+        Some(&managed),
+        "20260912",
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Applied { .. }),
+        "{steps:?}"
+    );
+    assert!(
+        !settings_of(&project).exists(),
+        "the project file is not written"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(managed.join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        value["claudeMdExcludes"],
+        serde_json::json!([notes.display().to_string()])
+    );
+}
+
+/// #12077 row 13: with no managed config dir there is no tm-owned target, so
+/// the exclude is refused and nothing is written.
+#[test]
+fn no_managed_config_dir_refuses_the_exclude_12077() {
+    let (_tmp, ancestor, project) = fixture();
+    std::fs::write(ancestor.join("CLAUDE.md"), "# Monorepo\n").unwrap();
+
+    let steps = repair_ancestor_claude_md(&project, None, None, "20260912", RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "{steps:?}"
+    );
+    assert!(!settings_of(&project).exists());
+}
+
+/// #12077 fail-open: a managed `settings.json` that is not JSON is refused and
+/// left byte-identical, never counted as applied.
+#[test]
+fn a_malformed_managed_settings_file_refuses_the_exclude_12077() {
+    let (tmp, ancestor, project) = fixture();
+    std::fs::write(ancestor.join("CLAUDE.md"), "# Monorepo\n").unwrap();
+    let managed = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::write(managed.join("settings.json"), "{ not json").unwrap();
+
+    let steps = repair_ancestor_claude_md(
+        &project,
+        None,
+        Some(&managed),
+        "20260912",
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(!steps[0].changed(), "{steps:?}");
+    assert_eq!(
+        std::fs::read_to_string(managed.join("settings.json")).unwrap(),
+        "{ not json"
+    );
+    assert!(!settings_of(&project).exists());
+}

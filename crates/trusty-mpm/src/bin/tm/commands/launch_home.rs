@@ -314,4 +314,22 @@ mod tests {
         );
         assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
     }
+
+    /// #12077 row 12: the launch never writes the generic
+    /// `~/.claude/settings.json`, even when it holds tm's exact old hook group.
+    #[test]
+    fn the_launch_leaves_the_home_settings_file_untouched_12077() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let settings = home.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings.parent().expect("parent")).expect("mkdir");
+        let doc = serde_json::json!({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "/usr/local/bin/tm hook", "timeout": 5}
+        ]}]}});
+        std::fs::write(&settings, doc.to_string()).expect("write");
+        let before = std::fs::read(&settings).expect("read");
+
+        super::strip_global_hooks(Some(home.path()));
+
+        assert_eq!(std::fs::read(&settings).expect("read"), before);
+    }
 }

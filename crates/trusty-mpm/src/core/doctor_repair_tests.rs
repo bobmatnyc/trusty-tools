@@ -1149,3 +1149,33 @@ fn statusline_repair_refuses_unparseable_json() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
 }
+
+/// #12077 row 9: `--fix --yes` must not merge the hook group into the
+/// project's `.claude/settings.json`; it refuses and names the launch that
+/// re-renders it.
+#[test]
+fn missing_group_repair_never_writes_the_project_file_12077() {
+    let project = tempfile::tempdir().unwrap();
+    let path = write_missing_group_settings(project.path());
+    let before = fs::read(&path).unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let fw = hermetic_fw(base.path(), project.path());
+
+    let steps = repair_missing_hook_group_with(
+        &fw,
+        project.path(),
+        Some(Path::new("/usr/local/bin/tm")),
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "the project file is not tm's to write: {steps:?}"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "the file must stay byte-identical"
+    );
+}
