@@ -101,6 +101,10 @@ tempfile = { workspace = true }
 trusty-common = { workspace = true, features = ["embedder", "embedder-bundled-ort", "embedder-client", "embedder-test-support"] }
 # #8616: the probe's unit tests run in the default (bundled-ort) test build.
 libloading = { workspace = true }
+# #10674: `tests/no_tcp_listener.rs` asks this process's own sockets whether any
+# is a listening TCP socket (`SO_ACCEPTCONN` + `getsockname`). Already in the
+# graph through tokio, so this adds no compile.
+libc = { workspace = true }
 
 [features]
 # Why (issue #250, renamed #6289): `daemon` gates the crate's startup surface
