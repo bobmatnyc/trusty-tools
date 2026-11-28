@@ -78,6 +78,17 @@ pub(crate) fn parse_top(
     args: &[String],
     check: &dyn Fn(usize, usize, &str) -> Result<(), String>,
 ) -> (Cmd, Args) {
+    parse_top_required(cli, args, check, &|_| &[])
+}
+
+/// [`parse_top`] with each subcommand's `required=True` options:
+/// `required(command)` is their indexes in its [`Sub::opts`] (#12029 P2g).
+pub(crate) fn parse_top_required(
+    cli: &Cli,
+    args: &[String],
+    check: &dyn Fn(usize, usize, &str) -> Result<(), String>,
+    required: &dyn Fn(usize) -> &'static [usize],
+) -> (Cmd, Args) {
     let pos = [Pos {
         name: cli.dest,
         nargs: Nargs::Parser,
@@ -92,7 +103,7 @@ pub(crate) fn parse_top(
             return (e, Args::default());
         }
     };
-    let cmd = parse_sub(cli, &top, check);
+    let cmd = parse_sub(cli, &top, check, required);
     (cmd, top)
 }
 
@@ -100,6 +111,7 @@ fn parse_sub(
     cli: &Cli,
     top: &Args,
     check: &dyn Fn(usize, usize, &str) -> Result<(), String>,
+    required: &dyn Fn(usize) -> &'static [usize],
 ) -> Cmd {
     let unrecognized = |extras: &[String]| {
         let msg = format!("unrecognized arguments: {}", extras.join(" "));
@@ -120,14 +132,16 @@ fn parse_sub(
     };
     let sub = &cli.subs[index];
     let check_sub = |opt: usize, v: &str| check(index, opt, v);
-    let sub_args = match argparse::parse_known(&words[1..], sub.opts, sub.pos, &check_sub) {
-        Parsed::Run(a) => a,
-        Parsed::Help => return Cmd::Help(sub.help),
-        Parsed::Error(m) => {
-            let prog = format!("{} {}", cli.prog, sub.name);
-            return Cmd::Error(argparse::error(sub.usage, &prog, &m));
-        }
-    };
+    let need = required(index);
+    let sub_args =
+        match argparse::parse_known_required(&words[1..], sub.opts, sub.pos, need, &check_sub) {
+            Parsed::Run(a) => a,
+            Parsed::Help => return Cmd::Help(sub.help),
+            Parsed::Error(m) => {
+                let prog = format!("{} {}", cli.prog, sub.name);
+                return Cmd::Error(argparse::error(sub.usage, &prog, &m));
+            }
+        };
     let mut extras = top.extras.clone();
     extras.extend(sub_args.extras.iter().cloned());
     if extras.is_empty() {

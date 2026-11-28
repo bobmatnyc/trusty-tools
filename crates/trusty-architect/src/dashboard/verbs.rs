@@ -183,9 +183,12 @@ pub fn tally_verb(env: &Env, r: &StoreRequest) -> Result<Tally, DashError> {
 /// # Errors
 /// As [`footer`].
 pub fn footer_verb(env: &Env, r: &FooterRequest) -> Result<Footer, DashError> {
+    // #12029 P2g: the daemon has no questions state or ledger to read; the
+    // questions part stays unlinked and the reminders line empty.
     let links = FooterLinks {
         local: r.local.clone().unwrap_or_else(|| LOCAL_URL.into()),
         tailnet: r.tailnet.clone(),
+        ..FooterLinks::default()
     };
     footer(&open(&r.store, env, false)?, env.clock.now_unix(), &links)
 }
@@ -324,10 +327,13 @@ pub fn render(reply: &Reply) -> String {
         Reply::Fsck(f) => emit(&obj(vec![("problems", strings(&f.problems))])),
         Reply::Tally(t, false) => tally_line(t) + "\n",
         Reply::Tally(t, true) => emit(&tally_emit(t)),
-        Reply::Footer(f, false) => format!("{}\n", f.footer),
+        // #12029 P2g: the reminders line follows, as `dashboard-db.py` prints it.
+        Reply::Footer(f, false) if f.reminders.is_empty() => format!("{}\n", f.footer),
+        Reply::Footer(f, false) => format!("{}\n{}\n", f.footer, f.reminders),
         Reply::Footer(f, true) => emit(&obj(vec![
             ("footer", s(f.footer.as_str())),
             ("tally", tally_emit(&f.tally)),
+            ("reminders", s(f.reminders.as_str())),
         ])),
         Reply::Ids(i) => emit(&obj(vec![
             ("prefix", s(i.prefix.as_str())),

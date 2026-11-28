@@ -200,6 +200,7 @@ fn derived_values_match_prototype() -> R {
     let links = FooterLinks {
         local: "http://127.0.0.1:7890/".into(),
         tailnet: "https://dash.example.ts.net:7890/".into(),
+        ..FooterLinks::default()
     };
     for case in corpus()? {
         let name = case["name"].as_str().ok_or("name")?;

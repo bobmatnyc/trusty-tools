@@ -838,3 +838,84 @@ $R record --clock 1795784400 --out $D/cases.json --seed $S/cases.json=cases.json
   -- $P/qrc_driver.py cases cases.json
 $R replay $D/*.json -- <target>/debug/examples/replay_port questions_rc
 ```
+
+## dashboard-db (#12029 P2g)
+
+133 runs of the frozen Python reference (architect commit `0fbbc81eed`),
+recorded on 2026-11-28 with `--clock 1795784400` and replayed in
+`tests/replay_dashboard_db.rs` against `examples/replay_port.rs
+dashboard-db`, which runs the port's command line (`dashboard::pydb::run`).
+Every store, queue, ledger and config is synthetic (sample names only).
+
+`dashboard-db/driver.py` is copied beside `dashboard-db.py` and the modules
+it imports as `ddb_driver.py`. It points the script's checkout at the
+sandbox root (the working directory): `dashboard_store.DEFAULT_ROOT` at
+`local/owner-queue`, `dashboard_schema.SCHEMA_DIR` at `schemas/dashboard`,
+`architect_config`'s default file at `local/architect.json`, `il_remind`'s
+ledger at `local/il` and the questions state at `inbox/questions-rc.json`;
+it sets argparse's program name to `dashboard-db.py` and changes none of the
+script's text. Recordings that touch a schema seed the frozen
+`schemas/dashboard`.
+
+| Recordings | Case |
+|---|---|
+| `get-*`, `list-*` | qualified, bare and alias ids, another store's S id (exit 1), a missing doc (exit 1), a bad collection name (exit 2), `--status` |
+| `set-*` | the new-id warning and `--allow-id`, the blind-overwrite conflict and a version conflict (exit 3), `steps`, task progress and goal refusals, `specs` normalisation with a tailnet config, the progress stamp kept and moved, the questions title and schema, the settings level, the sessions `site` block, a qualified or retired `A` id, bad JSON, `--json` from a file, a missing file and stdin, a body that is not an object, the level-lint warnings |
+| `update-*` | progress stamp, touch, title URL, leaving `interactive` (`QUESTIONS_RC_KICK=off`), the recommended-option notice and both refusals, not found, a qualified id, a version conflict, a bad `--if-version`, questions, a goal refusal |
+| `delete-*`, `pruned-*` | a delete with its prune-log line, not found, a version conflict; the log filtered by id and collection, and no log |
+| `next-*`, `create-*` | the next id, the retired `A`, an empty prefix; every `items` default and refusal (`context`, string options, `subs`, a short D detail, a T without instruction), questions, goals, the counter file |
+| `log-*`, `status-brief-*` | an entry (bare and qualified), empty text, another collection, not found; a brief added, moved to the front, refused by the schema |
+| `summary*`, `requests-*`, `validate`, `fsck-dir`, `tally-*` | the resume lines (18 answers and the `more` line), the request queue as text and JSON, the whole-store check (exit 1), `fsck` on a dir store (exit 2), the tally line and JSON |
+| `footer-*` | questions unlinked, linked (`rc` on), `rc` off, `$QUESTIONS_RC_STATE`, JSON; the reminders line present, nothing due, a failed read and no ledger; a tailnet link, an unusable config, a missing root, no interactive item |
+| `batch-*` | set, update, delete and a meta set in one batch; `{ops: [...]}` on stdin; a conflict, a refusal, an empty list, an unknown op, a questions schema refusal |
+| `usage-*`, `help-*`, `env-*` | argparse errors (no command, missing required arguments, an unknown command or flag, `--root` after the command), help, `$DASHBOARD_ROOT` and `$DASHBOARD_ACTOR`, a bad `$DASHBOARD_FORMAT` |
+| `jsonl-*` | AC1 in the jsonl format: get, set, update with schema warnings, create, delete, batch, fsck, tally, summary, and a jsonl read of a dir store |
+
+Intended divergences (Architect rulings 2026-11-28 17:06Z and 17:10Z):
+
+- (a) answer note: the port's `pending` appends `: <trimmed answer_note>` to a
+  plain answered event as the bundled copy's `_with_note` does; the frozen
+  `dashboard_derive.py:491` drops it. Pinned by
+  `answered_text_carries_the_trimmed_answer_note`; the `owner_answers`
+  replay applies it as `ANSWER_NOTE_DIVERGENCE`, and no `dashboard-db`
+  recording holds an answer note.
+- (b) in-process kick: leaving `interactive` runs one `questions::rc` pass in
+  process after the store write released its lock, where the script spawns
+  `questions_rc.py` detached; off under `QUESTIONS_RC_KICK=off`, and an error
+  is a stderr line with the exit unchanged. Pinned by
+  `kick_runs_after_the_write_and_never_changes_the_exit_code`; every
+  recording that leaves `interactive` sets `QUESTIONS_RC_KICK=off`.
+- (c) reminders through `datg`: the footer runs one bounded `datg --project
+  <ledger> reminders --due --json` on `PATH` and formats the rows as
+  `il_remind.footer_line`, where the script imports `datg` and `il_remind`.
+  The `datg` fake in `footer-reminders*` answers with the rows the script
+  read from the same `state.json`, so stdout matches; the replay test adds
+  the one call (`DATG_CALL`) to the four recordings with a ledger. Pinned by
+  `reminders_line_formats_the_datg_rows_as_il_remind_does` and
+  `reminders_line_names_each_failure` (a spawn failure, a non-zero exit, a
+  traceback, a bad row and a missing key each name their class).
+- (d) uncaught exceptions: a schema that cannot load, an `OSError` outside
+  the store, a bad counter digit, a lock wait past 10 s and the writer-class
+  refusal print one `<Class>: <msg>` line and exit 1, where the script prints
+  a traceback. `a_create_whose_counter_cannot_be_written_exits_1_after_the_write`
+  pins the counter case: the document is written first, as in the script.
+
+The schema subset gained `\d \D \s \S \w \W` (also in a class) and the `\n
+\t \r \f \v` escapes for this slice: the frozen `items.schema.json` uses
+`^[^/\s]+/\S+\.md$` and `^[^\n]{1,120}$`
+(`status_brief_pattern_matches_python_whitespace`). The shared lock is
+`dashboard_db_writes_take_the_shared_store_lock` (AC2). Not recorded: a
+traceback (the probe refuses the script's own frames outside the sandbox,
+e.g. a bad `$DASHBOARD_SCHEMA`), the kick itself (it reaches tmux), a lock
+wait. Regenerate with the frozen `scripts/` and `schemas/` exported to a
+sandbox directory `P` whose path has no symlink, the driver copied in as
+`P/scripts/ddb_driver.py`, and each recording's `files` laid into `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/dashboard-db
+$R record --clock 1795784400 --out $D/tally-text.json --seed $S/local=local \
+  -- $P/scripts/ddb_driver.py --root local/owner-queue tally
+$R record --clock 1795784400 --out $D/footer-reminders.json --seed $S/local=local \
+  --fakes $S/datg-rows.json -- $P/scripts/ddb_driver.py --root local/owner-queue footer
+$R replay $D/*.json -- <target>/debug/examples/replay_port dashboard-db
+```

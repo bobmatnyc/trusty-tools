@@ -20,8 +20,11 @@ a timestamp, a synthetic id, `pm-<n>` or an enum token.
 tally` (architect commit `0fbbc81eed`: `derive.tally` plus `running` and
 `answers_waiting`) over the committed `<case>/dir` and `<case>/jsonl`
 stores at `NOW`, which added `decisions` and `blockers` and moved `live`'s
-`answered_unrelayed` from 31 to 24. The tally line and footer goldens
-are unchanged. `tally_corpus.json` is the synthetic store
+`answered_unrelayed` from 31 to 24. #12029 P2g moved each case's
+`tally_line` and `footer` to the frozen script's wording (`<d> decisions,
+<b> blockers`, from the case's own `decisions` and `blockers`; no case has
+an interactive item, so no questions part), the only hand edit since the
+capture. `tally_corpus.json` is the synthetic store
 `tally_follows_the_python_rule_for_canaries_interactive_decisions_and_relays`
 reads.
 

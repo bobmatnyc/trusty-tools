@@ -254,6 +254,21 @@ pub(crate) fn parse_known(
     pos: &[Pos],
     check: &dyn Fn(usize, &str) -> Result<(), String>,
 ) -> Parsed {
+    parse_known_required(args, opts, pos, &[], check)
+}
+
+/// [`parse_known`] with `required=True` options: `required` holds their
+/// indexes in `opts`, and one never given joins the `the following arguments
+/// are required` list after the positionals (#12029 P2g: `dashboard-db.py
+/// set --json`). Precondition: the parser adds its positionals before its
+/// required options, so that is argparse's `_actions` order.
+pub(crate) fn parse_known_required(
+    args: &[String],
+    opts: &[Opt],
+    pos: &[Pos],
+    required: &[usize],
+    check: &dyn Fn(usize, &str) -> Result<(), String>,
+) -> Parsed {
     let mut kinds = Vec::with_capacity(args.len());
     let mut rest = false;
     for a in args {
@@ -286,12 +301,20 @@ pub(crate) fn parse_known(
     match st.run() {
         Ok(true) => Parsed::Help,
         Ok(false) => {
-            let missing: Vec<&str> = pos
+            let mut missing: Vec<String> = pos
                 .iter()
                 .zip(&st.out.pos)
                 .filter(|(p, v)| v.is_none() && (p.required || p.nargs == Nargs::One))
-                .map(|(p, _)| p.name)
+                .map(|(p, _)| p.name.to_owned())
                 .collect();
+            missing.extend(
+                required
+                    .iter()
+                    .filter(|i| {
+                        st.out.all.get(**i).is_some_and(Vec::is_empty) && !st.out.flags[**i]
+                    })
+                    .map(|i| label(&opts[*i])),
+            );
             if !missing.is_empty() {
                 let names = missing.join(", ");
                 return Parsed::Error(format!("the following arguments are required: {names}"));
