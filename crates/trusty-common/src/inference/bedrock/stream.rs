@@ -35,7 +35,6 @@ use aws_sdk_bedrockruntime::operation::converse_stream::ConverseStreamOutput as 
 use aws_sdk_bedrockruntime::types::{
     ContentBlockDelta, ContentBlockStart, ConverseStreamOutput as ConverseEvent,
 };
-use aws_smithy_types::error::display::DisplayErrorContext;
 use futures_util::stream;
 
 use crate::inference::error::InferenceError;
@@ -77,10 +76,11 @@ pub(super) trait ConverseEventSource: Send + 'static {
 /// failure message actionable (which model, which region) — the same context
 /// [`super::BedrockAdapter::chat`] puts on its non-streaming errors.
 /// What: `recv` delegates to the receiver's `recv`, mapping any `SdkError` to
-/// [`InferenceError::Provider`] with the full source chain via
-/// `DisplayErrorContext` (an `SdkError`'s own `Display` omits its cause, which
-/// is where the real reason lives).
-/// Test: exercised by the `#[ignore]`-gated `live_bedrock_converse_stream`; the
+/// [`InferenceError::Bedrock`] via
+/// [`super::send_error::classify_stream_error`], whose message carries the
+/// full source chain.
+/// Test: the mapping is `super::send_error_tests::stream_error_*`; the live
+/// wiring is the `#[ignore]`-gated `live_bedrock_converse_stream`, since the
 /// offline `stream_*` tests use the scripted source instead.
 pub(super) struct SdkEventSource {
     response: ConverseStreamResponse,
@@ -108,11 +108,12 @@ impl SdkEventSource {
 #[async_trait]
 impl ConverseEventSource for SdkEventSource {
     async fn recv(&mut self) -> Result<Option<ConverseEvent>, InferenceError> {
+        // #11228: type the mid-stream failure; it was a `Provider` string.
         self.response.stream.recv().await.map_err(|e| {
-            InferenceError::Provider(mid_stream_error_message(
+            InferenceError::Bedrock(super::send_error::classify_stream_error(
                 &self.model,
                 &self.region,
-                &DisplayErrorContext(&e).to_string(),
+                &e,
             ))
         })
     }
