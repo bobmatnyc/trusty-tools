@@ -32,13 +32,13 @@ fn tag_bare_and_handback_follow_python_re() {
     // The optional `@dddd` backs off when its lookahead fails.
     assert_eq!(g(&t, "Task: Tqa@11271"), Some("Tqa".into()));
     assert_eq!(g(&t, "Task: Tqal"), None);
-    assert_eq!(g(&t, "Task: ar-Tqcz_"), Some("ar-Tqcz".into()));
+    assert_eq!(g(&t, "Task: ar-T01_"), Some("ar-T01".into()));
     assert_eq!(g(&t, "Task: ar-x Task: Tqh"), Some("Tqh".into()));
-    assert_eq!(g(&b, "(ar-Tqa)"), Some("Tqa".into()));
-    assert_eq!(g(&b, "xar-Tqa ar-Tqb"), Some("Tqb".into()));
+    assert_eq!(g(&b, "(ar-T01)"), Some("T01".into()));
+    assert_eq!(g(&b, "xar-Tqa ar-T01@1127"), Some("T01".into()));
     assert_eq!(g(&b, "-ar-Tqa"), None);
-    assert_eq!(g(&b, "ar-TqaA"), None);
-    assert_eq!(g(&b, "ar-Tqa\u{e9}"), Some("Tqa".into()));
+    assert_eq!(g(&b, "ar-T01A"), None);
+    assert_eq!(g(&b, "ar-T01\u{e9}"), Some("T01".into()));
     let h = handback();
     let m = |s: &str| full_match(&h, s);
     let got = m("Task: Tqb | done: a | b | est: x | y | remaining: z | w | pct: 3");
@@ -55,8 +55,8 @@ fn tag_bare_and_handback_follow_python_re() {
 fn unicode_digits_and_spaces_follow_python_re() {
     let t = tag();
     assert_eq!(
-        g(&t, "Task:\u{3000}\u{2003}\tar-Tqj"),
-        Some("ar-Tqj".into())
+        g(&t, "Task:\u{3000}\u{2003}\tar-T01"),
+        Some("ar-T01".into())
     );
     // `@` and four Arabic-Indic digits are consumed, then the lookahead
     // fails on `x`, so the engine backs off to the match without them.
@@ -131,7 +131,7 @@ fn pick_task_items_prefers_open_then_oldest() {
         ),
         doc(
             "B02",
-            r#"{"kind": "task", "task": "ar-TQA", "created": "3"}"#,
+            r#"{"kind": "task", "task": "AR-TQA", "created": "3"}"#,
         ),
         doc("B03", r#"{"kind": "task", "task": "Tqa", "created": "2"}"#),
         doc("B04", r#"{"kind": "task", "task": "Tqa", "created": "2"}"#),
@@ -243,6 +243,78 @@ fn a_conflict_is_reported_and_writes_nothing() -> R {
         "only the racing write landed"
     );
     assert!(crate::pyval::get(&after.data, "updates").is_none());
+    Ok(())
+}
+
+/// The store whose `update` of B01 raises `fail`; every other write lands.
+struct FailsB01 {
+    inner: PyStore,
+    fail: PyStoreError,
+}
+
+impl ItemStore for FailsB01 {
+    fn list_items(&self) -> Result<Vec<PyDocOut>, PyStoreError> {
+        self.inner.list_items()
+    }
+    fn get_item(&self, id: &str) -> Result<PyDocOut, PyStoreError> {
+        self.inner.get_item(id)
+    }
+    fn update_item(
+        &self,
+        id: &str,
+        d: &PyValue,
+        v: &PyInt,
+        a: Option<&str>,
+    ) -> Result<PyInt, PyStoreError> {
+        if id == "B01" {
+            return Err(self.fail.clone());
+        }
+        self.inner.update_item(id, d, v, a)
+    }
+    fn now_iso(&self) -> String {
+        self.inner.now_iso()
+    }
+}
+
+/// `seeded` plus B02 (`Tqb`), with a relay for each, B01's first.
+fn ingest_failing_b01(fail: PyStoreError) -> Result<super::Ingested, Box<dyn std::error::Error>> {
+    let (tmp, st) = seeded("dir")?;
+    st.set_json(
+        "items",
+        "B02",
+        r#"{"kind": "task", "task": "Tqb", "status": "open"}"#,
+    )?;
+    let inbox = tmp.path().join("inbox");
+    let two = "{\"ts\": \"2026-11-26T09:00:00Z\", \"text\": \"Task: Tqa one\"}\n\
+               {\"ts\": \"2026-11-26T09:01:00Z\", \"text\": \"Task: Tqb two\"}\n";
+    std::fs::write(inbox.join("relays.jsonl"), two)?;
+    let store = FailsB01 { inner: st, fail };
+    let got = ingest(&store, &inbox, NOW, 72.0)?;
+    assert_eq!(store.inner.get_item("B02")?.version, PyInt::Small(2));
+    Ok(got)
+}
+
+/// `except (ds.Conflict, ds.NotFound)`: a `NotFound` on write is a `conflicts` entry, and the next item is written.
+#[test]
+fn a_not_found_on_write_is_a_conflict_and_the_loop_goes_on() -> R {
+    let got = ingest_failing_b01(PyStoreError::NotFound("no document items/B01".into()))?;
+    assert_eq!(got.conflicts, ["B01"]);
+    assert!(got.errors.is_empty(), "{got:?}");
+    assert_eq!(got.added, [("B02".to_owned(), 1)]);
+    Ok(())
+}
+
+/// `except (ds.StoreError, OSError) as e`: an `OSError` on write is `items/<id>: <str(e)>`, and the next item is written.
+#[test]
+fn an_os_error_on_write_is_an_errors_entry_and_the_loop_goes_on() -> R {
+    let eacces = std::io::Error::from_raw_os_error(libc::EACCES);
+    let got = ingest_failing_b01(PyStoreError::os("/q/items/B01.json", &eacces))?;
+    assert_eq!(
+        got.errors,
+        ["items/B01: [Errno 13] Permission denied: '/q/items/B01.json'"]
+    );
+    assert!(got.conflicts.is_empty(), "{got:?}");
+    assert_eq!(got.added, [("B02".to_owned(), 1)]);
     Ok(())
 }
 

@@ -254,7 +254,9 @@ fn same(a: &PyValue, at: &PyValue) -> bool {
 /// `poller`); see the module doc. `floor` is
 /// `(now - since_hours).strftime("%Y-%m-%dT%H:%M:%SZ")`.
 /// Test: `ingest_is_idempotent_and_dedups_on_at_and_text`,
-/// `a_list_docs_failure_is_an_errors_entry`, `a_conflict_is_reported_and_writes_nothing`.
+/// `a_list_docs_failure_is_an_errors_entry`, `a_conflict_is_reported_and_writes_nothing`,
+/// `a_not_found_on_write_is_a_conflict_and_the_loop_goes_on`,
+/// `an_os_error_on_write_is_an_errors_entry_and_the_loop_goes_on`.
 ///
 /// # Errors
 /// [`Fail::Raise`] where the script raises: a store exception that is not a

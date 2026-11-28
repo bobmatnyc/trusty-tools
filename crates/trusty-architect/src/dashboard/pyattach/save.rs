@@ -3,8 +3,8 @@
 //! Why: a stored attachment must be complete before any reader can see it,
 //! must never replace another file, and must not stay behind half written.
 //! What: [`save`]: the length checks, [`super::dirs::safe_dir`], a hidden
-//! `.upload-*` temp file (`O_EXCL`, mode `0o600`) filled in 64 KiB reads and
-//! fsynced, then `link(2)` to the name, or `<stem>-2<ext>` up to `-999` while
+//! `.upload-*` temp file (`O_EXCL`, mode `0o600`) filled in 64 KiB reads,
+//! hashed as they stream (memory stays one chunk), and fsynced, then `link(2)` to the name, or `<stem>-2<ext>` up to `-999` while
 //! taken; the temp file is removed on every path.
 //! Test: `save_links_without_overwriting_and_numbers_collisions`,
 //! `an_oversize_body_is_refused_and_nothing_is_written`.
@@ -112,7 +112,8 @@ fn fill_and_link(
     target: &str,
     name: &str,
 ) -> Result<Saved, AttachError> {
-    let mut all = Vec::new();
+    // #12029 P2h: hashed as it streams, so memory per upload is one chunk.
+    let mut digest = crate::sha256::Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     let mut got = 0u64;
     while got < want {
@@ -122,11 +123,12 @@ fn fill_and_link(
             return Err(store("upload ended before Content-Length bytes"));
         }
         got += read as u64;
-        all.extend_from_slice(&buf[..read]);
+        digest.update(&buf[..read]);
         out.write_all(&buf[..read]).map_err(os(tmp))?;
     }
     out.flush().map_err(os(tmp))?;
     out.sync_all().map_err(os(tmp))?;
+    let sha256 = digest.hex();
     let (stem, ext) = splitext(name);
     let (mut stored, mut n) = (name.to_owned(), 1);
     loop {
@@ -137,7 +139,7 @@ fn fill_and_link(
                     stored,
                     path,
                     size: got,
-                    sha256: crate::sha256::sha256_hex(&all),
+                    sha256,
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {

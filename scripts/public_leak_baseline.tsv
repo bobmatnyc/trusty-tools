@@ -146,6 +146,7 @@ crates/trusty-analyze/tests/on_demand.rs	EMAIL	1
 crates/trusty-analyze/tests/scoped_p95_bench.rs	OPERATOR_PATH	2
 crates/trusty-architect/src/classify/alerts.rs	ARCH_ID	1
 crates/trusty-architect/src/classify/matchers.rs	ARCH_ID	1
+crates/trusty-architect/src/dashboard/pyupdates/tests.rs	ARCH_ID	5
 crates/trusty-architect/src/dashboard/schema_check/pattern.rs	BRIEF_PATH	3
 crates/trusty-architect/src/dashboard/schema_check/tests.rs	BRIEF_PATH	5
 crates/trusty-architect/src/dashboard/tally.rs	HOSTNAME	1
@@ -172,6 +173,13 @@ crates/trusty-architect/tests/fixtures/dashboard/regen_dashboard.py	HOSTNAME	1
 crates/trusty-architect/tests/fixtures/parity/corpus.json	EMAIL	3
 crates/trusty-architect/tests/fixtures/parity/parse_pane.jsonl	EMAIL	2
 crates/trusty-architect/tests/fixtures/parity/regen.py	EMAIL	3
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cases-dir.json	ARCH_ID	5
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cases-jsonl.json	ARCH_ID	9
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cli-ingest-jsonl.json	ARCH_ID	4
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cli-list-docs-failed-jsonl.json	ARCH_ID	2
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cli-note-dir.json	ARCH_ID	1
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cli-note-jsonl.json	ARCH_ID	5
+crates/trusty-architect/tests/fixtures/replay/dashboard_updates/cli-note-noinbox-jsonl.json	ARCH_ID	4
 crates/trusty-architect/tests/self_ctx_ported.rs	OPERATOR_PATH	1
 crates/trusty-architect/tests/verbs_poll.rs	OPERATOR_PATH	2
 crates/trusty-browser/README.md	HOSTNAME	1

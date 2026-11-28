@@ -951,7 +951,13 @@ replayed in `tests/replay_dashboard_updates.rs` against
 `examples/replay_port.rs`, which hands each to the library's driver mirror
 (`dashboard::pyupdates::cases::replay`, `dashboard::pyattach::cases::replay_cases`).
 Every store, inbox line, schedule and upload body is synthetic: task ids are
-`Tq…` samples, sessions `pm-…`. No recording declares fakes.
+`Tq…` samples, sessions `pm-…`. No recording declares fakes. Every
+`ar-` id the public-leak `ARCH_ID` rule matches is the lint's `T01`
+placeholder, written with a trailing `@1127` or as a whole quoted value
+where the rule allows it. The cases no allowed form can carry (the id in parentheses,
+after `é`, before `_`, `é` or a capital, as a whole command-line argument,
+and quoted in the jsonl store's schema warning) are counted in
+`scripts/public_leak_baseline.tsv`.
 
 - `dashboard_updates/`: `driver.py`, copied beside `dashboard_updates.py`,
   `dashboard_store.py`, `dashboard_jsonl.py` and `dashboard_schema.py` as
