@@ -154,3 +154,7 @@ pub fn merge_settings_payload(slot: &mut Value, payload: &Value) {
 #[cfg(test)]
 #[path = "claude_sandbox_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "claude_sandbox_cleanup_tests.rs"]
+mod cleanup_tests;
