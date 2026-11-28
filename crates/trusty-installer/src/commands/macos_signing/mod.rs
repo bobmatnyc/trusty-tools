@@ -86,14 +86,17 @@
 //! `security find-identity`). `sign_binary` signs with `--options runtime
 //! --timestamp` only when `hardened` is `true` (see [`use_hardened_runtime`]),
 //! and `verify_signature` checks with `codesign --verify --deep --strict`.
-//! [`post_install_search`] / [`post_install_mpm`] are the fail-soft hooks
-//! `commands::install` calls after each member lands; `sign_set_strict` is the
+//! [`install_step`] is the one step `commands::install` runs to sign every
+//! installed trusty binary, reporting each one; [`post_install_guidance`] adds
+//! the no-certificate TCC guidance. `sign_set_strict` is the
 //! hard-failing primitive the standalone `tctl sign <target>` command
 //! (`commands::sign`) uses, which `scripts/install-trusty-search-signed.sh` now
 //! shells out to instead of duplicating codesign flags in bash. #11587:
 //! `trusty-secrets` joins as [`SECRETS_SET`], and `sign_set_strict` now reads
 //! each signature back and fails closed on an ad-hoc or wrong-team result
-//! (`strict`).
+//! (`strict`). #11587 (sign at install only): the browser,
+//! console, review and installer sets join, and both paths share
+//! `strict::sign_one`.
 //!
 //! Test: `tests` covers `binaries_for_set`, `codesign_identifier`,
 //! `use_hardened_runtime`, `identifier_migration_notice`,
@@ -189,6 +192,31 @@ pub const ANALYZE_SET: &str = "trusty-analyze";
 /// takes the explicit-only policy, and no automatic `tctl install` hook signs it.
 pub const SECRETS_SET: &str = "trusty-secrets";
 
+/// The `trusty-browser` signable set: `trusty-browser` and the
+/// `trusty-browser-mcp` binary the same `cargo install trusty-browser` places.
+///
+/// Why (#11587): both read one Keychain item (#11440), so both need the
+/// identity that item trusts. Both carry the identifier `com.trusty.browser`,
+/// the value `trusty-browser`'s own designated requirement pins
+/// (`crates/trusty-browser/src/codesign.rs`), so `install-service` /
+/// `install-host` find them already signed and never re-sign. trusty-browser
+/// signs itself with Hardened Runtime, so the automatic path uses it too.
+pub const BROWSER_SET: &str = "trusty-browser";
+
+/// The `trusty-console` signable set (one binary). #11587: it dials
+/// trusty-secrets; signed at install so no installed trusty binary stays ad-hoc.
+pub const CONSOLE_SET: &str = "trusty-console";
+
+/// The `trusty-review` signable set (one binary). #11587: same reason as
+/// [`CONSOLE_SET`].
+pub const REVIEW_SET: &str = "trusty-review";
+
+/// The `trusty-installer` signable set: `trusty-installer` and its `tctl`
+/// alias. #11587: same reason as [`CONSOLE_SET`]. Signing the running `tctl`
+/// is safe: `codesign` writes `<file>.cstemp` and renames it over the path, so
+/// the running process keeps its own inode.
+pub const INSTALLER_SET: &str = "trusty-installer";
+
 /// The master table: every signable binary → (its set, its codesign identifier).
 ///
 /// Why: PR #2657 review (MEDIUM) — `binaries_for_set` and `codesign_identifier`
@@ -252,7 +280,50 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     ("trusty-analyze", ANALYZE_SET, "com.trusty.trusty-analyze"),
     // #11587: one binary; see [`SECRETS_SET`] for why a stable identity matters.
     ("trusty-secrets", SECRETS_SET, "com.trusty.trusty-secrets"),
+    // #11587: one identifier for both, the one trusty-browser's requirement pins.
+    ("trusty-browser", BROWSER_SET, "com.trusty.browser"),
+    ("trusty-browser-mcp", BROWSER_SET, "com.trusty.browser"),
+    ("trusty-console", CONSOLE_SET, "com.trusty.trusty-console"),
+    ("trusty-review", REVIEW_SET, "com.trusty.trusty-review"),
+    (
+        "trusty-installer",
+        INSTALLER_SET,
+        "com.trusty.trusty-installer",
+    ),
+    ("tctl", INSTALLER_SET, "com.trusty.tctl"),
 ];
+
+/// The signable set `binary` belongs to, or `None` when it is not signable.
+///
+/// Why (#11587): the install step signs binaries by name, whatever member
+/// placed them, so it needs the reverse of [`binaries_for_set`].
+/// Test: `install_step::tests::signable_names_only_table_binaries`.
+pub fn set_of(binary: &str) -> Option<&'static str> {
+    SIGNABLE_BINARIES
+        .iter()
+        .find(|(b, _, _)| *b == binary)
+        .map(|(_, set, _)| *set)
+}
+
+/// Every signable binary name, in table order.
+///
+/// Why (#11587): the install step's sweep covers every installed trusty
+/// binary through this one list.
+/// Test: `install_step::tests::signable_names_only_table_binaries`.
+pub fn all_signable_binaries() -> Vec<&'static str> {
+    SIGNABLE_BINARIES.iter().map(|(b, _, _)| *b).collect()
+}
+
+/// Every distinct signable set name, in table order (#11587: for error text).
+pub fn signable_set_names() -> Vec<&'static str> {
+    let mut sets: Vec<&'static str> = Vec::new();
+    for (_, set, _) in SIGNABLE_BINARIES {
+        if !sets.contains(set) {
+            sets.push(set);
+        }
+    }
+    sets
+}
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
 ///
@@ -338,13 +409,15 @@ pub fn codesign_identifier(binary: &str) -> &'static str {
 /// What: `explicit` (the operator directly ran `tctl sign <target>`, or the
 /// wrapper script which shells out to it) → always `true`. Automatic
 /// (`tctl install`'s fail-soft hook, `explicit = false`) → `true` for
-/// [`MPM_SET`] and [`ASSISTANTS_SET`]; `false` for [`SEARCH_SET`], [`MEMORY_SET`],
-/// and [`ANALYZE_SET`] until ONNX-under-Hardened-Runtime is verified (see the
-/// tracking issue referenced in PR #2657).
+/// [`MPM_SET`], [`ASSISTANTS_SET`] and (#11587) [`BROWSER_SET`]; `false` for
+/// every other set, [`SEARCH_SET`], [`MEMORY_SET`] and [`ANALYZE_SET`] among
+/// them, until ONNX-under-Hardened-Runtime is verified (see the tracking issue
+/// referenced in PR #2657).
 ///
 /// Test: `tests::hardened_runtime_policy`.
 pub fn use_hardened_runtime(set: &str, explicit: bool) -> bool {
-    explicit || set == MPM_SET || set == ASSISTANTS_SET
+    // #11587: BROWSER_SET signs itself with Hardened Runtime already.
+    explicit || set == MPM_SET || set == ASSISTANTS_SET || set == BROWSER_SET
 }
 
 /// Parse the Developer ID Application identity out of `security
@@ -522,8 +595,8 @@ pub fn identifier_migration_notice(binary: &str, old_identifier: &str) -> Option
 /// Print [`identifier_migration_notice`] to stderr when `path`'s current
 /// on-disk identifier differs from the canonical one for `binary`.
 ///
-/// Why: Shared by both signing call sites ([`sign_set_strict`] and the
-/// fail-soft [`post_install_signed_set`]) so the warning fires regardless of
+/// Why: Shared by both signing call sites ([`sign_set_strict`] and, #11587,
+/// [`install_step`]) so the warning fires regardless of
 /// which path re-signs an already-signed binary. Always printed (not gated by
 /// `json`) — this is safety-critical information about an existing TCC grant
 /// breaking, not routine narration.
@@ -617,8 +690,9 @@ impl std::fmt::Display for SignSetError {
         match self {
             SignSetError::UnknownSet(set) => write!(
                 f,
-                // #11587: trusty-secrets is a signable set.
-                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', 'trusty-assistants', or 'trusty-secrets')"
+                "unknown signable set '{set}' (expected one of: {})",
+                // #11587: the list comes from the table, so it cannot go stale.
+                signable_set_names().join(", ")
             ),
             SignSetError::NoCertificate => {
                 write!(f, "no Developer ID Application certificate found")
@@ -816,94 +890,49 @@ pub fn app_data_guidance(binary_path: &str, existed_before: bool) -> String {
 /// Test: `tests::signing_persistence_tip_mentions_sign_identity_and_tctl_sign`,
 /// `tests::signing_persistence_tip_names_every_signable_set`.
 pub fn signing_persistence_tip() -> &'static str {
-    // #11587: trusty-secrets joins the advertised targets.
+    // #11587: every set the install step signs is an advertised target.
     "Tip: install a Developer ID Application certificate (or set TRUSTY_SIGN_IDENTITY) \
-     and run `tctl sign <trusty-search|trusty-mpm|trusty-memory|trusty-analyze|trusty-assistants|trusty-secrets>` to make \
+     and run `tctl sign <trusty-search|trusty-mpm|trusty-assistants|trusty-memory|trusty-analyze|\
+     trusty-secrets|trusty-browser|trusty-console|trusty-review|trusty-installer>` to make \
      these grants persist across every future reinstall."
 }
 
-/// Run the fail-soft post-install signing hook for a named set.
+/// The no-certificate TCC guidance for a named set, after an install.
 ///
 /// Why: Shared by [`post_install_search`] and [`post_install_mpm`] so the
-/// probe/sign/guidance sequence is written once.
+/// probe/guidance sequence is written once. #11587: signing moved to the
+/// shared install step (`install_step`), which signs, attests and reports each
+/// binary; this hook no longer signs.
 ///
-/// What: On macOS: probes for a Developer ID cert; if found, warns on any
-/// identifier migration ([`warn_on_identifier_change`]), then signs + verifies
-/// every present binary in `set` — with Hardened Runtime gated per
-/// [`use_hardened_runtime`] (`explicit = false`: on for [`MPM_SET`], off for
-/// [`SEARCH_SET`]) — and returns a success note; on cert-probe failure,
-/// returns the set-appropriate guidance (FDA for search, App Data TCC for mpm)
-/// using the set's first binary's path. Never aborts the caller. Returns
-/// `None` under `json` (never any output in machine-readable mode) or when
-/// there is nothing to report; callers own WHEN the returned text is printed
-/// (demo-critical fix: this used to `eprintln!` directly, interleaving noisy
-/// multi-line guidance into the middle of the live per-component checklist —
-/// it is now data the caller can defer to a post-install summary instead).
+/// What: On macOS: probes for a Developer ID cert; when none is found, returns
+/// the set-appropriate guidance (FDA for search, App Data TCC for mpm) naming
+/// `primary_path`. `None` when a cert is found, under `json`, or for an
+/// unknown set. Callers own WHEN the returned text is printed (demo-critical
+/// fix: deferred past the live per-component checklist).
 ///
 /// `existed_before` and `primary_path` (#3846 code-critic MEDIUM fix) MUST
 /// come from the caller's `install_one`/`InstalledBinary` result — the
-/// CONCRETE path/replace-state observed on the outcome branch actually
-/// taken (prebuilt `install_dir`, or the `cargo install` fallback's bin
-/// dir) — never re-derived here as `install_dir.join(primary)`. Re-deriving
-/// against a single fixed `install_dir` silently named/tested the wrong
-/// file whenever the fallback branch fired, since that branch's real
-/// destination is a different directory. `install_dir` is still used below,
-/// unchanged, for the SEPARATE signing loop that walks every binary in
-/// `set` when a cert IS found — that loop is unaffected by this fix.
-///
-/// `existed_before` selects the fresh-install vs. reinstall guidance variant
-/// (see [`fda_guidance`] / [`app_data_guidance`]). The `bool` half of the
-/// returned tuple is `true` only when the note is no-cert guidance (never
-/// for a signed-OK note or a codesign-warning note), so the caller can print
-/// [`signing_persistence_tip`] once, only when it is actually relevant.
+/// CONCRETE path/replace-state observed on the outcome branch actually taken —
+/// never re-derived from a fixed install directory. `existed_before` selects
+/// the fresh-install vs. reinstall guidance variant (see [`fda_guidance`] /
+/// [`app_data_guidance`]). The `bool` half of the returned tuple is `true`
+/// for guidance, so the caller prints [`signing_persistence_tip`] once.
 #[cfg(target_os = "macos")]
 fn post_install_signed_set(
-    install_dir: &std::path::Path,
     set: &str,
     json: bool,
     existed_before: bool,
     primary_path: &std::path::Path,
 ) -> Option<(String, bool)> {
-    if json {
+    if json || binaries_for_set(set).is_empty() {
         return None;
     }
-    let binaries = binaries_for_set(set);
-    if binaries.is_empty() {
-        return None;
-    }
-    let hardened = use_hardened_runtime(set, false);
 
     match has_developer_id_cert() {
-        Some(identity) => {
-            let mut signed_ok = true;
-            let mut warnings = Vec::new();
-            for &name in &binaries {
-                let path = install_dir.join(name);
-                if !path.exists() {
-                    // A bundled binary (e.g. embedderd) may not be present; skip gracefully.
-                    continue;
-                }
-                warn_on_identifier_change(&path, name);
-                if let Err(e) = sign_binary(&path, &identity, hardened) {
-                    warnings.push(format!(
-                        "trusty-installer: warning: codesign failed for {}: {e}",
-                        path.display()
-                    ));
-                    signed_ok = false;
-                }
-            }
-            if signed_ok {
-                Some((
-                    format!(
-                        "{set}: signed with Developer ID. The macOS grant will persist across \
-                         all future reinstalls."
-                    ),
-                    false,
-                ))
-            } else {
-                Some((warnings.join("\n"), false))
-            }
-        }
+        // #11587: `install_step` signs and attests every binary and reports each
+        // one; this hook keeps only the no-certificate TCC guidance. Its old
+        // "signed with Developer ID" note never read the signature back.
+        Some(_) => None,
         None => {
             let path_str = primary_path.to_string_lossy();
             let guidance = if set == MPM_SET {
@@ -916,77 +945,46 @@ fn post_install_signed_set(
     }
 }
 
-/// Run post-install codesign and FDA guidance for trusty-search.
+/// The no-certificate TCC guidance for `member` after it installs: Full Disk
+/// Access for trusty-search, App Data for trusty-mpm, `None` for any other.
 ///
-/// Why: After trusty-search (and trusty-embedderd) are installed the installer
-/// should immediately sign them (if a cert is available) or report the FDA
-/// re-grant guidance so the operator knows what to do next.
-///
-/// What: On macOS delegates to `post_install_signed_set` for [`SEARCH_SET`],
-/// returning its note/guidance text instead of printing directly (see that
-/// function's doc), plus a `bool` telling the caller whether
-/// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
-/// `existed_before` / `primary_path` — see `post_install_signed_set`; both
-/// MUST come from the caller's `InstalledBinary` result for the CONCRETE
-/// outcome branch taken, never re-derived from `install_dir` alone.
-///
-/// Test: `tests::fda_guidance_fresh_install_has_no_remove_step` /
-/// `tests::fda_guidance_reinstall_has_remove_and_readd` (pure); signing
-/// itself is not invoked in tests (side-effecting).
+/// Why: #11587 folded the former `post_install_search` / `post_install_mpm`
+/// hooks into this one call once signing moved to `install_step`; only the
+/// guidance they printed when no certificate exists is left.
+/// What: On macOS delegates to `post_install_signed_set` for [`SEARCH_SET`] or
+/// [`MPM_SET`]; the `bool` says whether to print [`signing_persistence_tip`].
+/// `existed_before` / `primary_path` MUST come from the caller's
+/// `InstalledBinary` result for the concrete outcome branch taken. On
+/// non-macOS: `None`.
+/// Test: `tests::fda_guidance_fresh_install_has_no_remove_step`,
+/// `tests::app_data_guidance_fresh_and_reinstall_variants` (pure); the cert
+/// probe is not invoked in tests (it runs `security`).
 #[must_use]
-pub fn post_install_search(
-    install_dir: &std::path::Path,
+pub fn post_install_guidance(
+    member: &str,
     json: bool,
     existed_before: bool,
     primary_path: &std::path::Path,
 ) -> Option<(String, bool)> {
+    if member != SEARCH_SET && member != MPM_SET {
+        return None;
+    }
     #[cfg(target_os = "macos")]
     {
-        post_install_signed_set(install_dir, SEARCH_SET, json, existed_before, primary_path)
+        post_install_signed_set(member, json, existed_before, primary_path)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (install_dir, json, existed_before, primary_path); // suppress unused warnings on non-macOS
-        None
-    }
-}
-
-/// Run post-install codesign and App-Data-TCC guidance for trusty-mpm.
-///
-/// Why: Owner-authorized scope extension (#2558, 2026-07-14) — `tm` needs the
-/// same stable-identity signing as trusty-search so the App Data TCC prompt
-/// does not re-fire on every `cargo install` rebuild.
-///
-/// What: On macOS delegates to `post_install_signed_set` for [`MPM_SET`],
-/// returning its note/guidance text instead of printing directly (see that
-/// function's doc), plus a `bool` telling the caller whether
-/// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
-/// `existed_before` / `primary_path` — see `post_install_signed_set`; both
-/// MUST come from the caller's `InstalledBinary` result for the CONCRETE
-/// outcome branch taken, never re-derived from `install_dir` alone.
-///
-/// Test: `tests::app_data_guidance_fresh_and_reinstall_variants` (pure);
-/// signing itself is not invoked in tests (side-effecting).
-#[must_use]
-pub fn post_install_mpm(
-    install_dir: &std::path::Path,
-    json: bool,
-    existed_before: bool,
-    primary_path: &std::path::Path,
-) -> Option<(String, bool)> {
-    #[cfg(target_os = "macos")]
-    {
-        post_install_signed_set(install_dir, MPM_SET, json, existed_before, primary_path)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (install_dir, json, existed_before, primary_path); // suppress unused warnings on non-macOS
+        let _ = (json, existed_before, primary_path); // unused off macOS
         None
     }
 }
 
 // #11587: the strict sign -> verify -> attest pipeline.
 mod strict;
+
+// #11587: the install-time sign step over every installed trusty binary.
+pub mod install_step;
 
 #[cfg(test)]
 mod tests;

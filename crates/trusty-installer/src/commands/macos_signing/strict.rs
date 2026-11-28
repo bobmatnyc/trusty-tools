@@ -79,7 +79,7 @@ pub(crate) fn codesign_verify(codesign: &OsStr, path: &Path) -> anyhow::Result<(
 /// Read `codesign -dvv <path>` (it writes its summary to stderr); a non-zero
 /// exit or an empty summary is an error, never an empty success.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn codesign_display(codesign: &OsStr, path: &Path) -> anyhow::Result<String> {
+pub(crate) fn codesign_display(codesign: &OsStr, path: &Path) -> anyhow::Result<String> {
     let out = std::process::Command::new(codesign)
         .arg("-dvv")
         .arg(path)
@@ -165,6 +165,37 @@ pub fn attest_developer_id(display: &str, expected_team: Option<&str>) -> Result
     }
 }
 
+/// Sign one binary, verify it, read the signature back and attest it.
+///
+/// Why (#11587): the per-binary step both signing paths share — `tctl sign`'s
+/// strict set loop and the install step (`install_step`) — so neither can
+/// report a binary signed that `codesign -dvv` shows ad-hoc.
+/// What: [`codesign_sign`], [`codesign_verify`], `codesign -dvv`, then
+/// [`attest_developer_id`] against [`expected_team_id`]`(identity)`. The first
+/// failure is the `Err`, naming the path and the cause.
+/// Test: `tests::sign_set_with_fails_closed_on_every_bad_signature`,
+/// `install_step::tests::sign_binaries_reports_each_binary_on_its_own`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn sign_one(
+    codesign: &OsStr,
+    path: &Path,
+    identity: &str,
+    hardened: bool,
+) -> anyhow::Result<()> {
+    codesign_sign(codesign, path, identity, hardened)?;
+    codesign_verify(codesign, path)?;
+    // #11587: `--verify --strict` passes an ad-hoc signature; read it back.
+    let display = codesign_display(codesign, path)?;
+    attest_developer_id(&display, expected_team_id(identity)).map_err(|reason| {
+        anyhow::anyhow!(
+            "{} is not Developer-ID signed after codesign: {reason}. Refusing to report \
+             success; check `codesign -dvv {}`",
+            path.display(),
+            path.display()
+        )
+    })
+}
+
 /// Sign, verify and attest every present binary of `set` with `codesign`.
 ///
 /// Why (#11587): the strict `tctl sign` path in one platform-neutral function,
@@ -190,7 +221,6 @@ pub(crate) fn sign_set_with(
         return Err(SignSetError::UnknownSet(set.to_owned()));
     }
     let hardened = use_hardened_runtime(set, true);
-    let expected_team = expected_team_id(identity);
 
     let mut signed = Vec::new();
     for name in binaries {
@@ -198,18 +228,7 @@ pub(crate) fn sign_set_with(
         if !path.exists() {
             continue;
         }
-        codesign_sign(codesign, &path, identity, hardened).map_err(SignSetError::Sign)?;
-        codesign_verify(codesign, &path).map_err(SignSetError::Sign)?;
-        // #11587: `--verify --strict` passes an ad-hoc signature; read it back.
-        let display = codesign_display(codesign, &path).map_err(SignSetError::Sign)?;
-        attest_developer_id(&display, expected_team).map_err(|reason| {
-            SignSetError::Sign(anyhow::anyhow!(
-                "{} is not Developer-ID signed after codesign: {reason}. Refusing to report \
-                 success; check `codesign -dvv {}`",
-                path.display(),
-                path.display()
-            ))
-        })?;
+        sign_one(codesign, &path, identity, hardened).map_err(SignSetError::Sign)?;
         signed.push(path);
     }
     if signed.is_empty() {

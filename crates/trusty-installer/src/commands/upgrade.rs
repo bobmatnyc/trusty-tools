@@ -40,6 +40,9 @@ use tokio::runtime::Handle;
 use trusty_progress::{Component, ComponentTracker};
 
 use super::content_step::{CommandRunner, ContentStepOutcome, ProcessRunner};
+use super::macos_signing::install_step::InstallSigner as Signer;
+#[path = "upgrade_verify.rs"]
+mod upgrade_verify;
 use super::deployment_record::{finish, Finisher, Placement};
 use super::progress_ui::{is_tty, narrator, prompt_yes_no};
 use super::runtime::with_runtime;
@@ -49,6 +52,7 @@ use super::update_engine::{
     decide_apply, gather_candidates, ApplyDecision, ApplyInputs, UpdateCandidate,
 };
 use crate::output::render_json;
+use upgrade_verify::{placed_state_error, verify_applied};
 
 /// One member's upgrade outcome for the report.
 ///
@@ -501,11 +505,13 @@ async fn apply_all(
     // #3554: the real $PATH, resolved once, used by every non-daemon
     // candidate's shadow-detection check below (mirrors `install::install_all`).
     let path_env = std::env::var_os("PATH").unwrap_or_default();
+    // #11587: one identity probe per run; every placed binary signs before restart.
+    let mut signer = Signer::probe();
 
     for c in candidates {
         let _ = narr.info(&format!("upgrading {} → {}", c.crate_name, c.latest));
 
-        let result = upgrade_one(c, &path_env).await;
+        let result = upgrade_one(c, &path_env, &mut signer).await;
 
         match result {
             Ok(d) => {
@@ -603,6 +609,7 @@ async fn apply_all(
 async fn upgrade_one(
     c: &UpdateCandidate,
     path_env: &std::ffi::OsStr,
+    signer: &mut Signer,
 ) -> anyhow::Result<UpgradeDetail> {
     use crate::download::{self, Outcome};
 
@@ -641,7 +648,7 @@ async fn upgrade_one(
             // #4964: no `cargo install` on this branch — only activation.
             let applied = verify_applied(c, Some(&version), &reported)
                 .map_err(|e| placed_state_error(e, &bin_path, &reported))?;
-            finish_member(c, applied, bin_path, path_env).await
+            finish_member(c, applied, bin_path, path_env, signer).await
         }
         // #5518: verification failed — abort this candidate instead of
         // upgrading it from source. `apply_all`'s Err arm already renders this
@@ -675,7 +682,7 @@ async fn upgrade_one(
             // #8642: cargo could not advance it either → an error, not "ok".
             let applied = verify_applied(c, None, &reported)
                 .map_err(|e| placed_state_error(e, &bin_path, &reported))?;
-            finish_member(c, applied, bin_path, path_env).await
+            finish_member(c, applied, bin_path, path_env, signer).await
         }
     }
 }
@@ -684,7 +691,9 @@ async fn upgrade_one(
 ///
 /// Why: both install branches of [`upgrade_one`] end the same way once the
 /// placed binary has proved its version; one tail keeps them from drifting.
-/// What: a daemon is restarted via [`restart_daemon_member`] (#4964 — the
+/// What: #11587: every binary the member places is signed first, through
+/// `signer`; a failed sign is `Err` and restarts nothing. Then a daemon is
+/// restarted via [`restart_daemon_member`] (#4964 — the
 /// restart is new on the cargo branch too; it used to be a manual hint
 /// reported as success); a non-daemon runs `shadow_check::detect_all` (#3554).
 /// The detail names installed → applied and, when they differ, crates.io's
@@ -696,20 +705,23 @@ async fn finish_member(
     applied: String,
     bin_path: std::path::PathBuf,
     path_env: &std::ffi::OsStr,
+    signer: &mut Signer,
 ) -> anyhow::Result<UpgradeDetail> {
     let summary = upgrade_summary(c, &applied);
+    // #11587: sign the placed binaries first; a failed sign restarts nothing.
+    let binaries = trusty_common::bin_resolve::installed_binaries(&c.crate_name);
+    let not_signed = |why: String| anyhow::anyhow!("{why}; {} was not restarted", c.binary);
     if c.daemon {
-        let restarted = restart_daemon_member(c)?;
+        let restarted = signer
+            .sign_then_start(&bin_path, &binaries, || restart_daemon_member(c))
+            .map_err(not_signed)??;
         let detail = format!("{summary}; {restarted}");
         return Ok(UpgradeDetail::ok(detail, applied, bin_path));
     }
-    let shadows = shadow_check::detect_all(
-        &trusty_common::bin_resolve::installed_binaries(&c.crate_name),
-        &bin_path,
-        Some(&applied),
-        path_env,
-    )
-    .await;
+    signer
+        .sign_member(&bin_path, &binaries)
+        .map_err(anyhow::Error::msg)?;
+    let shadows = shadow_check::detect_all(&binaries, &bin_path, Some(&applied), path_env).await;
     let ok = UpgradeDetail::ok(summary, applied, bin_path);
     Ok(UpgradeDetail::from_shadows(ok, shadows))
 }
@@ -728,72 +740,6 @@ fn upgrade_summary(c: &UpdateCandidate, applied: &str) -> String {
         s.push_str(&format!(" (crates.io latest {})", c.latest));
     }
     s
-}
-
-/// Check that a placed binary is the release expected and advances the install.
-///
-/// Why (#8642): `tctl upgrade` placed tga 8.0.0 over 8.0.0 and reported it
-/// upgraded; neither branch compared what landed against what was installed.
-/// What: parses the version from the `--version` line. With `tag_version`
-/// (the prebuilt branch) it must equal the tag. With an installed version it
-/// must be strictly newer (semver; string inequality when either does not
-/// parse). Returns the applied version.
-/// Test: `tests::verify_applied_rejects_a_version_that_does_not_match_the_tag`,
-/// `tests::verify_applied_rejects_a_non_advancing_upgrade`,
-/// `tests::verify_applied_accepts_an_advance_that_lags_latest`.
-fn verify_applied(
-    c: &UpdateCandidate,
-    tag_version: Option<&str>,
-    reported_line: &str,
-) -> anyhow::Result<String> {
-    let name = &c.crate_name;
-    let reported = super::update_engine::extract_version_from_line(reported_line)
-        .ok_or_else(|| anyhow::anyhow!("{name}: `--version` printed {reported_line:?}"))?;
-    if let Some(tag) = tag_version {
-        anyhow::ensure!(
-            reported == tag,
-            "{name}: placed binary reports {reported}, but the release tag is {tag}"
-        );
-    }
-    if let Some(installed) = c.installed.as_deref() {
-        let advanced = match (
-            semver::Version::parse(&reported),
-            semver::Version::parse(installed),
-        ) {
-            (Ok(now), Ok(was)) => now > was,
-            _ => reported != installed,
-        };
-        anyhow::ensure!(
-            advanced,
-            "{name} did not advance: installed {installed}, now reports {reported} \
-             (crates.io latest {}); no prebuilt or cargo build newer than installed",
-            c.latest
-        );
-    }
-    Ok(reported)
-}
-
-/// Name the on-disk state a failed post-placement check leaves behind.
-///
-/// Why (#8642 review): both install branches replace the binary BEFORE
-/// [`verify_applied`] runs, and neither keeps the previous copy. An error that
-/// said only "did not advance" or "tag mismatch" implied nothing changed on
-/// disk, when the old binary is already gone.
-/// What: appends the replaced path and the version that binary now reports
-/// (or its raw `--version` line when none parses) to the verification error.
-/// Test: `tests::placed_state_error_names_the_replaced_path_and_version`.
-fn placed_state_error(
-    err: anyhow::Error,
-    bin_path: &std::path::Path,
-    reported_line: &str,
-) -> anyhow::Error {
-    let now = super::update_engine::extract_version_from_line(reported_line)
-        .unwrap_or_else(|| format!("{reported_line:?}"));
-    anyhow::anyhow!(
-        "{err}. {} was already replaced and now holds {now}; the previous \
-         binary was not kept",
-        bin_path.display()
-    )
 }
 
 /// Activate a just-placed daemon binary by restarting the member (#4964).

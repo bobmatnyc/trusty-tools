@@ -879,10 +879,13 @@ Hardened Runtime's library validation has not been empirically verified. So
 stability depends on `--identifier` + Team ID, never on `--options runtime`,
 so the split costs nothing here.
 
-🟡 **No automatic post-install hook.** `tctl install trusty-memory` does not
-sign, matching `trusty-agents` (#4277) — `post_install_search` /
-`post_install_mpm` are the only hooks `commands::install` calls. Run the
-script or `tctl sign trusty-memory` after a local-source install.
+🟡 **Signed at install (#11587).** `tctl install` signs every installed trusty
+binary in its signing table, trusty-memory included, through one step
+(`macos_signing::install_step`), and prints one line per binary. On macOS,
+`tm install` signs trusty-browser with `tctl sign trusty-browser`. Signing
+happens at install time only: no CI or release workflow signs anything
+(#11587). After a local-source install, run the script or
+`tctl sign trusty-memory`.
 
 ### Signed Install: trusty-analyze
 

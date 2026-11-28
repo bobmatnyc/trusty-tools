@@ -137,6 +137,8 @@ pub enum AnalyzeCoreArg {
 /// `trusty-memory-mcp-bridge`; `Analyze` → the
 /// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06);
 /// `Secrets` → the `trusty-secrets` set, a single binary (#11587).
+/// #11587 (sign at install): `Browser`, `Console`, `Review` and `Installer`
+/// name the sets `tctl install` now signs as well.
 ///
 /// Test: `cli_tests::parse_sign` round-trips each value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -161,6 +163,18 @@ pub enum SignTargetArg {
     /// `trusty-secrets` (single binary), signed after a registry install. (#11587)
     #[value(name = "trusty-secrets")]
     Secrets,
+    /// `trusty-browser` and `trusty-browser-mcp`, identifier `com.trusty.browser`. (#11587)
+    #[value(name = "trusty-browser")]
+    Browser,
+    /// `trusty-console` (single binary). (#11587)
+    #[value(name = "trusty-console")]
+    Console,
+    /// `trusty-review` (single binary). (#11587)
+    #[value(name = "trusty-review")]
+    Review,
+    /// `trusty-installer` and its `tctl` alias. (#11587)
+    #[value(name = "trusty-installer")]
+    Installer,
 }
 
 impl SignTargetArg {
@@ -184,6 +198,11 @@ impl SignTargetArg {
             SignTargetArg::Analyze => "trusty-analyze",
             // #11587: the trusty-secrets set.
             SignTargetArg::Secrets => "trusty-secrets",
+            // #11587: the sets the install sign step added.
+            SignTargetArg::Browser => "trusty-browser",
+            SignTargetArg::Console => "trusty-console",
+            SignTargetArg::Review => "trusty-review",
+            SignTargetArg::Installer => "trusty-installer",
         }
     }
 }
@@ -419,8 +438,8 @@ pub enum Commands {
     /// Developer-ID codesign a signable binary set — macOS only. (#2558)
     ///
     /// The single source of truth for the FDA/App-Data-TCC persistent-signing
-    /// story: `tctl install` already runs this automatically (fail-soft) after
-    /// `trusty-search` / `trusty-mpm` land, but this standalone verb lets an
+    /// story: `tctl install` already signs every installed trusty binary
+    /// (#11587), but this standalone verb lets an
     /// operator (re-)sign binaries built from local source
     /// (`cargo install --path …`) directly, and is what
     /// `scripts/install-trusty-search-signed.sh` shells out to instead of

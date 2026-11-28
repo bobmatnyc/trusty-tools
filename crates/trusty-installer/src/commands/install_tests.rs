@@ -1801,3 +1801,44 @@ fn install_records_and_audits_what_it_placed_10607() {
     let _ = report().finish_deployment(&placements, true, &finish);
     assert_eq!(*seen.borrow(), [(1, true), (1, false)]);
 }
+
+/// Why (#11587): the install contract for the sign step. A binary that fails
+/// to sign while an identity is configured must fail the run, and the footer
+/// must name it; a host with no identity is a supported install and only warns.
+/// What: folds one `Failed`, then one `NoIdentity`, outcome into an all-ok
+/// report; asserts exit 2 with a `signing:` footer line for the first and
+/// exit 0 for the second; JSON omits `signing` when it is empty.
+/// Test: This is the test.
+#[test]
+fn a_failed_signing_flips_all_ok_but_no_identity_does_not() {
+    use crate::commands::macos_signing::install_step::{BinarySigning, SignStatus};
+    let signing = |status, detail: &str| {
+        vec![BinarySigning {
+            binary: "trusty-secrets".to_owned(),
+            path: std::path::PathBuf::from("/bin/trusty-secrets"),
+            status,
+            detail: detail.to_owned(),
+        }]
+    };
+    let report = || InstallReport::build(vec![outcome("trusty-mpm", true, "installed")]);
+    let empty = serde_json::to_value(report()).expect("serialize");
+    assert!(empty.get("signing").is_none(), "{empty}");
+
+    let failed = report().with_signing(signing(SignStatus::Failed, "wrong Team ID"));
+    assert!(!failed.all_ok);
+    assert_eq!(failed.exit_code(), 2);
+    let lines = install_report::summary_lines(&failed);
+    assert!(
+        lines
+            .errors
+            .iter()
+            .any(|l| l.contains("signing: trusty-secrets: wrong Team ID")),
+        "{lines:?}"
+    );
+
+    let warned = report().with_signing(signing(SignStatus::NoIdentity, ""));
+    assert!(warned.all_ok);
+    assert_eq!(warned.exit_code(), 0);
+    let json = serde_json::to_value(&warned).expect("serialize");
+    assert_eq!(json["signing"][0]["status"], "no_identity", "{json}");
+}

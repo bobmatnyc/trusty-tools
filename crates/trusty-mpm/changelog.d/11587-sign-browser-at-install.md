@@ -1,0 +1,3 @@
+Fixed
+
+- On macOS, `tm install` and `tm fleet init` sign the trusty-browser and trusty-browser-mcp binaries they just installed with `tctl sign trusty-browser` and print one line per binary; a browser already in place is not signed again, so the browser no longer waits for `install-service` or `install-host` to be signed. A binary reads as signed only when tctl exits 0. A failed sign with a signing identity configured makes the command exit non-zero; no `tctl`, a `tctl` too old to sign the browser (exit 2) or no identity configured (exit 3) is a warning only, so a clean-config `tm install` exits 0 (Refs #11587).

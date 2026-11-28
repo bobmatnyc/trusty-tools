@@ -1,8 +1,7 @@
 //! `tctl sign <target>` — standalone Developer-ID signing entry point (#2558).
 //!
-//! Why: `tctl install` already signs `trusty-search`/`trusty-embedderd` and
-//! (since #2558's scope extension) `trusty-mpm` as a fail-soft post-install
-//! hook (`macos_signing::post_install_search` / `post_install_mpm`), but an
+//! Why: `tctl install` already signs every installed trusty binary through
+//! its install step (`macos_signing::install_step`, #11587), but an
 //! operator who just built a binary from local source (`cargo install --path`)
 //! or wants to (re-)sign an already-installed binary without a full `tctl
 //! install` run needs a direct, HARD-failing entry point — this is that
@@ -82,8 +81,9 @@ pub fn sign_error_exit_code(err: &macos_signing::SignSetError) -> i32 {
 pub fn run(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     if macos_signing::binaries_for_set(target).is_empty() {
         eprintln!(
-            // #11587: trusty-secrets is a signable target.
-            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', 'trusty-assistants', or 'trusty-secrets')"
+            // #11587: the target list comes from the signing table.
+            "tctl sign: unknown target '{target}' (expected one of: {})",
+            macos_signing::signable_set_names().join(", ")
         );
         return EXIT_UNKNOWN_TARGET;
     }

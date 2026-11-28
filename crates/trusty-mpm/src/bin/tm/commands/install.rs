@@ -273,10 +273,13 @@ pub(crate) async fn install(
     // hooks fire even in stripped-PATH environments.
     let hooks = install_claude_hooks();
 
-    // See G0b auto-setup: failures print and never abort the install.
-    crate::commands::auto_setup::run_and_print();
+    // See G0b auto-setup: a server failure prints and never aborts the install.
+    // #11587: a failed trusty-browser sign does fail it, after the hooks verdict.
+    let signing = crate::commands::auto_setup::run_and_print();
 
-    println!("{}", install_outcome(hooks)?);
+    let done = install_outcome(hooks)?;
+    anyhow::Context::context(signing, "install incomplete")?;
+    println!("{done}");
     Ok(())
 }
 

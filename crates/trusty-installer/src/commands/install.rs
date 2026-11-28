@@ -49,18 +49,22 @@ use super::bundles::expand_bundles;
 use super::install_gate::{decide_install_gate, GateInputs, InstallGate};
 use super::progress_ui::{narrator, prompt_yes_no};
 use super::runtime::block_on;
-use super::service_bootstrap::{bootstrap_enabled, bootstrap_member_service, NO_SERVICE_ENV};
+use super::service_bootstrap::{bootstrap_enabled, NO_SERVICE_ENV};
 use super::shadow_check;
 use super::stable_set::{select_members_transitive, StableMember};
 use crate::output::render_json;
 
 #[path = "install_report.rs"]
 mod install_report;
+#[cfg(test)]
+use install_report::plans_mpm_supervisor_bootstrap;
 use install_report::{
-    plans_mpm_supervisor_bootstrap, plans_service_bootstrap, print_dry_run, print_human_summary,
-    report_with_content, selection_error, selection_notes, short_reason, InstallOutcome,
-    InstallReport,
+    print_dry_run, print_human_summary, report_with_content, selection_error, selection_notes,
+    short_reason, InstallOutcome, InstallReport,
 };
+// #11587: the member start the sign gate wraps.
+#[path = "install_start.rs"]
+mod install_start;
 
 /// Handle `tctl install [<members>…]`.
 ///
@@ -423,6 +427,8 @@ async fn install_all(
     // #5805: via the shared `install_dir_or_fallback`, so this, `install_one`,
     // and the `--dry-run` preview cannot name three different directories.
     let install_dir = crate::download::install_dir_or_fallback();
+    // #11587: the one install sign step; the identity is probed once per run.
+    let mut signer = super::macos_signing::install_step::InstallSigner::probe();
 
     // #3554: the real $PATH, resolved once, used by every member's
     // shadow-detection check below.
@@ -463,140 +469,42 @@ async fn install_all(
                     m.binary.clone(),
                     binary_size(&installed.path),
                 ));
-                // Phase 7: bootstrap trusty-mpm supervisor plist.
-                // #3527: gated behind the SAME `--no-service` /
-                // `TCTL_NO_SERVICE_BOOTSTRAP` decision as every other daemon —
-                // previously this ran unconditionally and could tear down /
-                // downgrade a live production supervisor regardless of the
-                // opt-out. A refusal from the downgrade guard inside
-                // `install_mpm_supervisor` is informational and leaves the
-                // running daemon untouched.
-                // #3554: passes `installed.path` — the CONCRETE binary this
-                // install just health-gated — as the supervisor's candidate
-                // version source, never a PATH-shadowable name lookup.
-                // #8415: a failed plist write or reload fails the install (it
-                // leaves the old job running); only the guard's refusal is info.
-                let mut supervisor_outcome = None;
-                if m.crate_name == "trusty-mpm" {
-                    if plans_mpm_supervisor_bootstrap(m, service_enabled) {
-                        let verdict = super::plist_bootstrap::supervisor_bootstrap_verdict(
-                            force,
-                            &installed.path,
-                        );
-                        let msg = verdict.note();
-                        if live {
-                            let prefix = if verdict.is_failure() {
-                                "error"
-                            } else {
-                                "info"
-                            };
-                            checklist.note(&format!("{prefix}: {msg}"));
-                        } else if verdict.is_failure() {
-                            let _ = narr.error(&msg);
-                        } else {
-                            let _ = narr.info(&msg);
-                        }
-                        supervisor_outcome = Some(verdict.service_outcome());
-                    } else {
-                        let msg = "trusty-mpm supervisor bootstrap skipped (--no-service / \
-                                    TCTL_NO_SERVICE_BOOTSTRAP)";
-                        if live {
-                            checklist.note(&format!("info: {msg}"));
-                        } else {
-                            let _ = narr.info(msg);
-                        }
-                    }
-                }
-                // Phase 8: codesign + FDA guidance for trusty-search (single
-                // source of truth: `macos_signing`, unified with
-                // `scripts/install-trusty-search-signed.sh` and `tctl sign` — #2558).
-                // PR #2657 review: this automatic hook signs WITHOUT Hardened
-                // Runtime (matching pre-PR behavior) because trusty-search's
-                // bundled ONNX runtime dylib load path under Hardened Runtime
-                // is not yet empirically verified — see
-                // `macos_signing::use_hardened_runtime`. `tctl sign trusty-search`
-                // / the wrapper script (explicit operator action) DO sign with
-                // Hardened Runtime, also matching pre-PR behavior. Demo-critical
-                // fix: the guidance text is now collected, not printed inline —
-                // see `post_install_notes` above.
-                // #3846 code-critic MEDIUM fix: `existed_before` and the
-                // guidance's interpolated binary path now come from
-                // `installed` (the CONCRETE path/replace-state `install_one`
-                // observed on the actual outcome branch taken — prebuilt
-                // `install_dir` or the cargo-fallback bin dir), never a fixed
-                // `install_dir` guess that names the wrong file/directory
-                // whenever the cargo-install fallback fires.
-                if m.crate_name == "trusty-search" {
-                    if let Some((note, needs_tip)) = super::macos_signing::post_install_search(
-                        &install_dir,
-                        json,
-                        installed.existed_before,
-                        &installed.path,
-                    ) {
-                        post_install_notes.push(note);
-                        show_signing_tip |= needs_tip;
-                    }
-                }
-                // Phase 8b: codesign + App-Data-TCC guidance for trusty-mpm.
-                // Owner-authorized scope extension (#2558, 2026-07-14): `tm`
-                // reads other apps' $HOME containers (Claude config dirs, tmux
-                // state), so macOS's App Data TCC category re-prompts on every
-                // ad-hoc-signed rebuild the same way FDA does for trusty-search;
-                // the same stable-identity Developer-ID signing fixes it. Unlike
-                // trusty-search, trusty-mpm loads no dylibs, so this automatic
-                // hook DOES sign with Hardened Runtime (low risk either way).
-                // Demo-critical fix: deferred, same as trusty-search above.
-                if m.crate_name == "trusty-mpm" {
-                    if let Some((note, needs_tip)) = super::macos_signing::post_install_mpm(
-                        &install_dir,
-                        json,
-                        installed.existed_before,
-                        &installed.path,
-                    ) {
-                        post_install_notes.push(note);
-                        show_signing_tip |= needs_tip;
-                    }
-                }
-                // Phase 7b (#2556): bootstrap the launchd plist for each shared
-                // daemon (search/memory/analyze/review/console) via its own
-                // `<binary> service install`, so `tctl start` has a plist to
-                // load. trusty-mpm (OwnVerb, handled above) and tga (non-daemon)
-                // are excluded. Fail-soft for the BINARY install phase (the
-                // member is still reported `ok: true` — the binary is on PATH
-                // and healthy) but the REPORT must not lie: a genuine bootstrap
-                // failure is routed through the error register (not the info
-                // one) and folds into `service_ok` / `all_ok` / the exit code
-                // (#2566 review — `--json` previously reported `all_ok: true`
-                // even when every daemon's service bootstrap had failed).
-                let (service_ok, service_detail) = if let Some(outcome) = supervisor_outcome {
-                    outcome
-                } else if plans_service_bootstrap(m, service_enabled) {
-                    // #4964 Phase 0.2: pass the CONCRETE path this install just
-                    // wrote. Passing a bare name let `which::which` pick a
-                    // stale earlier-on-PATH copy, whose `service install` bakes
-                    // its OWN `current_exe()` into `ProgramArguments[0]` — so
-                    // launchd's KeepAlive then respawned the stale binary at
-                    // every boot, forever, with nothing to rewrite the plist.
-                    let action = bootstrap_member_service(&m.binary, Some(&installed.path));
-                    let note = action.note(&m.binary);
-                    // #4470: classified by the enum itself, never re-derived
-                    // here. An inline `matches!` at this call site is exactly
-                    // how `RefusedForeignPort` came to report `service_ok:
-                    // true` — the guard refusing, the daemon not running, and
-                    // `tctl install` exiting 0 with `all_ok: true`.
-                    let is_failure = action.is_failure();
-                    if live {
-                        let prefix = if is_failure { "error" } else { "info" };
-                        checklist.note(&format!("{prefix}: {note}"));
-                    } else if is_failure {
-                        let _ = narr.error(&note);
-                    } else {
-                        let _ = narr.info(&note);
-                    }
-                    (!is_failure, note)
-                } else {
-                    InstallOutcome::service_not_attempted()
+                // #11587: sign every signable binary this member placed, then
+                // start its supervisor or service (Phase 7 / 7b) only after a
+                // sign that did not fail, so no daemon runs ad-hoc or fail-open.
+                let ctx = install_start::StartCtx {
+                    live,
+                    narr: &narr,
+                    checklist: &checklist,
+                    service_enabled,
+                    force,
                 };
+                let (service_ok, service_detail) = signer
+                    .sign_then_start(&installed.path, &m.binaries(), || {
+                        install_start::start_member(m, &installed.path, &ctx)
+                    })
+                    .unwrap_or_else(|why| {
+                        // The sign failure itself gates the exit via `with_signing`.
+                        if !install_start::plans_start(m, service_enabled) {
+                            return InstallOutcome::service_not_attempted();
+                        }
+                        let msg = format!("{}: service not started: {why}", m.crate_name);
+                        ctx.say(true, &msg);
+                        (false, msg)
+                    });
+                // Phase 8: the no-certificate FDA (trusty-search) / App-Data
+                // TCC (trusty-mpm) guidance, deferred like every note above.
+                // #3846 code-critic MEDIUM fix: `existed_before` and the path
+                // come from `installed`, the CONCRETE outcome branch taken.
+                if let Some((note, needs_tip)) = super::macos_signing::post_install_guidance(
+                    &m.crate_name,
+                    json,
+                    installed.existed_before,
+                    &installed.path,
+                ) {
+                    post_install_notes.push(note);
+                    show_signing_tip |= needs_tip;
+                }
                 // Phase 9 (#3554): after a successful, health-gated install,
                 // check whether a plain shell invocation of `m.binary` would
                 // actually run the binary we just installed, or a stale copy
@@ -700,6 +608,15 @@ async fn install_all(
         }
     }
 
+    // #11587: then every other installed trusty binary (trusty-secrets,
+    // trusty-browser, …) another install placed in the same directory.
+    signer.sweep(&install_dir);
+    let signing = signer.into_outcomes();
+    if !json {
+        let (lines, no_identity) = super::macos_signing::install_step::report_lines(&signing);
+        post_install_notes.extend(lines);
+        show_signing_tip |= no_identity;
+    }
     // The component table (rustup-style) summarising what landed.
     if !json {
         let _ = tracker.print();
@@ -718,7 +635,7 @@ async fn install_all(
     }
     let runner = super::content_step::ProcessRunner::fetch();
     (
-        report_with_content(outcomes, &placed, &runner, json),
+        report_with_content(outcomes, &placed, &runner, json).with_signing(signing),
         placements,
     )
 }
