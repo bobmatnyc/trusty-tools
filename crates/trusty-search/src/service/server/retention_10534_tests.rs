@@ -369,6 +369,7 @@ async fn an_index_loaded_or_made_live_mid_pass_is_kept() {
     use crate::core::registry::IndexId;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+    let mut evicted = Vec::new();
     for loaded in [true, false] {
         let id = if loaded {
             "s-race-loaded"
@@ -405,13 +406,12 @@ async fn an_index_loaded_or_made_live_mid_pass_is_kept() {
         }
         drop(writer);
 
-        assert_eq!(pass.await.expect("pass"), 0, "loaded={loaded}");
-        assert!(rig.registered(id), "loaded={loaded}: the row is kept");
-        assert!(
-            rig.marker(id).exists(),
-            "loaded={loaded}: the corpus is kept"
-        );
+        let count = pass.await.expect("pass");
+        if count != 0 || !rig.registered(id) || !rig.marker(id).exists() {
+            evicted.push(id);
+        }
     }
+    assert!(evicted.is_empty(), "evicted mid-pass: {evicted:?}");
 }
 
 /// Why: #10534 — grep, global grep, chunk pages and the fan-out are use.
@@ -422,6 +422,7 @@ async fn an_index_loaded_or_made_live_mid_pass_is_kept() {
 #[serial_test::serial]
 async fn a_grep_chunk_or_fan_out_read_keeps_an_idle_worktree_index() {
     use crate::core::registry::IndexId;
+    let mut evicted = Vec::new();
     for read in ["grep", "grep-all", "chunks", "fan-out"] {
         let wall = crate::core::project_map::now_unix();
         let stamped = |id: &str, root: &Path, idle: u64| PersistedIndex {
@@ -470,11 +471,13 @@ async fn a_grep_chunk_or_fan_out_read_keeps_an_idle_worktree_index() {
             .registry
             .remove_and_get(&IndexId::new("s1".to_string()));
 
-        assert_eq!(
-            evict_idle_at(&rig.state, now, wall).await,
-            0,
-            "{read}: a read within 30 days keeps the index"
-        );
-        assert!(rig.registered("s1") && rig.marker("s1").exists(), "{read}");
+        let count = evict_idle_at(&rig.state, now, wall).await;
+        if count != 0 || !rig.registered("s1") || !rig.marker("s1").exists() {
+            evicted.push(read);
+        }
     }
+    assert!(
+        evicted.is_empty(),
+        "read within 30 days, still evicted: {evicted:?}"
+    );
 }
