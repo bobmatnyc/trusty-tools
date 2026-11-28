@@ -88,9 +88,10 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
 ///
 /// Why: #12077 — tm never writes the sandbox into a Claude settings file; an
 /// opted-in launch carries it inline (`crate::core::claude_sandbox`).
-/// What: runs the one-time project-key cleanup
-/// ([`crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch`]), then
-/// returns `Ok`. It writes no sandbox policy into any tier and no role
+/// What: runs the one-time cleanup pass
+/// ([`crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch`]) over the
+/// project tier, tm's user tier under `config_dir`, and the role record when
+/// [`crate::core::claude_sandbox::sandbox_opted_in`] is false; then returns `Ok`. It writes no sandbox policy into any tier and no role
 /// record, and refuses no config dir. Every launch
 /// path (`tm launch`/`tm connect`, `tm run`, the managed spawn, resume and
 /// relaunch, the divert worker) reaches the sandbox only through here.
@@ -105,11 +106,18 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
 pub fn apply_launch_sandbox(
     role: SandboxRole,
     inputs: &SandboxInputs,
-    _config_dir: Option<&Path>,
+    config_dir: Option<&Path>,
 ) -> Result<(), SandboxSettingsError> {
-    // #12077 slice 3: remove tm's 1.14.14/1.14.15 project keys once; a failure
-    // is logged and never refuses the launch. Runs whatever the opt-in switch.
-    crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch(&inputs.workspace);
+    // #12077 slice 3: remove tm's 1.14.14/1.14.15 keys once; a failure is
+    // logged and never refuses the launch. Runs whatever the opt-in switch.
+    // #12077 slice 3b: `config_dir` is the user tier 1.14.15 wrote; the switch
+    // decides only whether the role record is deleted.
+    crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch(
+        &inputs.workspace,
+        config_dir,
+        &inputs.home,
+        crate::core::claude_sandbox::sandbox_opted_in(),
+    );
     tracing::debug!(
         ?role,
         workspace = %inputs.workspace.display(),
