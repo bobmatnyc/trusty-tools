@@ -93,7 +93,9 @@ pub(crate) async fn start_session(
     // preserve the original in-place deploy-and-start behavior.
     // #11077: the sandbox home under `TRUSTY_SANDBOX=1`, as launch/connect use.
     let home = crate::commands::launch_home::launch_home()?;
-    let fw = start_framework_paths(home.as_deref());
+    // #12048: a malformed `install.toml` refuses the start before any deploy.
+    let fw = start_framework_paths(home.as_deref())
+        .map_err(|err| anyhow::anyhow!("refusing to deploy the framework: {err}"))?;
     // #9999: the user tier `CLAUDE_CONFIG_DIR` names, as `tm validate --repair` uses.
     let config_dir = trusty_mpm::core::session_record::claude_config_dir_override();
     start_session_in_place(daemon, &path, &fw, home.as_deref(), config_dir.as_deref()).await
@@ -103,16 +105,18 @@ pub(crate) async fn start_session(
 ///
 /// Why (#11077): `FrameworkPaths::default()` reads the process home, so a
 /// sandboxed start wrote `crate_config_root()` outside the sandbox.
-/// What: `FrameworkPaths::under_home(home)`, the layout `tm launch` reads;
-/// no home keeps `default()`.
+/// What: `FrameworkPaths::try_for_home(home)`, the layout `tm launch` reads;
+/// a malformed `install.toml` is an error, so the start deploys nothing.
 /// Test: `sandboxed_session_start_paths_stay_under_the_sandbox_home`,
-/// `session_start_deploys_under_the_config_dir_launch_reads_12048`.
+/// `session_start_deploys_under_the_config_dir_launch_reads_12048`,
+/// `session_start_refuses_a_malformed_install_toml_12048`.
 pub(crate) fn start_framework_paths(
     home: Option<&std::path::Path>,
-) -> trusty_mpm::core::paths::FrameworkPaths {
-    use trusty_mpm::core::paths::FrameworkPaths;
-    // #12048: `under` ignored `install.toml` `config_dir`; launch honours it.
-    home.map_or_else(FrameworkPaths::default, FrameworkPaths::under_home)
+) -> Result<trusty_mpm::core::paths::FrameworkPaths, trusty_common::install_paths::InstallPathsError>
+{
+    // #12048: `under` ignored `install.toml` `config_dir`, and the lenient
+    // readers fell back to `$HOME` on a malformed file; a writer fails closed.
+    trusty_mpm::core::paths::FrameworkPaths::try_for_home(home)
 }
 
 /// The launch spec `tm session start` starts its in-place pane with (#8405,

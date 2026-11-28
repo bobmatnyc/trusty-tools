@@ -266,6 +266,22 @@ async fn launch_session_deploys_under_the_config_dir_launch_reads_12048() {
     );
 }
 
+/// #12048 Fail-Open Check: a malformed `install.toml` refuses the TUI launch
+/// before prep deploys anything under `<home>`.
+#[tokio::test]
+async fn launch_session_refuses_a_malformed_install_toml_12048() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let home = tmp.path().join("home");
+    let install = "config_dir = \"/elsewhere\"\nbogus = 1\n";
+    let err = launch_under_install_toml_12048(&home, install)
+        .await
+        .expect_err("a malformed install.toml refuses the launch");
+    assert!(err.to_string().contains("install.toml"), "{err}");
+    for written in [".trusty-mpm", ".claude", ".claude.json"] {
+        assert!(!home.join(written).exists(), "prep wrote <home>/{written}");
+    }
+}
+
 #[tokio::test]
 async fn connect_session_errors_when_daemon_unreachable() {
     // Why: `tm connect` registers via `POST /api/v1/sessions/connect`
