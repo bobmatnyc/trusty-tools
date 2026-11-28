@@ -6,8 +6,8 @@ use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
     is_stale_statusline_command, preseed_workspace_trust, resolve_palace_slug,
-    resolve_statusline_binary_with, write_auto_memory_off, write_enabled_plugins,
-    write_output_style, write_project_hooks, write_status_line,
+    resolve_statusline_binary_with, write_enabled_plugins, write_output_style, write_project_hooks,
+    write_status_line,
 };
 use super::*;
 use crate::core::content_source::test_support::rc;
@@ -224,34 +224,34 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
     );
 }
 
-/// The global hook cleanup reaches the real home, on an OVERRIDDEN managed root.
+/// The launch never writes the real home's `settings.json`, on an OVERRIDDEN
+/// managed root (#5544, #12077).
 ///
-/// Why (#5544): `--root` / `TRUSTY_MPM_ROOT` / config relocate the framework
-/// INSTALL (`core/standalone/load.rs` passes the result straight to
-/// `for_managed_project`), and an earlier revision derived the home from that
-/// base — so an override outside the home retargeted this cleanup at a file that
-/// does not exist. A missing file is success by contract, so the operator's real
-/// global `trusty-memory` hooks were never removed and nothing reported it.
-/// Asserting the EFFECT rather than a resolved path is what makes that
-/// indistinguishable-from-clean case visible.
-///
-/// FAILS BEFORE THE FIX: the seeded entry survives the cleanup untouched.
-///
-/// What: seeds `<home>/.claude/settings.json` with a `trusty-memory hooks fire`
-/// handler, builds the managed layout over a root deliberately outside any home,
-/// runs the cleanup with that home, and asserts the entry is gone.
+/// Why: #5544 pinned that this cleanup reached the real home under a relocated
+/// install. #12077 reverses the target: tm does not write the generic
+/// `~/.claude/settings.json`, so with no config dir named the strip leaves its
+/// hooks alone.
+/// What: seeds `<home>/.claude/settings.json` with tm's own old
+/// `prompt-context` group, prepares a session over a root outside any home, and
+/// asserts its hooks are unchanged.
 /// Test: this function IS the test.
 #[test]
-fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
+fn global_hook_cleanup_never_writes_the_real_home_under_an_overridden_root_12077() {
     let home = tempdir().unwrap();
     let workspace = tempdir().unwrap();
     let settings = home.path().join(".claude").join("settings.json");
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
     std::fs::write(
         &settings,
-        r#"{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"trusty-memory hooks fire UserPromptSubmit"}]}]}}"#,
+        r#"{"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"trusty-memory prompt-context","timeout":60}]}]}}"#,
     )
     .unwrap();
+    let hooks_of = |path: &std::path::Path| -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap()).unwrap()
+            ["hooks"]
+            .clone()
+    };
+    let before = hooks_of(&settings);
 
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(
         std::path::Path::new("/opt/tm-roots/team-a/.trusty-mpm"),
@@ -261,23 +261,12 @@ fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
     prepare_session_with_home(&fw, workspace.path(), None, true, Some(home.path()))
         .expect("prep succeeds");
 
-    let after = std::fs::read_to_string(&settings).expect("settings still readable");
-    assert!(
-        !after.contains("trusty-memory hooks fire"),
-        "the global trusty-memory hook entry must actually be removed — a cleanup \
-         pointed at a nonexistent file returns Ok(()) and looks identical (#5544). \
-         Settings after: {after}"
-    );
-    assert!(
-        !workspace
-            .path()
-            .join(".claude")
-            .join("settings.json")
-            .exists()
-            || !std::fs::read_to_string(workspace.path().join(".claude").join("settings.json"))
-                .unwrap_or_default()
-                .contains("trusty-memory hooks fire"),
-        "and the overridden install root must not have redirected it into the workspace"
+    // The user-tier statusLine seed (#12127 row 10, slice 5) still writes this
+    // file; the hook strip must not.
+    assert_eq!(
+        hooks_of(&settings),
+        before,
+        "#12077: the strip must leave the home file's hooks as they were"
     );
 }
 
@@ -935,9 +924,14 @@ fn prepare_session_sets_output_style() {
 
     let settings_path = project.join(".claude").join("settings.json");
     assert!(settings_path.exists(), ".claude/settings.json must exist");
-    let value: serde_json::Value =
+    // #12127: the style rides the `--settings` flag tier, not the file.
+    let file: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
+    assert!(file.get("outputStyle").is_none(), "{file}");
+    assert_eq!(
+        effective_settings(project)["outputStyle"],
+        serde_json::json!("trusty-mpm")
+    );
 }
 
 #[test]
@@ -961,10 +955,8 @@ fn prepare_session_disables_auto_memory() {
     )
     .expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(
         value["autoMemoryEnabled"],
         serde_json::json!(false),
@@ -1010,15 +1002,20 @@ fn prepare_session_keeps_auto_memory_off_when_trusty_memory_is_down() {
     )
     .expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(
         value["autoMemoryEnabled"],
         serde_json::json!(false),
         "auto memory is off for every session, trusty-memory down included: {value}"
     );
+    // #12127: the retired fallback's `true` is not the value the cleanup owns,
+    // so the file keeps it and the flag tier turns auto memory off.
+    let file: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file["autoMemoryEnabled"], serde_json::json!(true), "{file}");
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm"),
@@ -1049,10 +1046,8 @@ fn prepare_session_writes_configured_style() {
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm-teacher")
@@ -1086,10 +1081,8 @@ fn prepare_session_explicit_style_overrides_config() {
     )
     .expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm-research")
@@ -1114,10 +1107,8 @@ fn prepare_session_unknown_style_falls_back_to_default() {
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
 }
 
@@ -1134,12 +1125,13 @@ fn write_output_style_preserves_existing_keys() {
     )
     .unwrap();
 
-    write_output_style(project, None).expect("write succeeds");
+    write_output_style(project).expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
-    assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
+    // #12127: the writer no longer sets the style, so the operator's stays.
+    assert_eq!(value["outputStyle"], serde_json::json!("old"));
     assert_eq!(value["theme"], serde_json::json!("dark"));
 }
 
@@ -1151,7 +1143,8 @@ fn write_auto_memory_off_disables_auto_memory() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_auto_memory_off(project).expect("write succeeds");
+    merge_settings_key(project, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
+        .expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1174,7 +1167,8 @@ fn write_auto_memory_off_preserves_existing_keys() {
     )
     .unwrap();
 
-    write_auto_memory_off(project).expect("write succeeds");
+    merge_settings_key(project, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
+        .expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -1198,7 +1192,8 @@ fn write_auto_memory_off_overrides_an_enabled_value() {
     )
     .unwrap();
 
-    write_auto_memory_off(project).expect("write succeeds");
+    merge_settings_key(project, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
+        .expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -1214,7 +1209,7 @@ fn write_output_style_seeds_attribution() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_output_style(project, None).expect("write succeeds");
+    write_output_style(project).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1246,7 +1241,7 @@ fn write_output_style_preserves_operator_attribution() {
     )
     .unwrap();
 
-    write_output_style(project, None).expect("write succeeds");
+    write_output_style(project).expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
@@ -1264,38 +1259,20 @@ fn write_output_style_preserves_operator_attribution() {
 }
 
 #[test]
-fn write_output_style_sets_active_style() {
-    // Why: HR-4 — an explicitly resolved active style id must be written into
-    // settings.json so a native-capable Claude Code applies it.
+fn write_output_style_writes_no_output_style_12127() {
+    // #12127: `outputStyle` rides the launch's `--settings` flag tier; the
+    // project-file writer sets the spinner tips and nothing named the style.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_output_style(project, Some("trusty-mpm-research")).expect("write succeeds");
+    write_output_style(project).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        value["outputStyle"],
-        serde_json::json!("trusty-mpm-research")
-    );
-}
-
-#[test]
-fn write_output_style_empty_falls_back_to_default() {
-    // Why: a blank/whitespace id must not blank the outputStyle key; it falls
-    // back to the professional default.
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-
-    write_output_style(project, Some("   ")).expect("write succeeds");
-
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
+    assert!(value.get("outputStyle").is_none(), "{value}");
+    assert_eq!(value["spinnerTipsEnabled"], serde_json::json!(true));
 }
 
 #[test]
@@ -1306,7 +1283,7 @@ fn write_output_style_sets_spinner_tips() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_output_style(project, None).expect("write succeeds");
+    write_output_style(project).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -1634,13 +1611,13 @@ fn remove_global_hooks_removes_trusty_memory_entries() {
           "hooks": {
             "PostToolUse": [
               { "matcher": "*", "hooks": [ { "type": "command", "command": "bash track.sh" } ] },
-              { "matcher": "Write|Edit|Bash", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.post-tool-use" } ] }
+              { "matcher": "Write|Edit|Bash", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.post-tool-use", "timeout": 60 } ] }
             ],
             "Stop": [
-              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.stop" } ] }
+              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.stop", "timeout": 60 } ] }
             ],
             "UserPromptSubmit": [
-              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.user-prompt" } ] }
+              { "matcher": "", "hooks": [ { "type": "command", "command": "trusty-memory hooks fire claude.user-prompt", "timeout": 60 } ] }
             ]
           }
         }"#,
@@ -2189,10 +2166,8 @@ fn prepare_session_manifest_sets_default_style() {
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm-research")
@@ -2231,10 +2206,8 @@ fn prepare_session_config_style_overrides_manifest() {
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the `--settings` flag tier; read what the launch runs with.
+    let value = effective_settings(project);
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm-teacher"),

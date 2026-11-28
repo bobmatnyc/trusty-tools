@@ -114,8 +114,12 @@ pub enum DeploymentGap {
     SettingsMissing,
     /// `.claude/settings.json` exists but is not valid JSON.
     SettingsMalformed(String),
-    /// `.claude/settings.json` has no `outputStyle` key set.
+    /// Neither the launch-settings record nor a settings file sets
+    /// `outputStyle`.
     OutputStyleKeyMissing,
+    /// #12077: the launch-settings record that carries `outputStyle` exists
+    /// but cannot be read or parsed — carries the error, which names the file.
+    LaunchSettingsRecordUnreadable(String),
     /// `outputStyle` names an id unknown to the bundled style catalog.
     OutputStyleUnknownId(String),
     /// The resolved style id's file is missing or empty under
@@ -170,8 +174,12 @@ impl DeploymentGap {
                 format!(".claude/settings.json is not valid JSON: {detail}")
             }
             Self::OutputStyleKeyMissing => {
-                "settings.json has no outputStyle key configured".to_string()
+                "no outputStyle on the launch-settings record or in settings.json".to_string()
             }
+            Self::LaunchSettingsRecordUnreadable(detail) => format!(
+                "the launch-settings record that carries outputStyle is unreadable: {detail} \
+                 — fix or delete that file, then re-run `tm validate --repair`"
+            ),
             Self::OutputStyleUnknownId(id) => {
                 format!("outputStyle {id:?} is not a known trusty-mpm style")
             }
@@ -467,9 +475,12 @@ fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     }
 }
 
-/// Probe `.claude/settings.json` for a resolvable `outputStyle`, a configured
-/// `hooks` key, and (#7849) the toggle-driven hook groups this project's
-/// current config asks for.
+/// Probe for a resolvable `outputStyle`, a configured `hooks` key in
+/// `.claude/settings.json`, and (#7849) the toggle-driven hook groups this
+/// project's current config asks for.
+///
+/// #12077: `outputStyle` is read from the launch-settings record first, then
+/// from the file; see [`effective_output_style`].
 fn validate_settings(
     fw: &FrameworkPaths,
     settings_dir: &Path,
@@ -496,17 +507,18 @@ fn validate_settings(
         }
     };
 
-    match value.get("outputStyle").and_then(|v| v.as_str()) {
-        None => gaps.push(DeploymentGap::OutputStyleKeyMissing),
-        Some(id) => match OUTPUT_STYLES.iter().find(|s| s.id == id) {
-            None => gaps.push(DeploymentGap::OutputStyleUnknownId(id.to_string())),
+    match effective_output_style(fw, &value) {
+        Err(detail) => gaps.push(DeploymentGap::LaunchSettingsRecordUnreadable(detail)),
+        Ok(None) => gaps.push(DeploymentGap::OutputStyleKeyMissing),
+        Ok(Some(id)) => match OUTPUT_STYLES.iter().find(|s| s.id == id) {
+            None => gaps.push(DeploymentGap::OutputStyleUnknownId(id)),
             Some(style) => {
                 let style_path = settings_dir.join("output-styles").join(style.file_name);
                 let deployed = std::fs::metadata(&style_path)
                     .map(|m| m.len() > 0)
                     .unwrap_or(false);
                 if !deployed {
-                    gaps.push(DeploymentGap::OutputStyleFileMissing(id.to_string()));
+                    gaps.push(DeploymentGap::OutputStyleFileMissing(id));
                 }
             }
         },
@@ -549,6 +561,51 @@ fn validate_settings(
     for (event, command) in group_gaps.stale {
         gaps.push(DeploymentGap::ProjectHookGroupStale(event, command));
     }
+}
+
+/// The `outputStyle` a launch in `fw`'s project runs with (#12077).
+///
+/// Why: a 4a launch delivers `outputStyle` on the launch-settings record and
+/// writes it into no settings file, so a probe of the file alone reported a
+/// gap no repair could close, and every managed spawn logged "deployment
+/// incomplete".
+/// What: the record's value (the `--settings` flag tier outranks every file),
+/// else `settings` (the parsed `settings.json`), else the project's
+/// `settings.local.json`, which the launch leaves to win
+/// (`launch_keys_for`). `Ok(None)` when none sets it.
+///
+/// # Errors
+///
+/// The record's read or parse error, as text naming the file. It is a gap,
+/// never a pass and never a fall-through to the file's value.
+///
+/// Test: `a_record_output_style_closes_the_key_gap_12077`,
+/// `a_record_output_style_still_needs_its_style_file_12077`,
+/// `an_unreadable_launch_record_is_a_gap_never_a_pass_12077`.
+fn effective_output_style(
+    fw: &FrameworkPaths,
+    settings: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    let style = |value: &serde_json::Value| {
+        value
+            .get(crate::core::session_launch::launch_keys::OUTPUT_STYLE_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let project = fw.claude_home_dir();
+    let record = crate::core::session_launch::read_launch_keys(&project)
+        .map_err(|e| e.to_string())?
+        .map(serde_json::Value::Object);
+    let local = || {
+        std::fs::read_to_string(project.join(".claude").join("settings.local.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    };
+    Ok(record
+        .as_ref()
+        .and_then(style)
+        .or_else(|| style(settings))
+        .or_else(|| local().as_ref().and_then(style)))
 }
 
 /// The outcome of [`validate_and_repair`].

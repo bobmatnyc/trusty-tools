@@ -36,7 +36,8 @@
 //! What: [`RepairMode`], the [`RepairStep`] outcome model, and the repairs
 //! `--fix` drives — [`repair_build_tree_binary`] (#7262, the repoint that runs
 //! first), [`repair_hooks_contamination`], [`repair_missing_hook_group`]
-//! (#7490 — runs after that strip and restores what a launch would write),
+//! (#7490 — runs after that strip; #12077: reports the gap and refuses, as tm
+//! does not write the project file),
 //! [`repair_push_guard`], [`repair_output_style`] (#5866 — the one check whose
 //! remedy string named a command with no such step), and (via
 //! [`crate::core::skill_repair`]) the skill redeploy — plus
@@ -230,38 +231,48 @@ pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<R
 /// cannot drift onto a check name the report does not emit.
 /// What: the string `hooks_missing_tm_group`, as
 /// `daemon::doctor_hooks_hygiene` publishes it.
-/// Test: `missing_group_repair_merges_the_sessionstart_group_back`.
+/// Test: `missing_group_repair_never_writes_the_project_file_12077`.
 const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
 
-/// Merge the tm hook lifecycle groups back into a project settings file that
-/// is missing one (issue #7490).
+/// Why the missing-group repair writes nothing, and what restores the group
+/// (#12077 row 9a).
+///
+/// Test: `missing_group_refusal_names_the_launch_that_restores_the_guard_12077`.
+fn missing_group_refusal(project_dir: &Path) -> String {
+    format!(
+        "tm does not write `.claude/settings.json` (#12077). The project's next tm launch \
+         re-renders tm's hook group, which restores the guard (`tm hook --pm-guard`) and the \
+         other tm hooks; start one with `tm launch {}`",
+        project_dir.display()
+    )
+}
+
+/// Report the tm hook lifecycle groups a project settings file is missing
+/// (issue #7490), and refuse to write them (#12077).
+///
+/// #12077: tm does not write the generic `<project>/.claude/settings.json`, so
+/// this repair no longer merges the group back. Until hook delivery moves to a
+/// tm-owned surface (#12127 slice 8), the project's next managed `tm` launch
+/// re-renders it; the step says so.
 ///
 /// Why: `hooks_missing_tm_group` reports an event `tm hook` never fires for,
 /// and nothing else puts it back — `prepare_session` is the only writer and no
 /// resume or relaunch reached it before #7490. The operator's alternative was
 /// a hand-edit of `.claude/settings.json`.
 ///
-/// This runs AFTER [`repair_hooks_contamination`] in the driver, deliberately.
-/// That pass STRIPS a build-tree `<exe> hook` entry (#10565: in a provisioned
-/// file, nothing else), including ones this pass exists to restore, so running
-/// first would report a merge the strip then undid. Running last means a managed project ends the `--fix` in the
-/// state its next launch would write, rather than with PM lifecycle hooks
-/// offline until then.
+/// This runs AFTER [`repair_hooks_contamination`] in the driver, so it reports
+/// the gap a build-tree strip (#10565) leaves behind.
 /// What: one step for `<project>/.claude/settings.json` when
 /// [`crate::core::session_launch::missing_lifecycle_hook_events`] or (#7849)
 /// [`crate::core::session_launch::project_hook_group_gaps`] names at least one
 /// gap — no step for a complete file, a missing file, or one tm never
-/// provisioned. Applying calls
-/// [`crate::core::session_launch::ensure_project_hooks`], the SAME merge a
-/// launch runs: tm's own prior entries are replaced by identity, every other
-/// entry (the `trusty-memory inbox-check` under `SessionStart`) is preserved,
-/// and the file is snapshotted before the atomic write. A refusal to resolve
-/// an installed binary surfaces as [`StepStatus::Refused`], never a silent
-/// skip.
-/// Test: `missing_group_repair_merges_the_sessionstart_group_back`,
+/// provisioned. The step is [`StepStatus::Refused`] in both modes, naming the
+/// `tm launch` that restores the guard, and the file is never written.
+/// Test: `missing_group_repair_never_writes_the_project_file_12077`,
+/// `missing_group_refusal_names_the_launch_that_restores_the_guard_12077`,
 /// `missing_group_repair_dry_run_changes_nothing`,
 /// `missing_group_repair_is_silent_for_a_complete_file`,
-/// `missing_group_repair_closes_a_toggle_driven_gap`.
+/// `missing_group_repair_reports_a_toggle_driven_gap`.
 pub fn repair_missing_hook_group(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
     repair_missing_hook_group_with(&fw, project_dir, None, mode)
@@ -285,7 +296,7 @@ pub(crate) fn repair_missing_hook_group_with(
     fw: &crate::core::paths::FrameworkPaths,
     project_dir: &Path,
     exe_override: Option<&Path>,
-    mode: RepairMode,
+    _mode: RepairMode,
 ) -> Vec<RepairStep> {
     let path = project_dir.join(".claude").join("settings.json");
     let Some(val) = std::fs::read_to_string(&path)
@@ -297,11 +308,10 @@ pub(crate) fn repair_missing_hook_group_with(
     let mut gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
     // #7849: the lifecycle triad was the whole gate, so a toggle-driven group —
     // the one `hooks_missing_tm_group` now also reports — was a finding `--fix`
-    // could never close. The merge below already writes it; only this gate was
-    // blind to it. Appended rather than merged-and-sorted so the lifecycle
+    // could never close. #12077: the step reports it (and refuses). Appended rather than merged-and-sorted so the lifecycle
     // events keep the order the pre-#7849 message used.
-    // An unresolvable hook binary yields no toggle events here on purpose: this
-    // step's own apply arm would refuse for that same reason, and the verdict
+    // An unresolvable hook binary yields no toggle events here on purpose: the
+    // verdict
     // for an unverifiable hook set belongs to `tm validate`'s
     // `ProjectHookDiagnosticIncomplete`, not to a repair step that cannot act.
     for (event, _) in
@@ -316,26 +326,10 @@ pub(crate) fn repair_missing_hook_group_with(
     if gaps.is_empty() {
         return Vec::new();
     }
-    let what = format!("merge the tm hook group back under [{}]", gaps.join(", "));
-    let status = match mode {
-        RepairMode::DryRun => StepStatus::Planned,
-        RepairMode::Apply => {
-            match crate::core::session_launch::ensure_project_hooks_with(
-                fw,
-                project_dir,
-                exe_override,
-            ) {
-                Ok(()) => StepStatus::Applied { backup: None },
-                // #7490: an unresolvable installed binary is the fail-closed
-                // rule working (#7244), not a failure — a step that wrote
-                // nothing on purpose must not render like one that broke.
-                Err(e @ crate::core::session_launch::PrepError::HookExe { .. }) => {
-                    StepStatus::Refused(e.to_string())
-                }
-                Err(e) => StepStatus::Failed(e.to_string()),
-            }
-        }
-    };
+    // #12077 row 9a: the step names the gap; the refusal names the launch.
+    let what = format!("tm hook group missing under [{}]", gaps.join(", "));
+    // #12077: never written here, in either mode; the launch re-renders it.
+    let status = StepStatus::Refused(missing_group_refusal(project_dir));
     vec![RepairStep {
         check: MISSING_GROUP_CHECK,
         path,

@@ -299,8 +299,12 @@ pub(crate) struct WorkerSandbox<'a> {
 /// [`spawn_worker_at`]. #12077: enforcement is off, so that step writes and
 /// refuses nothing; with no home resolved it is skipped. When `opted_in`, the
 /// agent policy rides inline on the worker's argv as `--settings '<json>'`,
-/// and an opt-in with no home is refused before the worker starts.
-/// Test: `a_worker_starts_without_a_config_dir_or_over_a_local_override_12077`,
+/// and an opt-in with no home is refused before the worker starts. #12127:
+/// the launch keys recorded for the workspace join that one payload, and a
+/// record that cannot be read refuses the worker.
+/// Test: `a_worker_carries_the_recorded_launch_keys_12127`,
+/// `a_worker_with_a_malformed_record_is_refused_12127`,
+/// `a_worker_starts_without_a_config_dir_or_over_a_local_override_12077`,
 /// `a_worker_runs_with_no_sandbox_written_12077`,
 /// `a_worker_runs_with_no_home_12077`,
 /// `an_opted_in_worker_carries_the_agent_sandbox_inline_12077`,
@@ -336,9 +340,21 @@ pub(crate) async fn spawn_sandboxed_worker_at(
                 sl::SandboxRole::Agent,
                 &inputs,
             )
-            .to_string()
         });
     }
+    // #12127: the launch keys the session's preparation recorded, on the same
+    // one `--settings`; a record that cannot be read refuses the worker.
+    if let Some(keys) = sl::read_launch_keys(sandbox.workspace)
+        .map_err(|e| e.to_string())?
+        .filter(|keys| !keys.is_empty())
+    {
+        let body = settings.get_or_insert_with(|| serde_json::json!({}));
+        trusty_mpm::core::claude_sandbox::merge_settings_payload(
+            body,
+            &serde_json::Value::Object(keys),
+        );
+    }
+    let settings = settings.map(|body| body.to_string());
     spawn_worker_at(program, model, payload, timeout, settings.as_deref()).await
 }
 

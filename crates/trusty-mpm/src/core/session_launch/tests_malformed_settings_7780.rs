@@ -91,7 +91,7 @@ fn merge_settings_backs_up_a_malformed_file_before_rewriting_it() {
     let project = tmp.path();
     seed_settings(project, BROKEN);
 
-    settings::write_output_style(project, None).expect("the rewrite proceeds after the copy");
+    settings::write_output_style(project).expect("the rewrite proceeds after the copy");
 
     assert_eq!(copies(project).len(), 1, "{:?}", copies(project));
     assert_eq!(
@@ -100,7 +100,8 @@ fn merge_settings_backs_up_a_malformed_file_before_rewriting_it() {
         "the copy must hold the ORIGINAL bytes"
     );
     assert!(
-        read_settings(project)["outputStyle"].is_string(),
+        // #12127: the writer sets the spinner tips, no longer the style.
+        read_settings(project)["spinnerTipsEnabled"].is_boolean(),
         "the rewrite must still happen"
     );
 }
@@ -126,7 +127,7 @@ fn merge_settings_refuses_when_the_copy_cannot_be_written() {
 
     std::fs::write(claude.join("settings.json.lock"), b"").expect("pre-create the lock sidecar");
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let result = settings::write_output_style(project, None);
+    let result = settings::write_output_style(project);
     // Restore before asserting, so a failed assertion still leaves a removable
     // temp dir behind.
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -231,7 +232,8 @@ fn prepare_session_backs_up_a_malformed_settings_file_exactly_once() {
 
     let after = read_settings(project);
     assert!(
-        after["outputStyle"].is_string(),
+        // #12127: the spinner tips stand for the launch's project-file keys.
+        after["spinnerTipsEnabled"].is_boolean(),
         "the launch must still write its own keys: {after}"
     );
     let commands = pre_tool_use_commands(&after);

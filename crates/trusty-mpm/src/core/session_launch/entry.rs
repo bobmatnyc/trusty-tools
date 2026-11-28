@@ -439,7 +439,7 @@ pub fn prepare_session_with_style_and_native(
 /// function with `dirs::home_dir()`. An absent or relative `home` declines the
 /// two user-global writes rather than guessing a location.
 /// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`,
-/// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
+/// `global_hook_cleanup_never_writes_the_real_home_under_an_overridden_root_12077`.
 pub fn prepare_session_with_home(
     fw: &FrameworkPaths,
     project_dir: &Path,

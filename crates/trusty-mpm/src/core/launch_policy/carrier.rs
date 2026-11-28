@@ -30,6 +30,11 @@
 //! applied. Every arm prints its notice; none refuses the launch — except an
 //! unresolved repos root: a broken `install.toml` refuses it ([`ProvisionError`],
 //! #11821 df-D1w).
+//! #12127: the same file carries the four launch keys `prepare_session`
+//! recorded for the cwd (`outputStyle`, `model`, `autoMemoryEnabled`,
+//! `skillOverrides`), so a launch with recorded keys always gets a file; a
+//! record that cannot be read, or a file carrying those keys that cannot be
+//! written, refuses the launch.
 //! Test: `carrier_tests.rs`, `tests/owner_launch_config_8988.rs`.
 
 use std::collections::BTreeSet;
@@ -196,6 +201,12 @@ pub fn deny_set(policy: &OwnerPolicy, user_scope: Option<&[String]>) -> BTreeSet
 /// Test: `the_settings_body_carries_only_subtractive_keys`,
 /// `the_settings_file_never_carries_an_allow_on_or_ask`.
 pub fn settings_body(parts: &SettingsParts) -> Option<String> {
+    let map = settings_map(parts);
+    (!map.is_empty()).then(|| format!("{:#}", Value::Object(map)))
+}
+
+/// The object [`settings_body`] serialises; empty when it subtracts nothing.
+fn settings_map(parts: &SettingsParts) -> serde_json::Map<String, Value> {
     let mut map = serde_json::Map::new();
     if !parts.mcp_deny.is_empty() {
         let entries = parts
@@ -223,7 +234,7 @@ pub fn settings_body(parts: &SettingsParts) -> Option<String> {
             json!({ "deny": parts.tools_deny.iter().collect::<Vec<_>>() }),
         );
     }
-    (!map.is_empty()).then(|| format!("{:#}", Value::Object(map)))
+    map
 }
 
 /// Where the settings file for `body` lives:
@@ -246,41 +257,104 @@ pub fn settings_path_at(state_root: &Path, body: &str) -> PathBuf {
 
 /// Resolve the owner layer and write this launch's settings file.
 ///
-/// Why: see the module doc.
-/// What: no effective policy → no file. Otherwise the user scope is read from
-/// `claude_json_dir/.claude.json` ([`crate::core::session_mcp_scope::user_scope_servers`]),
-/// the deny set composed, and the body written atomically. Each failure arm is
-/// a notice, printed to stderr and logged, never an error.
-/// Test: every test in `carrier_tests.rs`.
-pub fn provision_settings_at(inputs: &CarrierInputs<'_>) -> LaunchSettings {
+/// Why: see the module doc. #12127: the file is also the one carrier of the
+/// launch keys `prepare_session` recorded for `cwd`
+/// ([`crate::core::session_launch::read_launch_keys`]), merged into the owner
+/// body, because Claude Code keeps only the last `--settings`.
+/// What: no effective policy and no recorded keys → no file. Otherwise the
+/// user scope is read from `claude_json_dir/.claude.json`
+/// ([`crate::core::session_mcp_scope::user_scope_servers`]), the deny set
+/// composed, the launch keys merged in, and the body written atomically. Each
+/// owner-policy failure arm is a notice, printed to stderr and logged.
+///
+/// # Errors
+///
+/// #12127: [`ProvisionError::LaunchKeys`] for an unreadable or malformed
+/// record, [`ProvisionError::Write`] when a body carrying launch keys cannot
+/// be written; both refuse the launch rather than run without the keys.
+///
+/// Test: every test in `carrier_tests.rs`;
+/// `the_carrier_payload_carries_the_launch_keys_12127`,
+/// `an_unresolvable_project_identity_refuses_the_carrier_when_a_project_record_exists_12077`,
+/// `an_unresolvable_project_identity_warns_and_launches_with_no_project_record_12077`,
+/// `a_malformed_record_refuses_the_carrier_12127`,
+/// `an_unwritable_launch_key_body_refuses_the_carrier_12127`.
+pub fn provision_settings_at(inputs: &CarrierInputs<'_>) -> Result<LaunchSettings, ProvisionError> {
+    // #12127: before the owner lookup, so a bad record refuses with nothing recorded.
+    let mut launch = crate::core::session_launch::read_launch_keys(inputs.cwd)?.unwrap_or_default();
+    // #12077 row 13: plus the excludes `tm doctor --fix` kept for this project,
+    // from whichever checkout it ran in. A git error refuses only when a
+    // project record exists (Architect 13:24Z); otherwise it is a notice.
+    use crate::core::session_launch::launch_keys::project_excludes_for_launch;
+    let project = project_excludes_for_launch(inputs.cwd, inputs.state_root)?;
+    if let Some(excludes) = &project.excludes {
+        let slot = launch
+            .entry(crate::core::claude_md_excludes::EXCLUDES_KEY.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        crate::core::claude_sandbox::merge_settings_payload(slot, excludes);
+    }
     let resolution = resolve_and_record(&OwnerInputs {
         cwd: inputs.cwd,
         repos_root: inputs.repos_root,
         state_root: inputs.state_root,
     });
     let mut notices: Vec<String> = resolution_notice(&resolution).into_iter().collect();
-    let settings = match resolution.effective() {
-        None => None,
-        Some(policy) => write_policy(inputs, policy, &mut notices),
-    };
+    notices.extend(project.warning);
+    let settings = write_settings(inputs, resolution.effective(), &launch, &mut notices);
     let notice = (!notices.is_empty()).then(|| notices.join("; "));
     if let Some(text) = &notice {
         eprintln!("tm: warning: {text}");
         tracing::warn!(cwd = %inputs.cwd.display(), "owner launch policy: {text} (#8988)");
     }
-    LaunchSettings {
-        file: settings,
+    Ok(LaunchSettings {
+        file: settings?,
         notice,
+    })
+}
+
+/// Compose and write `policy` with the `launch` keys merged in; `None` when
+/// there is nothing to write, or when an owner-only body could not be written
+/// (with a notice saying the policy was NOT applied).
+fn write_settings(
+    inputs: &CarrierInputs<'_>,
+    policy: Option<&OwnerPolicy>,
+    launch: &serde_json::Map<String, Value>,
+    notices: &mut Vec<String>,
+) -> Result<Option<PathBuf>, ProvisionError> {
+    let mut body = Value::Object(match policy {
+        Some(policy) => owner_map(inputs, policy, notices),
+        None => serde_json::Map::new(),
+    });
+    // #12127: one payload; a `skillOverrides` map unions with the owner's.
+    crate::core::claude_sandbox::merge_settings_payload(&mut body, &Value::Object(launch.clone()));
+    if body.as_object().is_none_or(serde_json::Map::is_empty) {
+        return Ok(None);
+    }
+    let body = format!("{body:#}");
+    let path = settings_path_at(inputs.state_root, &body);
+    match write_owner_only(&path, body.as_bytes()) {
+        Ok(()) => Ok(Some(path)),
+        // #12127: the launch keys must reach the launch; refuse, never run without them.
+        Err(source) if !launch.is_empty() => Err(ProvisionError::Write { path, source }),
+        // #8988 Fail-Open Check: launch without the flag, and say so.
+        Err(err) => {
+            // #8992: the notice names the whole launch policy, not only MCP.
+            notices.push(format!(
+                "owner launch policy NOT applied: could not write {}: {err}; this session \
+                 runs without the owner's MCP, skill and tool subtractions",
+                path.display()
+            ));
+            Ok(None)
+        }
     }
 }
 
-/// Compose and write `policy`; `None` when there is nothing to write or the
-/// write failed (with a notice saying the policy was NOT applied).
-fn write_policy(
+/// The owner body for `policy`, composed against the user scope.
+fn owner_map(
     inputs: &CarrierInputs<'_>,
     policy: &OwnerPolicy,
     notices: &mut Vec<String>,
-) -> Option<PathBuf> {
+) -> serde_json::Map<String, Value> {
     let user = match inputs.claude_json_dir {
         Some(dir) => crate::core::session_mcp_scope::user_scope_servers(dir),
         None => Err("no home directory to locate .claude.json".to_owned()),
@@ -296,22 +370,11 @@ fn write_policy(
         Err(_) => None,
     };
     // #8992: the skill and tool parts never depend on the user-scope read.
-    let parts = SettingsParts::for_launch(policy, user.as_deref(), inputs.profile);
-    let body = settings_body(&parts)?;
-    let path = settings_path_at(inputs.state_root, &body);
-    match write_owner_only(&path, body.as_bytes()) {
-        Ok(()) => Some(path),
-        // #8988 Fail-Open Check: launch without the flag, and say so.
-        Err(err) => {
-            // #8992: the notice names the whole launch policy, not only MCP.
-            notices.push(format!(
-                "owner launch policy NOT applied: could not write {}: {err}; this session \
-                 runs without the owner's MCP, skill and tool subtractions",
-                path.display()
-            ));
-            None
-        }
-    }
+    settings_map(&SettingsParts::for_launch(
+        policy,
+        user.as_deref(),
+        inputs.profile,
+    ))
 }
 
 /// The notice an owner resolution owes the operator, if any.
@@ -382,12 +445,30 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// root, finds no owner file, and retires the owner's last-good record — the
 /// launch then runs with no policy and no notice.
 /// Test: `owner_launch_policy_refuses_and_keeps_last_good_on_a_broken_install_file`.
+/// #12127: also an unreadable launch-settings record, or a body carrying the
+/// launch keys that could not be written.
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "owner launch policy refused: the managed repos root is unresolved because \
-     install.toml is broken ({0}); fix ~/.trusty-tools/install.toml or set TRUSTY_MPM_REPOS_ROOT" // path-literal: allow
-)]
-pub struct ProvisionError(#[from] pub trusty_common::install_paths::InstallPathsError);
+pub enum ProvisionError {
+    /// The repos root is unresolved (#11821 df-D1w).
+    #[error(
+        "owner launch policy refused: the managed repos root is unresolved because \
+         install.toml is broken ({0}); fix ~/.trusty-tools/install.toml or set TRUSTY_MPM_REPOS_ROOT" // path-literal: allow
+    )]
+    ReposRoot(#[from] trusty_common::install_paths::InstallPathsError),
+    /// #12127: the launch-settings record could not be read.
+    #[error(transparent)]
+    LaunchKeys(#[from] crate::core::session_launch::LaunchKeysError),
+    /// #12127: the settings file carrying the launch keys could not be written.
+    #[error(
+        "#12127 launch settings NOT applied: could not write {path}: {source}; refusing the launch"
+    )]
+    Write {
+        /// The settings file.
+        path: PathBuf,
+        /// The write error.
+        source: std::io::Error,
+    },
+}
 
 /// [`provision_settings_at`] for a production launch under `state_root`.
 ///
@@ -411,13 +492,13 @@ pub fn provision_settings(
     // the defaulted root can never retire the owner's last-good record.
     let repos_root = crate::core::repo_paths::try_repos_root()?;
     let claude_json_dir = claude_json_dir(config_dir);
-    Ok(provision_settings_at(&CarrierInputs {
+    provision_settings_at(&CarrierInputs {
         cwd,
         repos_root: &repos_root,
         state_root,
         claude_json_dir: claude_json_dir.as_deref(),
         profile,
-    }))
+    })
 }
 
 /// [`provision_settings`] under the process home's state root; nothing when

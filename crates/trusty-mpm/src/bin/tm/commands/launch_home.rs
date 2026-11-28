@@ -181,14 +181,23 @@ pub(crate) fn launch_files_with(
     })
 }
 
-/// Strip trusty-mpm hooks from `home`'s two `~/.claude/settings*.json` files.
+/// Report tm's old hook entries left in `home`'s two `~/.claude/settings*.json`
+/// files (#12077 row 12).
 ///
-/// #5875: those two files only, never a walk of the home tree. Best-effort: a
-/// failure warns and the launch continues; no home resolved means nothing to strip.
-pub(crate) fn strip_global_hooks(home: Option<&Path>) {
+/// Why: tm does not write the generic Claude settings files, so the launch no
+/// longer strips them; the operator is told instead. #5875: those two files
+/// only, never a walk of the home tree.
+/// What: one stderr warning per file holding tm's exact old entries, or that
+/// cannot be read; silent for a clean or absent file, or no home. #12077: the
+/// text, which names each entry and the removal, is
+/// `LegacyGlobalHooks::warning`.
+/// Test: `the_launch_leaves_the_home_settings_file_untouched_12077`,
+/// `the_legacy_global_hook_warning_names_each_entry_and_the_removal_12077`.
+pub(crate) fn report_global_hooks(home: Option<&Path>) {
+    use trusty_mpm::core::standalone::hooks::legacy_global::legacy_global_mpm_hooks_at;
     let Some(home) = home else { return };
-    if let Err(e) = trusty_mpm::core::standalone::hooks::remove_global_trusty_mpm_hooks_at(home) {
-        eprintln!("warning: could not remove global MPM hooks: {e:#}");
+    for file in legacy_global_mpm_hooks_at(home) {
+        eprintln!("{}", file.warning());
     }
 }
 
@@ -313,5 +322,23 @@ mod tests {
             "no project write"
         );
         assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
+    }
+
+    /// #12077 row 12: the launch never writes the generic
+    /// `~/.claude/settings.json`, even when it holds tm's exact old hook group.
+    #[test]
+    fn the_launch_leaves_the_home_settings_file_untouched_12077() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let settings = home.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings.parent().expect("parent")).expect("mkdir");
+        let doc = serde_json::json!({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "/usr/local/bin/tm hook", "timeout": 5}
+        ]}]}});
+        std::fs::write(&settings, doc.to_string()).expect("write");
+        let before = std::fs::read(&settings).expect("read");
+
+        super::report_global_hooks(Some(home.path()));
+
+        assert_eq!(std::fs::read(&settings).expect("read"), before);
     }
 }

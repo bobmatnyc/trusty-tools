@@ -338,9 +338,7 @@ pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> 
 /// review round 1, HIGH): a plain truncate-then-write left `settings.json`
 /// corrupt — unparseable by Claude Code until a manual `.bak` restore — if
 /// the process died mid-write; [`trusty_common::claude_config::write_json_atomic`]
-/// writes to a temp file and renames over `path`, matching the atomicity
-/// [`super::remove_global_trusty_mpm_hooks`] (mod.rs:353) already uses for
-/// the same class of mutation.
+/// writes to a temp file and renames over `path`.
 /// What: reads `path` (missing file → `Ok(None)`, malformed/non-object JSON →
 /// `Ok(None)` — never touched), returns `Ok(None)` when
 /// [`contamination_event_names`] is empty (#10565: a file the project tier
@@ -364,8 +362,7 @@ pub fn clean_settings_file(path: &Path, force: bool) -> anyhow::Result<Option<Cl
     // #7762: an absent file is skipped BEFORE the lock. `tm doctor --fix` calls
     // this for `settings.local.json` in every project whether or not one exists,
     // and acquiring the lock would create a sidecar for a file this repair is
-    // about to report `Ok(None)` for. Same pre-check as
-    // `super::remove_global_trusty_mpm_hooks_at`.
+    // about to report `Ok(None)` for.
     if !path.exists() {
         return Ok(None);
     }

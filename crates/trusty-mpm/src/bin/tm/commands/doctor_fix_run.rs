@@ -148,10 +148,15 @@ pub(crate) fn dispatch(id: &str) -> Option<RepairFn> {
         "hooks_build_tree_binary" => {
             |c| RepairRun::Evaluated(repair_build_tree_binary(c.machine_files(), c.mode))
         }
+        // #12077: only tm's managed config dir is written; its settings.json is
+        // added to the sweep, every other file's rewrite is refused.
         "hook-interpreter" => |c| {
+            let mut files = c.machine_files().to_vec();
+            files.extend(c.managed_config.as_ref().map(|d| d.join("settings.json")));
             RepairRun::Evaluated(
                 trusty_mpm::core::hook_interpreter_doctor::repair_hook_interpreter(
-                    c.machine_files(),
+                    &files,
+                    c.managed_config.as_deref(),
                     c.mode,
                 ),
             )

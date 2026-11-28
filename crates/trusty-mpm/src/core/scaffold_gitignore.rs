@@ -88,6 +88,9 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".trusty-mpm/sessions/",
     ".trusty-mpm/logs/",
     ".trusty-mpm/last-instructions.md",
+    // #12077: the launch-key record and its one-time cleanup marker.
+    ".trusty-mpm/launch-settings/",
+    ".trusty-mpm/launch-keys-cleanup.json",
 ];
 
 /// Append the legacy managed block to `<dir>/.gitignore`, as a pre-#8758 launch

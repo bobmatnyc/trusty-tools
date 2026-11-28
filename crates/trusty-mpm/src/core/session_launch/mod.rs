@@ -108,6 +108,15 @@ pub use system_prompt::{
 };
 // #8453: the supervisor model key, written and removed by ownership.
 mod architect_model;
+// #12127: the four launch keys, recorded for the `--settings` flag tier.
+pub mod launch_keys;
+// #12077: the legacy global `trusty-memory` hook strip (row 11).
+mod legacy_memory_hooks;
+#[cfg(test)]
+pub(crate) use launch_keys::effective_settings;
+pub use launch_keys::{
+    LaunchKeysError, read_launch_keys, record_path as launch_keys_record_path, set_launch_key,
+};
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -135,6 +144,11 @@ mod tests_search_index;
 #[cfg(test)]
 #[path = "tests_launch_trust_3926.rs"]
 mod tests_launch_trust_3926;
+// #12077 row 11: the legacy global `trusty-memory` hook strip writes only the
+// tm-owned config dir, and removes only tm's exact old groups.
+#[cfg(test)]
+#[path = "tests_legacy_hooks_12077.rs"]
+mod tests_legacy_hooks_12077;
 // Issue #4072 — concurrency coverage for the shared `~/.claude.json`
 // read-modify-write cycle both trust seeders perform. Its own file because
 // `settings.rs` (485/500 production SLOC) and `tests.rs` (1482/1500 test
@@ -193,7 +207,6 @@ use settings::{
     deploy_output_style,
     preseed_workspace_trust_home,
     remove_global_trusty_memory_hooks,
-    write_auto_memory_off,
     write_output_style,
     // #9018: the launch builds its additions with every toggle resolved — the
     // #7688 capture and `[pm_guard] enabled` included — and hands them to the
@@ -235,10 +248,13 @@ pub(crate) use settings::{write_enabled_plugins, write_enabled_plugins_with_trus
 /// logic of its own).
 pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
 
-/// Re-export of the auto-memory settings key and the one-key settings merge
-/// (#7685), so `tm doctor`'s `auto_memory` check and its `--fix` repair read and
-/// write exactly what this launch path writes.
-pub(crate) use settings::{AUTO_MEMORY_KEY, merge_settings_key};
+/// Re-export of the auto-memory settings key (#7685), so `tm doctor`'s
+/// `auto_memory` check reads the key this launch path delivers. #12077: the
+/// one-key project-file merge is test-only now; the repair writes the
+/// launch-settings record through [`set_launch_key`].
+pub(crate) use settings::AUTO_MEMORY_KEY;
+#[cfg(test)]
+pub(crate) use settings::merge_settings_key;
 
 /// Re-export of the trusty-search project-index registration entry point and
 /// the trusty-memory palace-slug derivation.
@@ -540,6 +556,11 @@ pub enum PrepError {
         /// The write failure.
         source: Box<PrepError>,
     },
+    /// #12127: the launch-settings record could not be written, so the launch
+    /// would run without its four keys. Fatal: the launch is refused.
+    /// Test: `an_unwritable_record_refuses_the_prepared_launch_12127`.
+    #[error("{0}")]
+    LaunchKeys(#[from] LaunchKeysError),
 }
 
 impl PrepError {
@@ -561,6 +582,7 @@ impl PrepError {
                 | Self::Content { .. }
                 | Self::ClaudeVersion(_)
                 | Self::ArchitectHooks { .. }
+                | Self::LaunchKeys(_)
         )
     }
 }
@@ -893,16 +915,14 @@ pub(super) fn prepare_session_inner(
         }
     };
 
-    // Set the Claude Code output style so the launched session's status bar
-    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
-    // still launches, it just shows the operator's default style.
-    if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
-        tracing::warn!("failed to set trusty-mpm output style: {err}");
-    }
-    // #8453: every launch path reads the project settings' `model`, including
-    // those that pass no `--model`; a supervisor runs on the Opus tier alias.
-    if let Err(err) = architect_model::write_architect_model(project_dir, profile) {
-        tracing::warn!("failed to update the supervisor model: {err}");
+    // #12127: the style, the supervisor model, auto memory off and the stack
+    // `skillOverrides` ride the launch's `--settings` flag tier, never the
+    // project file: remove what earlier releases wrote there, once, then record
+    // the values for the launch. A record that cannot be written refuses it.
+    launch_keys::deliver_launch_keys(project_dir, &active_style_id, profile)?;
+    // #12127: the spinner tips and the attribution seed stay in the project file.
+    if let Err(err) = write_output_style(project_dir) {
+        tracing::warn!("failed to set the trusty-mpm spinner tips: {err}");
     }
 
     // Stash the EXACT text the launch path passes to
@@ -952,14 +972,6 @@ pub(super) fn prepare_session_inner(
         ),
     }
 
-    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) —
-    // whatever trusty-memory's state, so no launch probes it. Non-fatal for the
-    // same reason the write above is: a failure costs the project the setting,
-    // not its session; `tm doctor`'s `auto_memory` row reports it.
-    if let Err(err) = write_auto_memory_off(project_dir) {
-        tracing::warn!("failed to write Claude Code `{AUTO_MEMORY_KEY}: false`: {err}");
-    }
-
     // #7422: write the project-tier `enabledPlugins` allowlist beside the output
     // style. Default-deny: every plugin the managed config dir knows about is
     // written `false` unless this project's `[session] plugins` names it.
@@ -970,22 +982,6 @@ pub(super) fn prepare_session_inner(
         crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
     ) {
         tracing::warn!("failed to write the project plugin allowlist: {err}");
-    }
-
-    // #7751: turn off the skill families this project's detected stack cannot
-    // use (owner ruling 2026-09-13), merged into the same project-tier file. An
-    // unknown stack writes nothing, and so does a detection a scan bound cut
-    // short (#7781); a malformed file is warned about and left alone. Non-fatal
-    // — a failure costs listing tokens, not the session.
-    match crate::core::skill_overrides::write_skill_overrides(project_dir) {
-        Ok(crate::core::skill_overrides::SkillOverridesOutcome::Written(added)) => {
-            tracing::info!(
-                "turned off {} skill(s) this stack cannot use: {added:?}",
-                added.len()
-            );
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!("failed to write stack-profile skillOverrides: {err}"),
     }
 
     // Inject `tm statusline` into the project's `.claude/settings.json` so

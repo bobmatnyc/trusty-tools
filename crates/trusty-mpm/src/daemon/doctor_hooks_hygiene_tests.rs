@@ -297,8 +297,9 @@ fn check_hooks_hygiene_reports_a_missing_sessionstart_group() {
         "the report must name the unwired event: {}",
         missing.message
     );
+    // #12077: `--fix` reports only; the next managed launch is the repair.
     assert!(
-        missing.message.contains("tm doctor --fix"),
+        missing.message.contains("next tm launch"),
         "the report must name the repair: {}",
         missing.message
     );
@@ -386,12 +387,14 @@ fn strip_post_tool_use_failure(path: &Path) {
 }
 
 /// `hooks_missing_tm_group` warns on a missing `PostToolUseFailure` group and
-/// `--fix --yes` restores it (#10095).
+/// the launch merge restores it (#10095, #12077).
 ///
 /// Why: a project provisioned before 1.9 lacks the group, and doctor is how the
-/// operator learns of it; the repair has to close the finding it names.
+/// operator learns of it. #12077: `--fix --yes` reports it and writes nothing;
+/// the launch's merge closes the finding.
 /// What: merges a complete file (Ok), strips the one group (Warn naming it),
-/// applies the repair, and asserts Ok again.
+/// applies the repair (refused, still Warn), runs the launch merge, and asserts
+/// Ok again.
 /// Test: itself.
 #[test]
 fn doctor_flags_missing_post_tool_use_failure_group_10095() {
@@ -424,10 +427,13 @@ fn doctor_flags_missing_post_tool_use_failure_group_10095() {
         steps.len() == 1
             && matches!(
                 steps[0].status,
-                crate::core::doctor_repair::StepStatus::Applied { .. }
+                crate::core::doctor_repair::StepStatus::Refused(_)
             ),
-        "the repair must apply: {steps:?}"
+        "#12077: the repair refuses: {steps:?}"
     );
+    assert_eq!(check().status, CheckStatus::Warn, "{}", check().message);
+    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
+        .expect("the launch merge restores the group");
     assert_eq!(check().status, CheckStatus::Ok, "{}", check().message);
 }
 
@@ -464,12 +470,10 @@ fn doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095() {
     // temp dir behind.
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(steps.len(), 1, "the gap must produce a step: {steps:?}");
+    // #12077: the repair never writes, so it is refused, never applied.
     assert!(
-        matches!(
-            steps[0].status,
-            crate::core::doctor_repair::StepStatus::Failed(_)
-        ),
-        "an unwritable directory must fail the repair: {steps:?}"
+        !steps[0].changed(),
+        "a repair that wrote nothing must not count as applied: {steps:?}"
     );
 
     let missing = check_hooks_hygiene_with_exe(Some(&project), &[], Some(exe)).3;
@@ -496,4 +500,23 @@ fn check_hooks_hygiene_missing_group_check_ignores_a_foreign_project() {
         "a foreign project owes no tm hook group: {}",
         missing.message
     );
+}
+
+/// #12077 row 9a: the row says the next `tm launch` restores the guard and
+/// names the command, since `--fix` no longer writes the group.
+#[test]
+fn missing_group_row_names_the_launch_that_restores_the_guard_12077() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("stale-project");
+    write_settings(&project, &missing_sessionstart_value());
+
+    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(missing.status, CheckStatus::Warn);
+    let launch = format!("`tm launch {}`", project.display());
+    assert!(
+        missing.message.contains(&launch),
+        "{launch} missing: {}",
+        missing.message
+    );
+    assert!(missing.message.contains("guard"), "{}", missing.message);
 }
