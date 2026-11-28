@@ -1,7 +1,8 @@
 //! Tests for memory_policy — env-var overrides, coreml, tripwire, RAM detect.
 //!
 //! Why: env-mutating tests need the crate's `#[serial]` group to prevent races
-//! between parallel test threads. They are isolated here so their
+//! between parallel test threads; a test that resolves a `MemoryPolicy` runs
+//! in an isolated child instead (#12111). They are isolated here so their
 //! process-global side effects don't mix with the pure compute tests in
 //! `tests_basic`.
 //! What: tests for `MemoryPolicy::from_total_ram_mb` with env overrides,
@@ -20,67 +21,72 @@ use super::{detect_total_ram_mb, MemoryTier};
 
 // #5937: env-mutating tests here run in the crate's unnamed `#[serial]`
 // group; a module-private mutex excluded no other env test in the binary.
+//
+// #12111: `#[serial]` does not fence non-serial readers. Every
+// `MemoryPolicy::from_total_ram_mb` call runs `apply_to_env`, which writes
+// `TRUSTY_MAX_CHUNKS` and seven other caps process-wide; the non-serial
+// `core::store::tests::test_adopt_*` tests read `TRUSTY_MAX_CHUNKS=42` from
+// `test_env_override` mid-run. Each such test now resolves its policy in an
+// isolated child process (`run_isolated`, #4213), so the parent env is never
+// written.
+
+/// Run the named `tests_env` test alone in a child with `envs` set at spawn.
+/// `true` only inside the child, where the caller runs its body.
+fn isolate(test: &str, envs: &[(&str, &str)]) -> bool {
+    crate::service::test_isolation::run_isolated(
+        &format!("core::memory_policy::tests_env::{test}"),
+        envs,
+    )
+}
+
+/// Remove `keys` from this process's env. Callers run only inside an
+/// isolated child, which runs one test on one thread.
+fn clear_env(keys: &[&str]) {
+    for key in keys {
+        // SAFETY: called only inside an isolated child (see above).
+        unsafe { std::env::remove_var(key) };
+    }
+}
 
 #[test]
-#[serial_test::serial]
 fn test_index_memory_limit_resolution_floors_at_global() {
     // When TRUSTY_INDEX_MEMORY_LIMIT_MB is set below TRUSTY_MEMORY_LIMIT_MB,
     // MemoryPolicy must clamp it back up to at least the global limit.
     // Otherwise the indexing pipeline would run with a tighter ceiling
     // than the steady-state daemon — almost certainly a misconfiguration.
-    let prior_idx = std::env::var("TRUSTY_INDEX_MEMORY_LIMIT_MB").ok();
-    let prior_mem = std::env::var("TRUSTY_MEMORY_LIMIT_MB").ok();
-    // SAFETY: serialized via #[serial].
-    unsafe {
-        std::env::set_var("TRUSTY_MEMORY_LIMIT_MB", "8192");
-        std::env::set_var("TRUSTY_INDEX_MEMORY_LIMIT_MB", "2048"); // < global
+    if !isolate(
+        "test_index_memory_limit_resolution_floors_at_global",
+        &[
+            ("TRUSTY_MEMORY_LIMIT_MB", "8192"),
+            ("TRUSTY_INDEX_MEMORY_LIMIT_MB", "2048"), // < global
+        ],
+    ) {
+        return;
     }
     let policy = MemoryPolicy::from_total_ram_mb(32 * 1024);
     assert_eq!(policy.memory_limit_mb, 8_192);
     // Indexing limit must be floored at the global limit, not the
     // operator's smaller value.
     assert_eq!(policy.index_memory_limit_mb, 8_192);
-
-    // SAFETY: same.
-    unsafe {
-        match prior_idx {
-            Some(v) => std::env::set_var("TRUSTY_INDEX_MEMORY_LIMIT_MB", v),
-            None => std::env::remove_var("TRUSTY_INDEX_MEMORY_LIMIT_MB"),
-        }
-        match prior_mem {
-            Some(v) => std::env::set_var("TRUSTY_MEMORY_LIMIT_MB", v),
-            None => std::env::remove_var("TRUSTY_MEMORY_LIMIT_MB"),
-        }
-    }
 }
 
 #[test]
-#[serial_test::serial]
 fn test_memory_limit_scales_proportionally_across_xlarge_hosts() {
     // Regression test for issue #120: two XLarge hosts of different sizes
     // must produce different memory limits (the old code returned 16 GB
     // for both 64 GB and 128 GB boxes).
-    let prior = std::env::var("TRUSTY_MEMORY_LIMIT_MB").ok();
-    // SAFETY: tests run single-threaded within this module's env block.
-    unsafe {
-        std::env::remove_var("TRUSTY_MEMORY_LIMIT_MB");
+    if !isolate(
+        "test_memory_limit_scales_proportionally_across_xlarge_hosts",
+        &[],
+    ) {
+        return;
     }
+    clear_env(&["TRUSTY_MEMORY_LIMIT_MB"]);
     let p64 = MemoryPolicy::from_total_ram_mb(64 * 1024);
     // The 64 GB call wrote TRUSTY_MEMORY_LIMIT_MB=16384 back into the env;
     // clear it again so the 128 GB call sees a clean slate.
-    // SAFETY: same as above.
-    unsafe {
-        std::env::remove_var("TRUSTY_MEMORY_LIMIT_MB");
-    }
+    clear_env(&["TRUSTY_MEMORY_LIMIT_MB"]);
     let p128 = MemoryPolicy::from_total_ram_mb(128 * 1024);
-    // Restore prior value.
-    // SAFETY: same as above.
-    unsafe {
-        match prior {
-            Some(v) => std::env::set_var("TRUSTY_MEMORY_LIMIT_MB", v),
-            None => std::env::remove_var("TRUSTY_MEMORY_LIMIT_MB"),
-        }
-    }
     assert_eq!(p64.tier, MemoryTier::XLarge);
     assert_eq!(p128.tier, MemoryTier::XLarge);
     assert!(
@@ -98,31 +104,17 @@ fn test_memory_limit_scales_proportionally_across_xlarge_hosts() {
 /// Verify that an env-var override beats the tier default.
 ///
 /// Note: `from_total_ram_mb` calls `apply_to_env`, which mutates the
-/// process env. We restore the prior values at the end of the test to
-/// avoid bleeding into other tests in the same binary.
+/// process env, so the body runs in an isolated child (#12111): an in-process
+/// `TRUSTY_MAX_CHUNKS=42` capped the non-serial store adopt tests at 42.
 #[test]
-#[serial_test::serial]
 fn test_env_override() {
-    // Save & override.
-    let prior = std::env::var("TRUSTY_MAX_CHUNKS").ok();
-    // SAFETY: tests run single-threaded within this module's env block.
-    unsafe {
-        std::env::set_var("TRUSTY_MAX_CHUNKS", "42");
+    if !isolate("test_env_override", &[("TRUSTY_MAX_CHUNKS", "42")]) {
+        return;
     }
-
     // 16 GB → Medium tier (default max_chunks = 200_000). Env should win.
     let policy = MemoryPolicy::from_total_ram_mb(16 * 1024);
     assert_eq!(policy.tier, MemoryTier::Medium);
     assert_eq!(policy.max_chunks, 42);
-
-    // Restore.
-    // SAFETY: same as above.
-    unsafe {
-        match prior {
-            Some(v) => std::env::set_var("TRUSTY_MAX_CHUNKS", v),
-            None => std::env::remove_var("TRUSTY_MAX_CHUNKS"),
-        }
-    }
 }
 
 #[test]
@@ -138,17 +130,15 @@ fn test_tier_batch_size_hard_cap() {
 }
 
 #[test]
-#[serial_test::serial]
 fn test_batch_size_env_override_clamped_by_hard_cap() {
-    // Save & override.
-    let prior = std::env::var("TRUSTY_MAX_BATCH_SIZE").ok();
-    let prior_explicit = std::env::var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT").ok();
-    // SAFETY: tests run single-threaded within this module's env block.
-    unsafe {
-        std::env::set_var("TRUSTY_MAX_BATCH_SIZE", "2048");
-        // Ensure the explicit-bypass flag is unset for this test.
-        std::env::remove_var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT");
+    if !isolate(
+        "test_batch_size_env_override_clamped_by_hard_cap",
+        &[("TRUSTY_MAX_BATCH_SIZE", "2048")],
+    ) {
+        return;
     }
+    // Ensure the explicit-bypass flag is unset for this test.
+    clear_env(&["TRUSTY_MAX_BATCH_SIZE_EXPLICIT"]);
 
     // 16 GB → Medium tier, hard cap = 128. Env value of 2048 must be
     // clamped down to the tier cap.
@@ -158,36 +148,22 @@ fn test_batch_size_env_override_clamped_by_hard_cap() {
         policy.max_batch_size, 128,
         "Medium tier must clamp TRUSTY_MAX_BATCH_SIZE=2048 down to 128"
     );
-
-    // Restore.
-    // SAFETY: same as above.
-    unsafe {
-        match prior {
-            Some(v) => std::env::set_var("TRUSTY_MAX_BATCH_SIZE", v),
-            None => std::env::remove_var("TRUSTY_MAX_BATCH_SIZE"),
-        }
-        match prior_explicit {
-            Some(v) => std::env::set_var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT", v),
-            None => std::env::remove_var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT"),
-        }
-    }
 }
 
 #[test]
-#[serial_test::serial]
 fn test_batch_size_explicit_flag_bypasses_clamp() {
-    // Save & override.
-    let prior = std::env::var("TRUSTY_MAX_BATCH_SIZE").ok();
-    let prior_explicit = std::env::var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT").ok();
-    let prior_mem = std::env::var("TRUSTY_MEMORY_LIMIT_MB").ok();
-    // SAFETY: tests run single-threaded within this module's env block.
-    unsafe {
-        std::env::set_var("TRUSTY_MAX_BATCH_SIZE", "512");
-        std::env::set_var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT", "1");
-        // Clear leftover memory-limit env from sibling tests so the
-        // proportional default for 16 GB host applies cleanly.
-        std::env::remove_var("TRUSTY_MEMORY_LIMIT_MB");
+    if !isolate(
+        "test_batch_size_explicit_flag_bypasses_clamp",
+        &[
+            ("TRUSTY_MAX_BATCH_SIZE", "512"),
+            ("TRUSTY_MAX_BATCH_SIZE_EXPLICIT", "1"),
+        ],
+    ) {
+        return;
     }
+    // Clear any inherited memory-limit override so the proportional default
+    // for a 16 GB host applies cleanly.
+    clear_env(&["TRUSTY_MEMORY_LIMIT_MB"]);
 
     // 16 GB → Medium tier, hard cap = 16. With EXPLICIT=1 the operator's
     // 512 must be honored verbatim (GPU path, expert opt-out).
@@ -197,23 +173,6 @@ fn test_batch_size_explicit_flag_bypasses_clamp() {
         policy.max_batch_size, 512,
         "TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 must bypass the tier hard cap"
     );
-
-    // Restore.
-    // SAFETY: same as above.
-    unsafe {
-        match prior {
-            Some(v) => std::env::set_var("TRUSTY_MAX_BATCH_SIZE", v),
-            None => std::env::remove_var("TRUSTY_MAX_BATCH_SIZE"),
-        }
-        match prior_explicit {
-            Some(v) => std::env::set_var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT", v),
-            None => std::env::remove_var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT"),
-        }
-        match prior_mem {
-            Some(v) => std::env::set_var("TRUSTY_MEMORY_LIMIT_MB", v),
-            None => std::env::remove_var("TRUSTY_MEMORY_LIMIT_MB"),
-        }
-    }
 }
 
 #[test]
