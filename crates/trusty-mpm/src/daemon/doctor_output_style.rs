@@ -27,7 +27,8 @@
 //! (`ClaudeConfigReader::paths_for_project`). The resolved value is validated
 //! against [`OUTPUT_STYLES`] and the deployed style files under
 //! `<home>/.claude/output-styles/`; the report names which scope the resolved
-//! value came from (see [`resolution_layers`]).
+//! value came from (see [`resolution_layers`]). #12077: with a project, the
+//! launch-settings record (`--settings`, above every file) is read first.
 //! Test: `output_style_ok_when_style_resolves`,
 //! `output_style_fail_when_id_unknown`, `output_style_warn_when_key_absent`,
 //! `output_style_fail_when_file_missing`, `output_style_fail_on_malformed_json`,
@@ -196,6 +197,17 @@ fn resolution_layers(project_dir: Option<&Path>, home: &Path) -> Vec<(PathBuf, &
 /// `output_style_falls_back_to_global_when_project_silent`,
 /// `output_style_project_local_wins_even_when_project_settings_correct`.
 pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> DoctorCheck {
+    // #12077: a launch delivers `outputStyle` on the launch-settings record,
+    // whose `--settings` tier outranks every file layer below.
+    if let Some(project) = project_dir {
+        match record_style(project) {
+            Ok(Some((id, record))) => {
+                return evaluate_style(&id, project_dir, home, &record, "launch-settings record");
+            }
+            Ok(None) => {}
+            Err(check) => return check,
+        }
+    }
     let layers = resolution_layers(project_dir, home);
 
     for (path, scope) in &layers {
@@ -221,6 +233,23 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
              Claude Code will use its own default"
         ),
     )
+}
+
+/// The `outputStyle` on `project`'s launch-settings record, with the record's
+/// path (#12077).
+///
+/// What: `Ok(None)` when there is no record or it sets no style; `Err`, a
+/// ready-to-return `Fail` naming the record, when it cannot be read or parsed,
+/// so an unreadable record is never read as "no outputStyle configured".
+/// Test: `output_style_reads_the_launch_settings_record_12077`,
+/// `output_style_fails_on_an_unreadable_launch_settings_record_12077`.
+fn record_style(project: &Path) -> Result<Option<(String, PathBuf)>, DoctorCheck> {
+    use crate::core::session_launch::{OUTPUT_STYLE_KEY, launch_keys_record_path};
+    let keys = crate::core::session_launch::read_launch_keys(project)
+        .map_err(|e| DoctorCheck::new("output_style", CheckStatus::Fail, e.to_string()))?;
+    Ok(keys
+        .and_then(|keys| keys.get(OUTPUT_STYLE_KEY)?.as_str().map(str::to_owned))
+        .map(|id| (id, launch_keys_record_path(project))))
 }
 
 /// Validate a resolved `outputStyle` id against the known styles and the
@@ -415,6 +444,10 @@ fn evaluate_project_style(
 /// helper only narrows an advisory scan.
 /// Test: `staleness_orphan_exempts_configured_custom_id`.
 fn resolve_effective_style_id(project_dir: Option<&Path>, home: &Path) -> Option<String> {
+    // #12077: the record outranks every file layer, as in `check_output_style`.
+    if let Some(Ok(Some((id, _)))) = project_dir.map(record_style) {
+        return Some(id);
+    }
     for (path, _) in resolution_layers(project_dir, home) {
         if let Ok(StyleKey::Present(id)) = read_style_key(&path) {
             return Some(id);

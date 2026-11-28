@@ -115,7 +115,8 @@ mod legacy_memory_hooks;
 #[cfg(test)]
 pub(crate) use launch_keys::effective_settings;
 pub use launch_keys::{
-    LaunchKeysError, read_launch_keys, record_path as launch_keys_record_path, set_launch_key,
+    LaunchKeysError, OUTPUT_STYLE_KEY, read_launch_keys, record_path as launch_keys_record_path,
+    set_launch_key,
 };
 #[cfg(test)]
 mod tests;

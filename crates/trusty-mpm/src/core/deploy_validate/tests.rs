@@ -457,6 +457,7 @@ fn describe_is_non_empty_for_every_variant() {
         DeploymentGap::SettingsMissing,
         DeploymentGap::SettingsMalformed("bad json".to_string()),
         DeploymentGap::OutputStyleKeyMissing,
+        DeploymentGap::LaunchSettingsRecordUnreadable("bad".to_string()),
         DeploymentGap::OutputStyleUnknownId("x".to_string()),
         DeploymentGap::OutputStyleFileMissing("x".to_string()),
         DeploymentGap::HooksMissing,
