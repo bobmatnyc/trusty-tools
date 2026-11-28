@@ -34,6 +34,24 @@ use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_stat
 /// Test: `a_worker_body_carries_the_egress_guard_12077`,
 /// `an_unwritable_worker_body_refuses_the_spawn_12077`.
 pub(crate) fn worker_settings(workdir: &Path, config: &ControlPlaneConfig) -> Result<PathBuf> {
+    let resolved = crate::core::launch_policy::carrier_hooks::resolve_launch_hooks(
+        workdir,
+        config.hook_exe.as_deref(),
+    );
+    worker_settings_resolved(workdir, config, resolved)
+}
+
+/// [`worker_settings`] with the hook resolution supplied (#12077 part 4c, Q2).
+///
+/// Test: `an_unresolvable_hook_binary_refuses_the_worker_12077`.
+pub(crate) fn worker_settings_resolved(
+    workdir: &Path,
+    config: &ControlPlaneConfig,
+    resolved: Result<
+        (crate::core::paths::FrameworkPaths, PathBuf),
+        crate::core::launch_policy::ProvisionError,
+    >,
+) -> Result<PathBuf> {
     let refusal = || {
         format!(
             "refusing to spawn: the worker's hooks are not in place for {}",
@@ -48,12 +66,12 @@ pub(crate) fn worker_settings(workdir: &Path, config: &ControlPlaneConfig) -> Re
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workdir);
     let mpm = crate::core::config::MpmConfig::load(&fw.root);
     let profile = crate::core::session_profile::resolve(workdir, &mpm);
-    let settings = crate::core::launch_policy::provision_settings_with_exe(
+    let settings = crate::core::launch_policy::carrier::provision_settings_resolved(
         &state_root,
         workdir,
         None,
         profile,
-        config.hook_exe.as_deref(),
+        resolved,
     )
     .with_context(refusal)?;
     let file = settings

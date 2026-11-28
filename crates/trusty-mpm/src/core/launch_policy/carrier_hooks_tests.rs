@@ -149,20 +149,32 @@ fn an_unwritable_project_file_refuses_the_carrier_12077() {
     assert!(matches!(err, ProvisionError::Strip(_)), "{err}");
 }
 
-/// Fail-Open Check (Q2): no stable hook binary refuses every profile's launch.
+/// Fail-Open Check (Q2): no stable hook binary refuses a PM launch, before
+/// any body is written or the project file touched.
 #[test]
-fn an_unresolvable_hook_binary_refuses_the_launch_12077() {
-    let err: ProvisionError = StableHookExeError::Unresolved.into();
-    assert!(matches!(err, ProvisionError::HookExe(_)));
+fn an_unresolvable_hook_binary_refuses_a_pm_launch_12077() {
+    let fx = Fx::new();
+    let path = fx.project.join(".claude").join("settings.json");
+    let old = json!({ "hooks": { "Stop": [
+        { "matcher": "*", "hooks": [{ "type": "command", "command": "/old/bin/tm hook" }] }
+    ]}})
+    .to_string();
+    std::fs::write(&path, &old).expect("seed");
+    let err = crate::core::launch_policy::carrier::provision_settings_resolved(
+        &fx.state,
+        &fx.project,
+        None,
+        SessionProfile::Pm,
+        Err(StableHookExeError::Unresolved.into()),
+    )
+    .expect_err("a PM launch with no stable hook binary is refused");
+    assert!(matches!(err, ProvisionError::HookExe(_)), "{err}");
     assert!(err.to_string().contains("refusing the launch"), "{err}");
-    // A build-tree override with no installed fallback is refused by the
-    // resolver itself; on a host with `tm` installed PATH rescues it, so the
-    // arm is asserted through the conversion above.
-    let ok = resolve_launch_hooks(Path::new("/tmp"), Some(Path::new(STABLE_HOOK_EXE)));
-    assert_eq!(
-        ok.expect("a pinned exe resolves").1,
-        PathBuf::from(STABLE_HOOK_EXE)
+    assert!(
+        !fx.state.join("session-settings").exists(),
+        "no body is written"
     );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), old, "no strip ran");
 }
 
 /// No hook fires twice: every tm command the managed `claude-config` file

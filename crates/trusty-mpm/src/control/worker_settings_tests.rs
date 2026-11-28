@@ -48,3 +48,21 @@ fn a_body_without_the_egress_guard_is_refused_12077() {
     let err = require_egress_guard(&file).expect_err("no guard");
     assert!(err.to_string().contains("egress guard Missing"), "{err}");
 }
+
+/// Fail-Open Check (Q2): a worker with no stable hook binary is refused.
+#[test]
+fn an_unresolvable_hook_binary_refuses_the_worker_12077() {
+    let workdir = hermetic_temp_dir();
+    let state = hermetic_temp_dir();
+    let err = worker_settings_resolved(
+        workdir.path(),
+        &config(state.path()),
+        Err(crate::core::standalone::hooks::StableHookExeError::Unresolved.into()),
+    )
+    .expect_err("refused");
+    assert!(
+        format!("{err:#}").contains("refusing the launch"),
+        "{err:#}"
+    );
+    assert!(!state.path().join("session-settings").exists());
+}

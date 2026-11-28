@@ -492,6 +492,9 @@ pub enum ProvisionError {
     /// #12077 part 4c: tm's old hooks could not be removed from a project file.
     #[error(transparent)]
     Strip(#[from] crate::core::session_launch::launch_hooks::StripError),
+    /// #12077 part 4c: no home resolves, so no body could carry tm's hooks.
+    #[error("#12077 refusing the launch: no tm state root resolves (no home directory)")]
+    StateRoot,
     /// #12077 part 4c: an Architect's Claude Code is below the hook floor (#10459).
     #[error(transparent)]
     ArchitectVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
@@ -524,7 +527,7 @@ pub fn provision_settings(
 /// runtime's test seam pin the binary; production passes `None`.
 /// What: resolves [`super::carrier_hooks::resolve_launch_hooks`] (a refusal
 /// refuses the launch, Q2) and provisions with those hooks.
-/// Test: `an_unresolvable_hook_binary_refuses_the_launch_12077`.
+/// Test: `an_unresolvable_hook_binary_refuses_a_pm_launch_12077`.
 pub fn provision_settings_with_exe(
     state_root: &Path,
     cwd: &Path,
@@ -532,11 +535,29 @@ pub fn provision_settings_with_exe(
     profile: SessionProfile,
     exe_override: Option<&Path>,
 ) -> Result<LaunchSettings, ProvisionError> {
+    let resolved = super::carrier_hooks::resolve_launch_hooks(cwd, exe_override);
+    provision_settings_resolved(state_root, cwd, config_dir, profile, resolved)
+}
+
+/// [`provision_settings_with_exe`] with the hook resolution supplied.
+///
+/// Why: `resolve_stable_hook_exe`'s PATH fallback rescues a refused binary on
+/// any host with `tm` installed, so the Q2 refusal arm needs a seam.
+/// What: a resolution error refuses the launch before anything is written.
+/// Test: `an_unresolvable_hook_binary_refuses_a_pm_launch_12077`.
+pub(crate) fn provision_settings_resolved(
+    state_root: &Path,
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    profile: SessionProfile,
+    resolved: Result<(crate::core::paths::FrameworkPaths, PathBuf), ProvisionError>,
+) -> Result<LaunchSettings, ProvisionError> {
+    // #12077 part 4c (Q2): a tm session never runs unguarded.
+    let (fw, exe) = resolved?;
     // #11821: df-D1w — an unresolved root refuses before the owner lookup, so
     // the defaulted root can never retire the owner's last-good record.
     let repos_root = crate::core::repo_paths::try_repos_root()?;
     let claude_json_dir = claude_json_dir(config_dir);
-    let (fw, exe) = super::carrier_hooks::resolve_launch_hooks(cwd, exe_override)?;
     provision_settings_at(&CarrierInputs {
         cwd,
         repos_root: &repos_root,
@@ -547,15 +568,29 @@ pub fn provision_settings_with_exe(
     })
 }
 
-/// [`provision_settings`] under the process home's state root; nothing when
-/// no home resolves.
+/// [`provision_settings`] under the process home's state root.
+///
+/// #12077 part 4c: no resolvable home refuses the launch
+/// ([`ProvisionError::StateRoot`]); it used to add nothing, which now means
+/// a launch with no hooks.
+/// Test: `no_state_root_refuses_the_launch_12077`.
 pub fn provision_settings_default(
     cwd: &Path,
     config_dir: Option<&Path>,
     profile: SessionProfile,
 ) -> Result<LaunchSettings, ProvisionError> {
-    // #11821: the refusal propagates; only a missing home still adds nothing.
-    match super::state_root() {
+    provision_settings_default_in(super::state_root(), cwd, config_dir, profile)
+}
+
+/// [`provision_settings_default`] with the state root supplied.
+fn provision_settings_default_in(
+    state_root: Option<PathBuf>,
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    profile: SessionProfile,
+) -> Result<LaunchSettings, ProvisionError> {
+    // #11821: the refusal propagates. #12077 part 4c: so does a missing home.
+    match state_root {
         Some(root) => provision_settings(&root, cwd, config_dir, profile),
         None => Ok(LaunchSettings::default()),
     }

@@ -789,3 +789,13 @@ fn an_unlistable_launch_settings_dir_refuses_the_carrier_12077() {
     assert!(text.contains("cannot list"), "{text}");
     assert!(text.contains("refusing the launch"), "{text}");
 }
+
+/// #12077 part 4c Fail-Open Check: with no state root there is no body to
+/// carry tm's hooks, so the launch is refused rather than run unguarded.
+#[test]
+fn no_state_root_refuses_the_launch_12077() {
+    let fx = Fx::new(&[]);
+    let err = provision_settings_default_in(None, &fx.project, None, SessionProfile::Pm)
+        .expect_err("no state root refuses");
+    assert!(matches!(err, ProvisionError::StateRoot), "{err}");
+}

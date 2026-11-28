@@ -36,7 +36,7 @@ pub struct LaunchHooks<'a> {
 /// [`ProvisionError::HookExe`] when no stable binary resolves: every profile's
 /// launch is refused, so a tm session never runs unguarded (Q2).
 ///
-/// Test: `an_unresolvable_hook_binary_refuses_the_launch_12077`.
+/// Test: `an_unresolvable_hook_binary_refuses_a_pm_launch_12077`.
 pub fn resolve_launch_hooks(
     cwd: &Path,
     exe_override: Option<&Path>,
