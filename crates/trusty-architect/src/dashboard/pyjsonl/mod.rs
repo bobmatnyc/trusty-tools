@@ -27,7 +27,7 @@ use crate::pyval::{cmp_int, get, int_text, json_str, repr};
 use crate::spec_drift::py::{decode_error, os_error};
 
 pub use cases::replay_cases;
-pub(crate) use changes::{append_changes, read_changes};
+pub(crate) use changes::{append_changes, bump, read_changes}; // See #12029 P2c
 pub use fsck::{fsck, run};
 
 /// The line schema version this reader writes and accepts (`SV`).

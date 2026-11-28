@@ -21,7 +21,9 @@
 //! (LDG-2.3.5). Names that differ only in letter case from an existing one,
 //! or from one earlier in the batch, are refused in both formats (#10063
 //! df-G01). [`Store::fsck`] and
-//! [`Store::validate`] check a whole store.
+//! [`Store::validate`] check a whole store. A batch claims its collections
+//! for the Rust writer class and is refused on one the Python class owns
+//! ([`writer`], #12029 AC2); [`py`] is the prototype's own port.
 //! Test: `tests/dashboard_golden.rs` (prototype bytes and outcomes),
 //! `tests/dashboard_store.rs` (conflict, rollback, refusals, lock, corrupt files),
 //! `tests/dashboard_case.rs` (case variants), `tests/dashboard_log.rs`
@@ -42,11 +44,14 @@ pub mod jsonl;
 mod level;
 mod lock;
 pub mod pruned;
+// #12029 P2c: the prototype store's port, and the AC2 writer-class guard.
+pub mod py;
 // #10063 PR 3: LDG-2.2.5 dangling references, for `fsck`.
 mod refs;
 mod sort;
 mod stage;
 mod validate;
+pub mod writer;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -465,6 +470,12 @@ impl Store {
         self.check_schemas(&staged)?;
         // #10063 df-G01: the log's checks refuse the batch before any write.
         let seq = changes::prepare(self, &now)?;
+        // #12029 AC2: a collection the Python writer class owns is refused here.
+        writer::admit(
+            &self.root,
+            staged.slots.iter().map(|s| s.coll.as_str()),
+            writer::WriterClass::Rust,
+        )?;
         self.archive_removed(&staged, &now)?;
         self.commit(&staged)?;
         // #10063 PR 2: after the commit; a failure is reported, never dropped.

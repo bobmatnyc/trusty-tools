@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "argv": [
+    "cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "cases.json": "[\n  {\"op\": \"env\", \"unset\": [\"DASHBOARD_FORMAT\", \"DASHBOARD_ACTOR\", \"DASHBOARD_SCHEMA\"]},\n  {\"op\": \"new\", \"root\": \"oq\"},\n  {\"op\": \"set\", \"coll\": \"items\", \"id\": \"A01\", \"data\": {\"status\": \"open\"}},\n  {\"op\": \"hold\", \"seconds\": 0.4, \"then\": {\"op\": \"update\", \"coll\": \"items\", \"id\": \"A01\", \"data\": {\"answer\": \"after the wait\"}, \"if_version\": 1}},\n  {\"op\": \"get\", \"coll\": \"items\", \"id\": \"A01\"},\n  {\"op\": \"hold\", \"seconds\": 0.3, \"then\": {\"op\": \"batch\", \"ops\": [{\"op\": \"set\", \"collection\": \"items\", \"id\": \"A02\", \"data\": {\"n\": 1}}, {\"op\": \"update\", \"collection\": \"items\", \"id\": \"A01\", \"data\": {\"n\": 2}, \"if_version\": 2}]}},\n  {\"op\": \"hold\", \"seconds\": 0.2, \"then\": {\"op\": \"get\", \"coll\": \"items\", \"id\": \"A02\"}},\n  {\"op\": \"new\", \"name\": \"j\", \"root\": \"jq\", \"fmt\": \"jsonl\", \"schema_mode\": \"off\", \"actor\": \"tester\"},\n  {\"op\": \"set\", \"store\": \"j\", \"coll\": \"items\", \"id\": \"J01\", \"data\": {\"status\": \"open\"}},\n  {\"op\": \"hold\", \"store\": \"j\", \"seconds\": 0.3, \"then\": {\"op\": \"set\", \"store\": \"j\", \"coll\": \"items\", \"id\": \"J01\", \"data\": {\"status\": \"done\"}, \"if_version\": 1}},\n  {\"op\": \"list\", \"store\": \"j\", \"coll\": \"items\"},\n  {\"op\": \"changes\", \"root\": \"jq\"}\n]\n",
+    "schemas/goals.schema.json": "{\"type\": \"object\", \"required\": [\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\"], \"properties\": {\"title\": {\"type\": \"string\"}}}\n",
+    "schemas/items.schema.json": "{\"type\": \"object\", \"required\": [\"status\"], \"properties\": {\"status\": {\"type\": \"string\", \"enum\": [\"open\", \"done\", \"brief_pending\"]}, \"title\": {\"type\": \"string\", \"minLength\": 1}}}\n",
+    "schemas/meta-state.schema.json": "{\"type\": \"object\", \"required\": [\"owner_name\"], \"properties\": {\"owner_name\": {\"type\": \"string\"}}}\n"
+  },
+  "reads": [
+    "cases.json"
+  ],
+  "stdout": "case 0 env\n  ok\ncase 1 new\n  fmt=dir actor=unknown schema_mode=off\n  prune_log={ROOT}/owner-queue-archive/pruned.jsonl\ncase 2 set\n  {\"collection\": \"items\", \"id\": \"A01\", \"version\": 1}\ncase 3 hold\n  waited True\n  {\"collection\": \"items\", \"id\": \"A01\", \"version\": 2}\ncase 4 get\n  'A01' 2 {\"answer\": \"after the wait\", \"status\": \"open\"}\ncase 5 hold\n  waited True\n  {\"collection\": \"items\", \"id\": \"A02\", \"version\": 1}\n  {\"collection\": \"items\", \"id\": \"A01\", \"version\": 3}\ncase 6 hold\n  waited False\n  'A02' 1 {\"n\": 1}\ncase 7 new\n  fmt=jsonl actor=tester schema_mode=off\n  prune_log={ROOT}/owner-queue-archive/pruned.jsonl\ncase 8 set\n  {\"collection\": \"items\", \"id\": \"J01\", \"version\": 1}\ncase 9 hold\n  waited True\n  {\"collection\": \"items\", \"id\": \"J01\", \"version\": 2}\ncase 10 list\n  'J01' 2 {\"status\": \"done\"}\ncase 11 changes\n  {\"actor\": \"tester\", \"coll\": \"items\", \"id\": \"J01\", \"keys\": [\"status\"], \"op\": \"set\", \"seq\": 1, \"sha256\": \"4280b5438f36791137e370013adda416595981c0872c02786427e98a838637f9\", \"ts\": \"2026-11-27T13:00:00Z\", \"version\": 1}\n  {\"actor\": \"tester\", \"coll\": \"items\", \"id\": \"J01\", \"keys\": [\"status\"], \"op\": \"set\", \"seq\": 2, \"sha256\": \"113a6561364df7a0382e90e70b4d85500b282d15d337dd9ef3cb9f7465ef4bb7\", \"ts\": \"2026-11-27T13:00:00Z\", \"version\": 2}\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "jq/.lock": "",
+    "jq/changes.jsonl": "{\"actor\":\"tester\",\"coll\":\"items\",\"id\":\"J01\",\"keys\":[\"status\"],\"op\":\"set\",\"seq\":1,\"sha256\":\"4280b5438f36791137e370013adda416595981c0872c02786427e98a838637f9\",\"ts\":\"2026-11-27T13:00:00Z\",\"version\":1}\n{\"actor\":\"tester\",\"coll\":\"items\",\"id\":\"J01\",\"keys\":[\"status\"],\"op\":\"set\",\"seq\":2,\"sha256\":\"113a6561364df7a0382e90e70b4d85500b282d15d337dd9ef3cb9f7465ef4bb7\",\"ts\":\"2026-11-27T13:00:00Z\",\"version\":2}\n",
+    "jq/items.jsonl": "{\"data\":{\"status\":\"done\"},\"id\":\"J01\",\"sv\":1,\"version\":2}\n",
+    "oq/.lock": "",
+    "oq/items/A01.json": "{\n  \"answer\": \"after the wait\",\n  \"n\": 2,\n  \"status\": \"open\",\n  \"version\": 3\n}\n",
+    "oq/items/A02.json": "{\n  \"n\": 1,\n  \"version\": 1\n}\n"
+  },
+  "clock": 1795784400
+}
