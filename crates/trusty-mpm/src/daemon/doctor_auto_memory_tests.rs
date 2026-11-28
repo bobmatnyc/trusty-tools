@@ -470,3 +470,155 @@ fn auto_memory_repair_reports_a_write_failure() {
         "a failed write must never count as a change"
     );
 }
+
+// ── #12077 part 4d: the key lives on tm's launch-settings record ──────────────
+
+/// Write `settings` as the #12127 launch-settings record for `project`.
+fn write_record(project: &Path, settings: serde_json::Value) -> PathBuf {
+    let path = crate::core::session_launch::launch_keys_record_path(project);
+    let body = serde_json::json!({"issue": 12127, "settings": settings});
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, body.to_string()).unwrap();
+    path
+}
+
+/// The project's `.claude/settings.json`, parsed.
+fn project_file(project: &Path) -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+/// #12077: after 4a's one-time cleanup the project file no longer holds the
+/// key and the launch record does. `--fix` must not put it back.
+#[test]
+fn doctor_fix_never_re_adds_auto_memory_to_the_project_file_12077() {
+    let (_tmp, _home, project) = fixture(Some(r#"{"permissions": {"allow": []}}"#));
+    write_record(&project, serde_json::json!({"autoMemoryEnabled": false}));
+
+    let steps = repair_auto_memory(&project, RepairMode::Apply);
+
+    assert!(
+        steps.is_empty(),
+        "a delivered key needs no repair: {steps:?}"
+    );
+    assert!(
+        project_file(&project).get("autoMemoryEnabled").is_none(),
+        "--fix re-added the key to the project file: {}",
+        project_file(&project)
+    );
+}
+
+/// #12077: the check reads the key from the record 4a delivers it through, so
+/// a delivered key is never reported as unset.
+#[test]
+fn auto_memory_reads_a_delivered_key_from_the_launch_record_12077() {
+    let (_tmp, home, project) = fixture(Some(r#"{"permissions": {"allow": []}}"#));
+    let record = write_record(&project, serde_json::json!({"autoMemoryEnabled": false}));
+
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
+
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(
+        check.message.contains(&record.display().to_string()),
+        "the row must name the record it read: {}",
+        check.message
+    );
+}
+
+/// #12077: with no record yet, `--fix` writes the key into the record and
+/// leaves the project file byte-identical.
+#[test]
+fn auto_memory_repair_writes_the_launch_record_not_the_project_file_12077() {
+    let (_tmp, _home, project) = fixture(Some(r#"{"outputStyle": "x"}"#));
+    let before = std::fs::read(project.join(".claude").join("settings.json")).unwrap();
+
+    let steps = repair_auto_memory(&project, RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(steps[0].changed(), "{:?}", steps[0].status);
+    let record = crate::core::session_launch::launch_keys_record_path(&project);
+    assert_eq!(steps[0].path, record, "the step names the record it wrote");
+    let keys = crate::core::session_launch::read_launch_keys(&project)
+        .unwrap()
+        .expect("the repair wrote the record");
+    assert_eq!(keys["autoMemoryEnabled"], serde_json::Value::Bool(false));
+    assert_eq!(
+        std::fs::read(project.join(".claude").join("settings.json")).unwrap(),
+        before,
+        "the project file must stay byte-identical"
+    );
+}
+
+/// #12077 fail-open: a record that is not valid JSON is reported, never
+/// overwritten, and never counted as a repair.
+#[test]
+fn a_malformed_launch_record_fails_the_check_and_the_repair_12077() {
+    let (_tmp, home, project) = fixture(None);
+    let record = crate::core::session_launch::launch_keys_record_path(&project);
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, "not json{{{").unwrap();
+
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains(&record.display().to_string()),
+        "the row must name the broken record: {}",
+        check.message
+    );
+
+    for mode in [RepairMode::DryRun, RepairMode::Apply] {
+        let steps = repair_auto_memory(&project, mode);
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert!(
+            matches!(steps[0].status, StepStatus::Failed(_)),
+            "{mode:?}: an unreadable record must fail the step: {:?}",
+            steps[0].status
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), "not json{{{");
+    assert!(!project.join(".claude").join("settings.json").exists());
+}
+
+/// #12077 fail-open: a record that cannot be written fails the step.
+#[test]
+fn an_unwritable_launch_record_fails_the_repair_12077() {
+    let (_tmp, _home, project) = fixture(None);
+    // A directory where the record belongs makes the write fail.
+    let record = crate::core::session_launch::launch_keys_record_path(&project);
+    std::fs::create_dir_all(&record).unwrap();
+
+    let steps = repair_auto_memory(&project, RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Failed(_)),
+        "{:?}",
+        steps[0].status
+    );
+    assert!(!project.join(".claude").join("settings.json").exists());
+}
+
+/// #12077: a `settings.local.json` that turns auto memory on is the operator's;
+/// the launch leaves the key off the record there, so `--fix` refuses rather
+/// than write a value the next launch drops.
+#[test]
+fn auto_memory_repair_refuses_a_local_true_12077() {
+    let (_tmp, _home, project) = fixture(None);
+    write_settings(&project, ".claude/settings.local.json", ON);
+
+    let steps = repair_auto_memory(&project, RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "{:?}",
+        steps[0].status
+    );
+    assert_eq!(
+        crate::core::session_launch::read_launch_keys(&project).unwrap(),
+        None
+    );
+    assert!(!project.join(".claude").join("settings.json").exists());
+}
