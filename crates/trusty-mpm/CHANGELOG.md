@@ -6,6 +6,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.16] — 2026-11-28
+
+Claude Code sandbox enforcement is off on every launch path. 1.14.14 and 1.14.15 put each launched Claude Code session in a sandbox that blocked Bash access to every trusty daemon socket except `trusty-mpm.sock` (#12077). 1.14.16 writes no sandbox settings, so a default launch reaches `tm memory` and `trusty-search` from Bash again. What you lose with the sandbox off:
+
+- The `Read` deny on `~/.ssh/**` (and the `~/.aws/**` and project `.env` read denies). tm no longer denies a session those reads.
+- The hiding of credential environment variables (`sandbox.credentials.envVars`). tm no longer hides credential variables in the environment from a session.
+- The sandbox itself for any session that runs without the guard. The write limits, the network allowlist and the socket allowlist of 1.14.14 and 1.14.15 no longer apply to such a session.
+
+An opt-in sandbox (`TM_CLAUDE_SANDBOX=1`) is planned as slice 2 of #12077 and is not in this release.
+
+Manual rollback for a workspace that 1.14.14 or 1.14.15 touched. 1.14.16 stops writing these keys but does not remove them. Remove them by hand (#12077):
+
+1. In `<project>/.claude/settings.json`, for each project tm launched, remove:
+   - the whole `sandbox` object;
+   - `env.RUSTC_WRAPPER` (tm set it to `""`);
+   - these 9 `permissions.deny` entries. Paths carry a doubled leading slash. `<fw>` is the framework directory, `~/.trusty-mpm` by default (it follows a configured config dir):
+     - `Read(//<home>/.ssh/**)`
+     - `Read(//<home>/.aws/**)`
+     - `Read(//<project>/.env)`
+     - `Edit(//<fw>/config.toml)`
+     - `Edit(//<fw>/architect-launch/**)`
+     - `Edit(//<fw>/twin/armed/**)`
+     - `Edit(//<project>/.claude/settings.json)`
+     - `Edit(//<project>/.claude/settings.local.json)`
+     - `Edit(//<project>/.mcp.json)`
+
+   Keep any entry you added yourself.
+2. Delete `<project>/.trusty-mpm/sandbox-roles.json`.
+3. In `~/.trusty-tools/trusty-mpm/claude-config/settings.json`, remove `sandbox.network.strictAllowlist`, `sandbox.network.allowedDomains` (written by 1.14.15 only) and `sandbox.credentials.envVars`.
+
+No change is needed in `~/.claude/settings.json` or any `settings.local.json`; tm's sandbox code never wrote them.
+
+### Breaking
+
+- trusty-mpm 1.14.15 ships a public-API break under the internal numbering
+  policy (docs/reference/semver-gate.md); recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.15.txt` (Refs #8699).
+
+### Added
+
+- `POST /projects` and `mpm.projects.register` on a decommissioned or archived project still leave it inactive, and the `200` response now carries `inactive_reason`, which says to start a session to reactivate it. The key is absent for an active project (#11998).
+- `tm project init` on a decommissioned or archived project now prints a `note:` line with the daemon's reason and the way to reactivate the project: start a session (#11998).
+
+### Fixed
+
+- `tm doctor`'s `disk_usage` row now lists mounts on the blocking pool with a 5 s deadline, so a slow mount listing no longer stalls the daemon's request worker; a missed deadline reports the row as undetermined (#5111).
+- The seeded Architect `fleet-poll.py` reads `inbox/pm-messages.jsonl` each cycle through `pm_intake.py`, so a queued question, blocker, done or urgent message wakes the Architect within one poll interval. A poll state from before this change starts at the queue's end, so old messages do not wake it. The seeded `pm_intake.py` prefixes an outside MCP sender's wake text with `[OUTSIDE MCP sender=<sender>, not the owner; id <id>]`, and `ack`/`ack-through` take `--no-reply-needed` (Refs #10764).
+- `tm project init`, `tm project info` and `POST /projects` canonicalize the project directory, so a symlink, a trailing slash or a case variant of one checkout gives one name, one record and one path. An unresolvable path is refused with a 400 that names it (Refs #11253).
+- `tm doctor`, the `tm start` refusal and the `tm daemon` refusal now suggest the release-workflow.md restart for a launchd-owned daemon: `launchctl bootout`, a wait of up to 30 s until `launchctl print` no longer finds the job, then one `launchctl bootstrap` of the registered plist. They no longer suggest `launchctl kickstart -k`, which SIGKILLs the daemon and skips request draining, and a bootstrap no longer races the exiting process into error 5. The MCP bridge's no-spawn hint offers a plain `kickstart` for a loaded-but-stopped job, never `-k` (#11809).
+- The never-deny MCP floor now names `trusty-browser-mcp`, the server key `tm install` registers, instead of the crate name `trusty-browser`, so an owner `deny` cannot strip the web-qa agent's browser tools (#11933).
+- `tm project decommission` no longer unloads a memory palace that another active project reaches through a trusty-memory palace alias. Two projects whose derived palace ids differ (for example `code-app` and `work-app`) but alias to one palace (`app`) are now treated as sharing it, and the unload is skipped with a reason naming the other project. When trusty-memory cannot say which palace an id resolves to, the unload is also skipped and the reason is logged.
+- The `a_gh_that_ignores_term_is_killed_within_the_grace` test no longer KILLs a shim that is about to exit 143 under full-suite load: it now waits up to 15 s for the shim to exit after gh is reaped, while the 7 s bound on gh itself is unchanged (#11988).
+- `tm session start` and the TUI launch now deploy the framework agents and skills under the configured `config_dir` (`install.toml`), the root `tm launch` reads, instead of `$HOME/.trusty-mpm/framework/` (Refs #12048, #11821).
+- `tm session start` and the TUI launch now refuse a malformed `install.toml` before they deploy anything, instead of deploying under `$HOME`. A missing `install.toml` still uses the default (Refs #12048, #11821).
+- Claude Code sandbox enforcement is disabled on every launch path pending an opt-in. tm writes no `sandbox` key, no sandbox `permissions.deny` entry and no `.trusty-mpm/sandbox-roles.json`, and no launch is refused for a sandbox reason, including a launch with no resolvable home. The manual rollback for 1.14.14 and 1.14.15 is at the top of this section (#12077).
+
+### Changed
+
+- The bundled PM prompt is 22,402 bytes, 798 under its 23,200-byte cap: three workflow rules now load through `Skill(skill="tm-workflow")` instead of sitting in every PM turn (#11624).
+
 ## [1.14.15] — 2026-11-27
 
 Restart the trusty daemons with this upgrade. A still-running 1.14.14 daemon refuses launches once 1.14.15 writes the user-tier sandbox settings (#12042).

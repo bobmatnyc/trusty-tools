@@ -1,2 +1,0 @@
-Fixed
-- `tm project decommission` no longer unloads a memory palace that another active project reaches through a trusty-memory palace alias. Two projects whose derived palace ids differ (for example `code-app` and `work-app`) but alias to one palace (`app`) are now treated as sharing it, and the unload is skipped with a reason naming the other project. When trusty-memory cannot say which palace an id resolves to, the unload is also skipped and the reason is logged.
