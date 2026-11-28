@@ -1,12 +1,14 @@
-//! Output-style, spinner-tip, hook, and MCP-injection helpers.
+//! Output-style, hook, and MCP-injection helpers.
 //!
 //! Why: `prepare_session` must configure several Claude Code settings files
 //! before launching a session. Grouping all the settings-file mutations here
 //! keeps `mod.rs` focused on the top-level preparation sequence and makes
 //! each individual helper easy to test in isolation.
-//! What: constants and functions for writing the output style, spinner tips,
+//! What: constants and functions for deploying the output style, writing the
 //! `trusty-memory` project hooks and `trusty-memory` MCP server injection. The
-//! global-hook cleanup is in `legacy_memory_hooks` (#12077).
+//! global-hook cleanup is in `legacy_memory_hooks` (#12077). #12077 part 4b:
+//! the spinner tips and the attribution footer are no longer written here;
+//! [`SPINNER_TIPS`] rides the launch's `--settings` flag tier (`launch_keys`).
 //! Test: each public(super) function is covered by a dedicated test in `tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -46,6 +48,8 @@ pub(crate) const OUTPUT_STYLE: &str = crate::core::bundle::DEFAULT_OUTPUT_STYLE_
 /// `spinnerTipsOverride.tips`; the operator's global settings carry generic
 /// claude-mpm tips, so trusty-mpm sessions override them with project-relevant
 /// guidance (the `tm` CLI, the `make check` gate, the API-first layering rule).
+/// #12077: part 4b delivers it on the `--settings` flag tier
+/// (`launch_keys::tm_companion_keys`), never in the project file.
 pub(super) const SPINNER_TIPS: &[&str] = &[
     "tm launch — start a configured claude session for this project",
     "make check = cargo test + clippy + fmt — must pass before any PR",
@@ -173,9 +177,9 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 
 /// Read-merge-write the project's `.claude/settings.json` under one mutation.
 ///
-/// Why (#7685): [`write_output_style`] was the only project-settings writer and
-/// carried the read/merge/write body inline, so every new key would have copied
-/// it. The merge discipline it encodes is the part worth sharing: an existing
+/// Why (#7685): the output-style writer was the only project-settings writer
+/// and carried the read/merge/write body inline, so every new key would have
+/// copied it (#12077 part 4b removed that writer). The merge discipline it encodes is the part worth sharing: an existing
 /// file is parsed and every key it already carries is preserved, a missing file
 /// starts from an empty object rather than aborting the launch, and the result
 /// is written back pretty-printed. Taking a closure rather than a single key
@@ -209,8 +213,7 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 ///   `write_skill_overrides` — would block forever on a lock its own caller
 ///   holds. No current closure does anything but assign keys.
 ///
-/// Test: `write_output_style_preserves_existing_keys`,
-/// `write_auto_memory_off_preserves_existing_keys`,
+/// Test: `write_auto_memory_off_preserves_existing_keys`,
 /// `merge_settings_backs_up_a_malformed_file_before_rewriting_it`,
 /// `merge_settings_refuses_when_the_copy_cannot_be_written`,
 /// `concurrent_merges_of_distinct_keys_never_lose_an_update`,
@@ -266,57 +269,6 @@ pub(crate) fn merge_settings_key(
     merge_settings(project_dir, |settings| settings[key] = value)
 }
 
-/// Merge the trusty-mpm spinner tips and the `attribution` seed into the
-/// project's `.claude/settings.json`.
-///
-/// Why: the same file drives the loading-spinner tips, so trusty-mpm-specific
-/// tips are written to override the operator's generic claude-mpm tips. #12127:
-/// the `outputStyle` key this function used to set beside them rides the
-/// launch's `--settings` flag tier instead (`launch_keys`); the name is kept
-/// because the tips and the seed are that style's companions.
-/// What: reads an existing `<project>/.claude/settings.json` (preserving all
-/// other keys), enables `spinnerTipsEnabled`, sets `spinnerTipsOverride.tips`
-/// to [`SPINNER_TIPS`], seeds `attribution` when absent (#6807, see below), and
-/// writes it back pretty-printed. Creates the file and `.claude/` directory
-/// when absent. It never writes `outputStyle`.
-///
-/// The `attribution` seed is deliberately duplicated from
-/// [`crate::core::standalone::settings_defaults::ensure_settings_defaults`],
-/// which writes the same key into the tm-owned `CLAUDE_CONFIG_DIR`. That copy
-/// reaches only the `claude` child tm spawns — `CLAUDE_CONFIG_DIR` is set
-/// per-command and never exported — whereas the project tier is read by any
-/// `claude` launched in this directory, tm-orchestrated or not. Both seeds are
-/// absent-only and share one constant, so an operator-set value survives either
-/// path.
-/// Test: `write_output_style_preserves_existing_keys`,
-/// `write_output_style_sets_spinner_tips`,
-/// `write_output_style_writes_no_output_style_12127`,
-/// `write_output_style_seeds_attribution`,
-/// `write_output_style_preserves_operator_attribution`.
-pub(super) fn write_output_style(project_dir: &Path) -> Result<(), PrepError> {
-    // #7685: the read/merge/write body this function used to carry inline now
-    // lives in `merge_settings`, so the auto-memory key and every later key
-    // share one tested code path.
-    merge_settings(project_dir, |settings| {
-        settings["spinnerTipsEnabled"] = serde_json::Value::Bool(true);
-        settings["spinnerTipsOverride"] = serde_json::json!({ "tips": SPINNER_TIPS });
-
-        // #6807: the tm-owned CLAUDE_CONFIG_DIR copy of this key reaches only the
-        // `claude` child tm spawns, because `CLAUDE_CONFIG_DIR` is set per-command
-        // (`standalone::run`) and never exported. A bare `claude` launched in this
-        // project reads the project tier regardless, so seed it here too — absent
-        // only, so an operator-set `attribution` survives.
-        if let Some(obj) = settings.as_object_mut() {
-            obj.entry("attribution").or_insert_with(|| {
-                serde_json::json!({
-                    "commit": crate::core::attribution::ATTRIBUTION_FOOTER,
-                    "pr": crate::core::attribution::ATTRIBUTION_FOOTER,
-                })
-            });
-        }
-    })
-}
-
 /// Write the project-tier `enabledPlugins` allowlist into the project's
 /// `.claude/settings.json` (#7422).
 ///
@@ -324,9 +276,7 @@ pub(super) fn write_output_style(project_dir: &Path) -> Result<(), PrepError> {
 /// loads its whole skill catalog into every session on the host, and there is
 /// no per-invocation flag to scope it — `enabledPlugins` is settings-only. The
 /// project tier outranks the user tier, so writing the map here is the one
-/// lever that turns a host-wide install into a per-project decision. Sits
-/// beside [`write_output_style`] because it is the same kind of write to the
-/// same file, on the same launch path.
+/// lever that turns a host-wide install into a per-project decision.
 /// What: enumerates every plugin the managed config dir knows about
 /// ([`crate::core::session_plugin_scope::known_plugins`]), maps each to `true`
 /// when the project's committed `[session] plugins` list names it and `false`
@@ -340,8 +290,7 @@ pub(super) fn write_output_style(project_dir: &Path) -> Result<(), PrepError> {
 /// approval to defer to, and the file ships with the clone.
 /// tm owns ONLY the keys it enumerated: a key for a plugin tm cannot see is the
 /// operator's and is carried through untouched, the same merge discipline
-/// [`write_output_style`]'s `attribution` seed and
-/// [`write_project_hooks`]'s entry-level strip already use. Returns without
+/// [`write_project_hooks`]'s entry-level strip already uses. Returns without
 /// writing when the merged object equals what is on disk, so an unchanged
 /// project takes no write on every launch.
 ///

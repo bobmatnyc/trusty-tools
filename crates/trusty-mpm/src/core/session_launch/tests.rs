@@ -6,8 +6,7 @@ use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
     is_stale_statusline_command, preseed_workspace_trust, resolve_palace_slug,
-    resolve_statusline_binary_with, write_enabled_plugins, write_output_style, write_project_hooks,
-    write_status_line,
+    resolve_statusline_binary_with, write_enabled_plugins, write_project_hooks, write_status_line,
 };
 use super::*;
 use crate::core::content_source::test_support::rc;
@@ -1112,29 +1111,6 @@ fn prepare_session_unknown_style_falls_back_to_default() {
     assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
 }
 
-#[test]
-fn write_output_style_preserves_existing_keys() {
-    // Why: merging the style must not clobber an operator's other settings.
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    let claude_dir = project.join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"theme":"dark","outputStyle":"old"}"#,
-    )
-    .unwrap();
-
-    write_output_style(project).expect("write succeeds");
-
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
-            .unwrap();
-    // #12127: the writer no longer sets the style, so the operator's stays.
-    assert_eq!(value["outputStyle"], serde_json::json!("old"));
-    assert_eq!(value["theme"], serde_json::json!("dark"));
-}
-
 /// #7685: Claude Code auto-memory (`MEMORY.md`) is not used in tm sessions —
 /// trusty-memory is the memory. The project tier is the half a bare `claude`
 /// launched in this directory reads.
@@ -1155,8 +1131,7 @@ fn write_auto_memory_off_disables_auto_memory() {
 
 #[test]
 fn write_auto_memory_off_preserves_existing_keys() {
-    // The shared `merge_settings` body must carry every unrelated key through,
-    // exactly as `write_output_style` does.
+    // The shared `merge_settings` body must carry every unrelated key through.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let claude_dir = project.join(".claude");
@@ -1199,102 +1174,6 @@ fn write_auto_memory_off_overrides_an_enabled_value() {
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
     assert_eq!(value["autoMemoryEnabled"], serde_json::json!(false));
-}
-
-/// #6807: the project tier is the only one a bare `claude` reads — the tm-owned
-/// `CLAUDE_CONFIG_DIR` copy reaches only the child tm spawns — so the footer
-/// must land here too.
-#[test]
-fn write_output_style_seeds_attribution() {
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-
-    write_output_style(project).expect("write succeeds");
-
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        value["attribution"]["commit"].as_str(),
-        Some(crate::core::attribution::ATTRIBUTION_FOOTER),
-        "attribution.commit must be the shared trusty-mpm footer"
-    );
-    assert_eq!(
-        value["attribution"]["pr"].as_str(),
-        Some(crate::core::attribution::ATTRIBUTION_FOOTER),
-        "attribution.pr must be the shared trusty-mpm footer"
-    );
-}
-
-/// #6807: seeding is absent-only on this path too, matching
-/// `ensure_settings_defaults`.
-#[test]
-fn write_output_style_preserves_operator_attribution() {
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    let claude_dir = project.join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"attribution":{"commit":"operator text","pr":""}}"#,
-    )
-    .unwrap();
-
-    write_output_style(project).expect("write succeeds");
-
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
-            .unwrap();
-    assert_eq!(
-        value["attribution"]["commit"].as_str(),
-        Some("operator text"),
-        "an operator-set attribution.commit must survive the seed"
-    );
-    assert_eq!(
-        value["attribution"]["pr"].as_str(),
-        Some(""),
-        "an operator-set attribution.pr must survive the seed"
-    );
-}
-
-#[test]
-fn write_output_style_writes_no_output_style_12127() {
-    // #12127: `outputStyle` rides the launch's `--settings` flag tier; the
-    // project-file writer sets the spinner tips and nothing named the style.
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-
-    write_output_style(project).expect("write succeeds");
-
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
-    assert!(value.get("outputStyle").is_none(), "{value}");
-    assert_eq!(value["spinnerTipsEnabled"], serde_json::json!(true));
-}
-
-#[test]
-fn write_output_style_sets_spinner_tips() {
-    // Why: trusty-mpm sessions must override the operator's generic
-    // claude-mpm spinner tips with project-specific ones; the settings.json
-    // merge must enable tips and write a non-empty tips array.
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-
-    write_output_style(project).expect("write succeeds");
-
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(value["spinnerTipsEnabled"], serde_json::json!(true));
-    let tips = value["spinnerTipsOverride"]["tips"]
-        .as_array()
-        .expect("spinnerTipsOverride.tips must be an array");
-    assert!(!tips.is_empty(), "spinner tips must be non-empty");
-    assert!(tips.iter().all(|tip| tip.is_string()));
 }
 
 #[test]

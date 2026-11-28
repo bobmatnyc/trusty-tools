@@ -1,9 +1,10 @@
-//! The four Claude settings tm delivers on the `--settings` flag tier, and the
+//! The Claude settings tm delivers on the `--settings` flag tier, and the
 //! tm-owned record that carries them from `prepare_session` to the launch
 //! (#12127).
 //!
-//! Why: #12077 — tm writes none of `outputStyle`, `model`, `autoMemoryEnabled`
-//! or `skillOverrides` into a generic Claude settings file. `prepare_session`
+//! Why: #12077 — tm writes none of `outputStyle`, `model`, `autoMemoryEnabled`,
+//! `skillOverrides` (part 4a), `spinnerTipsEnabled`, `spinnerTipsOverride` or
+//! `attribution` (part 4b) into a generic Claude settings file. `prepare_session`
 //! still decides them; every launch path then reads them back when it builds
 //! its one `--settings` payload (the owner carrier,
 //! `crate::core::launch_policy::carrier`), because Claude Code keeps only the
@@ -33,7 +34,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use super::PrepError;
-use super::settings::AUTO_MEMORY_KEY;
+use super::settings::{AUTO_MEMORY_KEY, SPINNER_TIPS};
 use crate::core::claude_md_excludes::EXCLUDES_KEY;
 use crate::core::claude_sandbox::{TmLaunchKeys, clean_tm_launch_keys_on_launch};
 use crate::core::session_profile::{ARCHITECT_MODEL, SessionProfile};
@@ -48,9 +49,35 @@ pub const OUTPUT_STYLE_KEY: &str = "outputStyle";
 /// The Claude Code model key.
 pub const MODEL_KEY: &str = "model";
 
+/// The spinner-tips switch, the tips list and the commit/PR footer keys
+/// (#12077 part 4b).
+pub const COMPANION_KEYS: [&str; 3] = ["spinnerTipsEnabled", "spinnerTipsOverride", "attribution"];
+
+/// tm's values for [`COMPANION_KEYS`]: tips on, [`SPINNER_TIPS`], and
+/// [`crate::core::attribution::ATTRIBUTION_FOOTER`] as both `commit` and `pr`.
+///
+/// Why: one definition for what the launch delivers and for what the one-time
+/// cleanup recognises as tm's in the project file (#12077 part 4b).
+/// Test: `the_record_carries_the_spinner_tips_and_attribution_12077`,
+/// `tms_companion_values_are_removed_and_edits_kept_12077`.
+pub fn tm_companion_keys() -> Map<String, Value> {
+    let footer = crate::core::attribution::ATTRIBUTION_FOOTER;
+    let mut keys = Map::new();
+    keys.insert(COMPANION_KEYS[0].to_owned(), json!(true));
+    keys.insert(
+        COMPANION_KEYS[1].to_owned(),
+        json!({ "tips": SPINNER_TIPS }),
+    );
+    keys.insert(
+        COMPANION_KEYS[2].to_owned(),
+        json!({ "commit": footer, "pr": footer }),
+    );
+    keys
+}
+
 /// Why the launch-settings record could not be read or written (#12127).
 ///
-/// Why: the record is the only carrier of the four keys; a launch that cannot
+/// Why: the record is the only carrier of the launch keys; a launch that cannot
 /// read or write it would run without them, so every variant refuses.
 /// Test: `a_malformed_record_refuses_the_carrier_12127`,
 /// `an_unwritable_record_refuses_the_prepared_launch_12127`.
@@ -138,7 +165,7 @@ fn read_layer(path: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// The four keys a launch of `profile` in `project_dir` carries inline.
+/// The keys a launch of `profile` in `project_dir` carries inline.
 ///
 /// Why: the flag tier outranks the project and local files; the old
 /// project-tier write did not, so a key is left out wherever it used to lose.
@@ -151,10 +178,14 @@ fn read_layer(path: &Path) -> Map<String, Value> {
 /// - `skillOverrides`: each of `skills_off` as `"off"` unless either file
 ///   names that skill (the old write added an entry only where none was); none
 ///   when either file holds a `skillOverrides` that is not an object (the old
-///   write skipped such a file), and none for a partial detection (`None`).
+///   write skipped such a file), and none for a partial detection (`None`);
+/// - each of [`COMPANION_KEYS`] at [`tm_companion_keys`], unless either file
+///   sets it (#12077 part 4b).
 ///
 /// Test: `the_record_carries_each_key_with_the_old_value_12127`,
-/// `a_user_value_keeps_winning_where_it_used_to_12127`.
+/// `a_user_value_keeps_winning_where_it_used_to_12127`,
+/// `the_record_carries_the_spinner_tips_and_attribution_12077`,
+/// `a_user_companion_value_keeps_winning_12077`.
 pub(super) fn launch_keys_for(
     project_dir: &Path,
     style_id: &str,
@@ -187,6 +218,13 @@ pub(super) fn launch_keys_for(
         .collect();
     if !off.is_empty() {
         keys.insert(SKILL_OVERRIDES_KEY.to_owned(), Value::Object(off));
+    }
+    // #12077: part 4b — a user's value in either file keeps winning, so the
+    // flag tier, which outranks both, leaves that key out.
+    for (key, value) in tm_companion_keys() {
+        if !project.contains_key(&key) && !local.contains_key(&key) {
+            keys.insert(key, value);
+        }
     }
     keys
 }
@@ -502,14 +540,17 @@ pub fn recorded_claude_md_excludes(dir: &Path, state_root: Option<&Path>) -> Vec
         .collect()
 }
 
-/// The prep step for the four keys (#12127).
+/// The prep step for the launch keys (#12127).
 ///
 /// Why: see the module doc.
 /// What: reads the `claudeMdExcludes` the current record carries (#12077 row
 /// 13), removes, once, the values earlier releases wrote into the project
 /// file (an unreadable model record skips the pass, unmarked, so a later launch
 /// retries), then records [`launch_keys_for`] for the launch with those
-/// excludes kept.
+/// excludes kept. [`launch_keys_for`] reads the file as the removal left it: a
+/// removal that failed (logged, no marker) leaves tm's values in place, so
+/// those keys stay out of the record and the launch runs with the file's copy
+/// (#12077 part 4b).
 ///
 /// # Errors
 ///
@@ -518,9 +559,12 @@ pub fn recorded_claude_md_excludes(dir: &Path, state_root: Option<&Path>) -> Vec
 /// run without the keys or with the recorded excludes dropped.
 ///
 /// Test: `prepare_session_writes_none_of_the_four_keys_12127`,
+/// `prepare_session_writes_none_of_the_companion_keys_12077`,
 /// `an_unwritable_record_refuses_the_prepared_launch_12127`,
 /// `deliver_keeps_the_recorded_claude_md_excludes_12077`,
-/// `deliver_refuses_over_an_unreadable_record_12077`.
+/// `deliver_refuses_over_an_unreadable_record_12077`,
+/// `a_companion_publish_failure_is_an_error_and_writes_no_marker_12077`,
+/// `an_unreadable_settings_file_fails_the_cleanup_and_keeps_no_marker_12077`.
 pub(super) fn deliver_launch_keys(
     project_dir: &Path,
     style_id: &str,
