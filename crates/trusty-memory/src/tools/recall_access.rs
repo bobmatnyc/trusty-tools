@@ -69,6 +69,20 @@ impl ServedHits {
     }
 }
 
+/// Whether a recall asked to record no access (#11348).
+///
+/// Why: an evaluation run (the df-T7c drift test) must query live palaces
+/// without moving the access boost that ranks them.
+/// What: the optional `read_only` boolean argument of the three recall tools;
+/// absent or not a boolean reads `false`, so a default recall still counts.
+/// Test: `a_read_only_recall_leaves_access_count_unchanged_on_x_and_rulings`,
+/// `a_default_recall_after_a_read_only_one_ranks_the_same_and_still_counts`.
+pub(crate) fn read_only_arg(args: &serde_json::Value) -> bool {
+    args.get("read_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// Record the lane hits a cross-palace recall served, each in its own palace.
 ///
 /// Why (Q4): `memory_recall_all` counts per owning palace. #11255: a walk that
