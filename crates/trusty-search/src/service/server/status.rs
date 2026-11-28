@@ -505,6 +505,11 @@ pub(crate) async fn index_status_report(
     body["profile"] =
         super::profile_apply::stored_label(state.registry_path_override.as_deref(), &index_id.0)
             .into();
+    // #10664: the corpus embedder stamp against the running embedder, report-only.
+    body["embedder_identity"] = indexer
+        .embedder_identity_check()
+        .await
+        .to_json(indexer.active_embedder_identity().as_ref());
     // #10738: `identity {instance_id, generation}`, or null plus `identity_error`.
     if let Some(obj) = body.as_object_mut() {
         crate::service::index_identity::insert_into(&index_id.0, obj);

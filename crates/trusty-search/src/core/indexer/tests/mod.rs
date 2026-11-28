@@ -110,6 +110,8 @@ mod deferred_corpus_12064;
 mod embed_pool_routing;
 // #9284: chunks cut at the embedder window are counted and warned on.
 mod embed_window_9284;
+// #10664: embedder identity stamped on build, compared at load.
+mod embedder_identity_10664;
 mod eviction_kg_paths;
 mod exact_match_floor;
 mod exact_match_perf;

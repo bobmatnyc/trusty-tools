@@ -330,6 +330,16 @@ impl Embedder for SwitchableEmbedder {
     > {
         self.current().split_window()
     }
+
+    // #10664: the live backend's model and precision, stamped and compared per index.
+    fn identity(&self) -> Option<crate::core::embedder_identity::EmbedderIdentity> {
+        let active = self.active.load();
+        Some(crate::core::embedder_identity::EmbedderIdentity::new(
+            active.model.clone(),
+            self.dimension(),
+            active.quantized,
+        ))
+    }
 }
 
 #[cfg(test)]

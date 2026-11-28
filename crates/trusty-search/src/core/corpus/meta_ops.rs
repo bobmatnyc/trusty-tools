@@ -518,6 +518,8 @@ impl CorpusStore {
                     META_KEY_REINDEXED_UNIX,
                     super::identity_meta::META_KEY_IDENTITY_STAMP,
                     super::identity_meta::META_KEY_IDENTITY_BUMP_PENDING,
+                    // #10664: an incremental run keeps the stamp of the build it extends.
+                    super::embedder_stamp::META_KEY_EMBEDDER_IDENTITY,
                 ] {
                     if let Some(val) = src_meta
                         .get(key)
