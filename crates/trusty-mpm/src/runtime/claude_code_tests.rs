@@ -2204,10 +2204,10 @@ fn an_architect_inplace_relaunch_carries_the_lockdown() {
     let carrier = tmp.path().join("owner.json");
     std::fs::write(&carrier, r#"{"deniedMcpServers":[{"serverName":"x"}]}"#).expect("carrier");
     for owner in [None, Some(carrier.as_path())] {
-        let args = super::inplace_tail_args(SessionProfile::Architect, owner).expect("argv");
+        let args = super::inplace_tail_args(SessionProfile::Architect, owner, None).expect("argv");
         assert_production_deny(&args);
     }
-    let pm = super::inplace_tail_args(SessionProfile::Pm, Some(&carrier)).expect("argv");
+    let pm = super::inplace_tail_args(SessionProfile::Pm, Some(&carrier), None).expect("argv");
     assert_eq!(
         pm,
         [
@@ -2218,7 +2218,7 @@ fn an_architect_inplace_relaunch_carries_the_lockdown() {
         ]
     );
     let missing = tmp.path().join("gone.json");
-    assert!(super::inplace_tail_args(SessionProfile::Architect, Some(&missing)).is_err());
+    assert!(super::inplace_tail_args(SessionProfile::Architect, Some(&missing), None).is_err());
 }
 
 /// #12077: `dir` carries no sandbox — its project settings, when present,
@@ -2396,4 +2396,163 @@ fn managed_sandbox_goes_ahead_with_no_home_12077() {
     super::managed_sandbox_at(&ws, None, &config, pm).expect("no home is not refused");
     assert_no_sandbox_in(&ws);
     assert!(!config.join("settings.json").exists(), "no user-tier write");
+}
+
+/// #12077: the inline `--settings` JSON a spec's argv carries, if any.
+fn inline_settings(args: &[String]) -> Option<serde_json::Value> {
+    args.windows(2)
+        .filter(|w| w[0] == "--settings")
+        .find_map(|w| serde_json::from_str(&w[1]).ok())
+}
+
+/// #12077: the switch an opted-in spec assigns for the pane's own relaunch.
+fn sandbox_switch() -> (String, String) {
+    (
+        crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned(),
+        "1".to_owned(),
+    )
+}
+
+/// #12077: an opted-in adapter's spawn and resume carry the role's sandbox
+/// as inline `--settings` and set the switch for the pane's own relaunch; a
+/// default adapter carries neither; and no path writes a sandbox key.
+#[test]
+#[serial_test::serial]
+fn an_opted_in_spawn_and_resume_carry_the_sandbox_inline_12077() {
+    // #9123: the spawn resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let root = home.home().join(MPM_DIR_NAME);
+    for on in [false, true] {
+        let spawned = FakeTmux::new();
+        ClaudeCodeAdapter::new(spawned.clone(), &root)
+            .with_claude_sandbox(on)
+            .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+            .expect("spawn");
+        let resumed = FakeTmux::new();
+        ClaudeCodeAdapter::new(resumed.clone(), &root)
+            .with_claude_sandbox(on)
+            .spawn_resume(
+                "tm-sess",
+                None,
+                home.home(),
+                "task",
+                None,
+                TEST_SESSION_ID,
+                &[],
+            )
+            .expect("resume");
+        for fake in [&spawned, &resumed] {
+            let spec = sent_spec(&only_line(fake));
+            let inline = inline_settings(&spec.args);
+            if on {
+                let inline = inline.expect("an inline --settings");
+                assert_eq!(
+                    inline.pointer("/sandbox/enabled"),
+                    Some(&serde_json::json!(true))
+                );
+                assert!(
+                    inline.pointer("/sandbox/network/strictAllowlist").is_some(),
+                    "{inline}"
+                );
+                assert!(spec.env_set.contains(&sandbox_switch()));
+            } else {
+                assert!(
+                    inline.is_none_or(|v| v.get("sandbox").is_none()),
+                    "{:?}",
+                    spec.args
+                );
+                assert!(!spec.env_set.contains(&sandbox_switch()));
+            }
+        }
+    }
+    assert_no_sandbox_in(home.home());
+    let user = FrameworkPaths::from_root(&root)
+        .managed_claude_config_dir()
+        .join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(&user) {
+        let settings: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert!(settings.get("sandbox").is_none(), "{user:?}: {raw}");
+    }
+    assert!(!home.home().join(".claude/settings.local.json").exists());
+}
+
+/// #12077 (d): `build_record_adapter` hands the record's opt-in to the
+/// adapter, so a daemon resume makes the spawn's choice again.
+#[test]
+#[serial_test::serial]
+fn a_record_adapter_carries_the_sandbox_opt_in_12077() {
+    // #9123: the spawn resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let root = home.home().join(MPM_DIR_NAME);
+    for on in [false, true] {
+        let record: crate::session_manager::SessionRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": "0708af71-2b5e-5dab-8c92-739ebdb04941",
+                "task": "PM",
+                "tmux_name": "tm-sess",
+                "cwd": "/",
+                "state": "stopped",
+                "created_at": "2026-09-30T00:00:00Z",
+                "claude_sandbox": on,
+            }))
+            .expect("record");
+        let fake = FakeTmux::new();
+        crate::runtime::build_record_adapter(&record, fake.clone(), &root)
+            .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+            .expect("spawn");
+        let spec = sent_spec(&only_line(&fake));
+        let enabled =
+            inline_settings(&spec.args).and_then(|v| v.pointer("/sandbox/enabled").cloned());
+        assert_eq!(enabled, on.then(|| serde_json::json!(true)), "on = {on}");
+    }
+    assert_no_sandbox_in(home.home());
+}
+
+/// #12077: the in-place relaunch inside an opted-in pane (its spec set the
+/// switch) carries the sandbox inline; without the switch it carries none;
+/// neither writes a sandbox key.
+#[test]
+#[serial_test::serial]
+fn an_opted_in_inplace_relaunch_carries_the_sandbox_inline_12077() {
+    use crate::secret_source::test_env::EnvVarGuard;
+    // #9123: the relaunch resolves credentials, so it runs in the sandbox.
+    let _creds = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    let home = HomeGuard::set();
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let _path = PathGuard::prepend(&bin_dir);
+    let fw = FrameworkPaths::from_root(home.home().join(crate::core::paths::FRAMEWORK_DIR_NAME));
+    let prompts = home.home().join("prompts");
+    let ws = home.home().join("ws");
+    std::fs::create_dir_all(&prompts).expect("mkdir prompts");
+    std::fs::create_dir_all(&ws).expect("mkdir ws");
+    let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
+    {
+        let _off = EnvVarGuard::unset(switch);
+        let cmd = build_inplace_resume_command_with(&fw, &prompts, &ws, None).expect("off");
+        assert!(
+            inline_settings(&cmd.args).is_none_or(|v| v.get("sandbox").is_none()),
+            "{:?}",
+            cmd.args
+        );
+    }
+    let _on = EnvVarGuard::set(switch, "1");
+    let cmd = build_inplace_resume_command_with(&fw, &prompts, &ws, None).expect("on");
+    let inline = inline_settings(&cmd.args).expect("an inline --settings");
+    assert_eq!(
+        inline.pointer("/sandbox/enabled"),
+        Some(&serde_json::json!(true))
+    );
+    assert_no_sandbox_in(&ws);
 }

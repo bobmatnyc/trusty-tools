@@ -82,6 +82,7 @@ fn record_round_trips_injection_status() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     record.injection_status = InjectionStatus::Success;
     let json = serde_json::to_string(&record).expect("serialize");

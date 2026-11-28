@@ -260,8 +260,14 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
     let spec = tracing::subscriber::with_default(subscriber, || {
-        super::inplace_session_spec(target.path(), &state, &probe_prompt("/probe/p.txt"), None)
-            .expect("a PM spec builds")
+        super::inplace_session_spec(
+            target.path(),
+            &state,
+            &probe_prompt("/probe/p.txt"),
+            None,
+            None,
+        )
+        .expect("a PM spec builds")
     });
     let line = crate::test_support::spec_text(&spec);
     let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
@@ -648,6 +654,7 @@ fn inplace_session_spec_follows_the_configured_renderer() {
             root.path(),
             &probe_prompt("/probe/p.txt"),
             None,
+            None,
         )
         .expect("a PM spec builds");
         let line = crate::test_support::spec_text(&spec);
@@ -683,6 +690,7 @@ fn inplace_session_spec_carries_the_prompt_file() {
         root.path(),
         &probe_prompt("/probe/pm-prompt.txt"),
         None,
+        None,
     )
     .expect("a PM spec builds");
     assert_eq!(
@@ -711,6 +719,7 @@ fn inplace_pm_session_spec_trims_the_unused_tools() {
         root.path(),
         &probe_prompt("/p.txt"),
         None,
+        None,
     )
     .expect("a PM spec builds");
     assert!(pm.env_set.contains(&artifact_off), "{:?}", pm.env_set);
@@ -724,8 +733,9 @@ fn inplace_pm_session_spec_trims_the_unused_tools() {
 
     let mut prompt = probe_prompt("/p.txt");
     prompt.stamp = launch_env(SessionProfile::Architect);
-    let sup = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
-        .expect("an Architect spec builds");
+    let sup =
+        super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None, None)
+            .expect("an Architect spec builds");
     assert!(!sup.env_set.contains(&artifact_off));
     assert!(!sup.args.iter().any(|a| a == "--disallowedTools"));
 }
@@ -786,8 +796,9 @@ fn inplace_session_spec_carries_the_profile_stamp() {
     prompt.stamp = trusty_mpm::core::session_profile::launch_env(
         trusty_mpm::core::session_profile::SessionProfile::Architect,
     );
-    let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
-        .expect("an Architect spec builds");
+    let spec =
+        super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None, None)
+            .expect("an Architect spec builds");
     assert!(
         spec.env_set.contains(&prompt.stamp),
         "the in-place spec must assign {:?}: {:?}",
@@ -840,7 +851,7 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
     let mut prompt = probe_prompt("/p.txt");
     prompt.stamp = launch_env(SessionProfile::Architect);
     let cwd = std::path::Path::new("/w");
-    let spec = super::inplace_session_spec(cwd, root.path(), &prompt, Some(&carrier))
+    let spec = super::inplace_session_spec(cwd, root.path(), &prompt, Some(&carrier), None)
         .expect("the Architect spec builds");
     let values: Vec<&String> = spec
         .args
@@ -865,8 +876,14 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
         assert!(spec.env_unset.iter().any(|n| n == name), "{name}");
     }
 
-    let pm = super::inplace_session_spec(cwd, root.path(), &probe_prompt("/p.txt"), Some(&carrier))
-        .expect("a PM spec builds");
+    let pm = super::inplace_session_spec(
+        cwd,
+        root.path(),
+        &probe_prompt("/p.txt"),
+        Some(&carrier),
+        None,
+    )
+    .expect("a PM spec builds");
     assert!(
         pm.args
             .ends_with(&["--settings".to_owned(), carrier.display().to_string()])
@@ -874,7 +891,7 @@ fn an_architect_inplace_session_spec_carries_the_lockdown() {
     assert!(!pm.env_unset.iter().any(|n| n == "SLACK_BOT_TOKEN"));
 
     let missing = root.path().join("gone.json");
-    assert!(super::inplace_session_spec(cwd, root.path(), &prompt, Some(&missing)).is_err());
+    assert!(super::inplace_session_spec(cwd, root.path(), &prompt, Some(&missing), None).is_err());
 }
 
 // ── #10101: the in-place start launches on its workspace tmux server ──
@@ -1077,7 +1094,7 @@ fn reused_spec(
     let root = tempfile::TempDir::new().expect("tmp config root");
     let mut prompt = probe_prompt("/p.txt");
     prompt.stamp = trusty_mpm::core::session_profile::launch_env(profile);
-    super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
+    super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None, None)
         .expect("a spec builds")
 }
 
@@ -1470,6 +1487,97 @@ async fn an_in_place_start_is_not_refused_by_the_sandbox_12077() {
     assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
     assert!(
         !target
+            .path()
+            .join(".trusty-mpm/sandbox-roles.json")
+            .exists()
+    );
+}
+
+/// #12077: the in-place start carries an opted-in sandbox as ONE inline
+/// `--settings` and assigns the switch; with no payload it carries neither.
+#[test]
+fn an_opted_in_session_start_spec_carries_the_sandbox_inline_12077() {
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let switch = (
+        trusty_mpm::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned(),
+        "1".to_owned(),
+    );
+    let payload = serde_json::json!({ "sandbox": { "enabled": true } });
+    let cwd = std::path::Path::new("/w");
+    let prompt = probe_prompt("/p.txt");
+    let spec = super::inplace_session_spec(cwd, root.path(), &prompt, None, Some(&payload))
+        .expect("a PM spec builds");
+    let values: Vec<&String> = spec
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--settings")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(values.len(), 1, "one --settings: {:?}", spec.args);
+    let inline: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    assert_eq!(inline, payload);
+    assert!(spec.env_set.contains(&switch), "{:?}", spec.env_set);
+
+    let plain =
+        super::inplace_session_spec(cwd, root.path(), &prompt, None, None).expect("a PM spec");
+    assert!(
+        !plain.args.iter().any(|a| a == "--settings"),
+        "{:?}",
+        plain.args
+    );
+    assert!(!plain.env_set.contains(&switch));
+}
+
+/// #12077 (a)/(b): `tm launch`, `tm connect` and the Architect launch get a
+/// sandbox payload only when opted in, and neither choice writes a sandbox key
+/// into the workspace's settings files, `~/.claude/settings.json` or the
+/// tm-owned config dir.
+#[test]
+fn launch_files_carry_the_sandbox_only_when_opted_in_12077() {
+    use crate::commands::launch_home::launch_files_with;
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let home = crate::test_support::hermetic_temp_dir();
+    let workspace = crate::test_support::hermetic_temp_dir();
+    let config = home.path().join("cfg");
+    for profile in [SessionProfile::Pm, SessionProfile::Architect] {
+        let off = launch_files_with(
+            workspace.path(),
+            Some(&config),
+            Some(home.path()),
+            profile,
+            false,
+        )
+        .expect("default launch files");
+        assert_eq!(off.sandbox, None, "{profile:?}: default is off");
+        let on = launch_files_with(
+            workspace.path(),
+            Some(&config),
+            Some(home.path()),
+            profile,
+            true,
+        )
+        .expect("opted-in launch files");
+        let enabled = on
+            .sandbox
+            .as_ref()
+            .and_then(|v| v.pointer("/sandbox/enabled"))
+            .cloned();
+        let want = serde_json::json!(!profile.is_architect());
+        assert_eq!(enabled, Some(want), "{profile:?}");
+    }
+    for file in [
+        workspace.path().join(".claude/settings.json"),
+        workspace.path().join(".claude/settings.local.json"),
+        home.path().join(".claude/settings.json"),
+        config.join("settings.json"),
+    ] {
+        let Ok(raw) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        assert!(!raw.contains("\"sandbox\""), "{}: {raw}", file.display());
+    }
+    assert!(
+        !workspace
             .path()
             .join(".trusty-mpm/sandbox-roles.json")
             .exists()

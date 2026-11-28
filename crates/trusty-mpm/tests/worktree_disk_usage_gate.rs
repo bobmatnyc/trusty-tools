@@ -374,6 +374,7 @@ async fn an_over_threshold_spawn_leaves_no_session_record() {
             deliverable_id: None,
             force_new: true,
             worktree: true,
+            claude_sandbox: false,
         },
     )
     .await

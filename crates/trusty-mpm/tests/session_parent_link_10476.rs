@@ -271,6 +271,7 @@ async fn cli_spawn_has_no_parent_key() {
         deliverable_id: None,
         force_new: true,
         worktree: false,
+        claude_sandbox: false,
     };
     let record = spawn_managed(&fx.state, ManagedSessionId::new(), params)
         .await

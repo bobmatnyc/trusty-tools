@@ -1,7 +1,8 @@
 //! Tests for the #10102 launch-time sandbox entry and the per-role record.
 //!
 //! #12077: the launch entry writes nothing; the #10102 tests drive the
-//! retained `enforce_launch_sandbox`, which slice 2 calls behind an opt-in.
+//! retained `enforce_launch_sandbox`, which no launch calls. An opted-in
+//! launch carries the policy inline instead.
 
 use std::path::{Path, PathBuf};
 
@@ -384,4 +385,86 @@ fn a_launch_with_no_config_dir_is_not_refused_12077() {
     }
     assert!(!operators.exists(), "no `~/.claude` write");
     assert!(!fx.root.join("ws/.claude/settings.json").exists());
+}
+
+/// #12077 (c): an opted-in PM launch carries its policy as ONE inline
+/// `--settings` that allows `trusty-mpm.sock` and the four client daemon
+/// sockets (memory, search, analyze, agents), never `trusty-code.sock`, holds
+/// both tiers' sandbox keys, and writes no settings file.
+#[test]
+#[serial_test::serial]
+fn an_opted_in_launch_puts_the_client_sockets_on_inline_settings_12077() {
+    use crate::core::session_launch::tests::EnvVarGuard;
+    let fx = Fx::new();
+    let data = fx.root.join("data");
+    let _data = EnvVarGuard::set(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV, &data);
+    // Socket overrides would bypass the data-dir rule this test pins.
+    let _cleared = [
+        trusty_common::mpm_rpc::TRUSTY_MPM_SOCKET_ENV,
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+        trusty_common::search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV,
+        trusty_agents_common::health::TRUSTY_AGENTS_SOCKET_ENV,
+    ]
+    .map(EnvVarGuard::clear);
+    let ws = fx.root.join("ws");
+    let home = fx.root.join("home");
+    let payload = crate::core::claude_sandbox::opted_in_launch_sandbox(
+        true,
+        SandboxRole::Pm,
+        &ws,
+        Some(&home),
+    )
+    .expect("an opted-in launch has a payload");
+    let argv = crate::core::architect_lockdown::Lockdown::PRODUCTION
+        .with_sandbox(Some(&payload))
+        .settings_argv(SessionProfile::Pm, None)
+        .expect("the argv builds");
+    assert_eq!(argv.len(), 2, "one --settings pair: {argv:?}");
+    assert_eq!(argv[0], "--settings");
+    let inline: Value = serde_json::from_str(&argv[1]).expect("inline JSON, not a file path");
+    let got = sockets(&inline);
+    let sock = |app: &str| {
+        data.join(app)
+            .join(format!("{app}.sock"))
+            .display()
+            .to_string()
+    };
+    for app in [
+        "trusty-mpm",
+        "trusty-memory",
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-agents",
+    ] {
+        assert!(got.contains(&sock(app)), "{app} allowed: {got:?}");
+    }
+    assert!(
+        !got.contains(&sock("trusty-code")),
+        "trusty-code.sock stays out: {got:?}"
+    );
+    assert_eq!(inline.pointer("/sandbox/enabled"), Some(&json!(true)));
+    assert_eq!(
+        inline.pointer("/sandbox/network/strictAllowlist"),
+        Some(&json!(true))
+    );
+    assert_eq!(inline.pointer("/env/RUSTC_WRAPPER"), Some(&json!("")));
+    let env_vars = inline
+        .pointer("/sandbox/credentials/envVars")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    assert_eq!(env_vars, Some(11), "{inline}");
+    let deny = inline
+        .pointer("/permissions/deny")
+        .and_then(Value::as_array);
+    assert!(deny.is_some_and(|d| !d.is_empty()), "{inline}");
+    for file in [
+        ws.join(".claude/settings.json"),
+        ws.join(".claude/settings.local.json"),
+        home.join(".claude/settings.json"),
+        fx.config.join("settings.json"),
+        record_path(&ws),
+    ] {
+        assert!(!file.exists(), "{} was written", file.display());
+    }
 }

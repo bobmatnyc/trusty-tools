@@ -70,6 +70,7 @@ fn params(dir: &Path, worktree: bool) -> SpawnParams {
         deliverable_id: None,
         force_new: true,
         worktree,
+        claude_sandbox: false,
     }
 }
 

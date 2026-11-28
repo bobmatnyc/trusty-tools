@@ -127,6 +127,7 @@ fn base_params(repo_url: &str, mcp_initiated: bool) -> SpawnParams {
         // #5274: the gate runs before any placement decision, so these cases
         // are indifferent to it; `false` is the default every caller gets.
         worktree: false,
+        claude_sandbox: false,
     }
 }
 

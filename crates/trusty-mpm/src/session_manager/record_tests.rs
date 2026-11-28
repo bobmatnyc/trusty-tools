@@ -68,6 +68,7 @@ fn record_serde_round_trip() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -116,6 +117,7 @@ fn stopped_state_survives_serde() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -162,6 +164,7 @@ fn decommissioned_state_survives_serde() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -233,6 +236,7 @@ fn record_round_trips_tcode_runtime() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     record.runtime = crate::runtime::RuntimeKind::Tcode;
     let json = serde_json::to_string(&record).expect("serialize");
@@ -308,6 +312,7 @@ fn record_round_trips_ephemeral_true() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -413,6 +418,7 @@ fn record_round_trips_scrollback_fields() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -463,6 +469,7 @@ fn record_round_trips_workspace_owned_true() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -541,6 +548,7 @@ fn record_round_trips_deliverable_id() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -616,6 +624,7 @@ fn record_round_trips_worktree_owner() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -765,6 +774,7 @@ fn terminal_fixture() -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 
@@ -840,4 +850,29 @@ fn tmux_socket_round_trips_and_old_records_load() {
     let back: SessionRecord = serde_json::from_str(&json).expect("reloads");
     assert_eq!(back.tmux_socket, Some(socket));
     assert_eq!(back.tmux_server, record.tmux_server);
+}
+
+/// #12077 (d): a record written before `claude_sandbox` existed reads `false`
+/// and re-saves without the key; an opted-in record round-trips `true`.
+/// Test: this function IS the test.
+#[test]
+fn claude_sandbox_round_trips_and_old_records_read_false_12077() {
+    let old = r#"{
+        "id": "0708af71-2b5e-5dab-8c92-739ebdb04941",
+        "task": "PM",
+        "tmux_name": "tm-proj",
+        "cwd": "/",
+        "state": "stopped",
+        "created_at": "2026-09-30T00:00:00Z"
+    }"#;
+    let mut record: SessionRecord = serde_json::from_str(old).expect("old record loads");
+    assert!(!record.claude_sandbox, "an old record is off");
+    let resaved = serde_json::to_string(&record).expect("serializes");
+    assert!(!resaved.contains("claude_sandbox"), "{resaved}");
+
+    record.claude_sandbox = true;
+    let json = serde_json::to_string(&record).expect("serializes");
+    assert!(json.contains(r#""claude_sandbox":true"#), "{json}");
+    let back: SessionRecord = serde_json::from_str(&json).expect("reloads");
+    assert!(back.claude_sandbox);
 }

@@ -57,3 +57,67 @@ fn run_sandbox_goes_ahead_with_no_home_12077() {
     assert!(!config.join("settings.json").exists(), "no user-tier write");
     assert!(!repo.join(".trusty-mpm/sandbox-roles.json").exists());
 }
+
+/// #12077: `tm run` carries the role's sandbox only when opted in, as ONE
+/// inline `--settings` with the switch set, and writes no sandbox key either
+/// way.
+#[test]
+fn run_carries_the_sandbox_inline_only_when_opted_in_12077() {
+    let (_tmp, repo, home, config) = fixture();
+    assert_eq!(
+        super::run_sandbox_payload(false, &repo, Some(&home), SessionProfile::Pm),
+        None
+    );
+    assert_eq!(
+        super::run_sandbox_payload(true, &repo, None, SessionProfile::Pm),
+        None
+    );
+    let payload = super::run_sandbox_payload(true, &repo, Some(&home), SessionProfile::Pm)
+        .expect("an opted-in payload");
+    let files = crate::core::launch_policy::LaunchFiles {
+        mcp_config: None,
+        settings: None,
+        sandbox: Some(payload),
+    };
+    let cmd = super::run_launch_command(
+        None,
+        &repo,
+        &config,
+        None,
+        &files,
+        &repo.join("p.txt"),
+        SessionProfile::Pm,
+    )
+    .expect("the command builds");
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let values: Vec<&String> = args
+        .windows(2)
+        .filter(|w| w[0] == "--settings")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(values.len(), 1, "{args:?}");
+    let inline: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    assert_eq!(
+        inline.pointer("/sandbox/enabled"),
+        Some(&serde_json::json!(true))
+    );
+    let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
+    assert!(
+        cmd.get_envs()
+            .any(|(k, v)| k == switch && v == Some(std::ffi::OsStr::new("1"))),
+        "the switch reaches claude"
+    );
+    run_sandbox(&repo, Some(&home), &config, SessionProfile::Pm).expect("not refused");
+    for file in [
+        repo.join(".claude/settings.json"),
+        repo.join(".claude/settings.local.json"),
+        home.join(".claude/settings.json"),
+        config.join("settings.json"),
+        repo.join(".trusty-mpm/sandbox-roles.json"),
+    ] {
+        assert!(!file.exists(), "{} was written", file.display());
+    }
+}

@@ -1383,6 +1383,7 @@ pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 
@@ -1522,6 +1523,7 @@ async fn manager_reconcile_skips_decommissioned() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1593,6 +1595,7 @@ async fn manager_reconcile_skips_deleted() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1674,6 +1677,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -2266,6 +2270,7 @@ pub(super) async fn seed_record(
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     if seeds_live_tmux {
         mgr.tmux
@@ -2798,6 +2803,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -2898,6 +2904,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 

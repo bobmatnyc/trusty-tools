@@ -1,4 +1,5 @@
-//! Unit tests for `SessionManager::set_source_id`'s bounded retry (#2157 item 5).
+//! Unit tests for `SessionManager::set_source_id`'s bounded retry (#2157 item 5),
+//! and for the #12077 `SessionManager::set_claude_sandbox` beside it.
 //!
 //! Why: split out of `tests.rs` (which was already at the 1500-SLOC test cap)
 //! rather than grown further, mirroring the established pattern of
@@ -59,4 +60,47 @@ async fn set_source_id_returns_err_after_retries_for_missing_session() {
         matches!(result, Err(ManagedError::SessionNotFound(_))),
         "expected SessionNotFound after exhausting retries, got {result:?}"
     );
+}
+
+/// #12077: an opt-in is stored on the record and survives a reload; the
+/// default writes nothing, and a missing record still returns the opt-in for
+/// this launch.
+#[tokio::test]
+async fn set_claude_sandbox_persists_only_an_opt_in_12077() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let off = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-off")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let returned = mgr.set_claude_sandbox(off.clone(), false).await;
+    assert!(!returned.claude_sandbox);
+    assert!(!mgr.get(&off.id).await.expect("get").claude_sandbox);
+
+    let on = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-on")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let returned = mgr.set_claude_sandbox(on.clone(), true).await;
+    assert!(returned.claude_sandbox, "the launch sees the opt-in");
+    let reloaded = mgr.get(&on.id).await.expect("get after set");
+    assert!(reloaded.claude_sandbox, "a resume reads the opt-in");
+
+    let mut gone = on.clone();
+    gone.id = ManagedSessionId::new();
+    assert!(mgr.set_claude_sandbox(gone, true).await.claude_sandbox);
 }

@@ -150,6 +150,7 @@ fn stub_record(
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 
@@ -473,6 +474,7 @@ async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
         // #5274: this test drives `reserve_inproject_worktree` directly — the
         // branch an explicit worktree request routes to.
         worktree: true,
+        claude_sandbox: false,
     };
 
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();
@@ -550,6 +552,7 @@ async fn reserve_8994(base: &std::path::Path) -> Result<(std::path::PathBuf, Str
         deliverable_id: None,
         force_new: false,
         worktree: true,
+        claude_sandbox: false,
     };
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();
     let id = ManagedSessionId::new();
@@ -926,6 +929,7 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
         // #5274: this test drives `spawn_managed_on_main` directly, which is
         // the branch a spawn carrying no worktree request lands on.
         worktree: false,
+        claude_sandbox: false,
     };
 
     let record = spawn_managed_on_main(
@@ -1018,6 +1022,7 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
         deliverable_id: None,
         force_new: false,
         worktree: false,
+        claude_sandbox: false,
     };
 
     spawn_managed_on_main(
@@ -1101,6 +1106,7 @@ async fn spawn_managed_on_main_writes_auto_memory_off_with_trusty_memory_down() 
         deliverable_id: None,
         force_new: false,
         worktree: false,
+        claude_sandbox: false,
     };
 
     spawn_managed_on_main(
@@ -1240,6 +1246,7 @@ fn on_main_params(checkout: &std::path::Path) -> SpawnParams {
         deliverable_id: None,
         force_new: true,
         worktree: false,
+        claude_sandbox: false,
     }
 }
 

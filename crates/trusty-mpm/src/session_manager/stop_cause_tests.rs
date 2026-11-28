@@ -78,6 +78,7 @@ fn record_at(
         terminal_at: None,
         stop_cause,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

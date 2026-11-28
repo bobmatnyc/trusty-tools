@@ -70,6 +70,7 @@ fn params(repo_url: &str) -> SpawnParams {
         deliverable_id: None,
         force_new: true,
         worktree: false,
+        claude_sandbox: false,
     }
 }
 

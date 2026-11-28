@@ -60,6 +60,7 @@ fn tombstoned(tmux_name: &str, workspace: &Path) -> SessionRecord {
         terminal_at: None,
         stop_cause: None,
         kind: Default::default(),
+        claude_sandbox: false,
     }
 }
 

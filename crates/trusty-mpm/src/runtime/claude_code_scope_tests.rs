@@ -44,6 +44,7 @@ fn scope_launch(config_dir: Option<&Path>) -> ManagedLaunch<'_> {
         // #7685: the reachable posture — MCP scoping is orthogonal to it.
         alternate_screen: false,
         profile: Default::default(),
+        sandbox: None,
     }
 }
 

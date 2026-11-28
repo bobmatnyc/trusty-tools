@@ -78,6 +78,7 @@ fn run_launch_command_carries_the_architect_lockdown() {
             &crate::core::launch_policy::LaunchFiles {
                 mcp_config: None,
                 settings: Some(settings),
+                sandbox: None,
             },
             &tmp.path().join("p.txt"),
             SessionProfile::Architect,

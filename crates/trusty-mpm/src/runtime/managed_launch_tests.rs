@@ -94,6 +94,7 @@ impl Worst {
             // #8405: the worst case carries the configured renderer too.
             alternate_screen: true,
             profile: Default::default(),
+            sandbox: None,
         }
     }
 }
@@ -114,6 +115,7 @@ fn bare_launch<'a>(cwd: &'a Path, gh_env: &'a [(String, String)]) -> ManagedLaun
         settings: None,
         alternate_screen: false,
         profile: Default::default(),
+        sandbox: None,
     }
 }
 
