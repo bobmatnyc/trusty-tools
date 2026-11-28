@@ -85,6 +85,15 @@ class TestUnnamedRows(Fx):
         r = self.resolve(dv.enc(os.path.join(self.pr, "acme", "widget")), reg)
         self.assertEqual((r["name"], r["goal"], r["sessions"], r["basis"]), ("acme/widget", "G09", ["tm-widget-01"], "tm registry (path match)"))
 
+    def test_path_registered_row_is_named_owner_repo_from_its_project_key_10350(self):
+        # #10350 AC1: a checkout registered by path has no GitHub URL; its owner/repo project_key names the row.
+        path = os.path.join(self.pr, "acme", "widget")
+        reg = [{"name": "wdg", "path": path, "owner": None, "repo": None, "project_key": "acme/widget"}]
+        self.assertEqual(self.resolve(dv.enc(path), reg)["name"], "acme/widget")
+        # A local:<uuid> key names no owner: the alias stays.
+        reg[0]["project_key"] = "local:0f0e0d0c"
+        self.assertEqual(self.resolve(dv.enc(path), reg)["name"], "wdg")
+
     def test_unregistered_path_under_projects_root_is_owner_repo_and_never_crosses_owners(self):
         r = self.resolve(dv.enc(os.path.join(self.pr, "acme", "widget")))
         self.assertEqual((r["name"], r["basis"], r["sessions"]), ("acme/widget", "path, not registered", ["tm-widget-01"]))   # zeta/widget's session excluded

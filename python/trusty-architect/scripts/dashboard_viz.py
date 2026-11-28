@@ -277,7 +277,9 @@ def resolve_dir(d, registry, sessions, goals, projects_root=None, _top=True):
     if best:
         r = best[1]
         owner, repo = r.get("owner"), r.get("repo")
-        return _row("%s/%s" % (owner, repo) if owner and repo else r["name"], owner, repo or r["name"], r["name"], "tm registry (path match)", sessions, goals)
+        # #10350 AC1: a path-registered checkout is named by its owner/repo project_key, as on the Projects view.
+        name = "%s/%s" % (owner, repo) if owner and repo else (dashboard_projects.key_label(r.get("project_key")) or r["name"])
+        return _row(name, owner, repo or r["name"], r["name"], "tm registry (path match)", sessions, goals)
     if real and projects_root:
         root = os.path.realpath(projects_root)
         if _inside(root, real) and real != root:

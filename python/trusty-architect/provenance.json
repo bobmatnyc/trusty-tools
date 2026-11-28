@@ -61,7 +61,7 @@
     "scripts/dashboard_store.py": "69e685dfe53d57ee05f2a60f539bffbe38add30a491e1adf96222b509769e445",
     "scripts/dashboard_toml.py": "69007b041109ca108dca44fcf1065864a10e58245497dc726878404d938f0bfc",
     "scripts/dashboard_updates.py": "ca093c51ea9ce0e5ec55cbf9e48fa005efba56cb924700cf567d716060301135",
-    "scripts/dashboard_viz.py": "189bab099097bc91747ba96d9751b3f5a13155a32074917e08c23fbad606a853",
+    "scripts/dashboard_viz.py": "c59213469376ec68daae6562e452dec1a4dda56c6722204f90b2e796cb5203f5",
     "scripts/dashboard_watch.py": "c02ab333e6c8550a3632e7d658a24aedc024f98d519dd900cd0841dbb6cba0c6",
     "scripts/datg-hook.sh": "b74b3f6d17084e3e52b67700f05d550a39c0abc9312d6af63ff7cc46a2f9da6f",
     "scripts/datg.py": "b12a9df1706bda2aa8a46952886c3e0de796d75b4d87792a11a08e34da04adc3",
