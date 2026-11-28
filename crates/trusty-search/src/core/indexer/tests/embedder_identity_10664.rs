@@ -272,6 +272,7 @@ async fn an_unreadable_stamp_reports_unreadable_not_match() {
 /// What: the JSON carries status, both identities, and the reason field.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn the_status_body_carries_the_identity_check() {
     let check = IdentityCheck::compare(StampRead::Stamped(int8()), Some(fp32()));
     let body = check.to_json(Some(&fp32()));
@@ -288,6 +289,7 @@ fn the_status_body_carries_the_identity_check() {
 /// What: `SwitchableEmbedder` reports its `ActiveBackend` model and precision.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn switchable_reports_the_active_backend_identity() {
     assert_eq!(switchable(true).identity(), Some(int8()));
     assert_eq!(switchable(false).identity(), Some(fp32()));
@@ -297,6 +299,7 @@ fn switchable_reports_the_active_backend_identity() {
 /// Why: the comparison is exact; no outcome may collapse into another.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn compare_covers_every_outcome() {
     use IdentityCheck as C;
     assert_eq!(C::compare(StampRead::Absent, Some(fp32())), C::Unknown);
@@ -321,6 +324,7 @@ fn compare_covers_every_outcome() {
 /// Why: only a run that replaced every vector may stamp.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn should_stamp_only_full_rebuilds() {
     assert!(should_stamp(true, 10));
     assert!(should_stamp(false, 0));
