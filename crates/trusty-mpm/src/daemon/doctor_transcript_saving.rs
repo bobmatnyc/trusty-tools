@@ -189,11 +189,12 @@ fn launch_lines() -> Vec<LaunchLine> {
         probe,
         false,
     );
-    let stream_cmd = crate::control::backend::stream_json::build_claude_command(cwd, None);
+    let stream_cmd = crate::control::backend::stream_json::build_claude_command(cwd, None, None);
     // #8453: the control-plane pane line, scrubbed since the stamp fix. A
     // `None` config root reads no operator file; only the `-u` flags matter.
     let control_pane_line =
-        crate::control::backend::tmux::pane_claude_line(None, "claude", None).unwrap_or_default();
+        crate::control::backend::tmux::pane_claude_line(None, "claude", None, None)
+            .unwrap_or_default();
 
     // #8308: the CLI and fleet paths now launch from these specs; the string
     // builders above stay covered while they remain public API.

@@ -14,13 +14,13 @@
 //! What: [`check_hooks_hygiene`] scans `project_dir` (when given) plus every
 //! currently-live `active_workspace_paths` — the SAME bounded scope
 //! `check_agents`/`check_skills` use — and returns THREE checks:
-//! `hooks_contamination` (`Warn` when any file carries a tm-owned hook group),
-//! `hooks_foreign_conflict` (`Warn` when any file carries a foreign claude-mpm
-//! hook group), `hooks_build_tree_binary` (#7262 — `Warn` naming each hook
-//! or `statusLine` command whose executable lives in a Cargo build tree), and
-//! `hooks_missing_tm_group` (#7490 — `Warn` naming each lifecycle event a
-//! tm-provisioned file carries NO tm hook group for).
-//! Test: the `tests` module below covers all four checks against temp
+//! `hooks_contamination` (`Warn` when any file carries a tm hook entry —
+//! #12077 part 4c: every one is stale, since tm's hooks ride each launch's
+//! `--settings` body), `hooks_foreign_conflict` (`Warn` when any file carries
+//! a foreign claude-mpm hook group), and `hooks_build_tree_binary` (#7262 —
+//! `Warn` naming each hook or `statusLine` command whose executable lives in a
+//! Cargo build tree). #12077 part 4c retired `hooks_missing_tm_group`.
+//! Test: the `tests` module below covers all three checks against temp
 //! directories.
 
 use std::collections::BTreeSet;
@@ -101,60 +101,23 @@ pub(crate) use crate::core::statusline_settings::read_settings;
 /// `check_hooks_hygiene_never_double_counts_active_workspace_dupes`,
 /// `check_hooks_hygiene_reports_the_build_tree_incident_shape`,
 /// `check_hooks_hygiene_reports_a_build_tree_statusline`,
-/// `check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary`.
-///
-/// #7490: a FOURTH check, `hooks_missing_tm_group`, names each lifecycle event
-/// a tm-provisioned file has no tm hook group for. It is the inverse of
-/// `hooks_contamination` and does not overlap it: contamination reports an
-/// entry that should not be there, this reports one that should be and is not.
-/// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
-/// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
-/// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`.
+/// `check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary`,
+/// `check_hooks_hygiene_warns_on_a_provisioned_file_12077`.
 pub(super) fn check_hooks_hygiene(
     project_dir: Option<&Path>,
     active_workspace_paths: &[PathBuf],
-) -> (DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck) {
-    check_hooks_hygiene_with_exe(project_dir, active_workspace_paths, None)
-}
-
-/// [`check_hooks_hygiene`] with the hook binary pinned by the caller.
-///
-/// Why (#7849): the toggle-driven probe compares the file against the COMMANDS
-/// the writer would produce, and resolving those needs an installed binary. A
-/// test process is a build artifact, so with `None` the probe's answer depends
-/// on whether the host happens to have `tm` installed — green on a developer
-/// machine, a resolution error on CI, for the same fixture. Mirrors the seam
-/// [`crate::core::deploy_validate::validate_workspace_with_exe`] carries.
-/// What: as [`check_hooks_hygiene`]; production passes `None`.
-/// Test: `check_hooks_hygiene_reports_a_missing_toggle_driven_group`.
-pub(super) fn check_hooks_hygiene_with_exe(
-    project_dir: Option<&Path>,
-    active_workspace_paths: &[PathBuf],
-    hook_exe: Option<&Path>,
-) -> (DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck) {
+) -> (DoctorCheck, DoctorCheck, DoctorCheck) {
     let files = candidate_settings_files(project_dir, active_workspace_paths);
 
     let mut contaminated: Vec<PathBuf> = Vec::new();
     let mut foreign: Vec<PathBuf> = Vec::new();
     let mut build_tree: Vec<(PathBuf, String)> = Vec::new();
-    let mut missing: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for path in &files {
         let Some(val) = read_settings(path) else {
             continue;
         };
-        // #7490: empty for a file tm never provisioned, so a foreign project
-        // never grows a finding telling it to adopt tm's hooks.
-        let mut gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
-        // #7849: `missing_lifecycle_hook_events` tests the base triad only, so a
-        // toggle-driven group — the #7688 `Stop`/`SubagentStop` capture, the
-        // #6887 diversion groups — was unreported on a project whose flag
-        // flipped on after its settings file was written.
-        gaps.extend(toggle_driven_gaps(path, hook_exe));
-        if !gaps.is_empty() {
-            missing.push((path.clone(), gaps));
-        }
-        // #10565: a provisioned file's own hooks are not contamination, so the
-        // check never names a finding `--fix` would act on by stripping them.
+        // #12077 part 4c: any tm entry in a project file is stale — the same
+        // predicate the launch-time strip and `--fix` remove by.
         if !contamination_event_names(&val).is_empty() {
             contaminated.push(path.clone());
         }
@@ -223,100 +186,6 @@ pub(super) fn check_hooks_hygiene_with_exe(
         contamination_check,
         foreign_check,
         build_tree_check(&build_tree),
-        missing_group_check(&missing),
-    )
-}
-
-/// The toggle-driven hook groups one settings file is missing (#7849).
-///
-/// Why: `missing_lifecycle_hook_events` answers only for the seven-event
-/// lifecycle triad, which every toggle is additive to — so the group a flipped
-/// flag asks for was invisible to `tm doctor` exactly as it was to
-/// `tm validate`. This reuses the SAME diff the validator reports from, so the
-/// two surfaces cannot disagree about what is missing.
-/// What: `<event> (asks for `<command>`)` per missing group, and nothing at all
-/// for a file whose project directory cannot be derived, that tm's project tier
-/// never provisioned, or for which no stable binary resolves — this check names
-/// a COMMAND, which an unresolved binary cannot supply; the missing-hook-set
-/// verdict for that case is `check_deployment_completeness`'s
-/// `ProjectHookDiagnosticIncomplete`, not a second copy here. The STALE half of
-/// the diff is deliberately not reported here: `tm doctor`'s own
-/// `hooks_contamination` check already owns "an entry that should not be
-/// there", and this check is the inverse of it (#7490).
-/// Test: `check_hooks_hygiene_reports_a_missing_toggle_driven_group`.
-fn toggle_driven_gaps(settings_path: &Path, hook_exe: Option<&Path>) -> Vec<String> {
-    // `<project>/.claude/settings.json` → `<project>`.
-    let Some(project_dir) = settings_path.parent().and_then(Path::parent) else {
-        return Vec::new();
-    };
-    let Some(val) = read_settings(settings_path) else {
-        return Vec::new();
-    };
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
-    let Ok(gaps) =
-        crate::core::session_launch::project_hook_group_gaps(&fw, project_dir, &val, hook_exe)
-    else {
-        return Vec::new();
-    };
-    if gaps.is_empty() {
-        return Vec::new();
-    }
-    gaps.missing
-        .into_iter()
-        .map(|(event, command)| format!("{event} (asks for `{command}`)"))
-        .collect()
-}
-
-/// Render the `hooks_missing_tm_group` check from the collected gaps (#7490).
-///
-/// Why: the operator has to see WHICH event is unwired and in which file. The
-/// incident was a single missing `SessionStart` group in a file that carried
-/// every other group, and the consequence — no savings row, no 💸 segment —
-/// is invisible from the file itself. It also has to name the repair, because
-/// a finding whose remedy the operator has to guess is how #4948 happened.
-/// What: `Ok` when `gaps` is empty. Otherwise `Warn`, listing up to 5
-/// `<path>: <event>, <event>` pairs plus an overflow count, and naming
-/// `tm doctor --fix`.
-/// Test: `check_hooks_hygiene_reports_a_missing_sessionstart_group`,
-/// `check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file`,
-/// `check_hooks_hygiene_missing_group_check_ignores_a_foreign_project`,
-/// `doctor_flags_missing_post_tool_use_failure_group_10095`,
-/// `doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095`.
-fn missing_group_check(gaps: &[(PathBuf, Vec<String>)]) -> DoctorCheck {
-    if gaps.is_empty() {
-        return DoctorCheck::new(
-            "hooks_missing_tm_group",
-            CheckStatus::Ok,
-            "every tm-provisioned settings file carries the full tm hook lifecycle group",
-        );
-    }
-    let shown: Vec<String> = gaps
-        .iter()
-        .take(5)
-        .map(|(path, events)| format!("{}: {}", path.display(), events.join(", ")))
-        .collect();
-    let overflow = if gaps.len() > 5 {
-        format!(" (+{} more)", gaps.len() - 5)
-    } else {
-        String::new()
-    };
-    DoctorCheck::new(
-        "hooks_missing_tm_group",
-        CheckStatus::Warn,
-        format!(
-            "{} tm-provisioned settings file{} lack{} a tm hook group this project asks \
-             for, so `tm hook` never fires for it — a missing `SessionStart` costs the \
-             session its savings row and the 💸 statusline segment, and a missing \
-             `Stop (asks for … --prompt-feedback)` costs it every prompt-feedback row \
-             (#7849). `tm doctor --fix` previews merging the groups back in and `--yes` \
-             applies it, preserving every other entry (issue #7490); \
-             `tm validate --repair --path <project>` resyncs one project in place. {}{}",
-            gaps.len(),
-            if gaps.len() == 1 { "" } else { "s" },
-            if gaps.len() == 1 { "s" } else { "" },
-            shown.join("; "),
-            overflow,
-        ),
     )
 }
 

@@ -13,7 +13,9 @@
 //! and, for #11463, `~/.ssh/authorized_keys` and
 //! `~/.trusty-tools/trusty-common/config.yaml` under the same rules —
 //! so the directories above them are protected too, and `rm -rf` or `mv` of
-//! `~/.trusty-tools/trusty-mpm` is denied. [`Anchors::judge_delete`] judges an
+//! `~/.trusty-tools/trusty-mpm` is denied. #12077 part 4c: the carrier body
+//! directory `~/.trusty-tools/trusty-mpm/session-settings/`, which holds every
+//! launch's hooks, is fenced: no write reaches a file under it. [`Anchors::judge_delete`] judges an
 //! `rm`/`rmdir`/`unlink` operand, a glob or expansion by its literal parent.
 //! [`project_settings_verdict`] is the D2 content rule for a project's
 //! `.claude/settings.json` and `settings.local.json`, and binds every session,
@@ -72,6 +74,9 @@ pub(super) struct EgressAnchors {
     pub(super) paths: Vec<PathBuf>,
     /// The identities of the anchors that exist, for hard links.
     pub(super) ids: Vec<FileId>,
+    /// #12077 part 4c: trees every path under which is refused — the carrier
+    /// body directory, lexical and resolved.
+    pub(super) fence: Vec<PathBuf>,
 }
 
 impl EgressAnchors {
@@ -80,7 +85,9 @@ impl EgressAnchors {
     ///
     /// Test: `egress_anchor_config_yaml_writes_are_denied`,
     /// `egress_anchor_unresolvable_location_denies_every_write`,
-    /// `the_install_file_is_an_anchor`.
+    /// `the_install_file_is_an_anchor`,
+    /// `the_carrier_body_directory_is_an_anchor_12077`,
+    /// `an_unresolvable_carrier_body_directory_denies_every_write_12077`.
     pub(super) fn locate(home: &Path) -> Result<Self, PathBuf> {
         // #11821 P3: under the configured config dir of `home`.
         let base = trusty_mpm::core::config_base::config_base_under(home);
@@ -101,6 +108,7 @@ impl EgressAnchors {
             guarded: Vec::new(),
             paths: Vec::new(),
             ids: Vec::new(),
+            fence: Vec::new(),
         };
         for path in lexical {
             let Resolved::Path(resolved) = resolve(&path) else {
@@ -110,6 +118,16 @@ impl EgressAnchors {
             out.guarded.push(resolved.clone());
             out.paths.extend([path, resolved]);
         }
+        // #12077 part 4c (Q1): the carrier body directory holds tm's hooks for
+        // every launch, so it is fenced beside `config.yaml` and `claude-config/`.
+        let bodies = trusty_common::crate_config::crate_config_dir_at(&base, CRATE_NAME)
+            .join(trusty_mpm::core::launch_policy::carrier::SESSION_SETTINGS_DIR);
+        let Resolved::Path(resolved) = resolve(&bodies) else {
+            return Err(bodies);
+        };
+        out.guarded.push(resolved.clone());
+        out.fence.extend([bodies.clone(), resolved.clone()]);
+        out.paths.extend([bodies, resolved]);
         Ok(out)
     }
 }

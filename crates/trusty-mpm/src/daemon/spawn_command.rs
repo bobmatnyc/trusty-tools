@@ -495,6 +495,8 @@ mod tests {
             err.contains(&*not_a_dir.to_string_lossy()) && err.contains("refusing to spawn"),
             "{err}"
         );
+        // #12077 part 4c: the refusal is the prompt file's, not the hook binary's.
+        assert!(!err.contains("tm's hooks cannot be built"), "{err}");
     }
 
     /// #4467: the relaunch line must scrub the inherited session markers, or a

@@ -155,7 +155,7 @@ fn out_of_scope_scripts_leave_the_row_ok_and_plan_no_step() {
         row.message
     );
     for mode in [RepairMode::DryRun, RepairMode::Apply] {
-        let steps = repair_hook_interpreter(std::slice::from_ref(&path), mode);
+        let steps = repair_hook_interpreter(std::slice::from_ref(&path), Some(dir.path()), mode);
         assert!(steps.is_empty(), "{mode:?}: {steps:?}");
     }
 
@@ -165,7 +165,7 @@ fn out_of_scope_scripts_leave_the_row_ok_and_plan_no_step() {
     );
     let row = hook_row(std::slice::from_ref(&mixed));
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
-    let steps = repair_hook_interpreter(&[mixed], RepairMode::DryRun);
+    let steps = repair_hook_interpreter(&[mixed], Some(dir.path()), RepairMode::DryRun);
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert!(matches!(steps[0].status, StepStatus::Refused(_)));
 }
@@ -235,7 +235,11 @@ fn repair_dry_run_writes_nothing() {
     let (dir, notify, _datg) = seeded();
     let path = settings(dir.path(), &hooks_doc(&[&notify.display().to_string()]));
     let before = std::fs::read(&path).expect("read");
-    let steps = repair_hook_interpreter(std::slice::from_ref(&path), RepairMode::DryRun);
+    let steps = repair_hook_interpreter(
+        std::slice::from_ref(&path),
+        Some(dir.path()),
+        RepairMode::DryRun,
+    );
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(steps[0].status, StepStatus::Planned);
     assert_eq!(std::fs::read(&path).expect("read"), before);
@@ -254,7 +258,11 @@ fn repair_applies_backs_up_and_is_idempotent() {
     let path = settings(dir.path(), &original);
     let before = std::fs::read_to_string(&path).expect("read");
 
-    let steps = repair_hook_interpreter(std::slice::from_ref(&path), RepairMode::Apply);
+    let steps = repair_hook_interpreter(
+        std::slice::from_ref(&path),
+        Some(dir.path()),
+        RepairMode::Apply,
+    );
     let backup = match &steps[0].status {
         StepStatus::Applied { backup: Some(b) } => b.clone(),
         other => panic!("expected an applied step with a backup, got {other:?}"),
@@ -287,7 +295,11 @@ fn repair_applies_backs_up_and_is_idempotent() {
     expected["hooks"] = after["hooks"].clone();
     assert_eq!(after, expected);
 
-    let again = repair_hook_interpreter(std::slice::from_ref(&path), RepairMode::Apply);
+    let again = repair_hook_interpreter(
+        std::slice::from_ref(&path),
+        Some(dir.path()),
+        RepairMode::Apply,
+    );
     assert!(again.is_empty(), "a second run plans nothing: {again:?}");
 }
 
@@ -296,7 +308,11 @@ fn repair_refuses_an_unparseable_file() {
     let dir = tempfile::tempdir().expect("dir");
     let path = dir.path().join("settings.json");
     std::fs::write(&path, "{ not json").expect("write");
-    let steps = repair_hook_interpreter(std::slice::from_ref(&path), RepairMode::Apply);
+    let steps = repair_hook_interpreter(
+        std::slice::from_ref(&path),
+        Some(dir.path()),
+        RepairMode::Apply,
+    );
     assert_eq!(steps.len(), 1);
     assert!(
         matches!(steps[0].status, StepStatus::Refused(_)),
@@ -364,7 +380,7 @@ fn an_unreadable_file_keeps_the_row_non_ok() {
     std::fs::create_dir_all(&path).expect("a directory where the file should be");
     let row = hook_row(std::slice::from_ref(&path));
     assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
-    let steps = repair_hook_interpreter(&[path], RepairMode::Apply);
+    let steps = repair_hook_interpreter(&[path], Some(dir.path()), RepairMode::Apply);
     assert!(
         matches!(steps[0].status, StepStatus::Failed(_)),
         "{steps:?}"
@@ -401,4 +417,23 @@ fn a_matching_seed_is_ok() {
         notify_asset_row(&BTreeSet::new(), &bytes).status,
         CheckStatus::Ok
     );
+}
+
+/// #12077 row 9: a generic Claude settings file (here a project's
+/// `.claude/settings.json`) is never rewritten by `--fix --yes`; the rewrite is
+/// reported as refused.
+#[test]
+fn a_generic_settings_file_is_refused_not_rewritten_12077() {
+    let (dir, notify, _datg) = seeded();
+    let path = settings(dir.path(), &hooks_doc(&[&notify.display().to_string()]));
+    let before = std::fs::read(&path).expect("read");
+
+    let steps = repair_hook_interpreter(std::slice::from_ref(&path), None, RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Refused(_)),
+        "{steps:?}"
+    );
+    assert_eq!(std::fs::read(&path).expect("read"), before);
 }

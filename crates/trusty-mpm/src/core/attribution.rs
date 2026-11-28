@@ -7,17 +7,18 @@
 //! (`attribution.commit` / `attribution.pr`, which deprecated
 //! `includeCoAuthoredBy` in v2.0.62), so tm writes the setting instead and the
 //! prose says nothing (#6807).
-//! What: [`ATTRIBUTION_FOOTER`] is the single definition, seeded into two
-//! settings tiers because they reach different launches:
+//! What: [`ATTRIBUTION_FOOTER`] is the single definition, delivered two ways:
 //! [`crate::core::standalone::settings_defaults::ensure_settings_defaults`]
-//! writes the tm-owned `CLAUDE_CONFIG_DIR` copy, which only the `claude` child
-//! tm spawns can see (`CLAUDE_CONFIG_DIR` is set per-command and never
-//! exported), and
-//! `core::session_launch::settings::write_output_style` (private to that
-//! module, so not linkable) writes the
-//! project-tier `.claude/settings.json`, which any `claude` launched in the
-//! project reads. Both seed absent-only. `tm pr open`'s body validator checks
-//! the same constant so a hand-written body matches what the setting produces.
+//! seeds the tm-owned `CLAUDE_CONFIG_DIR` copy, absent-only, which only the
+//! `claude` child tm spawns can see (`CLAUDE_CONFIG_DIR` is set per-command and
+//! never exported), and
+//! [`crate::core::session_launch::tm_companion_keys`] puts it on the launch's
+//! `--settings` flag tier, unless the project's `settings.json` or
+//! `settings.local.json` sets `attribution`. #12077 part 4b: tm no longer
+//! writes it into the project's `.claude/settings.json`, so a bare `claude`
+//! started outside tm no longer gets the footer from that file. `tm pr open`'s
+//! body validator checks the same constant so a hand-written body matches what
+//! the setting produces.
 //!
 //! Per-key fallback is what makes seeding both keys safe. Claude Code's
 //! settings reference, under `attribution`: "Once you set `commit` or `pr`,
@@ -29,7 +30,7 @@
 //! this was developed against.
 //! Test: `attribution_footer_is_the_expected_literal`,
 //! `ensure_settings_defaults_seeds_attribution`,
-//! `write_output_style_seeds_attribution`.
+//! `the_record_carries_the_spinner_tips_and_attribution_12077`.
 
 /// The attribution footer that ends every trusty-mpm commit message and PR body.
 ///

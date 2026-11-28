@@ -1,17 +1,20 @@
-//! Output-style, spinner-tip, hook, and MCP-injection helpers.
+//! Output-style, hook, and MCP-injection helpers.
 //!
 //! Why: `prepare_session` must configure several Claude Code settings files
 //! before launching a session. Grouping all the settings-file mutations here
 //! keeps `mod.rs` focused on the top-level preparation sequence and makes
 //! each individual helper easy to test in isolation.
-//! What: constants and functions for writing the output style, spinner tips,
-//! `trusty-memory` project hooks, `trusty-memory` MCP server injection, and
-//! global-hook cleanup.
+//! What: constants and functions for deploying the output style, writing the
+//! `trusty-memory` project hooks and `trusty-memory` MCP server injection. The
+//! global-hook cleanup is in `legacy_memory_hooks` (#12077). #12077 part 4b:
+//! the spinner tips and the attribution footer are no longer written here;
+//! [`SPINNER_TIPS`] rides the launch's `--settings` flag tier (`launch_keys`).
 //! Test: each public(super) function is covered by a dedicated test in `tests.rs`.
 
 use std::path::{Path, PathBuf};
 
 use super::PrepError;
+#[cfg(test)]
 use crate::core::standalone::hooks::backup;
 
 /// The `tm hook` sub-flag the PM enforcement guard is invoked with.
@@ -33,8 +36,8 @@ pub(super) use crate::core::standalone::hooks::build_tree::PM_GUARD_SUFFIX;
 /// Why: the Claude Code status bar renders `style:<outputStyle>`; when no style
 /// is configured, launched trusty-mpm sessions advertise the professional
 /// default `trusty-mpm`. HR-4 lets the operator select a different bundled style
-/// (teaching/research); [`write_output_style`] takes the resolved active id and
-/// falls back to this constant when none is supplied. `pub(crate)` (rather than
+/// (teaching/research); the launch's native style id falls back to this
+/// constant (#12127: delivered on the `--settings` flag tier). `pub(crate)` (rather than
 /// `pub(super)`) so `core::standalone::settings_defaults::ensure_settings_defaults`
 /// can seed the SAME default id into the tm-owned `CLAUDE_CONFIG_DIR` settings.json
 /// (issue #2214), re-exported via `session_launch::OUTPUT_STYLE`.
@@ -46,6 +49,8 @@ pub(crate) const OUTPUT_STYLE: &str = crate::core::bundle::DEFAULT_OUTPUT_STYLE_
 /// `spinnerTipsOverride.tips`; the operator's global settings carry generic
 /// claude-mpm tips, so trusty-mpm sessions override them with project-relevant
 /// guidance (the `tm` CLI, the `make check` gate, the API-first layering rule).
+/// #12077: part 4b delivers it on the `--settings` flag tier
+/// (`launch_keys::tm_companion_keys`), never in the project file.
 pub(super) const SPINNER_TIPS: &[&str] = &[
     "tm launch — start a configured claude session for this project",
     "make check = cargo test + clippy + fmt — must pass before any PR",
@@ -106,23 +111,10 @@ pub(super) const TRUSTY_MEMORY_HOOKS: &str = r#"{
   ]
 }"#;
 
-/// Hook event types the global `trusty-memory` entries may have been registered
-/// under (across current and legacy trusty-mpm builds).
-///
-/// Why: [`clean_global_trusty_memory_hooks`] strips trusty-mpm's
-/// `trusty-memory` hook entries from `~/.claude/settings.json` so they stop
-/// firing for unrelated sessions. It must cover every event trusty-mpm has ever
-/// written globally: the new canonical pair (`UserPromptSubmit`, `SessionStart`)
-/// AND the legacy `hooks fire` events (`PostToolUse`, `Stop`) so an upgrade
-/// cleans up the old entries too.
-/// What: the union of current and legacy global hook event keys.
-pub(super) const GLOBAL_TRUSTY_MEMORY_EVENTS: &[&str] =
-    &["UserPromptSubmit", "SessionStart", "PostToolUse", "Stop"];
-
 /// Deploy ALL bundled output styles under `<root>/.claude/output-styles/`.
 ///
-/// Why: [`write_output_style`] sets `"outputStyle": "<active>"` in the project
-/// settings; Claude Code honours that name only when a matching style file
+/// Why: the launch names `"outputStyle": "<active>"` on its `--settings` flag
+/// tier (#12127); Claude Code honours that name only when a matching style file
 /// exists under a `.claude/output-styles/` directory that is actually loaded
 /// by the running session's `--setting-sources`. HR-4 bundles three styles
 /// (professional / teaching / research) and the operator may select any of
@@ -186,9 +178,9 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 
 /// Read-merge-write the project's `.claude/settings.json` under one mutation.
 ///
-/// Why (#7685): [`write_output_style`] was the only project-settings writer and
-/// carried the read/merge/write body inline, so every new key would have copied
-/// it. The merge discipline it encodes is the part worth sharing: an existing
+/// Why (#7685): the output-style writer was the only project-settings writer
+/// and carried the read/merge/write body inline, so every new key would have
+/// copied it (#12077 part 4b removed that writer). The merge discipline it encodes is the part worth sharing: an existing
 /// file is parsed and every key it already carries is preserved, a missing file
 /// starts from an empty object rather than aborting the launch, and the result
 /// is written back pretty-printed. Taking a closure rather than a single key
@@ -222,8 +214,7 @@ pub(crate) const AUTO_MEMORY_KEY: &str = "autoMemoryEnabled";
 ///   `write_skill_overrides` — would block forever on a lock its own caller
 ///   holds. No current closure does anything but assign keys.
 ///
-/// Test: `write_output_style_preserves_existing_keys`,
-/// `write_auto_memory_off_preserves_existing_keys`,
+/// Test: `write_auto_memory_off_preserves_existing_keys`,
 /// `merge_settings_backs_up_a_malformed_file_before_rewriting_it`,
 /// `merge_settings_refuses_when_the_copy_cannot_be_written`,
 /// `concurrent_merges_of_distinct_keys_never_lose_an_update`,
@@ -264,108 +255,19 @@ where
 /// Set one key in the project's `.claude/settings.json`, preserving the rest.
 ///
 /// Why (#7685): the common case of [`merge_settings`] — one scalar key, every
-/// other key carried through untouched. `tm doctor --fix`'s `auto_memory` repair
-/// writes through this same function rather than re-implementing the merge, so
-/// the repair and the launch path cannot drift.
+/// other key carried through untouched; the settings-lock tests drive the merge
+/// through it.
 /// What: [`merge_settings`] with a closure that assigns `value` to `key`.
-/// Test: `write_auto_memory_off_disables_auto_memory`,
-/// `auto_memory_repair_applies_when_absent`.
+/// #12077: test-only — `tm doctor --fix` writes the launch-settings record
+/// instead, and no production path writes one key into the project file.
+/// Test: `write_auto_memory_off_disables_auto_memory`.
+#[cfg(test)]
 pub(crate) fn merge_settings_key(
     project_dir: &Path,
     key: &str,
     value: serde_json::Value,
 ) -> Result<(), PrepError> {
     merge_settings(project_dir, |settings| settings[key] = value)
-}
-
-/// Write `autoMemoryEnabled: false` into the project's `.claude/settings.json`.
-///
-/// Why: `trusty-memory` is the memory, and Claude Code's own auto memory
-/// (`MEMORY.md`) is off for every tm session with no fallback (#8436, Bob Db0
-/// Q5a 2026-10-14, which retired the 2026-09-12 #7685 fallback). This is the
-/// project-tier half; the managed-spawn half is the
-/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` assignment in
-/// [`crate::runtime::managed_launch`]. Both, for the reason
-/// [`write_output_style`]'s `attribution` seed gives: the env var reaches only
-/// the `claude` child tm spawns, whereas a bare `claude` launched in this
-/// project reads the project tier regardless.
-/// What: [`merge_settings_key`] with [`AUTO_MEMORY_KEY`] and `false`, every
-/// other key preserved. Unconditional: an existing `true` (the retired fallback
-/// wrote one whenever trusty-memory was down) is overwritten.
-/// Test: `write_auto_memory_off_disables_auto_memory`,
-/// `write_auto_memory_off_preserves_existing_keys`,
-/// `write_auto_memory_off_overrides_an_enabled_value`,
-/// `prepare_session_disables_auto_memory`,
-/// `prepare_session_keeps_auto_memory_off_when_trusty_memory_is_down`.
-pub(super) fn write_auto_memory_off(project_dir: &Path) -> Result<(), PrepError> {
-    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14)
-    merge_settings_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
-}
-
-/// Merge trusty-mpm output-style and spinner-tip settings into the project's
-/// `.claude/settings.json`.
-///
-/// Why: Claude Code reads the output style from `.claude/settings.json` under
-/// the `outputStyle` key (there is no `--style` CLI flag); writing it in the
-/// project directory makes every `claude` launched there show
-/// `style:trusty-mpm` without disturbing the operator's global settings. The
-/// same file drives the loading-spinner tips, so trusty-mpm-specific tips are
-/// written alongside to override the operator's generic claude-mpm tips.
-/// What: reads an existing `<project>/.claude/settings.json` (preserving all
-/// other keys), sets `outputStyle` to `active_style` (the resolved active id;
-/// `None` → [`OUTPUT_STYLE`] default), enables `spinnerTipsEnabled`, sets
-/// `spinnerTipsOverride.tips` to [`SPINNER_TIPS`], seeds `attribution` when
-/// absent (#6807, see below), and writes it back pretty-printed. Creates the
-/// file and `.claude/` directory when absent. The caller resolves+validates the
-/// id (via [`crate::core::output_style::resolve_active_style`]); an
-/// empty/whitespace id is treated as "unset" and falls back to the default here
-/// defensively.
-///
-/// The `attribution` seed is deliberately duplicated from
-/// [`crate::core::standalone::settings_defaults::ensure_settings_defaults`],
-/// which writes the same key into the tm-owned `CLAUDE_CONFIG_DIR`. That copy
-/// reaches only the `claude` child tm spawns — `CLAUDE_CONFIG_DIR` is set
-/// per-command and never exported — whereas the project tier is read by any
-/// `claude` launched in this directory, tm-orchestrated or not. Both seeds are
-/// absent-only and share one constant, so an operator-set value survives either
-/// path.
-/// Test: `prepare_session_sets_output_style`,
-/// `write_output_style_preserves_existing_keys`,
-/// `write_output_style_sets_spinner_tips`,
-/// `write_output_style_sets_active_style`,
-/// `write_output_style_seeds_attribution`,
-/// `write_output_style_preserves_operator_attribution`.
-pub(super) fn write_output_style(
-    project_dir: &Path,
-    active_style: Option<&str>,
-) -> Result<(), PrepError> {
-    let style = active_style
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(OUTPUT_STYLE);
-
-    // #7685: the read/merge/write body this function used to carry inline now
-    // lives in `merge_settings`, so the auto-memory key and every later key
-    // share one tested code path.
-    merge_settings(project_dir, |settings| {
-        settings["outputStyle"] = serde_json::Value::String(style.to_string());
-        settings["spinnerTipsEnabled"] = serde_json::Value::Bool(true);
-        settings["spinnerTipsOverride"] = serde_json::json!({ "tips": SPINNER_TIPS });
-
-        // #6807: the tm-owned CLAUDE_CONFIG_DIR copy of this key reaches only the
-        // `claude` child tm spawns, because `CLAUDE_CONFIG_DIR` is set per-command
-        // (`standalone::run`) and never exported. A bare `claude` launched in this
-        // project reads the project tier regardless, so seed it here too — absent
-        // only, so an operator-set `attribution` survives.
-        if let Some(obj) = settings.as_object_mut() {
-            obj.entry("attribution").or_insert_with(|| {
-                serde_json::json!({
-                    "commit": crate::core::attribution::ATTRIBUTION_FOOTER,
-                    "pr": crate::core::attribution::ATTRIBUTION_FOOTER,
-                })
-            });
-        }
-    })
 }
 
 /// Write the project-tier `enabledPlugins` allowlist into the project's
@@ -375,9 +277,7 @@ pub(super) fn write_output_style(
 /// loads its whole skill catalog into every session on the host, and there is
 /// no per-invocation flag to scope it — `enabledPlugins` is settings-only. The
 /// project tier outranks the user tier, so writing the map here is the one
-/// lever that turns a host-wide install into a per-project decision. Sits
-/// beside [`write_output_style`] because it is the same kind of write to the
-/// same file, on the same launch path.
+/// lever that turns a host-wide install into a per-project decision.
 /// What: enumerates every plugin the managed config dir knows about
 /// ([`crate::core::session_plugin_scope::known_plugins`]), maps each to `true`
 /// when the project's committed `[session] plugins` list names it and `false`
@@ -391,8 +291,7 @@ pub(super) fn write_output_style(
 /// approval to defer to, and the file ships with the clone.
 /// tm owns ONLY the keys it enumerated: a key for a plugin tm cannot see is the
 /// operator's and is carried through untouched, the same merge discipline
-/// [`write_output_style`]'s `attribution` seed and
-/// [`write_project_hooks`]'s entry-level strip already use. Returns without
+/// [`write_project_hooks`]'s entry-level strip already uses. Returns without
 /// writing when the merged object equals what is on disk, so an unchanged
 /// project takes no write on every launch.
 ///
@@ -577,7 +476,7 @@ pub(crate) fn write_enabled_plugins_with_trust(
 /// through [`super::hook_group_diff::project_hook_additions_for`]. It survives
 /// as the pre-#7688 REFERENCE its own tests assert against, exactly as
 /// [`super::project_hooks::project_managed_hook_additions`] does one layer down.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn write_project_hooks(
     project_dir: &Path,
     exe_override: Option<&Path>,
@@ -610,7 +509,7 @@ pub(super) fn write_project_hooks(
 /// form survives as the guard-on reference its tests assert against.
 /// Test: `project_hooks_tests::write_project_hooks_writes_prompt_feedback_when_enabled`,
 /// `project_hooks_tests::write_project_hooks_strips_stale_prompt_feedback_when_disabled`.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn write_project_hooks_with_prompt_feedback(
     project_dir: &Path,
     exe_override: Option<&Path>,
@@ -654,6 +553,11 @@ pub(super) fn write_project_hooks_with_prompt_feedback(
 /// the filesystem; otherwise performs the read / strip / merge / no-op check /
 /// snapshot / atomic-write exactly as [`write_project_hooks`] documents.
 /// Test: `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`.
+///
+/// #12077 part 4c: no launch, resume or repair writes the project file any
+/// more; this survives as the test reference for the additions block the
+/// `--settings` body carries.
+#[cfg(test)]
 pub(super) fn write_project_hooks_with(
     project_dir: &Path,
     additions: Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError>,
@@ -689,6 +593,7 @@ pub(super) fn write_project_hooks_with(
 /// What: exactly what [`write_project_hooks_with`] documents, minus the
 /// `additions` refusal and the directory creation its caller has already done.
 /// Test: see [`write_project_hooks_with`].
+#[cfg(test)]
 fn write_project_hooks_locked(
     settings_path: &Path,
     additions: &serde_json::Value,
@@ -1030,81 +935,11 @@ pub(super) fn preseed_workspace_trust_home(
     preseed_workspace_trust(&tier.claude_json, workspace)
 }
 
-/// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.
-///
-/// Why: `trusty-memory` hooks were previously registered globally, so they
-/// fired for every Claude Code session. Now that [`write_project_hooks`]
-/// scopes them to trusty-mpm projects, the global entries must be removed to
-/// stop them double-firing (and firing for unrelated sessions like claude-mpm).
-///
-/// #5544: the home arrives as a PARAMETER — see [`preseed_workspace_trust_home`]
-/// for why it is not read off `FrameworkPaths`. Pointing this at a managed
-/// workspace was the worse half of that bug: the file does not exist there, a
-/// missing file is success by contract, so the operator's REAL global hooks were
-/// never removed and kept double-firing with nothing to show for it. No second
-/// implementation of this cleanup exists to catch it.
-/// What: reads the user-tier `settings.json` — under `config_dir` when one is
-/// named (#9846), else `<home>/.claude/settings.json` — and for each event in
-/// [`GLOBAL_TRUSTY_MEMORY_EVENTS`] filters out handler groups whose `hooks`
-/// array contains a command matching `trusty-memory hooks fire`. An event key
-/// whose array becomes empty is removed entirely. Writes the file back. A
-/// missing or malformed file is treated as success (nothing to clean up).
-/// Test: `remove_global_hooks_removes_trusty_memory_entries`,
-/// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
-pub(super) fn remove_global_trusty_memory_hooks(
-    home: Option<&Path>,
-    config_dir: Option<&Path>,
-) -> Result<(), PrepError> {
-    // #9846: strip the file sessions read — `CLAUDE_CONFIG_DIR` when set.
-    let Some(tier) = super::user_tier::resolve_for_write(home, config_dir) else {
-        return Ok(());
-    };
-    // #8545: the operator's `~/.claude/settings.json`; fenced in tests.
-    crate::core::home_write_fence::check(&tier.dir);
-    clean_global_trusty_memory_hooks(&tier.settings_json())
-}
-
-/// Filter `trusty-memory` hook entries out of the settings file at `settings_path`.
-///
-/// Why: split from [`remove_global_trusty_memory_hooks`] so tests can target a
-/// temp file instead of the operator's real `~/.claude/settings.json`.
-/// What: see [`remove_global_trusty_memory_hooks`]. A missing or malformed
-/// file is a no-op success.
-/// Test: `remove_global_hooks_removes_trusty_memory_entries`.
-pub(super) fn clean_global_trusty_memory_hooks(settings_path: &Path) -> Result<(), PrepError> {
-    let text = match std::fs::read_to_string(settings_path) {
-        Ok(text) => text,
-        // Missing file: nothing to clean up.
-        Err(_) => return Ok(()),
-    };
-    let mut settings = match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(value) if value.is_object() => value,
-        // Malformed or non-object: leave it untouched rather than risk loss.
-        _ => return Ok(()),
-    };
-
-    let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return Ok(());
-    };
-
-    for event in GLOBAL_TRUSTY_MEMORY_EVENTS {
-        let Some(groups) = hooks.get_mut(*event).and_then(|g| g.as_array_mut()) else {
-            continue;
-        };
-        groups.retain(|group| !group_is_trusty_memory(group));
-        if groups.is_empty() {
-            hooks.remove(*event);
-        }
-    }
-
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
-}
+// #12077: the legacy global `trusty-memory` hook strip lives in
+// `legacy_memory_hooks`; re-exported so callers keep their paths.
+#[cfg(test)]
+pub(super) use super::legacy_memory_hooks::clean_global_trusty_memory_hooks;
+pub(super) use super::legacy_memory_hooks::remove_global_trusty_memory_hooks;
 
 /// Inject `"statusLine": {"type":"command","command":"<abs-path> statusline","padding":0}`
 /// into `<project>/.claude/settings.json` when the key is absent, or upgrade a
@@ -1347,29 +1182,4 @@ pub(super) fn resolve_statusline_binary_with(
         return s.to_string();
     }
     "tm".to_string()
-}
-
-/// Whether a hook handler group is a `trusty-memory` entry.
-///
-/// Why: identifies the groups [`clean_global_trusty_memory_hooks`] must drop.
-/// Matching on the broad `trusty-memory` prefix (rather than the old, narrow
-/// `trusty-memory hooks fire` substring) cleans up BOTH the legacy global
-/// entries and the canonical `prompt-context` / `inbox-check` entries should
-/// either ever have been written globally (issue #1270).
-/// What: returns `true` when any command in the group's `hooks` array invokes
-/// the `trusty-memory` binary (the command string starts with `trusty-memory `
-/// or is exactly `trusty-memory`).
-/// Test: covered indirectly by `remove_global_hooks_removes_trusty_memory_entries`.
-pub(super) fn group_is_trusty_memory(group: &serde_json::Value) -> bool {
-    group
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .is_some_and(|handlers| {
-            handlers.iter().any(|handler| {
-                handler
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|cmd| cmd == "trusty-memory" || cmd.starts_with("trusty-memory "))
-            })
-        })
 }

@@ -18,6 +18,8 @@
 //! `tests/owner_config_8988.rs` and `tests/owner_launch_config_8988.rs`.
 
 pub mod carrier;
+// #12077 part 4c: tm's hooks on the carrier body.
+pub mod carrier_hooks;
 pub mod compose;
 pub mod floor;
 pub mod last_good;
@@ -32,6 +34,7 @@ use last_good::{LastGood, read_last_good, record_last_good, retire_last_good};
 
 pub use carrier::{
     LaunchFiles, LaunchSettings, ProvisionError, provision_settings, provision_settings_default,
+    provision_settings_with_exe,
 };
 use schema::OwnerPolicyError;
 
@@ -194,7 +197,26 @@ pub fn resolve_and_record(inputs: &OwnerInputs<'_>) -> OwnerResolution {
 
 /// tm's state root, `~/.trusty-tools/trusty-mpm`; `None` without a home dir.
 pub fn state_root() -> Option<PathBuf> {
+    // #12077 part 4c: every launch now writes a carrier body, so a unit test
+    // reaching a launch path would write under the fenced real home (#8545).
+    #[cfg(test)]
+    return Some(test_state_root());
+    #[cfg(not(test))]
     trusty_common::crate_config::crate_config_dir(crate::core::trusty_tools_config::CRATE_NAME)
+}
+
+/// One hermetic state root per unit-test process (#12077 part 4c).
+#[cfg(test)]
+fn test_state_root() -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let path = dir.path().to_path_buf();
+        // Kept for the process; the hermetic root's sweep removes it later.
+        std::mem::forget(dir);
+        path
+    })
+    .clone()
 }
 
 #[cfg(test)]

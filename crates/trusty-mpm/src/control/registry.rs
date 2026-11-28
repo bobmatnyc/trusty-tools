@@ -13,7 +13,7 @@
 //! `registry_monotonic_ids` in the inline test module.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -32,8 +32,6 @@ use crate::control::classifier::{ActivityClassifier, ClassifierGate, OpenRouterC
 use crate::control::config::ControlPlaneConfig;
 use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
-use crate::core::session_launch::ensure_project_hooks;
-use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
 use crate::session_manager::inject_record::InjectSlot;
 
 /// Parameters for spawning a new session via `SessionRegistry::run_session`.
@@ -299,9 +297,10 @@ impl SessionRegistry {
     /// the stagger delay).
     /// What: (1) acquires a write lock and performs a fast-fail cap check —
     /// returning [`AdmissionError::CapReached`] immediately (no stagger) if
-    /// `live >= cap`; (2) on the admit path, releases the lock, writes the
-    /// workdir's project hooks via [`ensure_worker_hooks`] and returns its
-    /// error unspawned (#9704), sleeps the
+    /// `live >= cap`; (2) on the admit path, releases the lock, builds the
+    /// worker's `--settings` body via
+    /// [`crate::control::worker_settings::worker_settings`] (#12077 part 4c)
+    /// and returns its error unspawned (#9704), sleeps the
     /// configured `launch_stagger_ms`, then re-acquires the write lock and
     /// re-checks the cap authoritatively (preventing a concurrent launch that
     /// slipped in during the stagger from exceeding the cap); (3) holds that
@@ -310,9 +309,9 @@ impl SessionRegistry {
     /// Returns the allocated `ControlSessionId`.
     /// Test: `registry_run_session_id_visible_immediately`,
     /// `registry_run_session_rejects_when_capped`, `registry_cap_reject_is_immediate`,
-    /// `run_session_writes_hooks_before_any_stream_json_backend`,
-    /// `run_session_writes_hooks_before_any_tmux_backend`,
-    /// `run_session_refuses_and_spawns_nothing_when_hook_write_fails`.
+    /// `run_session_writes_the_carrier_before_any_stream_json_backend_12077`,
+    /// `run_session_writes_the_carrier_before_any_tmux_backend_12077`,
+    /// `run_session_refuses_and_spawns_nothing_when_the_body_cannot_be_written_12077`.
     pub async fn run_session(&self, params: RunParams) -> Result<ControlSessionId> {
         // §9.2 fast-fail cap check — under the read lock (cheap; no writers
         // blocked). A stale count that causes a false-admit is caught by the
@@ -333,11 +332,13 @@ impl SessionRegistry {
             }
         }
 
-        // #9704: the worker runs `claude` with its default tools, so its
-        // project hooks (egress guard included) must be on disk before it
-        // exists. Fail closed, and before the stagger and the write lock: a
-        // refusal pays no stagger, spends no session number, spawns nothing.
-        ensure_worker_hooks(&params.workdir, self.config.hook_exe.as_deref())?;
+        // #9704: the worker runs `claude` with its default tools, so its hooks
+        // (egress guard included) must exist before it does. #12077 part 4c
+        // (Q3): they ride its `--settings` body, checked as built. Fail closed,
+        // and before the stagger and the write lock: a refusal pays no stagger,
+        // spends no session number, spawns nothing.
+        let settings =
+            crate::control::worker_settings::worker_settings(&params.workdir, &self.config)?;
 
         // §9.2 launch stagger — applied ONLY on the admit path, AFTER the
         // cap check, so rejected launches pay zero delay. Tests inject zero
@@ -380,6 +381,7 @@ impl SessionRegistry {
                     session_id.clone(),
                     params.workdir,
                     params.prompt_file,
+                    Some(settings),
                 )
                 .with_context(|| format!("stream-json spawn failed for session {session_id}"))?;
                 spawn_actor(
@@ -405,6 +407,7 @@ impl SessionRegistry {
                     session_id.clone(),
                     params.workdir,
                     params.prompt_file,
+                    Some(settings),
                     claude_cmd,
                     100, // default capture_lines
                 )
@@ -429,43 +432,6 @@ impl SessionRegistry {
 impl Default for SessionRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Write the project-tier tm hooks into `workdir` and confirm the egress
-/// guard landed.
-///
-/// Why (#9704): a control-plane worker runs `claude` in `workdir` with its
-/// default tools, and no other path writes that project's hooks before it
-/// starts. [`ensure_project_hooks`] returns `Ok` without writing when the
-/// existing settings file is unparseable, so its `Ok` alone does not prove the
-/// guard is on disk.
-/// What: runs [`ensure_project_hooks`]`(workdir, hook_exe)`, then reads
-/// `<workdir>/.claude/settings.json` back and requires
-/// [`EgressGuardState::Present`]. A write error, an unreadable or unparseable
-/// file, or a missing or weakened guard is an `Err`; the caller spawns nothing.
-/// Test: `run_session_refuses_and_spawns_nothing_when_hook_write_fails`,
-/// `run_session_refuses_and_spawns_nothing_when_settings_unparseable`,
-/// `run_session_writes_hooks_before_any_stream_json_backend`.
-fn ensure_worker_hooks(workdir: &Path, hook_exe: Option<&Path>) -> Result<()> {
-    let refusal = || {
-        format!(
-            "refusing to spawn: project hooks not in place for {}",
-            workdir.display()
-        )
-    };
-    ensure_project_hooks(workdir, hook_exe).with_context(refusal)?;
-    let path = workdir.join(".claude").join("settings.json");
-    let text = std::fs::read_to_string(&path).with_context(refusal)?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("{}: {} is not valid JSON", refusal(), path.display()))?;
-    match egress_guard_state(&value) {
-        EgressGuardState::Present => Ok(()),
-        state => anyhow::bail!(
-            "{}: egress guard {state:?} in {}",
-            refusal(),
-            path.display()
-        ),
     }
 }
 
@@ -809,21 +775,24 @@ mod tests {
         );
     }
 
-    // ── #9704: project hooks are written before any worker is spawned ──
+    // ── #9704 / #12077 part 4c: the worker's carrier is built before any spawn ──
 
     use crate::test_support::{STABLE_HOOK_EXE, hermetic_temp_dir};
+    use std::path::Path;
 
-    /// A registry whose hook exe is pinned to [`STABLE_HOOK_EXE`].
+    /// A registry whose hook exe is pinned to [`STABLE_HOOK_EXE`] and whose
+    /// carrier writes under `state_root`.
     ///
     /// The pin is absolute, outside every build and temp root, and named `tm`,
     /// so `resolve_stable_hook_exe` accepts it on its first branch and never
     /// consults `PATH` — the tests behave the same with or without an
     /// installed `tm`.
-    fn pinned_registry(cap: u32, stagger_ms: u64) -> SessionRegistry {
+    fn pinned_registry(cap: u32, stagger_ms: u64, state_root: &Path) -> SessionRegistry {
         SessionRegistry::with_config(ControlPlaneConfig {
             max_concurrent_sessions: cap,
             launch_stagger_ms: stagger_ms,
             hook_exe: Some(PathBuf::from(STABLE_HOOK_EXE)),
+            state_root: Some(state_root.to_path_buf()),
             ..Default::default()
         })
     }
@@ -843,37 +812,54 @@ mod tests {
         registry.inner.write().await.counter.next("p").to_string()
     }
 
-    /// Drive `run_session` to its stagger sleep, read the workdir's settings,
-    /// then fill the registry so the write-lock re-check refuses the launch.
+    /// Every carrier body under `state_root`.
+    fn bodies(state_root: &Path) -> Vec<PathBuf> {
+        let dir = state_root.join(crate::core::launch_policy::carrier::SESSION_SETTINGS_DIR);
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Drive `run_session` to its stagger sleep, read the carrier body, then
+    /// fill the registry so the write-lock re-check refuses the launch.
     ///
     /// The paused clock never advances while the test task is runnable, so
     /// the stagger cannot elapse between the two reads: whatever is on disk
     /// was written before the write lock, the id allocation and every backend.
-    async fn assert_hooks_written_before_any_backend(backend: BackendKind) {
+    async fn assert_carrier_written_before_any_backend(backend: BackendKind) {
         let dir = hermetic_temp_dir();
-        let registry = pinned_registry(1, 60_000);
+        let state = hermetic_temp_dir();
+        let registry = pinned_registry(1, 60_000, state.path());
         let run = tokio::spawn({
             let registry = registry.clone();
             let params = run_params(dir.path().to_path_buf(), backend);
             async move { registry.run_session(params).await }
         });
 
-        let settings = dir.path().join(".claude").join("settings.json");
         for _ in 0..64 {
-            if settings.is_file() {
+            if !bodies(state.path()).is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
         }
-        assert!(
-            settings.is_file(),
-            "run_session must write {} before it builds a {backend:?} backend",
-            settings.display()
+        let written = bodies(state.path());
+        assert_eq!(
+            written.len(),
+            1,
+            "run_session must write the carrier before it builds a {backend:?} backend"
         );
         let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&settings).expect("read settings"))
-                .expect("settings is JSON");
+            serde_json::from_str(&std::fs::read_to_string(&written[0]).expect("read body"))
+                .expect("body is JSON");
+        use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
         assert_eq!(egress_guard_state(&value), EgressGuardState::Present);
+        // #12077 part 4c: nothing is written into the workdir's project tier.
+        assert!(!dir.path().join(".claude").join("settings.json").exists());
 
         let blocker = ControlSessionId::new("blocker", 0);
         registry
@@ -891,13 +877,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn run_session_writes_hooks_before_any_stream_json_backend() {
-        assert_hooks_written_before_any_backend(BackendKind::StreamJson).await;
+    async fn run_session_writes_the_carrier_before_any_stream_json_backend_12077() {
+        assert_carrier_written_before_any_backend(BackendKind::StreamJson).await;
     }
 
     #[tokio::test(start_paused = true)]
-    async fn run_session_writes_hooks_before_any_tmux_backend() {
-        assert_hooks_written_before_any_backend(BackendKind::Tmux).await;
+    async fn run_session_writes_the_carrier_before_any_tmux_backend_12077() {
+        assert_carrier_written_before_any_backend(BackendKind::Tmux).await;
     }
 
     /// Fail-Open Check, error arm: a refused run spawns nothing, registers
@@ -906,7 +892,7 @@ mod tests {
         let err = registry
             .run_session(run_params(workdir, BackendKind::StreamJson))
             .await
-            .expect_err("a worker without its project hooks must not spawn");
+            .expect_err("a worker without its hooks must not spawn");
         assert!(
             format!("{err:#}").contains("hooks"),
             "the refusal must name the hooks: {err:#}"
@@ -916,57 +902,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_session_refuses_and_spawns_nothing_when_hook_write_fails() {
-        // `.claude` is a regular file, so the writer cannot create the dir.
+    async fn run_session_refuses_and_spawns_nothing_when_the_body_cannot_be_written_12077() {
+        // The state root is a regular file, so no body can be written under it.
         let dir = hermetic_temp_dir();
-        std::fs::write(dir.path().join(".claude"), b"not a directory").expect("seed");
-        let registry = pinned_registry(5, 0);
+        let state = hermetic_temp_dir();
+        let root = state.path().join("state");
+        std::fs::write(&root, b"not a directory").expect("seed");
+        let registry = pinned_registry(5, 0, &root);
         assert_refused_without_spawn(&registry, dir.path().to_path_buf()).await;
     }
 
     #[tokio::test]
-    async fn run_session_refuses_and_spawns_nothing_when_settings_unparseable() {
-        // The writer leaves an unparseable file untouched and returns Ok.
+    async fn run_session_refuses_and_spawns_nothing_when_a_project_file_cannot_be_read_12077() {
+        // `settings.json` is a directory, so the strip cannot read it.
         let dir = hermetic_temp_dir();
-        let claude = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude).expect("create .claude");
-        let settings = claude.join("settings.json");
-        let garbage = b"{ \"permissions\": { }, // trailing comment\n";
-        std::fs::write(&settings, garbage).expect("seed");
-        let registry = pinned_registry(5, 0);
+        let state = hermetic_temp_dir();
+        std::fs::create_dir_all(dir.path().join(".claude").join("settings.json")).expect("seed");
+        let registry = pinned_registry(5, 0, state.path());
         assert_refused_without_spawn(&registry, dir.path().to_path_buf()).await;
-        assert_eq!(std::fs::read(&settings).expect("read"), garbage);
-    }
-
-    // #9704: `[]` parses but is not an object, so the writer returns Ok
-    // without writing and only the read-back's guard-state arm can refuse.
-    #[tokio::test]
-    async fn run_session_refuses_and_spawns_nothing_when_settings_not_an_object() {
-        let dir = hermetic_temp_dir();
-        let claude = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude).expect("create .claude");
-        let settings = claude.join("settings.json");
-        std::fs::write(&settings, b"[]").expect("seed");
-        let registry = pinned_registry(5, 0);
-        let err = registry
-            .run_session(run_params(
-                dir.path().to_path_buf(),
-                BackendKind::StreamJson,
-            ))
-            .await
-            .expect_err("a worker whose settings carry no egress guard must not spawn");
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("egress guard Missing"),
-            "the refusal must come from the guard read-back: {chain}"
-        );
-        assert!(
-            !chain.contains("is not valid JSON"),
-            "the refusal must not come from the parse arm: {chain}"
-        );
-        assert_eq!(err.chain().count(), 1, "no I/O or parse cause: {chain}");
-        assert!(registry.list_ids().await.is_empty());
-        assert_eq!(next_session_number(&registry).await, "p-0");
-        assert_eq!(std::fs::read(&settings).expect("read"), b"[]");
+        assert!(bodies(state.path()).is_empty());
     }
 }

@@ -125,7 +125,8 @@ pub struct AncestorScan {
 /// --fix`, the launch WARN and `tm session instructions` — so no two of them
 /// can disagree about which files a session is paying for.
 /// What: resolves `dir` through [`resolve_project_root`], reads the
-/// `claudeMdExcludes` union from the layers a session at that root merges, then
+/// `claudeMdExcludes` union from the layers a session at that root merges
+/// (#12077: plus the root's launch-settings record), then
 /// delegates to [`scan_with_excludes`]. `home` and `managed_config_dir` are
 /// INJECTED so a test never writes process-global environment state (#5544).
 /// Errors from either half propagate; see the module header.
@@ -135,9 +136,27 @@ pub fn scan(
     home: Option<&Path>,
     managed_config_dir: Option<&Path>,
 ) -> io::Result<AncestorScan> {
+    let state_root = crate::core::launch_policy::state_root();
+    scan_in(dir, home, managed_config_dir, state_root.as_deref())
+}
+
+/// [`scan`] with tm's state root, which holds the project's exclude record,
+/// named by the caller (#12077 row 13).
+/// Test: `a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077`.
+pub fn scan_in(
+    dir: &Path,
+    home: Option<&Path>,
+    managed_config_dir: Option<&Path>,
+    state_root: Option<&Path>,
+) -> io::Result<AncestorScan> {
     let root = resolve_project_root(dir, home)?;
     let layers = crate::core::claude_md_excludes::settings_layers(&root, home, managed_config_dir);
-    let excludes = crate::core::claude_md_excludes::merged_excludes(&layers);
+    let mut excludes = crate::core::claude_md_excludes::merged_excludes(&layers);
+    // #12077 row 13: `tm doctor --fix` keeps the exclude for the root's
+    // project (or its own record), which a tm launch passes as `--settings`.
+    excludes.extend(
+        crate::core::session_launch::launch_keys::recorded_claude_md_excludes(&root, state_root),
+    );
     scan_with_excludes(&root, &excludes)
 }
 
@@ -406,8 +425,9 @@ pub fn warning_text(found: &[AncestorMemoryFile]) -> Option<String> {
         "{} CLAUDE.md file(s) ABOVE this project load into every session here \
          (~{total} tokens per turn, estimated at bytes/{BYTES_PER_TOKEN}): {}. \
          Remedy: delete the file if it is a tm seed template, or add its path to \
-         `claudeMdExcludes` in .claude/settings.local.json. `tm doctor` reports \
-         them and `tm doctor --fix --yes` applies both remedies.",
+         `claudeMdExcludes`. `tm doctor` reports them and `tm doctor --fix --yes` \
+         applies both remedies, keeping the exclude for this project, which \
+         every `tm launch` of it passes as `--settings`.",
         loaded.len(),
         lines.join("; ")
     ))

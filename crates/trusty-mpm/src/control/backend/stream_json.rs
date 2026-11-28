@@ -86,10 +86,18 @@ const POST_KILL_REAP_FLOOR: Duration = Duration::from_secs(2);
 /// daemon's environment, so when the daemon was itself started from inside a
 /// Claude Code session the leaked `CLAUDE_CODE_CHILD_SESSION` reached every
 /// headless `claude` it spawned and disabled transcript saving.
+///
+/// #12077 part 4c (Q3): `settings` is the worker's carrier body, passed as
+/// `--settings <file>`: tm's hooks and the 4a/4b launch keys in one payload.
 /// Test: `build_command_removes_api_key`, `build_command_has_stream_json_args`,
 /// `build_command_scrubs_inherited_session_markers`,
-/// `build_command_does_not_pass_workdir_flag`.
-pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::process::Command {
+/// `build_command_does_not_pass_workdir_flag`,
+/// `build_command_carries_the_settings_body_12077`.
+pub fn build_claude_command(
+    workdir: &Path,
+    prompt_file: Option<&Path>,
+    settings: Option<&Path>,
+) -> std::process::Command {
     // Invoke `claude` directly (not via the `env -u` shell wrapper). Using
     // Command::env_remove makes the key-removal an explicit, inspectable part
     // of the child environment (visible via get_envs() in tests), which is what
@@ -105,6 +113,8 @@ pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::
     if let Some(pf) = prompt_file {
         cmd.arg("--append-system-prompt-file").arg(pf);
     }
+    // #12077 part 4c: the one `--settings` body (Claude Code keeps the last).
+    cmd.args(crate::core::launch_policy::carrier::settings_argv(settings));
     // #9704: no `--workdir` — claude rejects it; `current_dir` below sets it.
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -163,8 +173,9 @@ impl StreamJsonBackend {
         session_id: ControlSessionId,
         workdir: PathBuf,
         prompt_file: Option<PathBuf>,
+        settings: Option<PathBuf>,
     ) -> Result<Self> {
-        let std_cmd = build_claude_command(&workdir, prompt_file.as_deref());
+        let std_cmd = build_claude_command(&workdir, prompt_file.as_deref(), settings.as_deref());
         let sid = session_id.clone();
         Self::spawn_command(session_id, std_cmd, EXIT_WAIT_BOUND).with_context(|| {
             format!(
@@ -464,7 +475,7 @@ mod tests {
         // §9.1: the built command MUST explicitly remove ANTHROPIC_API_KEY so
         // it cannot leak into the spawned child. get_envs() surfaces an
         // env_remove as (key, None).
-        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None, None);
         let muts = env_mutations(&cmd);
         let removed = muts
             .iter()
@@ -483,7 +494,7 @@ mod tests {
         // inherited CLAUDE_CODE_CHILD_SESSION and saved no transcript. The
         // marker name is hard-coded so the assertion cannot go vacuous if the
         // shared constant is emptied.
-        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None, None);
         let muts = env_mutations(&cmd);
         let removed = muts
             .iter()
@@ -503,7 +514,7 @@ mod tests {
     /// `TRUSTY_MPM_SESSION_PROFILE`; the headless child must not inherit it.
     #[test]
     fn build_command_never_passes_on_the_profile_stamp() {
-        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None, None);
         assert!(
             env_mutations(&cmd).contains(&("TRUSTY_MPM_SESSION_PROFILE".to_owned(), None)),
             "the profile stamp must be REMOVED from the headless child"
@@ -514,13 +525,13 @@ mod tests {
     fn build_command_program_is_claude() {
         // The seam invokes `claude` directly, not the `env` shell wrapper, so
         // get_program() is stable and inspectable.
-        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None, None);
         assert_eq!(cmd.get_program(), OsStr::new("claude"));
     }
 
     #[test]
     fn build_command_has_stream_json_args() {
-        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None, None);
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -541,7 +552,7 @@ mod tests {
     fn build_command_does_not_pass_workdir_flag() {
         let pf = PathBuf::from("/tmp/prompt.md");
         for prompt_file in [None, Some(pf.as_path())] {
-            let cmd = build_claude_command(Path::new("/tmp/wd"), prompt_file);
+            let cmd = build_claude_command(Path::new("/tmp/wd"), prompt_file, None);
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
@@ -561,13 +572,34 @@ mod tests {
     #[test]
     fn build_command_includes_prompt_file_when_present() {
         let pf = PathBuf::from("/tmp/prompt.md");
-        let cmd = build_claude_command(Path::new("/tmp/wd"), Some(&pf));
+        let cmd = build_claude_command(Path::new("/tmp/wd"), Some(&pf), None);
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.contains(&"--append-system-prompt-file".to_string()));
         assert!(args.contains(&"/tmp/prompt.md".to_string()));
+    }
+
+    /// #12077 part 4c (Q3): the worker carries its carrier body as one
+    /// `--settings <file>` pair, and none without one.
+    #[test]
+    fn build_command_carries_the_settings_body_12077() {
+        let body = PathBuf::from("/tmp/session-settings/abc.json");
+        let args = |settings: Option<&Path>| -> Vec<String> {
+            build_claude_command(Path::new("/tmp/wd"), None, settings)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let with = args(Some(&body));
+        let at = with
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings");
+        assert_eq!(with[at + 1], "/tmp/session-settings/abc.json");
+        assert_eq!(with.iter().filter(|a| *a == "--settings").count(), 1);
+        assert!(!args(None).contains(&"--settings".to_owned()));
     }
 
     // ── #9725: worker exit status at stdout EOF ──────────────────────────────

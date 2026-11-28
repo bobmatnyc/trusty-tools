@@ -2,9 +2,9 @@
 //!
 //! Why: the table and merge rules are unit-tested in
 //! `core/skill_overrides_tests.rs` against a pinned stack set; these tests prove
-//! the launch path detects the stack from real marker files and writes the
-//! result into the project's `.claude/settings.json` beside every other key the
-//! same launch writes.
+//! the launch path detects the stack from real marker files and delivers the
+//! result on the `--settings` flag tier (#12127), leaving the project's
+//! `.claude/settings.json` with the user's entries only.
 //! What: a Rust project and a Svelte project, each seeded with user settings,
 //! run through the real `prepare_session` twice; an unmarked project runs once.
 //! Test: this module IS the test suite for that wiring.
@@ -42,7 +42,15 @@ fn assert_launch_applies_table(label: &str, markers: &[(&str, &str)], stacks: &[
     let first = std::fs::read_to_string(&settings_path).unwrap();
     println!("--- {label} settings.json BEFORE ---\n{USER_SETTINGS}\n--- AFTER ---\n{first}");
 
-    let value: serde_json::Value = serde_json::from_str(&first).unwrap();
+    // #12127: the stack entries ride the `--settings` flag tier; the file keeps
+    // only the user's entry.
+    let file: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(
+        file[SKILL_OVERRIDES_KEY],
+        serde_json::json!({"breeze-voice": "on"}),
+        "{label}: tm writes no skillOverrides entry into the project file"
+    );
+    let value = effective_settings(project);
     let overrides = &value[SKILL_OVERRIDES_KEY];
     assert_eq!(
         value["permissions"]["allow"],
@@ -127,8 +135,9 @@ fn prepare_session_on_an_unknown_stack_writes_no_skill_overrides() {
 
     run_prepare(&fw, project, tmp_home.path());
 
-    let text = std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    // #12127: neither the file nor the flag-tier record carries one.
+    let value = effective_settings(project);
+    let text = value.to_string();
     assert!(
         value.get(SKILL_OVERRIDES_KEY).is_none(),
         "an unknown stack must write no skillOverrides, got:\n{text}"

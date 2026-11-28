@@ -59,13 +59,28 @@ impl Fx {
         claude_json_dir: Option<&Path>,
         profile: SessionProfile,
     ) -> LaunchSettings {
+        self.try_provision(claude_json_dir, profile)
+            .expect("the carrier provisions")
+    }
+    fn try_provision(
+        &self,
+        claude_json_dir: Option<&Path>,
+        profile: SessionProfile,
+    ) -> Result<LaunchSettings, ProvisionError> {
         provision_settings_at(&CarrierInputs {
             cwd: &self.project,
             repos_root: &self.repos,
             state_root: &self.state,
             claude_json_dir,
             profile,
+            hooks: None,
         })
+    }
+    /// #12127: plant the launch-settings record `prepare_session` leaves.
+    fn record(&self, body: &str) {
+        let path = crate::core::session_launch::launch_keys_record_path(&self.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
     }
     /// Plant `acme`'s last-good record as raw JSON, as an older tm wrote it.
     fn plant_last_good(&self, policy: Value) {
@@ -609,4 +624,178 @@ fn the_project_tier_skill_overrides_file_is_never_touched() {
     );
     assert!(!settings.file.unwrap().starts_with(&fx.project));
     assert_eq!(std::fs::read(&project_settings).unwrap(), before);
+}
+
+/// The record a PM launch's preparation leaves (#12127).
+const LAUNCH_KEYS: &str = r#"{"issue": 12127, "settings": {
+    "outputStyle": "trusty-mpm",
+    "autoMemoryEnabled": false,
+    "skillOverrides": {"xlsx": "off"}
+}}"#;
+
+/// #12127 (b): the recorded launch keys ride the one settings file, with no
+/// owner file at all, and merge into an owner body when one resolves.
+#[test]
+fn the_carrier_payload_carries_the_launch_keys_12127() {
+    let fx = Fx::new(USER);
+    fx.record(LAUNCH_KEYS);
+    let alone = fx.provision();
+    assert_eq!(
+        body_of(&alone),
+        json!({
+            "outputStyle": "trusty-mpm",
+            "autoMemoryEnabled": false,
+            "skillOverrides": {"xlsx": "off"}
+        })
+    );
+    assert_eq!(
+        alone.argv().len(),
+        2,
+        "one --settings pair: {:?}",
+        alone.argv()
+    );
+
+    fx.owner("[mcp]\ndeny = [\"heygen\"]\n[skills]\noff = [\"pdf\"]\n");
+    let merged = fx.provision();
+    assert_eq!(
+        body_of(&merged),
+        json!({
+            "deniedMcpServers": [{"serverName": "heygen"}],
+            "outputStyle": "trusty-mpm",
+            "autoMemoryEnabled": false,
+            "skillOverrides": {"pdf": "off", "xlsx": "off"}
+        })
+    );
+}
+
+/// #12127 (d), Fail-Open Check: a record that is not JSON refuses the launch
+/// rather than launching without the keys.
+#[test]
+fn a_malformed_record_refuses_the_carrier_12127() {
+    let fx = Fx::new(USER);
+    fx.record("{ not json");
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("a malformed record must refuse");
+    assert!(matches!(err, ProvisionError::LaunchKeys(_)), "{err}");
+    assert!(err.to_string().contains("refusing the launch"), "{err}");
+    assert!(!fx.settings_dir().exists(), "nothing written");
+}
+
+/// #12127 (d), Fail-Open Check: a body carrying launch keys that cannot be
+/// written refuses the launch; an owner-only body keeps the #8988 notice.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_launch_key_body_refuses_the_carrier_12127() {
+    let fx = Fx::new(USER);
+    fx.record(LAUNCH_KEYS);
+    // A file where the settings directory goes, so the write cannot create it.
+    std::fs::create_dir_all(&fx.state).unwrap();
+    std::fs::write(fx.settings_dir(), "not a directory").unwrap();
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("the keys must not be dropped");
+    assert!(matches!(err, ProvisionError::Write { .. }), "{err}");
+
+    let owner_only = Fx::new(USER);
+    owner_only.owner("[mcp]\ndeny = [\"heygen\"]\n");
+    std::fs::create_dir_all(&owner_only.state).unwrap();
+    std::fs::write(owner_only.settings_dir(), "not a directory").unwrap();
+    let settings = owner_only.provision();
+    assert_eq!(settings.file, None);
+    assert!(settings.notice.is_some_and(|n| n.contains("NOT applied")));
+}
+
+/// #12077 row 13: the ancestor `claudeMdExcludes` the doctor repair records
+/// rides the one `--settings` payload, so the launch carries it; Claude Code
+/// unions the array with the file layers.
+#[test]
+fn the_carrier_payload_carries_the_recorded_claude_md_excludes_12077() {
+    let fx = Fx::new(USER);
+    fx.record(r#"{"issue": 12127, "settings": {"claudeMdExcludes": ["/anc/CLAUDE.md"]}}"#);
+    let settings = fx.provision();
+    assert_eq!(
+        body_of(&settings)["claudeMdExcludes"],
+        json!(["/anc/CLAUDE.md"])
+    );
+}
+
+/// A `.git` file naming no git dir: git cannot read this checkout at all.
+fn break_git(fx: &Fx) {
+    std::fs::write(fx.project.join(".git"), "gitdir: /nonexistent/12077\n").unwrap();
+}
+
+/// #12077 row 13, Fail-Open Check: a git error with a project exclude record
+/// on disk refuses the launch, since that record may be this project's.
+#[test]
+fn an_unresolvable_project_identity_refuses_the_carrier_when_a_project_record_exists_12077() {
+    let fx = Fx::new(USER);
+    break_git(&fx);
+    let records = fx.state.join("launch-settings");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(
+        records.join("project-00112233445566778899aabbccddeeff.json"),
+        r#"{"issue": 12077, "project": "acme/other", "settings": {"claudeMdExcludes": ["/a"]}}"#,
+    )
+    .unwrap();
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("a git error with a project record on disk must refuse");
+    assert!(err.to_string().contains("refusing the launch"), "{err}");
+}
+
+/// #12077 row 13 (Architect 13:24Z): a git error with no project exclude
+/// record anywhere warns, names the git error, and launches with the
+/// directory record's keys.
+#[test]
+fn an_unresolvable_project_identity_warns_and_launches_with_no_project_record_12077() {
+    let fx = Fx::new(USER);
+    break_git(&fx);
+    fx.record(LAUNCH_KEYS);
+    let launch = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect("no project record exists, so the launch goes ahead");
+    let notice = launch.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("cannot resolve the project identity") && notice.contains("git"),
+        "the warning names the git error: {notice}"
+    );
+    assert_eq!(
+        body_of(&launch),
+        json!({
+            "outputStyle": "trusty-mpm",
+            "autoMemoryEnabled": false,
+            "skillOverrides": {"xlsx": "off"}
+        }),
+        "the directory record's keys still ride the launch"
+    );
+}
+
+/// #12077 row 13, Fail-Open Check: on a git error, a record directory that
+/// cannot be listed leaves "does a project record exist?" unknown, so the
+/// launch refuses rather than read it as "none".
+#[test]
+fn an_unlistable_launch_settings_dir_refuses_the_carrier_12077() {
+    let fx = Fx::new(USER);
+    break_git(&fx);
+    // A regular file where the record directory goes: `read_dir` fails with
+    // NotADirectory, not NotFound.
+    std::fs::create_dir_all(&fx.state).unwrap();
+    std::fs::write(fx.state.join("launch-settings"), "not a directory").unwrap();
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("an unlistable record directory must refuse");
+    let text = err.to_string();
+    assert!(text.contains("cannot list"), "{text}");
+    assert!(text.contains("refusing the launch"), "{text}");
+}
+
+/// #12077 part 4c Fail-Open Check: with no state root there is no body to
+/// carry tm's hooks, so the launch is refused rather than run unguarded.
+#[test]
+fn no_state_root_refuses_the_launch_12077() {
+    let fx = Fx::new(&[]);
+    let err = provision_settings_default_in(None, &fx.project, None, SessionProfile::Pm)
+        .expect_err("no state root refuses");
+    assert!(matches!(err, ProvisionError::StateRoot), "{err}");
 }

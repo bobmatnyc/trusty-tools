@@ -413,6 +413,93 @@ async fn an_opted_in_worker_carries_the_agent_sandbox_inline_12077() {
     }
 }
 
+/// Plant the launch-settings record `ws`'s preparation leaves (#12127).
+fn plant_launch_keys(ws: &std::path::Path, body: &str) {
+    let path = trusty_mpm::core::session_launch::launch_keys_record_path(ws);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+}
+
+/// #12127 (b): a default worker carries the recorded launch keys as its one
+/// inline `--settings`, and writes them nowhere.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_carries_the_recorded_launch_keys_12127() {
+    let (tmp, ws, home, config) = sandbox_fixture();
+    plant_launch_keys(
+        &ws,
+        r#"{"settings": {"outputStyle": "trusty-mpm", "autoMemoryEnabled": false}}"#,
+    );
+    let fake = tmp.path().join("claude");
+    let argv_log = tmp.path().join("argv.txt");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\n\
+             cat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
+            argv_log.display()
+        ),
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: Some(&home),
+        config_dir: Some(&config),
+        opted_in: false,
+    };
+    let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect("the worker answers");
+    assert_eq!(reply.text, "ok");
+    let argv: Vec<String> = std::fs::read_to_string(&argv_log)
+        .expect("argv log")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let values: Vec<&String> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--settings")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(values.len(), 1, "one --settings: {argv:?}");
+    let inline: serde_json::Value = serde_json::from_str(values[0]).expect("inline JSON");
+    assert_eq!(
+        inline,
+        serde_json::json!({"outputStyle": "trusty-mpm", "autoMemoryEnabled": false})
+    );
+    assert!(!ws.join(".claude/settings.json").exists());
+}
+
+/// #12127 (d), Fail-Open Check: a record that cannot be read refuses the
+/// worker before it starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_with_a_malformed_record_is_refused_12127() {
+    let (tmp, ws, home, config) = sandbox_fixture();
+    plant_launch_keys(&ws, "{ not json");
+    let fake = tmp.path().join("claude");
+    let started = tmp.path().join("started");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        format!(
+            "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
+            started.display()
+        ),
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: Some(&home),
+        config_dir: Some(&config),
+        opted_in: false,
+    };
+    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect_err("a malformed record must refuse the worker");
+    assert!(err.contains("launch-settings"), "{err}");
+    assert!(!started.exists(), "the worker must not start");
+}
+
 /// #12077 Fail-Open Check: an opted-in worker with no home is refused with an
 /// error naming the switch, before the worker starts.
 #[cfg(unix)]

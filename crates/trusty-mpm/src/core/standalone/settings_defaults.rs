@@ -1,9 +1,9 @@
 //! Seed `outputStyle`/`statusLine`/`attribution` defaults into the tm-owned
 //! `CLAUDE_CONFIG_DIR` `settings.json` (defense-in-depth, issue #2214).
 //!
-//! Why: managed sessions currently rely on the PROJECT-tier `settings.json`
-//! (written by `crate::core::session_launch::settings::write_output_style` /
-//! `write_status_line`) plus `claude --setting-sources project,local` to show
+//! Why: managed sessions relied on the PROJECT-tier `settings.json` (the style
+//! now rides the launch's `--settings` flag tier, #12127; the status line is
+//! written by `write_status_line`) plus `claude --setting-sources project,local` to show
 //! the `trusty-mpm` output style and live statusline. That is a single point of
 //! failure: if the project-tier write is ever skipped, races with a resumed
 //! workspace, or the `--setting-sources` flag drifts, the tm-owned config dir

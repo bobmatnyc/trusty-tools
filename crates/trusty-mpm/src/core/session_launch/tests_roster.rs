@@ -83,10 +83,11 @@ fn prepare_session_continues_after_agent_deploy_failure() {
         "output style must still deploy despite the agent-deploy failure: {}",
         output_style.display()
     );
-    let settings = std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap();
+    // #12127: the `outputStyle` key rides the `--settings` flag tier.
+    let settings = effective_settings(project);
     assert!(
-        settings.contains("\"outputStyle\""),
-        "outputStyle key must still be written: {settings}"
+        settings["outputStyle"].is_string(),
+        "outputStyle key must still be delivered: {settings}"
     );
 }
 

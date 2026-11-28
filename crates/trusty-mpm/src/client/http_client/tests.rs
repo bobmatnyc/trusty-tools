@@ -268,6 +268,34 @@ async fn launch_session_deploys_under_the_config_dir_launch_reads_12048() {
     );
 }
 
+/// #12077: the TUI launch writes its one `--settings` body under the pinned
+/// home's state root — the `install.toml` `config_dir` here — never under the
+/// process home, which the #8545 fence guards.
+#[tokio::test]
+async fn launch_session_writes_the_settings_body_under_the_pinned_home_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let home = tmp.path().join("home");
+    let cfg = tmp.path().join("cfg");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let install = format!("config_dir = {:?}\n", cfg.display().to_string());
+    let result = launch_under_install_toml_12048(&home, &install).await;
+    assert!(result.is_err(), "the fake tmux ends this launch");
+    let state_root = crate::core::paths::FrameworkPaths::try_under_home(&home)
+        .expect("a well-formed install.toml")
+        .crate_config_root();
+    assert!(state_root.starts_with(&cfg), "{}", state_root.display());
+    let dir = state_root.join(crate::core::launch_policy::carrier::SESSION_SETTINGS_DIR);
+    let bodies: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("no settings body under {}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&bodies[0]).unwrap()).unwrap();
+    assert!(body.get("outputStyle").is_some(), "{body}");
+}
+
 /// #12048 Fail-Open Check: a malformed `install.toml` refuses the TUI launch
 /// before prep deploys anything under `<home>`.
 #[tokio::test]

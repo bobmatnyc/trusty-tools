@@ -247,14 +247,10 @@ pub(crate) async fn launch(
     };
     let managed_workdir = managed_path.to_string_lossy().to_string();
 
-    // 8. Write project-scoped MPM hooks into the managed clone (NOT the live checkout).
-    //    Both steps are best-effort — a failure is logged but never fatal.
-    // #5875: this strips the two `~/.claude/settings*.json` files only. It used
-    // to walk the whole `$HOME` tree here, which blocked a launch indefinitely.
-    super::launch_home::strip_global_hooks(home);
-    if let Err(e) = crate::commands::install::write_project_hooks_for_dir(&managed_path, None) {
-        eprintln!("warning: could not write project-scoped MPM hooks: {e:#}");
-    }
+    // 8. #12077: reports, never strips, tm's old hooks in `~/.claude/settings*.json`.
+    //    #12077 part 4c: no project-scoped hook write; the clone's launch carries
+    //    tm's hooks on its `--settings` body (`launch_home::launch_files`).
+    super::launch_home::report_global_hooks(home);
 
     // 9. (#4752) The former regeneration of
     //     `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` is gone. Its

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::doctor_repair::{
     RepairMode, RepairStep, refuse_legacy_sources, repair_build_tree_binary,
-    repair_hooks_contamination, repair_missing_hook_group, repair_push_guard, repair_statusline,
+    repair_hooks_contamination, repair_push_guard, repair_statusline,
 };
 use trusty_mpm::core::doctor_repair_scope::repair_session_scope;
 use trusty_mpm::core::stray_mcp::quarantine_strays;
@@ -34,9 +34,8 @@ use super::doctor_repair::{
 /// Why (#10425): `--only <check>` takes these values, and clap lists them in
 /// `--help`, so the scope an operator can name is the scope that exists.
 /// What: the order is the dependency order the repairs need — the build-tree
-/// repoint before the contamination strip (#7262), the strip before the
-/// lifecycle-group re-merge (#7490), the repoint before the statusline seed
-/// (#7617).
+/// repoint before the contamination strip (#7262), the repoint before the
+/// statusline seed (#7617).
 /// Test: `every_repair_id_dispatches_and_no_other_does`.
 pub(crate) const FIX_REPAIR_IDS: &[&str] = &[
     "skill_staleness",
@@ -44,7 +43,6 @@ pub(crate) const FIX_REPAIR_IDS: &[&str] = &[
     "hook-interpreter",
     "statusline",
     "hooks_contamination",
-    "hooks_missing_tm_group",
     "push_guard",
     "session_scope",
     "ancestor_claude_md",
@@ -148,10 +146,15 @@ pub(crate) fn dispatch(id: &str) -> Option<RepairFn> {
         "hooks_build_tree_binary" => {
             |c| RepairRun::Evaluated(repair_build_tree_binary(c.machine_files(), c.mode))
         }
+        // #12077: only tm's managed config dir is written; its settings.json is
+        // added to the sweep, every other file's rewrite is refused.
         "hook-interpreter" => |c| {
+            let mut files = c.machine_files().to_vec();
+            files.extend(c.managed_config.as_ref().map(|d| d.join("settings.json")));
             RepairRun::Evaluated(
                 trusty_mpm::core::hook_interpreter_doctor::repair_hook_interpreter(
-                    c.machine_files(),
+                    &files,
+                    c.managed_config.as_deref(),
                     c.mode,
                 ),
             )
@@ -161,7 +164,6 @@ pub(crate) fn dispatch(id: &str) -> Option<RepairFn> {
             RepairRun::Evaluated(repair_statusline(&files, c.mode))
         },
         "hooks_contamination" => |c| c.with_project(|p| repair_hooks_contamination(p, c.mode)),
-        "hooks_missing_tm_group" => |c| c.with_project(|p| repair_missing_hook_group(p, c.mode)),
         "push_guard" => |c| c.with_project(|p| repair_push_guard(p, c.mode)),
         "session_scope" => |c| {
             c.with_project(|p| {

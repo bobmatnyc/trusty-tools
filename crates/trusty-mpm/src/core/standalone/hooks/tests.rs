@@ -549,7 +549,7 @@ fn test_ensure_managed_hooks_preserves_existing_keys() {
     assert!(val.get("hooks").is_some(), "hooks must be present");
 }
 
-/// Why: `remove_global_trusty_mpm_hooks` must strip only MPM entries and
+/// Why: `strip_mpm_hook_entries` must strip only MPM entries and
 /// leave unrelated hooks (e.g. trusty-memory's) intact.
 /// What: seeds a settings JSON with both an MPM hook group and a non-MPM
 /// hook group, calls `strip_mpm_hook_entries`, and asserts only the MPM
@@ -1172,122 +1172,110 @@ fn test_write_project_hooks_replaces_stale_exe_path_group() {
     }
 }
 
-/// Plant a settings file at `path` carrying one tm hook group and one foreign
-/// group under `PreToolUse`.
-///
-/// Why: both `remove_global_trusty_mpm_hooks_at` tests need the same shape — a
-/// file where a correct strip is visibly distinguishable both from a wholesale
-/// wipe and from no write at all.
-/// What: creates the parent directory and writes the two-group JSON.
-/// Test: used by `remove_global_hooks_at_strips_only_the_two_global_files` and
-/// `remove_global_hooks_at_ignores_project_settings_below_home`.
-fn plant_mixed_settings(path: &Path) {
-    std::fs::create_dir_all(path.parent().expect("settings path has a parent"))
-        .expect("settings parent dir creatable");
-    let json = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [
-                { "hooks": [ { "type": "command", "command": "/opt/bin/trusty-mpm hook" } ] },
-                { "hooks": [ { "type": "command", "command": "/usr/bin/other-tool run" } ] }
-            ]
-        }
-    });
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&json).expect("json serialises"),
-    )
-    .expect("settings file writable");
+/// tm's exact old `PreToolUse` group for `cmd`, as `mpm_hook_block` writes it.
+fn tm_old_pre_tool_use(cmd: &str) -> serde_json::Value {
+    serde_json::json!({"matcher": "*", "hooks": [
+        {"type": "command", "command": cmd, "timeout": 5}
+    ]})
 }
 
-/// Every `PreToolUse` command still present in the settings file at `path`.
-fn pre_tool_use_commands(path: &Path) -> Vec<String> {
-    let text = std::fs::read_to_string(path).expect("settings file readable");
-    let val: serde_json::Value = serde_json::from_str(&text).expect("settings file parses");
-    val["hooks"]["PreToolUse"]
-        .as_array()
-        .expect("PreToolUse is an array")
-        .iter()
-        .filter_map(|g| g["hooks"][0]["command"].as_str().map(str::to_string))
-        .collect()
+/// Write `value` at `path`, creating the parent.
+fn plant(path: &Path, value: &serde_json::Value) {
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(path, serde_json::to_string_pretty(value).expect("json")).expect("write");
 }
 
-/// Why (#5875, #6070): the removal path must strip tm's own hook groups from
-/// both global settings files and leave every foreign group in place.
-/// What: plants a mixed file at `<home>/.claude/settings.json` and another at
-/// `<home>/.claude/settings.local.json`, runs the strip against that home, and
-/// asserts two files changed and only the foreign command survives in each.
+/// #12077 row 12: tm's exact old entry in either global file is reported, and
+/// neither file is written.
 #[test]
-fn remove_global_hooks_at_strips_only_the_two_global_files() {
+fn tm_exact_old_global_hook_is_reported_12077() {
+    use super::legacy_global::{LegacyGlobalHooks, LegacyHookEntry, legacy_global_mpm_hooks_at};
     let home = TempDir::new().expect("tempdir");
     let global = home.path().join(".claude").join("settings.json");
-    let global_local = home.path().join(".claude").join("settings.local.json");
-    plant_mixed_settings(&global);
-    plant_mixed_settings(&global_local);
+    let local = home.path().join(".claude").join("settings.local.json");
+    let doc = serde_json::json!({"hooks": {"PreToolUse": [
+        tm_old_pre_tool_use("/opt/bin/trusty-mpm hook"),
+        {"hooks": [{"type": "command", "command": "/usr/bin/other-tool run"}]}
+    ]}});
+    plant(&global, &doc);
+    plant(&local, &doc);
+    let before = std::fs::read(&global).expect("read");
 
-    let changed = remove_global_trusty_mpm_hooks_at(home.path()).expect("strip succeeds");
+    let found = legacy_global_mpm_hooks_at(home.path());
 
-    assert_eq!(changed, 2, "both global settings files carried a tm group");
-    for path in [&global, &global_local] {
-        assert_eq!(
-            pre_tool_use_commands(path),
-            vec!["/usr/bin/other-tool run".to_string()],
-            "only the foreign group may survive in {}",
-            path.display()
-        );
-    }
+    let entry = || LegacyHookEntry {
+        event: "PreToolUse".to_owned(),
+        command: "/opt/bin/trusty-mpm hook".to_owned(),
+    };
+    assert_eq!(
+        found,
+        vec![
+            LegacyGlobalHooks {
+                path: global.clone(),
+                found: Ok(vec![entry()])
+            },
+            LegacyGlobalHooks {
+                path: local,
+                found: Ok(vec![entry()])
+            },
+        ]
+    );
+    assert_eq!(std::fs::read(&global).expect("read"), before, "read-only");
 }
 
-/// Why (#5875): this is the regression test for the hang. Before the fix the
-/// removal path reached its targets by a depth-8 recursive walk of the whole
-/// home tree, so it rewrote every PROJECT settings file on the machine and paid
-/// an unbounded scan to find them — the `opendir()` that blocked `tm launch`,
-/// and with it the eight `guided_fallback_*` tests, forever. `tm hooks clean`
-/// owns the machine-wide sweep (#2940); this path must not.
-/// What: plants a project settings file three levels below `home` carrying the
-/// same tm hook group as the global file, strips, and asserts the project file
-/// is byte-identical afterwards while the global file was still cleaned.
+/// #12077 row 12: an entry that differs from tm's old one in any field is the
+/// operator's and is not counted.
 #[test]
-fn remove_global_hooks_at_ignores_project_settings_below_home() {
+fn a_user_hook_that_differs_from_tm_old_hook_is_not_reported_12077() {
+    use super::legacy_global::legacy_global_mpm_hooks_at;
     let home = TempDir::new().expect("tempdir");
-    let global = home.path().join(".claude").join("settings.json");
+    let mut timeout = tm_old_pre_tool_use("/opt/bin/trusty-mpm hook");
+    timeout["hooks"][0]["timeout"] = serde_json::json!(30);
+    let mut matcher = tm_old_pre_tool_use("/opt/bin/trusty-mpm hook");
+    matcher["matcher"] = serde_json::json!("Bash");
+    let mut extra = tm_old_pre_tool_use("/opt/bin/trusty-mpm hook");
+    extra["hooks"][0]["statusMessage"] = serde_json::json!("mine");
+    let doc = serde_json::json!({"hooks": {"PreToolUse": [timeout, matcher, extra]}});
+    plant(&home.path().join(".claude").join("settings.json"), &doc);
+
+    assert_eq!(legacy_global_mpm_hooks_at(home.path()), vec![]);
+}
+
+/// #5875, #12077: only the two global files are read, never a project file
+/// below home, and a home with no `.claude` reports nothing.
+#[test]
+fn project_settings_below_home_are_not_read_12077() {
+    use super::legacy_global::legacy_global_mpm_hooks_at;
+    let home = TempDir::new().expect("tempdir");
+    assert_eq!(legacy_global_mpm_hooks_at(home.path()), vec![]);
     let project = home
         .path()
         .join("code")
-        .join("acme")
         .join("widget")
         .join(".claude")
         .join("settings.json");
-    plant_mixed_settings(&global);
-    plant_mixed_settings(&project);
-    let project_before = std::fs::read_to_string(&project).expect("project settings readable");
+    let doc = serde_json::json!({"hooks": {"PreToolUse": [
+        tm_old_pre_tool_use("/opt/bin/trusty-mpm hook")
+    ]}});
+    plant(&project, &doc);
 
-    let changed = remove_global_trusty_mpm_hooks_at(home.path()).expect("strip succeeds");
-
-    assert_eq!(changed, 1, "only the global settings file may be rewritten");
-    assert_eq!(
-        std::fs::read_to_string(&project).expect("project settings still readable"),
-        project_before,
-        "a project settings file below home must be left untouched: {}",
-        project.display()
-    );
-    assert_eq!(
-        pre_tool_use_commands(&global),
-        vec!["/usr/bin/other-tool run".to_string()],
-        "the global file must still have its tm group stripped"
-    );
+    assert_eq!(legacy_global_mpm_hooks_at(home.path()), vec![]);
 }
 
-/// Why (#5875): a home with no `.claude` directory is the common case on a
-/// machine that never carried legacy global hooks. `launch()` calls this on
-/// every session start, so it must be a silent no-op rather than an error.
-/// What: strips against an empty tempdir and asserts `Ok(0)`.
+/// #12077 fail-open: a global file that exists and cannot be read is reported
+/// with its error, never read as clean.
 #[test]
-fn remove_global_hooks_at_reports_zero_when_no_global_settings_exist() {
+fn an_unreadable_global_file_is_reported_12077() {
+    use super::legacy_global::legacy_global_mpm_hooks_at;
     let home = TempDir::new().expect("tempdir");
-    assert_eq!(
-        remove_global_trusty_mpm_hooks_at(home.path()).expect("strip succeeds"),
-        0
-    );
+    let global = home.path().join(".claude").join("settings.json");
+    std::fs::create_dir_all(&global).expect("a directory where the file belongs");
+
+    let found = legacy_global_mpm_hooks_at(home.path());
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].path, global);
+    assert!(found[0].found.is_err(), "{found:?}");
 }
 
 /// Every timestamped snapshot of `settings.json` in `dir`, name-sorted.
@@ -1622,5 +1610,46 @@ fn write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on() {
             .iter()
             .any(|c| c == "/usr/local/bin/tm hook --pm-guard"),
         "{commands:?}"
+    );
+}
+
+/// #12077 row 12: the launch warning names each old entry (file, event,
+/// command), gives `tm hooks clean --path ~` as a dry run and then with
+/// `--force`, says that command matches more widely, and gives the manual
+/// alternative.
+#[test]
+fn the_legacy_global_hook_warning_names_each_entry_and_the_removal_12077() {
+    use super::legacy_global::legacy_global_mpm_hooks_at;
+    let home = TempDir::new().expect("tempdir");
+    let global = home.path().join(".claude").join("settings.json");
+    plant(
+        &global,
+        &serde_json::json!({"hooks": {"PreToolUse": [
+            tm_old_pre_tool_use("/opt/bin/trusty-mpm hook"),
+            {"hooks": [{"type": "command", "command": "/usr/bin/other-tool run"}]}
+        ]}}),
+    );
+
+    let found = legacy_global_mpm_hooks_at(home.path());
+    assert_eq!(found.len(), 1, "{found:?}");
+    let text = found[0].warning();
+
+    for wanted in [
+        global.display().to_string().as_str(),
+        "PreToolUse",
+        "/opt/bin/trusty-mpm hook",
+        "tm hooks clean --path ~",
+        "--force",
+        "dry run",
+        "backs up",
+        "any plain `tm hook` entry",
+        "settings.local.json",
+        "under `hooks`",
+    ] {
+        assert!(text.contains(wanted), "missing {wanted:?} in:\n{text}");
+    }
+    assert!(
+        !text.contains("/usr/bin/other-tool"),
+        "only tm's entries are listed:\n{text}"
     );
 }

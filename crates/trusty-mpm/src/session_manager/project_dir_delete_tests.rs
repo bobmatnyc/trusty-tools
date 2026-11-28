@@ -1140,6 +1140,8 @@ fn settings_snapshots(repo: &Path) -> Vec<PathBuf> {
 fn spawn_provisioned_ignoring_claude(fx: &GitWorktreeFixture) -> tempfile::TempDir {
     std::fs::write(fx.repo.join(".gitignore"), ".claude/\n").expect("write .gitignore");
     GitWorktreeFixture::commit_all_and_push(&fx.repo, "ignore .claude");
+    // #12077: the backups need prior tm bytes in `settings.json`.
+    super::super::decommission_settings_backup_tests::seed_an_earlier_launchs_settings(&fx.repo);
     let home = crate::test_support::hermetic_temp_dir();
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(home.path(), &fx.repo);
     let exe = Path::new(crate::test_support::STABLE_HOOK_EXE);
@@ -1152,6 +1154,8 @@ fn spawn_provisioned_ignoring_claude(fx: &GitWorktreeFixture) -> tempfile::TempD
         None,
     )
     .expect("the spawn preparation succeeds");
+    // #12077 part 4c: no launch writes these backups now; replay an older one.
+    crate::test_support::replay_pre_4c_hook_backups(&fx.repo);
     // Premise: the spawn wrote both backups the live check named.
     assert!(
         fx.repo.join(".claude/settings.json.bak").is_file(),

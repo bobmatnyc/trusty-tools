@@ -13,13 +13,14 @@
 //! call site and let the write proceed); [`mpm_hook_additions`] returns the hook
 //! triad JSON block; [`ensure_managed_hooks`] reads `<claude_config_dir>/settings.json`,
 //! deep-merges the triad idempotently, and writes back;
-//! [`remove_global_trusty_mpm_hooks_at`] strips MPM hook entries from the two
-//! global settings files; [`write_project_hooks`] writes project-scoped hooks
+//! [`legacy_global::legacy_global_mpm_hooks_at`] reports, read-only, tm's old
+//! hook entries left in the two global settings files (#12077);
+//! [`write_project_hooks`] writes project-scoped hooks
 //! into a given settings file.
 //! Test: `test_ensure_managed_hooks_writes_triad`,
 //! `test_ensure_managed_hooks_is_idempotent`,
 //! `test_hook_command_uses_absolute_path`,
-//! `remove_global_hooks_at_strips_only_the_two_global_files`,
+//! `tm_exact_old_global_hook_is_reported_12077`,
 //! `test_write_project_hooks_targets_project_dir`,
 //! `test_is_mpm_hook_command_recognises_tm_bin_name`,
 //! `test_write_project_hooks_replaces_stale_exe_path_group`,
@@ -42,6 +43,8 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
+// #12077 row 12: tm's old hooks in `~/.claude`, reported and never rewritten.
+pub mod legacy_global;
 // #8454: the `tm hook --egress-guard` entry both tiers' writers add.
 pub mod egress;
 // #8392: the opt-in `Notification` entry and its push target.
@@ -162,6 +165,11 @@ pub const TEST_HOOK_EXE_ENV: &str = "TRUSTY_MPM_TEST_HOOK_EXE";
 /// [`resolve_stable_hook_exe_with`]; a release build never reads it.
 /// Test: `architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op`,
 /// `a_managed_resume_under_an_owner_file_carries_the_same_policy`.
+///
+/// #12077 part 4c: every launch now resolves a hook binary, so a test process
+/// on a runner with no installed `tm` would refuse every launch. The pin
+/// ([`pin_test_hook_exe`]) and, in this crate's own unit tests, a fixed
+/// installed-looking path stand in when the env var is unset.
 fn test_hook_exe() -> Option<PathBuf> {
     if !cfg!(debug_assertions) {
         return None;
@@ -169,6 +177,34 @@ fn test_hook_exe() -> Option<PathBuf> {
     std::env::var_os(TEST_HOOK_EXE_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .or_else(|| TEST_HOOK_EXE_PIN.get().cloned())
+        .or_else(unit_test_hook_exe)
+}
+
+/// The process-wide test stand-in [`pin_test_hook_exe`] sets (#12077 part 4c).
+static TEST_HOOK_EXE_PIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Pin the stand-in hook binary for this test process (#12077 part 4c).
+///
+/// Why: the `tm` bin's tests link this crate without `cfg(test)`, so they need
+/// a call, not a cfg, to stay hermetic; an env var would need `unsafe` writes
+/// racing other threads.
+/// What: the first call wins; a release build never reads it.
+/// Test: `launch_files_carry_the_hook_body_without_an_owner_12077`.
+pub fn pin_test_hook_exe(path: PathBuf) {
+    let _ = TEST_HOOK_EXE_PIN.set(path);
+}
+
+/// This crate's unit tests: an installed-looking path no host needs to have.
+#[cfg(test)]
+fn unit_test_hook_exe() -> Option<PathBuf> {
+    Some(PathBuf::from(crate::test_support::STABLE_HOOK_EXE))
+}
+
+/// Outside this crate's unit tests: no stand-in.
+#[cfg(not(test))]
+fn unit_test_hook_exe() -> Option<PathBuf> {
+    None
 }
 
 /// Testable core of [`resolve_stable_hook_exe`] with its I/O sources injected.
@@ -277,7 +313,8 @@ fn hash_stripped_stem(name: &str) -> &str {
 
 /// The seven lifecycle events [`mpm_hook_additions_with_exe`] writes a group for.
 ///
-/// Why (#7490): `tm doctor`'s `hooks_missing_tm_group` check has to name the
+/// Why (#7490; that doctor row is retired by #12077 part 4c, and the literal
+/// stays for the hook relay's event list): `tm doctor`'s `hooks_missing_tm_group` check had to name the
 /// events a settings file is MISSING, and a missing event has no group to read
 /// the name off. Deriving the list from the block itself needs a resolvable
 /// binary, which the diagnostic must not depend on; a literal that drifts from
@@ -332,7 +369,17 @@ pub fn mpm_hook_additions_with_exe(
     // #7244: resolved BEFORE any JSON is built, so a refusal reaches the caller
     // with nothing written and no half-formed block to merge.
     let cmd = mpm_hook_command(exe_override)?;
-    Ok(serde_json::json!({
+    Ok(mpm_hook_block(&cmd))
+}
+
+/// The seven-event block [`mpm_hook_additions_with_exe`] writes, for `cmd`.
+///
+/// Why (#12077): the legacy-hook report matches tm's old entries exactly, and
+/// their only varying field is the command.
+/// Test: `test_mpm_hook_additions_has_seven_events`,
+/// `tm_exact_old_global_hook_is_reported_12077`.
+pub(crate) fn mpm_hook_block(cmd: &str) -> serde_json::Value {
+    serde_json::json!({
         "hooks": {
             "PreToolUse": [{
                 "matcher": "*",
@@ -395,7 +442,7 @@ pub fn mpm_hook_additions_with_exe(
                 }]
             }]
         }
-    }))
+    })
 }
 
 /// Build the MPM lifecycle hook additions JSON block with the default exe resolution.
@@ -552,7 +599,7 @@ fn is_mpm_hash_suffixed_artifact(path: &Path) -> bool {
 /// and the strip below therefore duplicated rather than replaced it. That arm
 /// also widens this predicate past the ` hook` suffix, to the `--pm-guard` and
 /// `--divert-check` shapes, but ONLY for a build-tree executable.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
+/// Test: `tm_exact_old_global_hook_is_reported_12077`,
 /// `is_mpm_hook_command_claims_the_build_tree_incident_shape`,
 /// `test_is_mpm_hook_command_recognises_tm_bin_name`,
 /// `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
@@ -692,125 +739,13 @@ fn command_exe_is_named(cmd: &str, names: &[&str]) -> bool {
 /// Test: `is_claude_mpm_hook_command_recognises_the_bare_claude_hook_shim`.
 const CLAUDE_MPM_HOOK_BIN_NAMES: &[&str] = &["claude-hook", "claude_hook"];
 
-/// The two GLOBAL Claude settings files under `home`.
-///
-/// Why (#5875, #6070): Claude Code reads exactly `~/.claude/settings.json` and
-/// `~/.claude/settings.local.json` as the user's GLOBAL settings. Everything
-/// else a `$HOME` walk reaches is a PROJECT file that the project itself owns.
-/// Naming the two paths directly costs two `open()` calls; discovering them by
-/// recursive walk costs the whole home tree, and that walk is what
-/// [`remove_global_trusty_mpm_hooks`] used to pay on every `tm launch`.
-/// What: joins the two well-known file names under `<home>/.claude` without
-/// touching the filesystem — existence is decided by the caller's read.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`.
-fn global_settings_files(home: &Path) -> Vec<PathBuf> {
-    let claude = home.join(".claude");
-    vec![
-        claude.join("settings.json"),
-        claude.join("settings.local.json"),
-    ]
-}
-
-/// Strip trusty-mpm hook entries from the global Claude settings files.
-///
-/// Why: after switching from global hooks to project-scoped hooks, any
-/// previously installed global hook triad must be cleaned up so it does not
-/// fire in unrelated projects. This mirrors the `remove_global_trusty_memory_hooks`
-/// pattern from trusty-memory — strip first, then write project-scoped hooks.
-/// What: resolves the home directory and delegates to
-/// [`remove_global_trusty_mpm_hooks_at`].
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
-/// `remove_global_hooks_at_ignores_project_settings_below_home`.
-pub fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    remove_global_trusty_mpm_hooks_at(&home)
-}
-
-/// [`remove_global_trusty_mpm_hooks`] against an explicit home directory.
-///
-/// Why (#5875): the no-argument form resolved the real `$HOME` and recursively
-/// walked it to depth 8, so `launch()` step 8 paid an O(entire home tree) scan
-/// on every session start. On a real developer machine one `opendir()` inside
-/// that walk blocked indefinitely, hanging `tm launch` — and every test that
-/// drives it, which is how the eight `guided_fallback_*` tests came to run
-/// forever (#6070). Issue #2940 already made this call for the WRITE side:
-/// `tm install` stopped walking `$HOME` and writes only the managed config dir,
-/// leaving the machine-wide sweep to the explicit, user-invoked `tm hooks
-/// clean`. This is the symmetric fix for the REMOVE side. Taking `home` as a
-/// parameter is also what makes the behaviour testable at all — every `Test:`
-/// line in this module previously named a test that did not exist, because the
-/// only entry point read a process-global.
-/// What: for each of [`global_settings_files`], removes every hook group whose
-/// `command` matches a trusty-mpm hook pattern (see [`is_mpm_hook_command`]) and
-/// writes the file back atomically only when something actually changed.
-/// Missing, empty, unparseable, and non-object files are skipped silently.
-/// Returns the count of files modified. PROJECT settings files under `home` are
-/// deliberately NOT touched — `tm hooks clean` owns that sweep.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
-/// `remove_global_hooks_at_ignores_project_settings_below_home`.
-pub fn remove_global_trusty_mpm_hooks_at(home: &Path) -> anyhow::Result<usize> {
-    // #8545: the operator's `~/.claude` settings; fenced in tests.
-    crate::core::home_write_fence::check(&home.join(".claude"));
-    let files = global_settings_files(home);
-
-    let mut changed = 0usize;
-    for path in &files {
-        // #7762: an absent file is skipped BEFORE the lock — acquiring one would
-        // create `~/.claude/` and a sidecar for a file this sweep will not touch.
-        if !path.exists() {
-            continue;
-        }
-        // #7762: the strip re-reads under the lock, so nothing published between
-        // the two reads is discarded.
-        let stripped = crate::core::settings_lock::with_settings_lock(path, || {
-            strip_global_hooks_locked(path)
-        });
-        match stripped {
-            Ok(Ok(true)) => changed += 1,
-            Ok(Ok(false)) => {}
-            Ok(Err(e)) | Err(e) => eprintln!(
-                "warning: could not remove MPM hooks from {}: {e}",
-                path.display()
-            ),
-        }
-    }
-    Ok(changed)
-}
-
-/// Strip this crate's hook entries from one global settings file, under the
-/// settings lock.
-///
-/// Why (#7762): the read and the write have to be one critical section, and the
-/// sweep's per-file body is where that section starts and ends.
-/// What: `Ok(true)` when the file was rewritten, `Ok(false)` when it was empty,
-/// unparseable, not an object, or carried no entry to strip. Missing, empty,
-/// unparseable and non-object files stay silent skips, as the sweep always
-/// treated them.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`.
-fn strip_global_hooks_locked(path: &Path) -> std::io::Result<bool> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(s) if s.trim().is_empty() => return Ok(false),
-        Ok(s) => s,
-        Err(_) => return Ok(false),
-    };
-    let mut val: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) if v.is_object() => v,
-        _ => return Ok(false),
-    };
-    if !strip_mpm_hook_entries(&mut val) {
-        return Ok(false);
-    }
-    crate::core::settings_lock::publish(path, &val).map(|()| true)
-}
-
 /// Remove every trusty-mpm hook entry from a settings JSON value in-place.
 ///
-/// Why: shared logic between `remove_global_trusty_mpm_hooks`, [`cleanup`]
+/// Why: shared logic between [`cleanup`]
 /// (issue #2940's `tm hooks clean`), and tests.
 /// What: delegates to [`strip_mpm_hook_entries_for_events`] with `events =
 /// None`, which strips MPM-owned groups from every event key present.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`.
+/// Test: `test_strip_mpm_hook_entries_removes_only_mpm_entries`.
 pub fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
     strip_mpm_hook_entries_for_events(val, None)
 }
@@ -828,7 +763,7 @@ pub fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
 /// MPM group per event survives regardless of exe-path churn.
 /// What: delegates to [`strip_hook_entries_matching_for_events`] with
 /// [`is_mpm_hook_command`] as the predicate.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
+/// Test: `test_strip_mpm_hook_entries_removes_only_mpm_entries`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
 /// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
 fn strip_mpm_hook_entries_for_events(
@@ -884,7 +819,7 @@ pub(crate) fn hook_entry_command_line(entry: &serde_json::Value) -> Option<Cow<'
 /// event key emptied of all groups is removed. Groups with a non-array/absent
 /// `hooks` field (unrecognised shape) are always retained untouched. Returns
 /// `true` if anything was removed.
-/// Test: `remove_global_hooks_at_strips_only_the_two_global_files`,
+/// Test: `test_strip_mpm_hook_entries_removes_only_mpm_entries`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
 /// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
 pub(crate) fn strip_hook_entries_matching_for_events(

@@ -49,7 +49,7 @@ use super::{start_session, start_session_in_place};
 // target's tests as threads in ONE process, so `$HOME` was repointed for every
 // sibling for the duration, and `#[serial]` excludes only other `#[serial]`
 // tests. `prepare_session_does_not_seed_the_workspace_on_the_managed_path` and
-// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`
+// `global_hook_cleanup_never_writes_the_real_home_under_an_overridden_root_12077`
 // (`core::session_launch::tests`) are the regression tests for the escape.
 
 /// Run `git <args>` in `dir`, panicking with full context on failure.
@@ -1578,10 +1578,12 @@ fn an_opted_in_session_start_spec_carries_the_sandbox_inline_12077() {
     assert!(!plain.env_set.contains(&switch));
 }
 
-/// #12077 (a)/(b): `tm launch`, `tm connect` and the Architect launch get a
-/// sandbox payload only when opted in, and neither choice writes a sandbox key
-/// into the workspace's settings files, `~/.claude/settings.json` or the
-/// tm-owned config dir.
+/// #12077 (a)/(b): `tm launch` and `tm connect` get a sandbox payload only
+/// when opted in, and neither choice writes a sandbox key into the workspace's
+/// settings files, `~/.claude/settings.json` or the tm-owned config dir.
+/// #12077 part 4c: the Architect arm probes `claude --version`, so it rewrites
+/// `PATH` and lives in `env_serial`:
+/// `an_architect_launch_carries_the_sandbox_only_when_opted_in_12077`.
 #[test]
 fn launch_files_carry_the_sandbox_only_when_opted_in_12077() {
     use crate::commands::launch_home::launch_files_with;
@@ -1589,32 +1591,30 @@ fn launch_files_carry_the_sandbox_only_when_opted_in_12077() {
     let home = crate::test_support::hermetic_temp_dir();
     let workspace = crate::test_support::hermetic_temp_dir();
     let config = home.path().join("cfg");
-    for profile in [SessionProfile::Pm, SessionProfile::Architect] {
-        let off = launch_files_with(
-            workspace.path(),
-            Some(&config),
-            Some(home.path()),
-            profile,
-            false,
-        )
-        .expect("default launch files");
-        assert_eq!(off.sandbox, None, "{profile:?}: default is off");
-        let on = launch_files_with(
-            workspace.path(),
-            Some(&config),
-            Some(home.path()),
-            profile,
-            true,
-        )
-        .expect("opted-in launch files");
-        let enabled = on
-            .sandbox
-            .as_ref()
-            .and_then(|v| v.pointer("/sandbox/enabled"))
-            .cloned();
-        let want = serde_json::json!(!profile.is_architect());
-        assert_eq!(enabled, Some(want), "{profile:?}");
-    }
+    let profile = SessionProfile::Pm;
+    let off = launch_files_with(
+        workspace.path(),
+        Some(&config),
+        Some(home.path()),
+        profile,
+        false,
+    )
+    .expect("default launch files");
+    assert_eq!(off.sandbox, None, "{profile:?}: default is off");
+    let on = launch_files_with(
+        workspace.path(),
+        Some(&config),
+        Some(home.path()),
+        profile,
+        true,
+    )
+    .expect("opted-in launch files");
+    let enabled = on
+        .sandbox
+        .as_ref()
+        .and_then(|v| v.pointer("/sandbox/enabled"))
+        .cloned();
+    assert_eq!(enabled, Some(serde_json::json!(true)), "{profile:?}");
     for file in [
         workspace.path().join(".claude/settings.json"),
         workspace.path().join(".claude/settings.local.json"),

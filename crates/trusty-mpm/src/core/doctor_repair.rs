@@ -35,8 +35,9 @@
 //!
 //! What: [`RepairMode`], the [`RepairStep`] outcome model, and the repairs
 //! `--fix` drives — [`repair_build_tree_binary`] (#7262, the repoint that runs
-//! first), [`repair_hooks_contamination`], [`repair_missing_hook_group`]
-//! (#7490 — runs after that strip and restores what a launch would write),
+//! first), [`repair_hooks_contamination`] (#12077 part 4c retired the
+//! missing-hook-group repair that ran after it: a project file owes tm no
+//! hook group),
 //! [`repair_push_guard`], [`repair_output_style`] (#5866 — the one check whose
 //! remedy string named a command with no such step), and (via
 //! [`crate::core::skill_repair`]) the skill redeploy — plus
@@ -167,10 +168,9 @@ const PM_GUARD_REMOVAL_CLAUSE: &str =
 /// reason.
 /// What: scans `<project>/.claude/settings.json` and `settings.local.json`
 /// through [`clean_settings_file`], whose `force` parameter IS the dry-run
-/// gate, so preview and apply share one reader and one classifier. #10565: in
-/// a file a managed launch provisioned (PM guard or `trusty-memory` entry
-/// present) only a build-tree entry counts — the installed lifecycle triad is
-/// that session's own, the Architect's included. Applying
+/// gate, so preview and apply share one reader and one classifier. #12077
+/// part 4c: every tm entry counts, a provisioned file's included — tm's hooks
+/// ride each launch's `--settings` body. Applying
 /// writes a byte-identical `<path>.bak-<epoch>` first. A file with no tm
 /// entries produces no step. Scope is this project only — the `$HOME`-wide
 /// sweep stays `tm hooks clean`, which pays that cost once on request rather
@@ -181,8 +181,7 @@ const PM_GUARD_REMOVAL_CLAUSE: &str =
 /// `hooks_repair_leaves_foreign_entries_alone`,
 /// `hooks_repair_warns_when_it_removes_the_pm_guard`,
 /// `hooks_repair_omits_the_pm_guard_clause_for_other_entries`,
-/// `doctor_fix_keeps_the_architect_hooks`,
-/// `a_refused_re_merge_never_leaves_the_architect_hooks_stripped`.
+/// `doctor_fix_strips_an_architect_projects_old_hooks_12077`.
 pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
     let claude = project_dir.join(".claude");
     let mut steps = Vec::new();
@@ -224,125 +223,8 @@ pub fn repair_hooks_contamination(project_dir: &Path, mode: RepairMode) -> Vec<R
     steps
 }
 
-/// The `tm doctor` check [`repair_missing_hook_group`] answers.
-///
-/// Why: named once so the repair, its tests, and the driver's ordering comment
-/// cannot drift onto a check name the report does not emit.
-/// What: the string `hooks_missing_tm_group`, as
-/// `daemon::doctor_hooks_hygiene` publishes it.
-/// Test: `missing_group_repair_merges_the_sessionstart_group_back`.
-const MISSING_GROUP_CHECK: &str = "hooks_missing_tm_group";
-
-/// Merge the tm hook lifecycle groups back into a project settings file that
-/// is missing one (issue #7490).
-///
-/// Why: `hooks_missing_tm_group` reports an event `tm hook` never fires for,
-/// and nothing else puts it back — `prepare_session` is the only writer and no
-/// resume or relaunch reached it before #7490. The operator's alternative was
-/// a hand-edit of `.claude/settings.json`.
-///
-/// This runs AFTER [`repair_hooks_contamination`] in the driver, deliberately.
-/// That pass STRIPS a build-tree `<exe> hook` entry (#10565: in a provisioned
-/// file, nothing else), including ones this pass exists to restore, so running
-/// first would report a merge the strip then undid. Running last means a managed project ends the `--fix` in the
-/// state its next launch would write, rather than with PM lifecycle hooks
-/// offline until then.
-/// What: one step for `<project>/.claude/settings.json` when
-/// [`crate::core::session_launch::missing_lifecycle_hook_events`] or (#7849)
-/// [`crate::core::session_launch::project_hook_group_gaps`] names at least one
-/// gap — no step for a complete file, a missing file, or one tm never
-/// provisioned. Applying calls
-/// [`crate::core::session_launch::ensure_project_hooks`], the SAME merge a
-/// launch runs: tm's own prior entries are replaced by identity, every other
-/// entry (the `trusty-memory inbox-check` under `SessionStart`) is preserved,
-/// and the file is snapshotted before the atomic write. A refusal to resolve
-/// an installed binary surfaces as [`StepStatus::Refused`], never a silent
-/// skip.
-/// Test: `missing_group_repair_merges_the_sessionstart_group_back`,
-/// `missing_group_repair_dry_run_changes_nothing`,
-/// `missing_group_repair_is_silent_for_a_complete_file`,
-/// `missing_group_repair_closes_a_toggle_driven_gap`.
-pub fn repair_missing_hook_group(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project_dir);
-    repair_missing_hook_group_with(&fw, project_dir, None, mode)
-}
-
-/// [`repair_missing_hook_group`] with the framework layout and hook binary
-/// supplied by the caller.
-///
-/// Why (#7244's seam, reused): `resolve_stable_hook_exe` refuses a `cargo test`
-/// harness binary, so a test driving the apply arm through
-/// [`repair_missing_hook_group`] would assert the refusal rather than the
-/// merge on any host without `tm` installed. `fw` is taken rather than derived
-/// because `for_managed_workspace` reads the process-global `$HOME`, and the
-/// config under it decides which toggle groups the merge writes — a test
-/// deriving it saw a concurrent `#[serial]` `$HOME` redirect flip
-/// `[hooks] prompt_context` mid-test (the #5040 seam, extended here).
-/// What: as [`repair_missing_hook_group`]; production passes the
-/// `for_managed_workspace` layout and `exe_override = None`.
-/// Test: see [`repair_missing_hook_group`].
-pub(crate) fn repair_missing_hook_group_with(
-    fw: &crate::core::paths::FrameworkPaths,
-    project_dir: &Path,
-    exe_override: Option<&Path>,
-    mode: RepairMode,
-) -> Vec<RepairStep> {
-    let path = project_dir.join(".claude").join("settings.json");
-    let Some(val) = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-    else {
-        return Vec::new();
-    };
-    let mut gaps = crate::core::session_launch::missing_lifecycle_hook_events(&val);
-    // #7849: the lifecycle triad was the whole gate, so a toggle-driven group —
-    // the one `hooks_missing_tm_group` now also reports — was a finding `--fix`
-    // could never close. The merge below already writes it; only this gate was
-    // blind to it. Appended rather than merged-and-sorted so the lifecycle
-    // events keep the order the pre-#7849 message used.
-    // An unresolvable hook binary yields no toggle events here on purpose: this
-    // step's own apply arm would refuse for that same reason, and the verdict
-    // for an unverifiable hook set belongs to `tm validate`'s
-    // `ProjectHookDiagnosticIncomplete`, not to a repair step that cannot act.
-    for (event, _) in
-        crate::core::session_launch::project_hook_group_gaps(fw, project_dir, &val, exe_override)
-            .unwrap_or_default()
-            .missing
-    {
-        if !gaps.contains(&event) {
-            gaps.push(event);
-        }
-    }
-    if gaps.is_empty() {
-        return Vec::new();
-    }
-    let what = format!("merge the tm hook group back under [{}]", gaps.join(", "));
-    let status = match mode {
-        RepairMode::DryRun => StepStatus::Planned,
-        RepairMode::Apply => {
-            match crate::core::session_launch::ensure_project_hooks_with(
-                fw,
-                project_dir,
-                exe_override,
-            ) {
-                Ok(()) => StepStatus::Applied { backup: None },
-                // #7490: an unresolvable installed binary is the fail-closed
-                // rule working (#7244), not a failure — a step that wrote
-                // nothing on purpose must not render like one that broke.
-                Err(e @ crate::core::session_launch::PrepError::HookExe { .. }) => {
-                    StepStatus::Refused(e.to_string())
-                }
-                Err(e) => StepStatus::Failed(e.to_string()),
-            }
-        }
-    };
-    vec![RepairStep {
-        check: MISSING_GROUP_CHECK,
-        path,
-        what,
-        status,
-    }]
-}
+// #12077 part 4c: `repair_missing_hook_group` (the `hooks_missing_tm_group`
+// repair) is retired with its check; a project file owes tm no hook group.
 
 /// The `tm doctor` check [`repair_statusline`] answers.
 const STATUSLINE_CHECK: &str = "statusline";

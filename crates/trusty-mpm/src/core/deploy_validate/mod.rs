@@ -30,13 +30,10 @@
 //! bundled roster (the pre-#2171 behavior) — see `expected_set`'s module doc
 //! for the full fallback contract. [`validate_workspace`] also checks
 //! `.claude/settings.json` (at [`FrameworkPaths::claude_home_dir`]) for a
-//! resolvable `outputStyle`, a configured `hooks` key, and — since #7849 —
-//! every TOGGLE-DRIVEN hook group this project's current config asks for,
-//! recomputed through the launch path's own builder
-//! ([`crate::core::session_launch::project_hook_group_gaps`]). That last probe
-//! is what lets `--repair` resync a flag that flipped after the settings file
-//! was written; the repair itself is an in-place merge through the same locked
-//! writer, not a re-run of the deploy pipeline.
+//! resolvable `outputStyle`. #12077 part 4c: it no longer asks for a `hooks`
+//! key or any tm hook group — tm's hooks ride each launch's `--settings` body,
+//! and a repair that wrote them back into the project file would undo that on
+//! every boot reconcile (`session_manager/reconcile.rs`).
 //! [`validate_and_repair`] re-runs
 //! [`crate::core::session_launch::prepare_session_with_repo_url`] — the exact
 //! deploy pipeline `spawn_managed`/`resume_managed` already use — when the
@@ -47,7 +44,8 @@
 //! `validate_missing_skill_is_a_gap`, `validate_settings_missing_is_a_gap`,
 //! `validate_missing_output_style_key_is_a_gap`,
 //! `validate_unknown_output_style_id_is_a_gap`,
-//! `validate_output_style_file_missing_is_a_gap`, `validate_missing_hooks_is_a_gap`,
+//! `validate_output_style_file_missing_is_a_gap`,
+//! `a_hookless_settings_file_is_not_a_gap_12077`,
 //! `validate_complete_workspace_has_no_gaps`,
 //! `validate_filtered_but_manifest_matching_workspace_has_no_gaps`,
 //! `validate_entry_missing_on_disk_but_in_manifest_is_still_a_gap`,
@@ -57,15 +55,9 @@
 //! `repair_is_a_noop_on_already_complete_workspace`,
 //! `repair_closes_a_managed_tier_bundled_skill_gap` (issue #6586),
 //! `a_stray_project_tier_bundled_skill_does_not_satisfy_completeness` (issue
-//! #6586), `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`,
-//! `a_second_repair_leaves_the_settings_file_byte_identical`,
-//! `repair_removes_a_stale_prompt_feedback_group_when_the_flag_is_off`,
-//! `a_hook_group_repair_leaves_foreign_entries_untouched`,
-//! `a_malformed_settings_file_is_a_fail_not_a_silent_pass`,
-//! `a_hook_writer_failure_surfaces_rather_than_reporting_no_gaps`,
-//! `an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report` (issue
-//! #7849); the expected-set resolution itself is covered by `expected_set`'s
-//! own test module.
+//! #6586), `a_malformed_settings_file_is_a_fail_not_a_silent_pass`,
+//! `a_repair_never_writes_hooks_into_the_project_file_12077`; the expected-set
+//! resolution itself is covered by `expected_set`'s own test module.
 
 use std::path::Path;
 
@@ -114,30 +106,19 @@ pub enum DeploymentGap {
     SettingsMissing,
     /// `.claude/settings.json` exists but is not valid JSON.
     SettingsMalformed(String),
-    /// `.claude/settings.json` has no `outputStyle` key set.
+    /// Neither the launch-settings record nor a settings file sets
+    /// `outputStyle`.
     OutputStyleKeyMissing,
+    /// #12077: the launch-settings record that carries `outputStyle` exists
+    /// but cannot be read or parsed — carries the error, which names the file.
+    LaunchSettingsRecordUnreadable(String),
     /// `outputStyle` names an id unknown to the bundled style catalog.
     OutputStyleUnknownId(String),
     /// The resolved style id's file is missing or empty under
     /// `.claude/output-styles/`.
     OutputStyleFileMissing(String),
-    /// `.claude/settings.json` has no (non-empty) `hooks` key configured.
-    HooksMissing,
-    /// A tm-owned hook group this project's CURRENT config asks for is absent
-    /// from `.claude/settings.json` (#7849) — named by its event and the
-    /// command the group would run.
-    ProjectHookGroupMissing(String, String),
-    /// `.claude/settings.json` carries a tm-owned hook group this project's
-    /// current config no longer asks for (#7849) — a toggle that flipped back
-    /// off, or a command naming a binary path that no longer resolves.
-    ProjectHookGroupStale(String, String),
-    /// The toggle-driven hook probe could not run, so whether the file carries
-    /// the right groups is UNKNOWN (#7849) — carries the resolution error.
-    ///
-    /// Why this is a gap rather than a silent skip: an unknown answer reported
-    /// as "complete" is the exact defect #7849 is about, moved one probe along
-    /// and gated on binary resolution instead of on the toggle.
-    ProjectHookDiagnosticIncomplete(String),
+    // #12077 part 4c: `HooksMissing` and the three #7849 project hook-group
+    // gaps are retired; a project file owes tm no hook.
 }
 
 impl DeploymentGap {
@@ -170,52 +151,19 @@ impl DeploymentGap {
                 format!(".claude/settings.json is not valid JSON: {detail}")
             }
             Self::OutputStyleKeyMissing => {
-                "settings.json has no outputStyle key configured".to_string()
+                "no outputStyle on the launch-settings record or in settings.json".to_string()
             }
+            Self::LaunchSettingsRecordUnreadable(detail) => format!(
+                "the launch-settings record that carries outputStyle is unreadable: {detail} \
+                 — fix or delete that file, then re-run `tm validate --repair`"
+            ),
             Self::OutputStyleUnknownId(id) => {
                 format!("outputStyle {id:?} is not a known trusty-mpm style")
             }
             Self::OutputStyleFileMissing(id) => {
                 format!("outputStyle {id:?} has no deployed style file")
             }
-            Self::HooksMissing => "settings.json has no hooks configured".to_string(),
-            Self::ProjectHookGroupMissing(event, command) => format!(
-                "settings.json has no `{event}` hook group running `{command}` — this \
-                 project's config asks for it; run `tm validate --repair` to add it"
-            ),
-            Self::ProjectHookGroupStale(event, command) => format!(
-                "settings.json carries a `{event}` hook group running `{command}` that this \
-                 project's config no longer asks for; run `tm validate --repair` to remove it"
-            ),
-            Self::ProjectHookDiagnosticIncomplete(detail) => format!(
-                "the toggle-driven hook-group check could not run, so this project's hook set \
-                 is UNVERIFIED: {detail} — install tm (`cargo install trusty-mpm`) so the hook \
-                 commands can be resolved, then re-run `tm validate --repair`"
-            ),
         }
-    }
-
-    /// Whether this gap is a project-tier hook group the in-place resync closes.
-    ///
-    /// Why (#7849): a hook-group gap does not need the deploy pipeline. Running
-    /// it would also rewrite the output style, the plugin allowlist and the
-    /// statusline — work the resync does not need, and a fatal refusal it does
-    /// not deserve.
-    /// What: `true` for the three `#7849` variants, `false` for every other.
-    /// [`Self::ProjectHookDiagnosticIncomplete`] is included so an unverifiable
-    /// hook set still takes the resync branch: that branch calls the writer,
-    /// which resolves the same binary and surfaces the same refusal as
-    /// `repair_error`, instead of the deploy pipeline refusing for an unrelated
-    /// reason.
-    /// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`,
-    /// `an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report`.
-    fn is_project_hook_group(&self) -> bool {
-        matches!(
-            self,
-            Self::ProjectHookGroupMissing(..)
-                | Self::ProjectHookGroupStale(..)
-                | Self::ProjectHookDiagnosticIncomplete(..)
-        )
     }
 }
 
@@ -246,15 +194,13 @@ impl ValidationReport {
     ///
     /// Why (#10425): `--repair --dry-run` must name the repair the real run
     /// takes, so the preview and [`repair_with`] read the same decision.
-    /// What: [`RepairPlan::Nothing`] when complete, [`RepairPlan::ResyncHookGroups`]
-    /// when every gap is a tm hook group (#7849), else
-    /// [`RepairPlan::RerunPipeline`].
+    /// What: [`RepairPlan::Nothing`] when complete, else
+    /// [`RepairPlan::RerunPipeline`] (#12077 part 4c: the hook-group resync is
+    /// retired).
     /// Test: `repair_plan_matches_the_branch_repair_takes`.
     pub fn repair_plan(&self) -> RepairPlan {
         if self.is_complete() {
             RepairPlan::Nothing
-        } else if self.gaps.iter().all(DeploymentGap::is_project_hook_group) {
-            RepairPlan::ResyncHookGroups
         } else {
             RepairPlan::RerunPipeline
         }
@@ -266,8 +212,6 @@ impl ValidationReport {
 pub enum RepairPlan {
     /// The workspace is complete; nothing runs.
     Nothing,
-    /// Rewrite only the tm hook groups in `.claude/settings.json`, in place.
-    ResyncHookGroups,
     /// Re-run the session preparation pipeline over the whole `.claude/` tier.
     RerunPipeline,
 }
@@ -281,12 +225,9 @@ impl RepairPlan {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Nothing => "nothing — the deployment is complete",
-            Self::ResyncHookGroups => {
-                "resync the tm hook groups in .claude/settings.json in place; no other file"
-            }
             Self::RerunPipeline => {
                 "re-run the session preparation pipeline, which may rewrite .claude/agents, \
-                 .claude/skills, .claude/settings.json (hooks, outputStyle, plugin allowlist, \
+                 .claude/skills, .claude/settings.json (outputStyle, plugin allowlist, \
                  statusLine) and the output styles; the exact files are decided when it runs, \
                  so this preview lists the gaps it must close, not each write"
             }
@@ -305,61 +246,7 @@ impl RepairPlan {
 /// findings into a [`ValidationReport`]. Pure filesystem reads — no writes.
 /// Test: every `validate_*` test in this module's `tests` submodule.
 pub fn validate_workspace(fw: &FrameworkPaths) -> ValidationReport {
-    validate_workspace_with_exe(fw, None)
-}
-
-/// [`validate_workspace`] with the hook binary pinned by the caller.
-///
-/// Why (#7849): the toggle-driven hook probe compares the file against the
-/// COMMANDS the writer would produce, and those carry the resolved stable
-/// binary path. `resolve_stable_hook_exe` refuses a build-artifact binary, and
-/// a test process is one — so without this seam the probe would silently skip
-/// in every test that exercises it. Mirrors the seam
-/// [`validate_and_repair_with_exe`] already carries for the repair half.
-/// What: binds `hook_exe` into the hook-group probe and delegates to
-/// [`validate_workspace_with_probe`]. Production callers pass `None` and keep
-/// resolving the running installed binary.
-/// Test: `repair_adds_the_prompt_feedback_groups_after_the_flag_flips_on`.
-pub fn validate_workspace_with_exe(
-    fw: &FrameworkPaths,
-    hook_exe: Option<&Path>,
-) -> ValidationReport {
-    validate_workspace_with_probe(fw, &|fw, project_dir, settings| {
-        crate::core::session_launch::project_hook_group_gaps(fw, project_dir, settings, hook_exe)
-    })
-}
-
-/// The hook-group probe [`validate_workspace_with_probe`] runs.
-///
-/// Why: named so the `&dyn Fn` in two signatures cannot drift apart.
-/// What: `(paths, project dir, parsed settings) -> gaps or the resolution
-/// error`.
-/// Test: see [`validate_workspace_with_probe`].
-type HookGroupProbe<'a> = &'a dyn Fn(
-    &FrameworkPaths,
-    &Path,
-    &serde_json::Value,
-) -> Result<
-    crate::core::session_launch::ProjectHookGroupGaps,
-    crate::core::standalone::hooks::StableHookExeError,
->;
-
-/// [`validate_workspace`] with the hook-group probe supplied by the caller.
-///
-/// Why (#7849): `resolve_stable_hook_exe` rescues a refused `exe_override` from
-/// `$PATH` and from the well-known daemon directories, so the REFUSAL arm is
-/// unreachable on any host that has `tm` installed — and pinning a path is
-/// therefore not enough to test what happens when resolution fails. This seam
-/// hands the probe's answer in directly, the same convention
-/// [`crate::core::session_launch`]'s writers use for the identical reason.
-/// What: the body of [`validate_workspace`], with `probe` replacing the bound
-/// [`crate::core::session_launch::project_hook_group_gaps`] call.
-/// Test: `an_unresolvable_hook_binary_is_an_incomplete_diagnostic_never_a_clean_report`.
-pub(crate) fn validate_workspace_with_probe(
-    fw: &FrameworkPaths,
-    probe: HookGroupProbe<'_>,
-) -> ValidationReport {
-    validate_workspace_at(fw, &fw.claude_home_dir().join(".claude"), probe)
+    validate_workspace_at(fw, &fw.claude_home_dir().join(".claude"))
 }
 
 /// [`validate_workspace`] with `settings.json` and `output-styles/` read from
@@ -369,25 +256,18 @@ pub(crate) fn validate_workspace_with_probe(
 /// which is `CLAUDE_CONFIG_DIR` when that is set. `tm validate` and the
 /// spawn/resume gate keep [`validate_workspace`]; only the doctor row calls
 /// this.
-/// What: the same three probes; the hook-group probe still receives
-/// `fw.claude_home_dir()` as its project dir.
+/// What: the same probes, the settings read from `settings_dir`.
 /// Test: `deployment_check_reads_settings_from_claude_config_dir`.
 pub(crate) fn validate_workspace_in(fw: &FrameworkPaths, settings_dir: &Path) -> ValidationReport {
-    validate_workspace_at(fw, settings_dir, &|fw, project_dir, settings| {
-        crate::core::session_launch::project_hook_group_gaps(fw, project_dir, settings, None)
-    })
+    validate_workspace_at(fw, settings_dir)
 }
 
 /// The probe sequence, with the settings dir named by the caller.
-fn validate_workspace_at(
-    fw: &FrameworkPaths,
-    settings_dir: &Path,
-    probe: HookGroupProbe<'_>,
-) -> ValidationReport {
+fn validate_workspace_at(fw: &FrameworkPaths, settings_dir: &Path) -> ValidationReport {
     let mut gaps = Vec::new();
     validate_agents(fw, &mut gaps);
     validate_skills(fw, &mut gaps);
-    validate_settings(fw, settings_dir, probe, &mut gaps);
+    validate_settings(fw, settings_dir, &mut gaps);
     ValidationReport { gaps }
 }
 
@@ -467,15 +347,11 @@ fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     }
 }
 
-/// Probe `.claude/settings.json` for a resolvable `outputStyle`, a configured
-/// `hooks` key, and (#7849) the toggle-driven hook groups this project's
-/// current config asks for.
-fn validate_settings(
-    fw: &FrameworkPaths,
-    settings_dir: &Path,
-    probe: HookGroupProbe<'_>,
-    gaps: &mut Vec<DeploymentGap>,
-) {
+/// Probe `.claude/settings.json` for a resolvable `outputStyle`.
+///
+/// #12077: `outputStyle` is read from the launch-settings record first, then
+/// from the file; see [`effective_output_style`].
+fn validate_settings(fw: &FrameworkPaths, settings_dir: &Path, gaps: &mut Vec<DeploymentGap>) {
     let settings_path = settings_dir.join("settings.json");
     let text = match std::fs::read_to_string(&settings_path) {
         Ok(text) => text,
@@ -496,59 +372,70 @@ fn validate_settings(
         }
     };
 
-    match value.get("outputStyle").and_then(|v| v.as_str()) {
-        None => gaps.push(DeploymentGap::OutputStyleKeyMissing),
-        Some(id) => match OUTPUT_STYLES.iter().find(|s| s.id == id) {
-            None => gaps.push(DeploymentGap::OutputStyleUnknownId(id.to_string())),
+    match effective_output_style(fw, &value) {
+        Err(detail) => gaps.push(DeploymentGap::LaunchSettingsRecordUnreadable(detail)),
+        Ok(None) => gaps.push(DeploymentGap::OutputStyleKeyMissing),
+        Ok(Some(id)) => match OUTPUT_STYLES.iter().find(|s| s.id == id) {
+            None => gaps.push(DeploymentGap::OutputStyleUnknownId(id)),
             Some(style) => {
                 let style_path = settings_dir.join("output-styles").join(style.file_name);
                 let deployed = std::fs::metadata(&style_path)
                     .map(|m| m.len() > 0)
                     .unwrap_or(false);
                 if !deployed {
-                    gaps.push(DeploymentGap::OutputStyleFileMissing(id.to_string()));
+                    gaps.push(DeploymentGap::OutputStyleFileMissing(id));
                 }
             }
         },
     }
 
-    let hooks_present = value
-        .get("hooks")
-        .and_then(|h| h.as_object())
-        .is_some_and(|o| !o.is_empty());
-    if !hooks_present {
-        gaps.push(DeploymentGap::HooksMissing);
-        return;
-    }
+    // #12077 part 4c: no `hooks` probe. A project file owes tm no hook, and a
+    // gap here was the `HooksMissing` repair that wrote them back on boot.
+}
 
-    // #7849: a non-empty `hooks` key was the whole test, so a toggle that
-    // flipped on after this file was written was invisible — and a toggle that
-    // flipped off left its group firing forever. The diff recomputes what the
-    // launch-path writer would produce for THIS project and names both
-    // directions. A file tm's project tier never provisioned yields nothing,
-    // so a foreign project is never told to adopt tm's hooks.
-    let project_dir = fw.claude_home_dir();
-    // #7849 (fail-open check): an Err here means the expected commands could
-    // not be resolved, so whether the file is right is UNKNOWN. Reporting
-    // UNKNOWN as complete is the same defect this issue is about, gated on the
-    // hook binary instead of on the toggle — so it becomes a gap the caller
-    // sees, and `--repair` still attempts the resync (which surfaces the same
-    // refusal as `repair_error`).
-    let group_gaps = match probe(fw, &project_dir, &value) {
-        Ok(group_gaps) => group_gaps,
-        Err(e) => {
-            gaps.push(DeploymentGap::ProjectHookDiagnosticIncomplete(
-                e.to_string(),
-            ));
-            return;
-        }
+/// The `outputStyle` a launch in `fw`'s project runs with (#12077).
+///
+/// Why: a 4a launch delivers `outputStyle` on the launch-settings record and
+/// writes it into no settings file, so a probe of the file alone reported a
+/// gap no repair could close, and every managed spawn logged "deployment
+/// incomplete".
+/// What: the record's value (the `--settings` flag tier outranks every file),
+/// else `settings` (the parsed `settings.json`), else the project's
+/// `settings.local.json`, which the launch leaves to win
+/// (`launch_keys_for`). `Ok(None)` when none sets it.
+///
+/// # Errors
+///
+/// The record's read or parse error, as text naming the file. It is a gap,
+/// never a pass and never a fall-through to the file's value.
+///
+/// Test: `a_record_output_style_closes_the_key_gap_12077`,
+/// `a_record_output_style_still_needs_its_style_file_12077`,
+/// `an_unreadable_launch_record_is_a_gap_never_a_pass_12077`.
+fn effective_output_style(
+    fw: &FrameworkPaths,
+    settings: &serde_json::Value,
+) -> Result<Option<String>, String> {
+    let style = |value: &serde_json::Value| {
+        value
+            .get(crate::core::session_launch::launch_keys::OUTPUT_STYLE_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
     };
-    for (event, command) in group_gaps.missing {
-        gaps.push(DeploymentGap::ProjectHookGroupMissing(event, command));
-    }
-    for (event, command) in group_gaps.stale {
-        gaps.push(DeploymentGap::ProjectHookGroupStale(event, command));
-    }
+    let project = fw.claude_home_dir();
+    let record = crate::core::session_launch::read_launch_keys(&project)
+        .map_err(|e| e.to_string())?
+        .map(serde_json::Value::Object);
+    let local = || {
+        std::fs::read_to_string(project.join(".claude").join("settings.local.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    };
+    Ok(record
+        .as_ref()
+        .and_then(style)
+        .or_else(|| style(settings))
+        .or_else(|| local().as_ref().and_then(style)))
 }
 
 /// The outcome of [`validate_and_repair`].
@@ -648,10 +535,9 @@ pub fn validate_and_repair_under(
 
 /// [`validate_and_repair`] with the hook binary pinned by the caller.
 ///
-/// Why (#7244): the repair pipeline writes the project's hooks, and that write
-/// refuses a build-artifact binary. A test process IS one, and a CI runner has
-/// no installed `tm`, so `HooksMissing` stayed a gap and the repair could never
-/// report complete. Pinning the path keeps the assertion about the pipeline.
+/// Why (#7244): the repair pipeline resolves the hook binary, which refuses a
+/// build-artifact binary. A test process IS one, and a CI runner has no
+/// installed `tm`. Pinning the path keeps the assertion about the pipeline.
 /// What: [`repair_with`], forwarding `hook_exe` to
 /// [`crate::core::session_launch::prepare_session_for_repair_in`], with the
 /// process home and `CLAUDE_CONFIG_DIR` as the user tier (#9846).
@@ -679,8 +565,8 @@ pub fn validate_and_repair_with_exe(
 /// Why (#7763): the hook binary, the user home and (#9846) the user tier's
 /// config dir are host inputs a caller may pin, and each public wrapper pins a
 /// different subset. One body keeps them from drifting.
-/// What: validate; return early when complete; resync in place for a
-/// hook-group-only gap; otherwise re-run the preparation pipeline through
+/// What: validate; return early when complete; otherwise re-run the
+/// preparation pipeline through
 /// [`crate::core::session_launch::prepare_session_for_repair_in`] and
 /// re-validate.
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
@@ -695,7 +581,7 @@ fn repair_with(
     home: Option<&Path>,
     claude_config_dir: Option<&Path>,
 ) -> RepairOutcome {
-    let before = validate_workspace_with_exe(fw, hook_exe);
+    let before = validate_workspace(fw);
     // #10425: the same decision `tm validate --repair --dry-run` previews.
     let plan = before.repair_plan();
     if plan == RepairPlan::Nothing {
@@ -704,28 +590,6 @@ fn repair_with(
             before,
             repaired: false,
             repair_error: None,
-        };
-    }
-
-    // #7849: a hook-group-only gap is resynced in place through the SAME locked
-    // writer the launch path uses, not by re-running the deploy pipeline — that
-    // pipeline closes this gap too (it calls the same writer), but it also
-    // rewrites the output style, the plugin allowlist and the statusline, and
-    // it can refuse fatally for a reason a hook resync has nothing to do with.
-    // An Err here is reported: a repair that could not write must never leave
-    // the caller reading "no gaps found" (the fail-open shape this issue is).
-    if plan == RepairPlan::ResyncHookGroups {
-        let repair_error =
-            crate::core::session_launch::ensure_project_hooks_with(fw, workspace, hook_exe)
-                .err()
-                .map(|e| e.to_string());
-        let after = validate_workspace_with_exe(fw, hook_exe);
-        let repaired = repair_error.is_none() && after.is_complete();
-        return RepairOutcome {
-            before,
-            after,
-            repaired,
-            repair_error,
         };
     }
 
@@ -742,7 +606,7 @@ fn repair_with(
         Err(e) => Some(e.to_string()),
     };
 
-    let after = validate_workspace_with_exe(fw, hook_exe);
+    let after = validate_workspace(fw);
     // #4781: `repaired` is a statement about the OUTCOME, never about the
     // attempt — a fatally-refused repair left the workspace exactly as broken
     // as it found it.

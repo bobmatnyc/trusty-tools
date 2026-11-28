@@ -60,11 +60,39 @@ fn snapshots(ws: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// #12077: lay `.claude/settings.json` down as a launch before part 4b left it
+/// — the spinner tips and the `attribution` seed — and record it in the
+/// provisioning ledger as that launch did.
+///
+/// Why: part 4b removed the last writer that created this file on a fresh
+/// tree, so a spawn there has no prior bytes to back up. An upgraded workspace
+/// still holds them; its next spawn's statusline and hooks writers back tm's
+/// own bytes up to `settings.json.bak` and a timestamped snapshot.
+pub(super) fn seed_an_earlier_launchs_settings(ws: &Path) {
+    use super::provisioning_ledger::{record, snapshot};
+    let before = snapshot(ws);
+    let settings = ws.join(".claude").join("settings.json");
+    std::fs::create_dir_all(settings.parent().expect("parent")).expect("mkdir .claude");
+    let footer = crate::core::attribution::ATTRIBUTION_FOOTER;
+    let body = serde_json::json!({
+        "spinnerTipsEnabled": true,
+        "attribution": {"commit": footer, "pr": footer},
+    });
+    std::fs::write(&settings, format!("{body:#}")).expect("write settings.json");
+    assert_eq!(
+        record(ws, &before).ok(),
+        Some(true),
+        "premise: the ledger recorded it"
+    );
+}
+
 /// Run the launch preparation a spawn runs on `ws`, under a hermetic home
 /// that must outlive the test, and assert both backups are present and
-/// gitignored. The hook exe is pinned so the hooks writer runs and snapshots
-/// `settings.json` on a runner with no installed `tm`.
+/// gitignored. #12077 part 4c: the snapshot an older launch's hooks writer
+/// took is made here, since no launch takes one now.
 fn spawn(ws: &Path) -> tempfile::TempDir {
+    // #12077: the backups need prior tm bytes in `settings.json`.
+    seed_an_earlier_launchs_settings(ws);
     let home = crate::test_support::hermetic_temp_dir();
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(home.path(), ws);
     crate::core::session_launch::prepare_session_for_repair_in(
@@ -76,6 +104,8 @@ fn spawn(ws: &Path) -> tempfile::TempDir {
         None,
     )
     .expect("the spawn preparation succeeds");
+    // #12077 part 4c: no launch writes these backups now; replay an older one.
+    crate::test_support::replay_pre_4c_hook_backups(ws);
     assert!(ws.join(BAK).is_file(), "premise: the spawn wrote {BAK}");
     assert!(
         !snapshots(ws).is_empty(),

@@ -6,7 +6,7 @@
 //! prompt; that is per-project and written at launch.)
 //! What: `install`, `install_claude_hooks` / `install_claude_hooks_at`,
 //! `mpm_hook_additions`, `install_to`, `install_one`, `deploy_report_lines`,
-//! `reset_report_lines`, `skill_report_lines`, `write_project_hooks_for_dir`.
+//! `reset_report_lines`, `skill_report_lines`.
 //! Test: `install_writes_all_artifacts`,
 //! `overwrite_artifact_refreshes_modified_file_without_force`,
 //! `seed_once_artifact_is_not_clobbered_without_force`,
@@ -432,39 +432,8 @@ fn install_claude_hooks_at_with_pm_guard(
     }
 }
 
-/// Write project-scoped MPM hooks into `<project_dir>/.claude/settings.json`.
-///
-/// Why: project-scoped hooks fire only inside the specific project directory,
-/// so they cannot break unrelated build environments or foreign repos —
-/// unlike global hooks. This mirrors trusty-memory's approach of writing
-/// project-local hook entries at session start.
-/// What: resolves `<project_dir>/.claude/settings.json` and calls
-/// [`trusty_mpm::core::standalone::hooks::write_project_hooks`] with the
-/// absolute exe path from `current_exe()`. Returns `true` if the file was
-/// updated (new or changed), `false` when already configured. #9018: honours
-/// `[pm_guard] enabled` from the user config, stripping a guard entry when off.
-/// Test: `test_write_project_hooks_for_dir_targets_project_dir` in
-/// `tests_behavior_a_tests.rs`.
-pub(crate) fn write_project_hooks_for_dir(
-    project_dir: &std::path::Path,
-    exe_override: Option<&std::path::Path>,
-) -> anyhow::Result<bool> {
-    let settings_path = project_dir.join(".claude").join("settings.json");
-    // #7244: `None` resolves the running installed binary and now REFUSES a
-    // build artifact outright rather than baking its path in. A test passes a
-    // path so it exercises the write, not the host's `tm` installation.
-    let exe = exe_override
-        .map(std::path::Path::to_path_buf)
-        .or_else(trusty_mpm::core::standalone::hooks::resolve_current_exe);
-    // #9018: `[pm_guard] enabled = false` also strips a guard entry.
-    trusty_mpm::core::standalone::hooks::write_project_hooks_honoring_pm_guard(
-        &settings_path,
-        exe.as_deref(),
-        trusty_mpm::core::config::MpmConfig::load_default()
-            .pm_guard
-            .enabled,
-    )
-}
+// #12077 part 4c: `write_project_hooks_for_dir` (the `tm launch` clone write)
+// is gone; the clone's launch carries tm's hooks on its `--settings` body.
 
 // #7244: the test-only `mpm_hook_additions` wrapper is gone. Its one caller
 // (`tests_behavior_a::mpm_hook_additions_is_idempotent_under_merge`) now pins

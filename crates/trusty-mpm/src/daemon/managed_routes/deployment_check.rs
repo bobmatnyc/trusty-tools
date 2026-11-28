@@ -187,7 +187,8 @@ pub(super) fn warn_if_no_persona_carrier(
 /// rationale.
 /// What: `true` when `gaps` contains NONE of the output-style-related
 /// [`crate::core::deploy_validate::DeploymentGap`] variants
-/// (`OutputStyleKeyMissing`, `OutputStyleUnknownId`, `OutputStyleFileMissing`)
+/// (`OutputStyleKeyMissing`, `LaunchSettingsRecordUnreadable`, `OutputStyleUnknownId`,
+/// `OutputStyleFileMissing`)
 /// — the output-style carrier is intact — OR
 /// `<workspace>/.trusty-mpm/last-instructions.md` exists and is non-empty (the
 /// prompt-file carrier). `false` only when NEITHER carrier is reachable.
@@ -204,6 +205,8 @@ pub(super) fn carrier_reachable(
         matches!(
             g,
             DeploymentGap::OutputStyleKeyMissing
+                // #12077: the record carries `outputStyle`; unreadable, no style.
+                | DeploymentGap::LaunchSettingsRecordUnreadable(_)
                 | DeploymentGap::OutputStyleUnknownId(_)
                 | DeploymentGap::OutputStyleFileMissing(_)
         )

@@ -408,7 +408,8 @@ impl Anchors {
         // #8454: `config.yaml` and the managed settings, same rules.
         let extra = egress::EgressAnchors::locate(home)?;
         let (mut guarded, mut paths, mut ids) = (extra.guarded, extra.paths, extra.ids);
-        let (mut armed, mut fence, mut records_live) = (Vec::new(), Vec::new(), false);
+        // #12077 part 4c: the carrier body directory is fenced (egress module).
+        let (mut armed, mut fence, mut records_live) = (Vec::new(), extra.fence, false);
         for part in parts {
             guarded.extend(part.guarded);
             paths.extend(part.paths);

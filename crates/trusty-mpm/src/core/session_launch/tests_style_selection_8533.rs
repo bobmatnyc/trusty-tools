@@ -53,10 +53,8 @@ fn a_manifest_only_style_is_named_alike_by_the_report_and_the_launch() {
     )
     .expect("the launch prepares");
 
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the launch's `--settings` flag tier.
+    let settings = effective_settings(project);
     assert_eq!(
         settings["outputStyle"], "tm-demo-01.tm-floor",
         "the launch applies the manifest's style, through its composite"
@@ -105,12 +103,10 @@ fn a_bare_claude_launch_loads_the_project_prose_then_the_floor() {
     )
     .expect("the launch prepares");
 
-    // What a bare `claude` in this project loads: the settings' style name,
+    // What a tm launch in this project loads: the settings' style name,
     // resolved to the file of that name under `.claude/output-styles/`.
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the launch's `--settings` flag tier.
+    let settings = effective_settings(project);
     let named = settings["outputStyle"].as_str().expect("an outputStyle");
     let file = std::fs::read_to_string(styles.join(format!("{named}.md")))
         .expect("the named style file exists");
@@ -181,10 +177,8 @@ fn an_unwritable_composite_names_the_default_style_and_keeps_the_floor() {
     std::fs::set_permissions(&styles, std::fs::Permissions::from_mode(0o755)).unwrap();
     let report = report.expect("the launch prepares");
 
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the style rides the launch's `--settings` flag tier.
+    let settings = effective_settings(project);
     assert_eq!(settings["outputStyle"], "trusty-mpm");
     assert!(
         report

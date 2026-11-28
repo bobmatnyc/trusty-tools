@@ -4,7 +4,8 @@
 //! branch on the profile; only the launch proves they agree in one session.
 //! What: runs `prepare_session_inner` against a scratch `$HOME` whose
 //! `.trusty-mpm/config.toml` is the user-level allowlist, and reads back the
-//! settings and the instruction stash (`.trusty-mpm/last-instructions.md`).
+//! effective settings (#12127: the project file under the recorded flag-tier
+//! keys) and the instruction stash (`.trusty-mpm/last-instructions.md`).
 //! Test: this is the test module.
 
 use super::tests::EnvVarGuard;
@@ -33,10 +34,8 @@ fn launch_in(project: &Path, home: &Path) -> (SessionProfile, serde_json::Value,
         },
     )
     .expect("the launch prepares");
-    let settings = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12127: the keys ride the `--settings` flag tier; read what the launch runs with.
+    let settings = effective_settings(project);
     let stash = std::fs::read_to_string(
         crate::core::harness_root::harness_dir(project).join("last-instructions.md"),
     )

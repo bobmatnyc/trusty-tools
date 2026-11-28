@@ -353,9 +353,10 @@ fn log_project_outcome(workspace: &Path, outcome: Result<CleanupOutcome, Sandbox
 /// Remove from `have` each leaf of `ours` it holds with the same value;
 /// `true` when `have` changed.
 ///
-/// What: the detector's rule (`collect`) applied as a removal. Objects recurse
-/// by key; a list under a key in `whole` goes only when equal to tm's list,
-/// any other list loses each entry `ours` lists; a scalar key goes when equal.
+/// What: the detector's rule (`collect`) applied as a removal. A list or object
+/// under a key in `whole` goes only when equal to tm's value; other objects
+/// recurse by key, any other list loses each entry `ours` lists; a scalar key
+/// goes when equal.
 /// A container emptied by the removal goes too. `retain` keeps the remaining
 /// keys and entries in their order.
 fn prune(have: &mut Value, ours: &Value, whole: &[&str]) -> bool {
@@ -367,8 +368,11 @@ fn prune(have: &mut Value, ours: &Value, whole: &[&str]) -> bool {
                     continue;
                 };
                 let drop = match value {
-                    // #12077 slice 3b: a whole-list key is tm's only when equal.
-                    Value::Array(_) if whole.contains(&key.as_str()) => child == value,
+                    // #12077 slice 3b: a whole-list key is tm's only when equal;
+                    // #12077 part 4b: so is a whole-object key (`attribution`).
+                    Value::Array(_) | Value::Object(_) if whole.contains(&key.as_str()) => {
+                        child == value
+                    }
                     Value::Object(_) | Value::Array(_) => {
                         let pruned = prune(child, value, whole);
                         changed |= pruned;
