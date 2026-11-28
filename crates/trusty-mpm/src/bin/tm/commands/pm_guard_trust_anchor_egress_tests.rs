@@ -97,6 +97,53 @@ fn egress_anchor_managed_settings_writes_are_denied() {
     assert_eq!(pm_verdict(&fx, "Write", write_input(&skill, "x")), None);
 }
 
+/// The carrier body directory under the fixture home (#12077 part 4c).
+fn bodies(fx: &Fixture) -> PathBuf {
+    trusty_common::crate_config::crate_config_dir_at(&fx.home, "trusty-mpm")
+        .join(trusty_mpm::core::launch_policy::carrier::SESSION_SETTINGS_DIR)
+}
+
+/// 🔴 #12077 part 4c (Q1): the carrier body directory holds every launch's
+/// hooks, so no edit tool and no Bash write reaches a file in it, a new file
+/// included, nor removes the directory; a file beside it stays writable.
+#[test]
+fn the_carrier_body_directory_is_an_anchor_12077() {
+    let fx = egress_fixture();
+    std::fs::create_dir_all(bodies(&fx)).expect("mkdir bodies");
+    let body = bodies(&fx).join("abc.json");
+    std::fs::write(&body, "{}").expect("write body");
+    let fresh = bodies(&fx).join("new.json");
+    for tool in EDIT_TOOLS {
+        for path in [&body, &fresh] {
+            let reason = pm_verdict(&fx, tool, write_input(path, "{}")).expect(tool);
+            assert!(reason.contains("trust anchor"), "{tool}: {reason}");
+        }
+    }
+    for command in [
+        format!("echo '{{}}' > {}", body.display()),
+        format!("cp a.json {}", fresh.display()),
+        format!("rm -rf {}", bodies(&fx).display()),
+        format!("sed -i s/a/b/ {}", body.display()),
+    ] {
+        assert!(pm_bash(&fx, &command).is_some(), "allowed: {command}");
+    }
+    let beside =
+        trusty_common::crate_config::crate_config_dir_at(&fx.home, "trusty-mpm").join("notes.md");
+    assert_eq!(pm_verdict(&fx, "Write", write_input(&beside, "x")), None);
+}
+
+/// 🔴 #12077 part 4c Fail-Open Check: a body directory whose location does not
+/// resolve denies every write, as the other anchors do.
+#[test]
+fn an_unresolvable_carrier_body_directory_denies_every_write_12077() {
+    let fx = egress_fixture();
+    let dir = bodies(&fx);
+    std::fs::create_dir_all(dir.parent().expect("parent")).expect("mkdir");
+    std::os::unix::fs::symlink(&dir, &dir).expect("self symlink");
+    let reason = pm_bash(&fx, "echo x > notes.md").expect("denied");
+    assert!(reason.contains("cannot locate the"), "{reason}");
+}
+
 /// 🔴 #8454 S2: anchoring `config.yaml` also denies `rm` and `mv` of the
 /// directories above it; deletes elsewhere stay allowed.
 #[test]

@@ -88,8 +88,8 @@ pub(super) fn seed_an_earlier_launchs_settings(ws: &Path) {
 
 /// Run the launch preparation a spawn runs on `ws`, under a hermetic home
 /// that must outlive the test, and assert both backups are present and
-/// gitignored. The hook exe is pinned so the hooks writer runs and snapshots
-/// `settings.json` on a runner with no installed `tm`.
+/// gitignored. #12077 part 4c: the snapshot an older launch's hooks writer
+/// took is made here, since no launch takes one now.
 fn spawn(ws: &Path) -> tempfile::TempDir {
     // #12077: the backups need prior tm bytes in `settings.json`.
     seed_an_earlier_launchs_settings(ws);
@@ -104,6 +104,8 @@ fn spawn(ws: &Path) -> tempfile::TempDir {
         None,
     )
     .expect("the spawn preparation succeeds");
+    // #12077 part 4c: no launch writes these backups now; replay an older one.
+    crate::test_support::replay_pre_4c_hook_backups(ws);
     assert!(ws.join(BAK).is_file(), "premise: the spawn wrote {BAK}");
     assert!(
         !snapshots(ws).is_empty(),

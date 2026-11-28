@@ -87,9 +87,9 @@ fn assert_key_removed(cmd: &std::process::Command, label: &str) {
 fn three_simultaneous_sessions_no_key_leak() {
     let prompt = Path::new("/tmp/wi5-prompt.md");
     let commands = [
-        build_claude_command(Path::new("/tmp/wi5-session-0"), None),
-        build_claude_command(Path::new("/tmp/wi5-session-1"), Some(prompt)),
-        build_claude_command(Path::new("/tmp/wi5-session-2"), None),
+        build_claude_command(Path::new("/tmp/wi5-session-0"), None, None),
+        build_claude_command(Path::new("/tmp/wi5-session-1"), Some(prompt), None),
+        build_claude_command(Path::new("/tmp/wi5-session-2"), None, None),
     ];
 
     // All three commands must invoke `claude` directly and strip the key.
@@ -127,7 +127,7 @@ fn key_removed_even_when_present_in_parent_env() {
         );
     }
 
-    let cmd = build_claude_command(Path::new("/tmp/wi5-parent-has-key"), None);
+    let cmd = build_claude_command(Path::new("/tmp/wi5-parent-has-key"), None, None);
     assert_key_removed(&cmd, "parent-has-key");
 
     // Restore the prior environment to avoid leaking the canary to later tests.

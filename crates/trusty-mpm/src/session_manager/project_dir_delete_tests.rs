@@ -1154,6 +1154,8 @@ fn spawn_provisioned_ignoring_claude(fx: &GitWorktreeFixture) -> tempfile::TempD
         None,
     )
     .expect("the spawn preparation succeeds");
+    // #12077 part 4c: no launch writes these backups now; replay an older one.
+    crate::test_support::replay_pre_4c_hook_backups(&fx.repo);
     // Premise: the spawn wrote both backups the live check named.
     assert!(
         fx.repo.join(".claude/settings.json.bak").is_file(),

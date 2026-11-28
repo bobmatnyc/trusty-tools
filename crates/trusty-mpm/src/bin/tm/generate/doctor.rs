@@ -281,7 +281,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "hooks_contamination",
-        "Warns when a project's `.claude/settings*.json` still carries tm hook entries from a pre-fix `tm install` — suggests `tm hooks clean` (issue #2940).",
+        "Warns when a project's `.claude/settings*.json` still carries any tm hook entry. tm's hooks ride each launch's `--settings` body, so every copy in a project file is stale and each tm launch removes them; `tm doctor --fix` previews the removal and `--yes` applies it, and `tm hooks clean` sweeps every project under $HOME (issues #2940, #12077).",
     ),
     (
         "hooks_foreign_conflict",
@@ -292,12 +292,8 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when a hook or `statusLine` command in a project's `.claude/settings*.json` runs a binary that lives in a Cargo build tree, naming the file and each offending command. Such a command stops working the moment the artifact is rebuilt away, which silently disables PM-guard enforcement. `tm doctor --fix` previews repointing every one of them at the installed `tm` binary — machine-wide, not just this project — and `--yes` applies it, taking a timestamped snapshot of each file first; `statusLine.command` is repaired by the same pass (issue #7262).",
     ),
     (
-        "hooks_missing_tm_group",
-        "Warns when a tm-provisioned project `.claude/settings*.json` carries NO tm hook group for one of the seven lifecycle events, naming the file and each missing event. Only `prepare_session` wrote those groups and no resume or in-place relaunch reached it, so a project provisioned before an event existed never gained it — a missing `SessionStart` means `tm hook` never fires, no savings row is written under the live Claude session id, and the 💸 statusline segment stays hidden. `tm doctor --fix` reports the gap and does not write the project file (#12077); the project's next `tm launch <project>` re-renders tm's hook group, preserving every other entry, which restores the guard (`tm hook --pm-guard`) (issue #7490).",
-    ),
-    (
         "egress_guard",
-        "Whether every tm-provisioned settings file still registers the `tm hook --egress-guard` `PreToolUse` group, which denies outbound-channel MCP tools of the native servers (Slack, Gmail, Notion, Google Chat) and outbound Bash egress to those hosts. The claude.ai connectors (`claude_ai_*`) are exempt, except that their write tools are denied in a channel-tainted session. Reads each project `.claude/settings*.json` the hygiene probe reaches and the managed `claude-config/settings*.json`. `Fail` when a provisioned file lacks the group, carries it with a timeout under 10 s or a narrowed matcher, or sets `disableAllHooks`; `Unknown` when a file cannot be read or parsed; `Ok` otherwise, including a foreign project with no tm hook. Never reads `[pm_guard]` — the entry has no off switch. Read-only (issue #8454).",
+        "Whether every tm-provisioned settings file still registers the `tm hook --egress-guard` `PreToolUse` group, which denies outbound-channel MCP tools of the native servers (Slack, Gmail, Notion, Google Chat) and outbound Bash egress to those hosts. The claude.ai connectors (`claude_ai_*`) are exempt, except that their write tools are denied in a channel-tainted session. Judges the `--settings` body a tm launch in each reached project carries and the managed `claude-config/settings*.json`. `Fail` when either lacks the group or carries it with a timeout under 10 s or a narrowed matcher, or when the managed tier or a reached project `.claude/settings*.json` sets `disableAllHooks`; `Unknown` when a body cannot be built or a file cannot be read or parsed; `Ok` otherwise (#12077). Never reads `[pm_guard]` — the entry has no off switch. Read-only (issue #8454).",
     ),
     (
         "tcc_taint",
@@ -451,9 +447,8 @@ mod tests {
                 .map(|(_, d)| *d)
                 .unwrap_or_default()
         };
-        let hooks = row("hooks_missing_tm_group");
-        assert!(hooks.contains("`tm launch"), "{hooks}");
-        assert!(!hooks.contains("`--yes` applies it"), "{hooks}");
+        // #12077 part 4c: `hooks_missing_tm_group` is retired.
+        assert!(row("hooks_missing_tm_group").is_empty());
         let memory = row("auto_memory");
         assert!(memory.contains("launch-settings record"), "{memory}");
         assert!(!memory.contains("into the PROJECT tier"), "{memory}");

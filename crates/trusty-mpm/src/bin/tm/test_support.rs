@@ -187,10 +187,20 @@ fn resolve_test_tmp_root(override_root: Option<std::ffi::OsString>) -> PathBuf {
 /// test code.
 /// Test: [`tests::hermetic_temp_dir_ignores_tmpdir`].
 pub(crate) fn hermetic_temp_dir() -> TempDir {
+    pin_test_hook_exe();
     tempfile::Builder::new()
         .prefix(TEST_DIR_PREFIX)
         .tempdir_in(real_system_tmp())
         .expect("create hermetic test temp dir")
+}
+
+/// Pin [`STABLE_HOOK_EXE`] as this process's hook binary (#12077 part 4c).
+///
+/// Why: every launch now resolves a hook binary, and a runner with no
+/// installed `tm` refuses one; [`hermetic_temp_dir`] calls this, so any test
+/// that builds a launch under a temp dir is hermetic.
+pub(crate) fn pin_test_hook_exe() {
+    trusty_mpm::core::standalone::hooks::pin_test_hook_exe(PathBuf::from(STABLE_HOOK_EXE));
 }
 
 /// Raise the process-global tracing level so a thread-local capture can see

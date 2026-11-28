@@ -20,7 +20,6 @@ const HERMETIC: &[&str] = &[
     "hook-interpreter",
     "statusline",
     "hooks_contamination",
-    "hooks_missing_tm_group",
     "push_guard",
     "session_scope",
     "ancestor_claude_md",

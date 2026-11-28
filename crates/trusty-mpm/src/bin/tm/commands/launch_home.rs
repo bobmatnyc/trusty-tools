@@ -129,10 +129,11 @@ pub(crate) fn launch_sandbox_with(
 /// root, which fails the launch only on a broken `install.toml` (#11821
 /// df-D1w); `profile` is the launch's resolved
 /// profile, which decides whether the #8992 skill and tool parts apply.
+/// #12077 part 4c: it also fails when tm's hooks cannot be built or written.
 /// #12077: plus, when this process opted in (`TM_CLAUDE_SANDBOX=1`), the
 /// role's inline sandbox payload ([`launch_files_with`]); no file is written.
 /// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
-/// `launch_files_add_no_settings_without_an_owner`; the `--settings` token
+/// `launch_files_carry_the_hook_body_without_an_owner_12077`; the `--settings` token
 /// itself: `isolated_spec_carries_the_owner_settings_after_the_mcp_config`.
 pub(crate) fn launch_files(
     workspace: &Path,
@@ -205,10 +206,11 @@ pub(crate) fn report_global_hooks(home: Option<&Path>) {
 mod tests {
     use super::apply_sandbox;
 
-    /// #8988: a workspace with no owner gets its session-MCP file and no
-    /// settings file, so `tm launch`/`tm connect` argv stays as before.
+    /// #8988: a workspace with no owner gets its session-MCP file. #12077 part
+    /// 4c: it also gets a settings file now — the body carrying tm's hooks,
+    /// egress guard included — so `tm launch`/`tm connect` are never unguarded.
     #[test]
-    fn launch_files_add_no_settings_without_an_owner() {
+    fn launch_files_carry_the_hook_body_without_an_owner_12077() {
         let home = crate::test_support::hermetic_temp_dir();
         let workspace = crate::test_support::hermetic_temp_dir();
         let config = home.path().join("cfg");
@@ -216,7 +218,11 @@ mod tests {
         let files = super::launch_files(workspace.path(), Some(&config), Some(home.path()), pm)
             .expect("the session-MCP file is writable under a temp home");
         assert!(files.mcp_config.is_some());
-        assert_eq!(files.settings, None);
+        let body = files.settings.expect("a hook body");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(body).expect("read body")).expect("JSON");
+        use trusty_mpm::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
+        assert_eq!(egress_guard_state(&value), EgressGuardState::Present);
     }
     /// #11077: a sandboxed client resolves `<sandbox>/home`, never `$HOME`.
     #[test]

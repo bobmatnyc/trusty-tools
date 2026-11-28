@@ -31,6 +31,8 @@ pub mod event;
 pub mod id;
 pub mod registry;
 pub mod state;
+// #12077 part 4c: the worker's `--settings` body.
+pub(crate) mod worker_settings;
 
 // Convenience re-exports so consumers can import from `crate::control::*`.
 pub use actor::{

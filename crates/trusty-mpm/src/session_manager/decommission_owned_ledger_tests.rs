@@ -349,27 +349,25 @@ fn ledger_adopts_a_relaunch_rewrite_of_tm_or_head_bytes() {
     );
 }
 
-/// #8663 critic round 2: the resume path's hook merge rewrites
+/// #8663 critic round 2, #12077 part 4c: the launch-time hook strip rewrites
 /// `settings.json` without recording the ledger, so the clone is kept. This
-/// drives the real merge (`ensure_project_hooks_with`) over a ledgered clone.
+/// drives the real strip over a ledgered clone whose file carries a tm hook.
 #[tokio::test]
-async fn resume_hook_merge_keeps_a_ledgered_clone() {
+async fn launch_hook_strip_keeps_a_ledgered_clone_12077() {
     let fx = GitWorktreeFixture::new();
     let ws = clone(&fx, "ledger-resume");
-    provision(&ws);
+    let before = snapshot(&ws);
+    std::fs::write(ws.join("CLAUDE.md"), "# Project Instructions\n").expect("CLAUDE.md");
+    std::fs::create_dir_all(ws.join(".claude")).expect("mkdir .claude");
     let settings = ws.join(".claude/settings.json");
-    let launched = std::fs::read(&settings).expect("read settings");
+    let hook = r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/tm hook"}]}]}}"#;
+    std::fs::write(&settings, hook).expect("settings.json");
+    crate::core::scaffold_gitignore::append_legacy_block(&ws);
+    assert!(record(&ws, &before).expect("record the ledger"));
 
-    let base = tempfile::tempdir().expect("framework base");
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base.path(), &ws);
-    let exe = Path::new(crate::test_support::STABLE_HOOK_EXE);
-    crate::core::session_launch::ensure_project_hooks_with(&fw, &ws, Some(exe))
-        .expect("the resume merge");
-    assert_ne!(
-        std::fs::read(&settings).expect("reread"),
-        launched,
-        "precondition"
-    );
+    let changed =
+        crate::core::session_launch::launch_hooks::strip_tm_project_hooks(&ws).expect("the strip");
+    assert_eq!(changed, vec![settings.clone()], "precondition");
 
     assert!(kept(&ws).contains(".claude/settings.json"), "{}", kept(&ws));
     assert!(!plain_decommission(&fx.repos_root, &ws).await);

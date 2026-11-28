@@ -577,8 +577,7 @@ async fn run_doctor_produces_eighty_checks() {
         "hooks_contamination",
         "hooks_foreign_conflict",
         "hooks_build_tree_binary",
-        // #7490: the lifecycle event a tm-provisioned file has no group for.
-        "hooks_missing_tm_group",
+        // #12077 part 4c: `hooks_missing_tm_group` is retired.
         // #8454: the egress-guard entry in every tm-provisioned file.
         "egress_guard",
         "tcc_taint",

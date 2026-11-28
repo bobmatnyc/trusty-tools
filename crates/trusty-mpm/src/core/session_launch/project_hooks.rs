@@ -142,7 +142,6 @@ pub(super) fn project_managed_hook_additions_with_prompt_feedback(
 /// `true` builds exactly what the function above builds.
 /// #8454: the egress-guard group is appended whatever any toggle says.
 /// Test: `a_disabled_guard_is_left_out_of_the_additions`,
-/// `launch_with_the_guard_disabled_removes_an_existing_entry`,
 /// `egress_settings_writer_adds_entry_even_when_pm_guard_disabled`.
 pub(super) fn project_managed_hook_additions_with_pm_guard(
     exe_override: Option<&std::path::Path>,
@@ -315,6 +314,8 @@ pub(super) fn project_managed_hook_additions_for_profile(
 /// Test: `project_managed_hook_events_is_a_superset_of_every_variant`,
 /// `write_project_hooks_strips_stale_prompt_context_when_disabled`,
 /// `write_project_hooks_strips_stale_divert_when_disabled`.
+// #12077 part 4c: the strip domain of the test-only project writer.
+#[cfg(test)]
 pub(super) fn project_managed_hook_events() -> Vec<String> {
     // #7244: the key SET is a property of the block's SHAPE and must never
     // depend on whether a binary resolves — an empty answer here would narrow
@@ -355,6 +356,7 @@ pub(super) fn project_managed_hook_events() -> Vec<String> {
 /// What: never written anywhere; only the keys of the block built around it
 /// are read.
 /// Test: `project_managed_hook_events_is_a_superset_of_every_variant`.
+#[cfg(test)]
 const EVENT_KEY_PROBE_EXE: &str = "/usr/local/bin/tm";
 
 /// Recognise a hook command belonging to ANY of the three project-tier
@@ -415,6 +417,7 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
 /// contamination classifier needs the same marker.
 /// Test: `the_tier_marker_ignores_a_user_tier_lifecycle_command`,
 /// `the_tier_marker_recognises_the_pm_guard`.
+#[cfg(test)]
 pub(super) use crate::core::standalone::hooks::cleanup::is_project_tier_marker_command;
 
 #[cfg(test)]

@@ -4,18 +4,18 @@
 //! tm-launched session and a Slack, Gmail, Notion or Google Chat MCP tool. A
 //! settings file that lost it, shortened its timeout or set `disableAllHooks`
 //! runs every session there unguarded, and nothing else on screen says so.
-//! What: [`check_egress_guard`] reads every project-tier settings file the
-//! hygiene probe reaches ([`candidate_settings_files`]) and the managed
-//! user-tier `claude-config/settings{,.local}.json`, grouped by the directory
-//! that holds them. A group is tm-provisioned when one of its files carries a
-//! tm hook command (the lifecycle `tm hook`, the pm-guard or the egress
-//! guard); the managed tier always is. `Fail` when a provisioned group carries
-//! no egress group, a weakened one (a timeout under 10 or a narrowed matcher),
-//! or sets `disableAllHooks`. `Unknown` when a file is unreadable or
-//! malformed, or when `claude-config/` cannot be stat'ed; a `claude-config/`
-//! whose `settings.json` is missing fails. `Ok` otherwise — a foreign
-//! project owes tm nothing. It never reads `[pm_guard]`: the entry has no off
-//! switch (Architect D3). Read-only.
+//! What: #12077 part 4c — [`check_egress_guard`] judges the `--settings` body
+//! a tm launch in each reached project would carry, and the managed user-tier
+//! `claude-config/settings{,.local}.json`. `Fail` when either carries no
+//! egress group or a weakened one (a timeout under 10 or a narrowed matcher),
+//! when the managed tier sets `disableAllHooks`, or when a reached project
+//! settings file ([`candidate_settings_files`]) sets it — a lower tier's
+//! `disableAllHooks: true` silences the body's hooks. `Unknown` when a body
+//! cannot be built (no stable hook binary), a file is unreadable or
+//! malformed, or `claude-config/` cannot be stat'ed; a `claude-config/`
+//! whose `settings.json` is missing fails. A project file's own tm entries are
+//! stale and reported by `hooks_contamination`, not judged here. It never
+//! reads `[pm_guard]`: the entry has no off switch (Architect D3). Read-only.
 //! Test: the `egress_doctor_*` tests below.
 
 use std::collections::BTreeMap;
@@ -25,12 +25,9 @@ use serde_json::Value;
 
 use super::doctor_hooks_hygiene::candidate_settings_files;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
-use crate::core::standalone::hooks::build_tree::PM_GUARD_SUFFIX;
-use crate::core::standalone::hooks::cleanup::event_names_matching;
 use crate::core::standalone::hooks::egress::{
-    EgressGuardState, disables_all_hooks, egress_guard_state, is_egress_guard_hook_command,
+    EgressGuardState, disables_all_hooks, egress_guard_state,
 };
-use crate::core::standalone::hooks::is_mpm_hook_command;
 use crate::core::trusty_tools_config::managed_claude_config_dir_at;
 
 /// The check's name.
@@ -45,12 +42,43 @@ struct Tier {
     managed: bool,
 }
 
-/// Report whether every tm-provisioned settings file registers the egress
-/// guard. See the module doc.
+/// The hook body a tm launch in a project carries, or why it cannot be built.
+type BodyFor<'a> = &'a dyn Fn(&Path) -> Result<Value, String>;
+
+/// Report whether every tm launch body and the managed tier register the
+/// egress guard. See the module doc.
+///
+/// Test: `egress_doctor_reports_ok_for_a_registered_project`,
+/// `egress_doctor_flags_a_body_missing_the_egress_entry_12077`.
 pub(super) fn check_egress_guard(
     project_dir: Option<&Path>,
     active_workspace_paths: &[PathBuf],
     home: &Path,
+) -> DoctorCheck {
+    check_egress_guard_with(project_dir, active_workspace_paths, home, &launch_body)
+}
+
+/// The hook groups a tm launch in `project` would carry (#12077 part 4c).
+fn launch_body(project: &Path) -> Result<Value, String> {
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(project);
+    let config = crate::core::config::MpmConfig::load(&fw.root);
+    let profile = crate::core::session_profile::resolve(project, &config);
+    let exe =
+        crate::core::standalone::hooks::resolve_stable_hook_exe(None).map_err(|e| e.to_string())?;
+    crate::core::session_launch::launch_hooks::launch_hook_additions(&fw, project, profile, &exe)
+        .map_err(|e| e.to_string())
+}
+
+/// [`check_egress_guard`] with the launch body supplied by the caller.
+///
+/// Why: the body names the resolved hook binary, which a test host without an
+/// installed `tm` cannot resolve.
+/// Test: `egress_doctor_reports_unknown_when_no_body_can_be_built_12077`.
+fn check_egress_guard_with(
+    project_dir: Option<&Path>,
+    active_workspace_paths: &[PathBuf],
+    home: &Path,
+    body_for: BodyFor<'_>,
 ) -> DoctorCheck {
     let mut tiers: BTreeMap<PathBuf, Tier> = BTreeMap::new();
     for file in candidate_settings_files(project_dir, active_workspace_paths) {
@@ -98,6 +126,32 @@ pub(super) fn check_egress_guard(
             Verdict::Fail(why) => fails.extend(why),
         }
     }
+    // #12077 part 4c: the body each reached project's launch would carry.
+    let mut projects: Vec<&Path> = project_dir.into_iter().collect();
+    for path in active_workspace_paths {
+        if !projects.contains(&path.as_path()) {
+            projects.push(path);
+        }
+    }
+    for project in projects {
+        match body_for(project) {
+            Err(why) => unknowns.push(format!(
+                "the launch body for {} cannot be built ({why})",
+                project.display()
+            )),
+            Ok(body) => match egress_guard_state(&body) {
+                EgressGuardState::Present => guarded += 1,
+                EgressGuardState::Weakened(why) => fails.push(format!(
+                    "the launch body for {}: the egress entry is weakened — {why}",
+                    project.display()
+                )),
+                EgressGuardState::Missing => fails.push(format!(
+                    "the launch body for {} carries no `hook --egress-guard` PreToolUse group",
+                    project.display()
+                )),
+            },
+        }
+    }
     let remedy = "Relaunch the session with tm, or run `tm install` for the managed tier; a \
          running Claude Code session keeps the hooks it loaded at startup.";
     if !fails.is_empty() {
@@ -121,7 +175,9 @@ pub(super) fn check_egress_guard(
         NAME,
         CheckStatus::Ok,
         format!(
-            "`hook --egress-guard` registered in {guarded} tm-provisioned settings director{}",
+            "`hook --egress-guard` registered in {guarded} tm launch bod{} and managed \
+             settings director{}",
+            if guarded == 1 { "y" } else { "ies" },
             if guarded == 1 { "y" } else { "ies" }
         ),
     )
@@ -164,15 +220,17 @@ fn judge_tier(dir: &Path, tier: &Tier) -> Verdict {
             },
         }
     }
-    let provisioned = tier.managed
-        || values
-            .iter()
-            .any(|(_, value)| !event_names_matching(value, is_tm_hook_command).is_empty());
+    // #12077 part 4c: only the managed tier carries tm's hooks on disk; a
+    // project file is judged for `disableAllHooks` alone.
+    let provisioned = tier.managed;
     let mut fails = missing;
     let (mut present, mut weakened) = (false, false);
     for (file, value) in &values {
         if disables_all_hooks(value) {
             fails.push(format!("{} sets disableAllHooks", file.display()));
+        }
+        if !tier.managed {
+            continue;
         }
         match egress_guard_state(value) {
             EgressGuardState::Present => present = true,
@@ -192,20 +250,13 @@ fn judge_tier(dir: &Path, tier: &Tier) -> Verdict {
             dir.display()
         ));
     }
-    if provisioned && !fails.is_empty() {
+    if !fails.is_empty() {
         Verdict::Fail(fails)
     } else if !unknown.is_empty() {
         Verdict::Unknown(unknown)
     } else {
         Verdict::Fine(provisioned)
     }
-}
-
-/// A tm hook command: the lifecycle `tm hook` (including a build-tree one),
-/// the pm-guard or the egress guard. Not `trusty-memory`, which writes its
-/// own project hooks outside tm.
-fn is_tm_hook_command(cmd: &str) -> bool {
-    is_mpm_hook_command(cmd) || cmd.ends_with(PM_GUARD_SUFFIX) || is_egress_guard_hook_command(cmd)
 }
 
 /// The first [`SHOWN`] findings joined, plus a count of the rest.
@@ -250,8 +301,18 @@ mod tests {
         }
     }
 
+    /// The row with a launch body carrying the egress group (timeout 10).
     fn check(fx: &Fixture) -> DoctorCheck {
-        check_egress_guard(Some(fx.project.as_path()), &[], &fx.home)
+        check_with_body(fx, Some(10))
+    }
+
+    /// The row with a launch body carrying the egress group at `timeout`, or
+    /// none at all.
+    fn check_with_body(fx: &Fixture, timeout: Option<u64>) -> DoctorCheck {
+        let body = serde_json::from_str::<Value>(&provisioned(timeout)).expect("body");
+        check_egress_guard_with(Some(fx.project.as_path()), &[], &fx.home, &|_| {
+            Ok(body.clone())
+        })
     }
 
     /// A tm-provisioned settings body: the lifecycle `tm hook` group, plus the
@@ -269,21 +330,21 @@ mod tests {
         json!({ "hooks": { "PreToolUse": pre } }).to_string()
     }
 
-    /// 🔴 #8454 S2: a provisioned project carrying the group is `Ok`.
+    /// 🔴 #8454 S2: a project whose launch body carries the group is `Ok`.
     #[test]
     fn egress_doctor_reports_ok_for_a_registered_project() {
-        let fx = fixture(&[("settings.json", provisioned(Some(10)))]);
+        let fx = fixture(&[]);
         let row = check(&fx);
         assert_eq!(row.name, NAME);
         assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
     }
 
-    /// 🔴 #8454 S2 (plan §6 `doctor_flags_missing_egress_entry`): a
-    /// provisioned project file with no egress group fails — even with
+    /// 🔴 #8454 S2 (plan §6 `doctor_flags_missing_egress_entry`), #12077
+    /// part 4c: a launch body with no egress group fails — even with
     /// `[pm_guard] enabled = false`, which this row never reads.
     #[test]
-    fn egress_doctor_flags_missing_egress_entry() {
-        let fx = fixture(&[("settings.json", provisioned(None))]);
+    fn egress_doctor_flags_a_body_missing_the_egress_entry_12077() {
+        let fx = fixture(&[]);
         std::fs::create_dir_all(fx.home.join(trusty_common::install_paths::MPM_DIR_NAME))
             .expect("mkdir");
         std::fs::write(
@@ -293,23 +354,45 @@ mod tests {
             "[pm_guard]\nenabled = false\n",
         )
         .expect("write config");
-        let row = check(&fx);
+        let row = check_with_body(&fx, None);
         assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
         assert!(row.message.contains("--egress-guard"), "{}", row.message);
+        assert!(row.message.contains("launch body"), "{}", row.message);
+    }
+
+    /// 🔴 #12077 part 4c: a project file's stale tm entries are not judged
+    /// here (`hooks_contamination` reports them); the body decides.
+    #[test]
+    fn a_project_file_without_the_egress_entry_no_longer_fails_12077() {
+        let fx = fixture(&[("settings.json", provisioned(None))]);
+        let row = check(&fx);
+        assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    }
+
+    /// 🔴 #12077 part 4c Fail-Open Check: a body that cannot be built is
+    /// `Unknown`, never `Ok`.
+    #[test]
+    fn egress_doctor_reports_unknown_when_no_body_can_be_built_12077() {
+        let fx = fixture(&[]);
+        let row = check_egress_guard_with(Some(fx.project.as_path()), &[], &fx.home, &|_| {
+            Err("no installed tm".to_owned())
+        });
+        assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+        assert!(row.message.contains("no installed tm"), "{}", row.message);
     }
 
     /// 🔴 #8454 S2: a timeout under 10 lets Claude Code kill the hook into an
     /// allow, so it fails.
     #[test]
     fn egress_doctor_fails_a_timeout_under_10() {
-        let fx = fixture(&[("settings.json", provisioned(Some(5)))]);
-        let row = check(&fx);
+        let fx = fixture(&[]);
+        let row = check_with_body(&fx, Some(5));
         assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
         assert!(row.message.contains("timeout"), "{}", row.message);
     }
 
-    /// 🔴 #8454 S2: `disableAllHooks` in either file of a provisioned project
-    /// fails, though the group itself is intact.
+    /// 🔴 #8454 S2: `disableAllHooks` in either project file fails, though the
+    /// group itself is intact (#12077 part 4c: it silences the body's hooks).
     #[test]
     fn egress_doctor_fails_disable_all_hooks() {
         let fx = fixture(&[

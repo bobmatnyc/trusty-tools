@@ -54,7 +54,13 @@ pub mod socket;
 fn arm_home_write_fence() {
     OPERATOR_HOME.get_or_init(|| std::env::var_os("HOME").map(PathBuf::from));
     trusty_mpm::core::home_write_fence::arm_for_this_process();
+    // #12077 part 4c: every launch resolves a hook binary; a runner with no
+    // installed `tm` would refuse every in-process launch.
+    trusty_mpm::core::standalone::hooks::pin_test_hook_exe(PathBuf::from(TEST_HOOK_EXE));
 }
+
+/// The installed-looking hook binary every integration target pins (#12077).
+pub const TEST_HOOK_EXE: &str = "/usr/local/bin/tm";
 
 /// `$HOME` as the harness started this process, before any test repointed it.
 static OPERATOR_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -195,6 +201,11 @@ pub fn isolate_spawned_tm<'a>(cmd: &'a mut Command, home: &Path) -> &'a mut Comm
     cmd.env(trusty_mpm::content::first_use::OFFLINE_ENV, "1");
     // See G0b auto-setup: a scratch-HOME child never runs a real `cargo install`.
     cmd.env("TM_SKIP_MCP_AUTO_SETUP", "1");
+    // #12077 part 4c: the debug child pins its hook binary too (debug-only read).
+    cmd.env(
+        trusty_mpm::core::standalone::hooks::TEST_HOOK_EXE_ENV,
+        TEST_HOOK_EXE,
+    );
     for key in CHILD_STATE_ENV {
         cmd.env_remove(key);
     }

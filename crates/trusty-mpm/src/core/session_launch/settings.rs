@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use super::PrepError;
+#[cfg(test)]
 use crate::core::standalone::hooks::backup;
 
 /// The `tm hook` sub-flag the PM enforcement guard is invoked with.
@@ -475,7 +476,7 @@ pub(crate) fn write_enabled_plugins_with_trust(
 /// through [`super::hook_group_diff::project_hook_additions_for`]. It survives
 /// as the pre-#7688 REFERENCE its own tests assert against, exactly as
 /// [`super::project_hooks::project_managed_hook_additions`] does one layer down.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn write_project_hooks(
     project_dir: &Path,
     exe_override: Option<&Path>,
@@ -508,7 +509,7 @@ pub(super) fn write_project_hooks(
 /// form survives as the guard-on reference its tests assert against.
 /// Test: `project_hooks_tests::write_project_hooks_writes_prompt_feedback_when_enabled`,
 /// `project_hooks_tests::write_project_hooks_strips_stale_prompt_feedback_when_disabled`.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn write_project_hooks_with_prompt_feedback(
     project_dir: &Path,
     exe_override: Option<&Path>,
@@ -552,6 +553,11 @@ pub(super) fn write_project_hooks_with_prompt_feedback(
 /// the filesystem; otherwise performs the read / strip / merge / no-op check /
 /// snapshot / atomic-write exactly as [`write_project_hooks`] documents.
 /// Test: `project_hooks_tests::write_project_hooks_takes_no_snapshot_when_the_exe_is_refused`.
+///
+/// #12077 part 4c: no launch, resume or repair writes the project file any
+/// more; this survives as the test reference for the additions block the
+/// `--settings` body carries.
+#[cfg(test)]
 pub(super) fn write_project_hooks_with(
     project_dir: &Path,
     additions: Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError>,
@@ -587,6 +593,7 @@ pub(super) fn write_project_hooks_with(
 /// What: exactly what [`write_project_hooks_with`] documents, minus the
 /// `additions` refusal and the directory creation its caller has already done.
 /// Test: see [`write_project_hooks_with`].
+#[cfg(test)]
 fn write_project_hooks_locked(
     settings_path: &Path,
     additions: &serde_json::Value,

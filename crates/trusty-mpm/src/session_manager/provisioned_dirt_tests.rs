@@ -69,6 +69,8 @@ fn spawn(ws: &Path) -> tempfile::TempDir {
         Some(home.path()),
     )
     .expect("the spawn preparation succeeds");
+    // #12077 part 4c: no launch writes the settings backups now; replay them.
+    crate::test_support::replay_pre_4c_hook_backups(ws);
     home
 }
 

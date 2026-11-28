@@ -10,7 +10,7 @@
 //! drives the REAL spawn and resume paths against a recording tmux, reads the
 //! launch spec the typed line names, and asserts on the exact contents of the
 //! file its `--settings` token names. A third case proves the no-owner launch
-//! carries no `--settings` at all. #8992: the `[skills] off` / `[tools] deny`
+//! carries no owner keys (#12077 part 4c: its body holds tm's hooks alone). #8992: the `[skills] off` / `[tools] deny`
 //! cases drive the same three callers (spawn, resume, in-place relaunch) for a
 //! PM and for an allow-listed Architect, which gets the `[mcp]` part only.
 //! Test: this file IS the test.
@@ -297,6 +297,10 @@ fn launched_args(tmux: &Recorder) -> Vec<String> {
 }
 
 /// The parsed file the `--settings` token names, and its path.
+///
+/// #12077 part 4c: every launch's body also carries tm's hooks. They are
+/// asserted present (egress guard included) and removed, so the comparisons
+/// below see the owner policy alone.
 fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
     let at = args
         .iter()
@@ -304,10 +308,21 @@ fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
         .unwrap_or_else(|| panic!("argv carries no --settings: {args:?}"));
     let path = PathBuf::from(&args[at + 1]);
     let body = std::fs::read(&path).expect("read the settings file");
-    (
-        path,
-        serde_json::from_slice(&body).expect("the settings file is JSON"),
-    )
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&body).expect("the settings file is JSON");
+    use trusty_mpm::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
+    assert_eq!(
+        egress_guard_state(&body),
+        EgressGuardState::Present,
+        "{body}"
+    );
+    body.as_object_mut().expect("an object").remove("hooks");
+    (path, body)
+}
+
+/// #12077 part 4c: the owner keys a launch's body carries, `{}` for none.
+fn owner_keys(args: &[String]) -> serde_json::Value {
+    settings_file(args).1
 }
 
 /// #10127: an Architect's ONE `--settings` is inline JSON — the owner file's
@@ -415,11 +430,11 @@ fn a_managed_resume_under_an_owner_file_carries_the_same_policy() {
     );
 }
 
-/// With no owner file the launch is byte-identical to today: no `--settings`,
-/// and no settings file written. Green on both sides of the fix.
+/// With no owner file the launch carries no owner keys. #12077 part 4c: it
+/// still carries one `--settings` body, holding tm's hooks alone.
 #[test]
 #[cfg(unix)]
-fn a_spawn_with_no_owner_file_carries_no_settings_flag() {
+fn a_spawn_with_no_owner_file_carries_only_the_hook_body_12077() {
     let fx = Fixture::new();
     let tmux = Arc::new(Recorder::default());
 
@@ -434,12 +449,7 @@ fn a_spawn_with_no_owner_file_carries_no_settings_flag() {
         .expect("the spawn path must run with claude on PATH");
 
     let args = launched_args(&tmux);
-    assert!(!args.iter().any(|a| a == "--settings"), "{args:?}");
-    assert!(
-        !fx.home
-            .join(".trusty-tools/trusty-mpm/session-settings")
-            .exists()
-    );
+    assert_eq!(owner_keys(&args), serde_json::json!({}), "{args:?}");
 }
 
 /// The in-place relaunch (bare `tm` inside a managed pane, exec'd by
@@ -482,15 +492,16 @@ fn a_deleted_owner_file_stays_off_when_a_bad_file_follows() {
         launched_args(&tmux)
     };
     fx.owner_file("[mcp]\ndeny = [\"heygen\"]\n");
-    assert!(spawn_args().iter().any(|a| a == "--settings"));
+    assert!(owner_keys(&spawn_args()).get("deniedMcpServers").is_some());
 
     std::fs::remove_file(fx.repos_root.join("acme").join(OWNER_FILE)).expect("delete");
-    assert!(!spawn_args().iter().any(|a| a == "--settings"));
+    assert_eq!(owner_keys(&spawn_args()), serde_json::json!({}));
 
     fx.owner_file("[mcp\n");
     let args = spawn_args();
-    assert!(
-        !args.iter().any(|a| a == "--settings"),
+    assert_eq!(
+        owner_keys(&args),
+        serde_json::json!({}),
         "a bad file after a delete must not revive the old policy: {args:?}"
     );
 }

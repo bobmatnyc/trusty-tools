@@ -495,66 +495,16 @@ pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHo
     (dir, override_guard)
 }
 
-/// A fake, executable `claude` first on `PATH`, plus the guard that restores
-/// `PATH` when the test ends (#7862).
-///
-/// Why: every route that reaches `ClaudeCodeAdapter::spawn_resume` resolves the
-/// `claude` binary before it types anything into the pane, so a test driving
-/// that route on a machine with no Claude Code install stops at the adapter and
-/// observes nothing past it — green on a developer laptop, red on every CI
-/// runner. Winning the lookup outright also stops a machine that DOES have
-/// `claude` from launching the operator's real one.
-/// What: writes `#!/bin/sh` + `exit 0` at `<tempdir>/claude`, mode 0755, and
-/// prepends that directory to `PATH` — `bin_resolve::resolve_binary` consults
-/// the live `PATH` before its well-known-dirs fallback. Both the directory and
-/// the previous `PATH` live in the returned guard, so the stub survives exactly
-/// as long as the test and `Drop` restores the environment on the unwind too.
-///
-/// Callers MUST be tagged `#[serial_test::serial]`: `PATH` is process-global.
-/// Test: `daemon::managed_routes::resume_claim_tests::the_claim_is_still_held_when_the_route_types_into_the_pane`.
+/// A fake `claude` at the Architect floor, first on `PATH` (#7862, #12077
+/// part 4c). The same file backs the `env_serial` target's copy.
 #[cfg(unix)]
-pub(crate) fn fake_claude_on_path() -> FakeClaudeOnPath {
-    let dir = hermetic_temp_dir();
-    let exe = dir.path().join("claude");
-    // See #10248
-    trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
-        .expect("write the fake claude");
-    let prev = std::env::var_os("PATH");
-    let mut entries = vec![dir.path().to_path_buf()];
-    if let Some(ref p) = prev {
-        entries.extend(std::env::split_paths(p));
-    }
-    let joined = std::env::join_paths(entries).expect("join PATH");
-    // SAFETY: callers are `#[serial]`, and `Drop` restores the previous value.
-    unsafe { std::env::set_var("PATH", joined) };
-    assert!(
-        trusty_common::bin_resolve::resolve_binary("claude").is_some_and(|found| found == exe),
-        "the planted stub must WIN the lookup, else the test it guards still \
-         depends on the host's own Claude Code install"
-    );
-    FakeClaudeOnPath { _dir: dir, prev }
-}
-
-/// The live half of [`fake_claude_on_path`] — see its doc.
+#[path = "test_fake_claude_path.rs"]
+mod fake_claude_path;
 #[cfg(unix)]
-pub(crate) struct FakeClaudeOnPath {
-    /// Holds the stub's directory alive for the guard's lifetime.
-    _dir: TempDir,
-    prev: Option<std::ffi::OsString>,
-}
-
+pub(crate) use fake_claude_path::fake_claude_on_path;
+// The floor version `fake_claude_on_path`'s stub reports.
 #[cfg(unix)]
-impl Drop for FakeClaudeOnPath {
-    fn drop(&mut self) {
-        // SAFETY: as in `fake_claude_on_path`.
-        unsafe {
-            match self.prev.take() {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-}
+use crate::core::architect_claude_version::ARCHITECT_MIN_CLAUDE_VERSION;
 
 /// Make `tracing` events reachable by a thread-local capturing subscriber, for
 /// the whole test process (#4931).
@@ -687,6 +637,30 @@ pub(crate) fn relink_spool_files(dir: &Path) {
         std::fs::write(&path, bytes).expect("rewrite spool file");
         std::fs::set_permissions(&path, mode).expect("spool mode");
     }
+}
+
+/// Replay the settings backups a pre-#12077-part-4c launch left in `ws`.
+///
+/// Why: the project hooks writer took the timestamped `settings.json`
+/// snapshot, and it no longer runs at launch; the decommission and dirt rules
+/// that excuse tm's backups still guard clones provisioned by older releases.
+/// What: inside one provisioning-ledger window, copies `settings.json` to
+/// `settings.json.bak` when no `.bak` exists and takes one snapshot, then
+/// records the window as that launch did.
+/// Test: `owned_decommission_removes_a_clone_holding_only_tm_s_backups_11267`,
+/// `the_spawn_written_settings_backups_do_not_refuse_11218`.
+pub(crate) fn replay_pre_4c_hook_backups(ws: &std::path::Path) {
+    use crate::core::standalone::hooks::backup;
+    use crate::session_manager::provisioning_ledger::{record, snapshot};
+    let before = snapshot(ws);
+    let settings = ws.join(".claude").join("settings.json");
+    let bak = ws.join(".claude").join("settings.json.bak");
+    if !bak.exists() {
+        std::fs::copy(&settings, &bak).expect("legacy .bak");
+    }
+    backup::snapshot_then_prune(&settings, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT)
+        .expect("legacy snapshot");
+    record(ws, &before).expect("record the legacy launch");
 }
 
 #[cfg(test)]
