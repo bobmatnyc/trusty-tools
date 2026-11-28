@@ -161,6 +161,66 @@ pub struct IndexFileStatus {
 /// `data.overlapping_index_id`.
 pub const METHOD_PROJECT_ENSURE: &str = "search.project.ensure";
 
+// #10535: hygiene counts for `tm doctor`; PR 2 (#10534) adds the classified ones.
+
+/// Registry-wide index counts from stored state, loading no corpus (#10535).
+///
+/// Params are none (`{}` or absent). The reply decodes as
+/// [`ProjectHealthCounts`]. An unreadable `indexes.toml` or `project-map.toml`
+/// answers `CODE_INTERNAL_ERROR` naming the file, never zero counts.
+pub const METHOD_PROJECT_HEALTH: &str = "search.project.health";
+
+/// The reply of [`METHOD_PROJECT_HEALTH`] (#10535).
+///
+/// Why: `tm doctor` needs index hygiene counts without waking a parked or
+/// cold index, and the daemon and its clients must agree on one wire shape;
+/// trusty-search serialises this type and every client decodes it.
+/// What: five counts over the daemon's stored state. Invariants:
+/// `orphaned <= parked <= registered` and `never_queried <= registered`;
+/// `resident` counts loaded handles and is not bounded by `registered`.
+/// Test: `project_health_at_decodes_the_daemons_counts`,
+/// `project_health_at_refuses_a_body_without_the_counts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProjectHealthCounts {
+    /// Rows in `indexes.toml`.
+    pub registered: u64,
+    /// Indexes loaded in the daemon at the time of the call.
+    pub resident: u64,
+    /// Registered indexes with a `[[parked]]` row in `project-map.toml`.
+    pub parked: u64,
+    /// Parked indexes whose stored park reason is `orphaned`: the root was
+    /// gone when the index was parked. The root is not re-checked.
+    pub orphaned: u64,
+    /// Registered indexes with no stored `last_queried_unix`. An upper bound:
+    /// it also counts a row written before query stamps existed (#993) and an
+    /// index queried only through a path that does not stamp.
+    pub never_queried: u64,
+}
+
+/// [`call_at`] of [`METHOD_PROJECT_HEALTH`], decoded (#10535).
+///
+/// Why: `tm doctor` reads the counts in one bounded call and must tell a
+/// daemon that did not answer from one that answered something else.
+/// What: sends `{}`, decodes the result as [`ProjectHealthCounts`].
+/// Test: `project_health_at_decodes_the_daemons_counts`,
+/// `project_health_at_refuses_a_body_without_the_counts`.
+///
+/// # Errors
+///
+/// Everything [`call_at`] reports (a refusal is a [`SearchRpcError`]), and a
+/// result that does not decode as the counts.
+pub async fn project_health_at(socket: &Path, timeout: Duration) -> Result<ProjectHealthCounts> {
+    let body = call_at(
+        socket,
+        METHOD_PROJECT_HEALTH,
+        serde_json::json!({}),
+        timeout,
+    )
+    .await?;
+    serde_json::from_value(body)
+        .with_context(|| format!("decode the {METHOD_PROJECT_HEALTH} reply"))
+}
+
 /// The daemon's code for "the thing you asked about does not exist" (HTTP 404).
 ///
 /// A second copy of `trusty_search::service::rpc::error::CODE_NOT_FOUND`, and

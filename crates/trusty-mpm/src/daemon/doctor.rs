@@ -323,6 +323,11 @@ use doctor_search_pin::check_search_index_pin;
 mod doctor_search_project;
 use doctor_search_project::check_search_project;
 
+// #10535: daemon-wide index hygiene counts from `search.project.health`.
+#[path = "doctor_search_index_health.rs"]
+mod doctor_search_index_health;
+use doctor_search_index_health::check_search_index_health;
+
 // #9664: `tm doctor --fix` parks what `search_project_duplicate_index` flags.
 #[path = "doctor_search_park.rs"]
 mod doctor_search_park;
@@ -648,6 +653,8 @@ pub(crate) async fn run_doctor_with_claims(
     // #9169: the project map — this project's index, live duplicates, second
     // checkouts, and whether the daemon can read the map at all.
     checks.extend(check_search_project(project_dir).await);
+    // #10535: beside the `search_project_*` rows, never replacing them.
+    checks.extend(check_search_index_health().await);
     // #10042: the trusty-events bus socket — one UDS connect, never TCP.
     checks.push(super::doctor_events::check_events(&home).await);
     checks.push(check_worktrees(repos_root, worktree_counts).await);

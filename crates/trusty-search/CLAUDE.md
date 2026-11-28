@@ -281,6 +281,14 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   index never wins, and the answer carries `pinned_by` (`null` when derived).
   Each duplicate carries `parked`.
 - `search.project.map` → `{path, schema, projects, parked}`.
+- `search.project.health` (#10535) → `{registered, resident, parked,
+  orphaned, never_queried}`: counts from `indexes.toml`, the resident handles
+  and the map. Loads no corpus and never migrates a missing map (nothing is
+  parked then). `parked` and `orphaned` count only registered ids;
+  `orphaned` is a park whose stored reason is `orphaned` (roots are not
+  re-checked). `never_queried` counts rows with no `last_queried_unix`, an
+  upper bound that includes pre-#993 rows. An unreadable registry or map is
+  `CODE_INTERNAL_ERROR` naming the file. Socket-only, free lane.
 - `search.project.park {index_id}` → `{index_id, parked, key, reason,
   canonical_index_id, unpinned, unloaded}`. A pin naming the parked index is
   dropped; `unpinned` lists the group keys it held. Only a worktree, an orphaned root, or an

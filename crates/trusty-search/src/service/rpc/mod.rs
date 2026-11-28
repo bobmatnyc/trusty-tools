@@ -51,6 +51,9 @@ pub mod project_ensure;
 /// Registration for the project map: map, park, unpark, pin (#9169 PR-B1).
 pub mod project_map;
 
+/// Registration for `search.project.health`: stored-state index counts (#10535).
+pub mod project_health;
+
 /// Registration for the dashboard's file read (#9029).
 pub mod file;
 

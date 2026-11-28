@@ -1409,6 +1409,8 @@ async fn doctor_endpoint_returns_report() {
         "search_project_duplicate_index",
         "search_project_two_checkouts",
         "search_project_map_unreadable",
+        // #10535: stored-state counts from `search.project.health`.
+        "search_index_orphan_parked",
         // #10042: the trusty-events bus socket — serving, absent or stale.
         "events",
         "worktrees",
