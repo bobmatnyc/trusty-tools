@@ -719,16 +719,53 @@ fn the_carrier_payload_carries_the_recorded_claude_md_excludes_12077() {
     );
 }
 
-/// #12077 row 13, Fail-Open Check: a launch whose project identity cannot be
-/// resolved refuses, rather than start without the excludes recorded for that
-/// project.
-#[test]
-fn an_unresolvable_project_identity_refuses_the_carrier_12077() {
-    let fx = Fx::new(USER);
-    // A `.git` file naming no git dir: git cannot read this checkout at all.
+/// A `.git` file naming no git dir: git cannot read this checkout at all.
+fn break_git(fx: &Fx) {
     std::fs::write(fx.project.join(".git"), "gitdir: /nonexistent/12077\n").unwrap();
+}
+
+/// #12077 row 13, Fail-Open Check: a git error with a project exclude record
+/// on disk refuses the launch, since that record may be this project's.
+#[test]
+fn an_unresolvable_project_identity_refuses_the_carrier_when_a_project_record_exists_12077() {
+    let fx = Fx::new(USER);
+    break_git(&fx);
+    let records = fx.state.join("launch-settings");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(
+        records.join("project-00112233445566778899aabbccddeeff.json"),
+        r#"{"issue": 12077, "project": "acme/other", "settings": {"claudeMdExcludes": ["/a"]}}"#,
+    )
+    .unwrap();
     let err = fx
         .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
-        .expect_err("an unresolvable identity must refuse");
+        .expect_err("a git error with a project record on disk must refuse");
     assert!(err.to_string().contains("refusing the launch"), "{err}");
+}
+
+/// #12077 row 13 (Architect 13:24Z): a git error with no project exclude
+/// record anywhere warns, names the git error, and launches with the
+/// directory record's keys.
+#[test]
+fn an_unresolvable_project_identity_warns_and_launches_with_no_project_record_12077() {
+    let fx = Fx::new(USER);
+    break_git(&fx);
+    fx.record(LAUNCH_KEYS);
+    let launch = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect("no project record exists, so the launch goes ahead");
+    let notice = launch.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("cannot resolve the project identity") && notice.contains("git"),
+        "the warning names the git error: {notice}"
+    );
+    assert_eq!(
+        body_of(&launch),
+        json!({
+            "outputStyle": "trusty-mpm",
+            "autoMemoryEnabled": false,
+            "skillOverrides": {"xlsx": "off"}
+        }),
+        "the directory record's keys still ride the launch"
+    );
 }

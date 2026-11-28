@@ -330,3 +330,22 @@ fn deliver_refuses_over_an_unreadable_record_12077() {
         "{ not json"
     );
 }
+
+/// #12077 row 13 (Architect 13:24Z): the repair path refuses on a git error
+/// even when no project record exists anywhere, and writes nothing.
+#[test]
+fn add_launch_exclude_refuses_on_a_git_error_with_no_project_record_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path().join("ws");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    write_text(&project.join(".git"), "gitdir: /nonexistent/12077\n");
+    let state = tmp.path().join("state");
+    let err = add_launch_exclude(&project, Some(&state), Path::new("/anc/CLAUDE.md"))
+        .expect_err("a git error refuses the repair");
+    assert!(matches!(err, LaunchKeysError::Identity { .. }), "{err}");
+    assert!(!state.exists(), "nothing written under the state root");
+    assert!(
+        !record_path(&project).exists(),
+        "no directory record written"
+    );
+}
