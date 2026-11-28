@@ -769,3 +769,22 @@ fn an_unresolvable_project_identity_warns_and_launches_with_no_project_record_12
         "the directory record's keys still ride the launch"
     );
 }
+
+/// #12077 row 13, Fail-Open Check: on a git error, a record directory that
+/// cannot be listed leaves "does a project record exist?" unknown, so the
+/// launch refuses rather than read it as "none".
+#[test]
+fn an_unlistable_launch_settings_dir_refuses_the_carrier_12077() {
+    let fx = Fx::new(USER);
+    break_git(&fx);
+    // A regular file where the record directory goes: `read_dir` fails with
+    // NotADirectory, not NotFound.
+    std::fs::create_dir_all(&fx.state).unwrap();
+    std::fs::write(fx.state.join("launch-settings"), "not a directory").unwrap();
+    let err = fx
+        .try_provision(Some(fx.claude.as_path()), SessionProfile::Pm)
+        .expect_err("an unlistable record directory must refuse");
+    let text = err.to_string();
+    assert!(text.contains("cannot list"), "{text}");
+    assert!(text.contains("refusing the launch"), "{text}");
+}
