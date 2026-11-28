@@ -30,12 +30,15 @@
 //! # Spec References
 //! - [`SPEC-UNIDASH-04~draft`](docs/specs/DOC-73-unified-mpm-code-agents-dashboard.md#SPEC-UNIDASH-04~draft)
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use trusty_common::control_bus::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
+use trusty_common::control_bus::{
+    DEFAULT_PUSH_BUFFER_CAPACITY, HarnessEvent, PushClient, PushFlushOutcome,
+};
 
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
@@ -91,7 +94,12 @@ pub struct ActionEvents {
     /// The inject recorder the session manager takes when it is built (#9167).
     inject_recorder: OnceLock<Arc<dyn InjectRecorder>>,
     flush_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// #12049: events the daemon itself emitted, for `tm events`.
+    daemon_events: parking_lot::Mutex<VecDeque<HarnessEvent>>,
 }
+
+/// The most daemon-emitted events [`ActionEvents`] keeps for `tm events`.
+pub const DAEMON_EVENT_LIMIT: usize = 256;
 
 impl std::fmt::Debug for ActionEvents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,6 +125,25 @@ impl ActionEvents {
     /// The attached publisher, if any.
     pub fn publisher(&self) -> Option<&Arc<ActionPublisher>> {
         self.publisher.get()
+    }
+
+    /// Keep `event`, one the daemon emitted, in a bounded ring (#12049).
+    ///
+    /// Why: `tm events` read only the hook ring, so a `ci_transition` the PR
+    /// watch handed to the bus or its spool was never readable there.
+    /// What: appends, dropping the oldest past [`DAEMON_EVENT_LIMIT`].
+    /// Test: `a_watch_transition_is_readable_where_tm_events_reads_12049`.
+    pub fn remember_daemon_event(&self, event: HarnessEvent) {
+        let mut ring = self.daemon_events.lock();
+        if ring.len() >= DAEMON_EVENT_LIMIT {
+            ring.pop_front();
+        }
+        ring.push_back(event);
+    }
+
+    /// The daemon-emitted events kept, oldest first (#12049).
+    pub fn recent_daemon_events(&self) -> Vec<HarnessEvent> {
+        self.daemon_events.lock().iter().cloned().collect()
     }
 
     /// Keep `recorder` for the session manager; `false` when one is kept.
@@ -379,10 +406,19 @@ impl ActionPublisher {
     /// What: stamps `seq` under the projection lock, as `publish` does, so
     /// `seq` follows buffer order, then hands it to the push client.
     /// Test: `the_park_event_reaches_the_bus_once_across_ticks_10362`.
-    pub fn publish_event(&self, mut event: trusty_common::control_bus::HarnessEvent) {
+    pub fn publish_event(&self, event: trusty_common::control_bus::HarnessEvent) {
+        self.try_publish_event(event);
+    }
+
+    /// [`Self::publish_event`], answering whether the event was buffered.
+    ///
+    /// #12049: `false` once the stop settled the buffer, so a caller that
+    /// advances state on delivery (the PR watch) can refuse to advance.
+    /// Test: `a_late_publish_is_an_emit_error_and_records_nothing_12049`.
+    pub fn try_publish_event(&self, mut event: trusty_common::control_bus::HarnessEvent) -> bool {
         let _order = self.threader.lock();
         event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.buffer(event);
+        self.buffer(event)
     }
 
     /// Buffer a `received` event per cross-session message that reached a

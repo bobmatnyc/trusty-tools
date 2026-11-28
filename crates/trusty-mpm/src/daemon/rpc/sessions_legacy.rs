@@ -32,6 +32,7 @@
 //! | `mpm.sessions.set_pid` | `PATCH /sessions/{id}/pid` |
 //! | `mpm.sessions.events_poll` | `GET /sessions/{id}/events/poll` |
 //! | `mpm.events.poll` | `GET /events/poll` |
+//! | `mpm.events.daemon_poll` | `GET /events/daemon/poll` (#12049) |
 //! | `mpm.hooks.ingest` | `POST /hooks` |
 //!
 //! Three naming notes, so a reader does not have to diff the table against
@@ -125,6 +126,7 @@ pub const METHODS: &[&str] = &[
     "mpm.sessions.set_pid",
     "mpm.sessions.events_poll",
     "mpm.events.poll",
+    "mpm.events.daemon_poll",
     "mpm.hooks.ingest",
 ];
 
@@ -326,6 +328,14 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
         NoParams,
         t::EventsResponse,
         |s, _p| ops::recent_events(&s)
+    );
+    // #12049: the daemon's own events, `ci_transition` among them.
+    let r = ok!(
+        r,
+        "mpm.events.daemon_poll",
+        NoParams,
+        t::DaemonEventsResponse,
+        |s, _p| ops::recent_daemon_events(&s)
     );
     fallible!(
         r,

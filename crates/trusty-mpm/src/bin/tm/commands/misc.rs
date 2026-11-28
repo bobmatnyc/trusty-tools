@@ -109,7 +109,38 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
     for e in &body.events {
         println!("{} {} {}", e.at, short_id(&e.session), e.event);
     }
+    // #12049: then the daemon's own events (the PR watch's `ci_transition`),
+    // which the hook ring above never holds.
+    let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+        .get("/events/daemon/poll")
+        .send()
+        .await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        eprintln!("tm events: this daemon serves no daemon-event feed; upgrade it");
+        return Ok(());
+    }
+    let own: trusty_mpm::daemon::api::types::DaemonEventsResponse =
+        resp.error_for_status()?.json().await?;
+    for e in &own.events {
+        println!("{}", daemon_event_line(e));
+    }
     Ok(())
+}
+
+/// One `tm events` line for a daemon-emitted event (#12049):
+/// `{at} daemon {kind} {key}`, the key only when the event carries one.
+///
+/// Test: `daemon_event_line_names_kind_and_key_12049`.
+pub(crate) fn daemon_event_line(e: &trusty_common::control_bus::HarnessEvent) -> String {
+    use trusty_common::control_bus::HarnessPayload;
+    let at = e.at.to_rfc3339();
+    match &e.payload {
+        HarnessPayload::Hook { kind, data } => match data.get("key").and_then(|k| k.as_str()) {
+            Some(key) => format!("{at} daemon {kind} {key}"),
+            None => format!("{at} daemon {kind}"),
+        },
+        other => format!("{at} daemon {other:?}"),
+    }
 }
 
 /// `validate` subcommand — diff a workspace's deployed `.claude/{agents,skills}`
@@ -881,6 +912,11 @@ pub(crate) async fn attach_cmd(
         }
     }
 }
+
+// #12049: `tm events` daemon-event lines, kept out of the capped `tests.rs`.
+#[cfg(test)]
+#[path = "misc_events_tests.rs"]
+mod events_tests;
 
 // #7278: the parking detector opens a path the hook payload chose, so these
 // cover the screen that decides whether it opens anything at all. Temp dirs

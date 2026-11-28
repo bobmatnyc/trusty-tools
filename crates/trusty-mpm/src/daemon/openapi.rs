@@ -43,6 +43,7 @@ use utoipa::OpenApi;
         super::api::send_command,
         super::api::get_output,
         super::api::recent_events,
+        super::api::recent_daemon_events,
         super::api::ingest_hook,
         super::api::list_projects,
         super::api::register_project,
