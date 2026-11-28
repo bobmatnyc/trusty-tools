@@ -795,3 +795,47 @@ async fn decommission_skips_the_unload_when_another_project_shares_the_palace_id
             .is_decommissioned()
     );
 }
+
+/// Why: #11977 acceptance 2 — two registered projects whose derived ids
+/// differ (`code-app`, `work-app`) but alias to one canonical palace `app`;
+/// decommissioning one must leave the shared palace loaded.
+/// Test: this test. Fails if decommission sends `memory.palace_unload`.
+#[tokio::test]
+async fn decommission_skips_the_unload_when_an_alias_joins_two_palaces() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{aliased_registry, aliasing_memory, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (root_a, root_b) = (
+        crate::test_support::hermetic_temp_dir(),
+        crate::test_support::hermetic_temp_dir(),
+    );
+    for (name, path) in [
+        ("app-a", root_a.path().join("code").join("app")),
+        ("app-b", root_b.path().join("work").join("app")),
+    ] {
+        let mut project = registry.get("widget").await.expect("row");
+        project.name = name.into();
+        project.repo_url = path.to_string_lossy().into_owned();
+        project.project_key = Some(format!("local:{name}"));
+        registry.register(project).await.expect("register");
+    }
+    let palaces = aliased_registry();
+    let rig = rig(search_not_found(), aliasing_memory(palaces.path().into())).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "app-a", Ok(rig.capability()))
+        .await
+        .expect("a skipped unload must not refuse the decommission");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    match &shutdown.palace {
+        ShutdownState::Skipped { reason } => {
+            assert!(
+                reason.contains("app-b") && reason.contains("palace app"),
+                "{reason}"
+            )
+        }
+        other => panic!("expected a reported skip, got {other:?}"),
+    }
+    assert!(rig.params_of("memory.palace_unload").is_none(), "no unload");
+}
