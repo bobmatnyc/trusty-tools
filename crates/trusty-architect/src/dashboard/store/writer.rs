@@ -7,21 +7,24 @@
 //! first class to write a collection owns it and the other is refused, in
 //! code.
 //! What: [`WriterClass`] names the two classes. `admit` runs under the
-//! exclusive store lock: it reads the claims from the lock file, refuses the
-//! batch with [`DashError::WriterClass`] when any touched collection is
-//! claimed by the other class, and appends one `writer <class> <collection>`
-//! line per new claim to the lock file, synced. The lock file holds the
-//! claims because it is the one file every writer already opens, it is never
-//! replaced (a rename would break the `flock` other waiters hold), and the
-//! prototype opens it in append mode and never reads it. A claim line that
-//! does not parse, a torn last line included, refuses every batch: a claim is
-//! never guessed.
+//! exclusive store lock: it refuses a collection name outside
+//! `[A-Za-z0-9_.-]`, refuses the batch with [`DashError::WriterClass`] when
+//! any touched collection is claimed by the other class (names compared
+//! without letter case, as APFS does), and appends one
+//! `writer <class> <collection>` line per new claim to the lock file, synced;
+//! a failed append is truncated away. The lock file holds the claims because
+//! it is the one file every writer already opens, it is never replaced (a
+//! rename would break the `flock` other waiters hold), and the prototype
+//! opens it in append mode and never reads it. A complete line that does not
+//! parse refuses every batch: a claim is never guessed. A last line with no
+//! `\n` is a torn append, never a claim; it is ignored and dropped by the next
+//! append. The Rust `Store` claims only when built with
+//! `Store::with_writer_claim`, a test-only option until the P2g cutover.
 //! Test: `a_second_writer_class_on_one_collection_is_refused`,
-//! `each_class_keeps_its_own_collections`,
-//! `an_unreadable_claim_refuses_the_batch`.
+//! `an_unreadable_claim_refuses_the_batch`, `a_failed_claim_append_leaves_the_lock_file_as_it_was`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
@@ -55,12 +58,23 @@ impl WriterClass {
     }
 }
 
-/// The claims recorded in `<root>/.lock`: collection to class.
-///
-/// # Errors
-/// [`DashError::WriterClass`] for a line that is not a claim;
-/// [`DashError::Io`] when the file cannot be read.
-pub(crate) fn claims(root: &Path) -> Result<BTreeMap<String, WriterClass>, DashError> {
+/// #12029: the bytes a claimable collection name may hold; a `\n` would
+/// break the claim line, a space its fields.
+fn claimable(coll: &str) -> bool {
+    !coll.is_empty()
+        && coll
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// The claims key: APFS folds letter case, so `Items` is `items`.
+fn key(coll: &str) -> String {
+    coll.to_ascii_lowercase()
+}
+
+/// The claims in `<root>/.lock`, keyed by [`key`], and the length of its
+/// complete lines (a torn last line excluded).
+fn read_claims(root: &Path) -> Result<(BTreeMap<String, WriterClass>, u64), DashError> {
     let path = root.join(LOCK_FILE);
     let blob = match std::fs::read(&path) {
         Ok(b) => b,
@@ -73,46 +87,78 @@ pub(crate) fn claims(root: &Path) -> Result<BTreeMap<String, WriterClass>, DashE
             path.display()
         ))
     };
-    let text = std::str::from_utf8(&blob).map_err(|_| bad(1))?;
+    // #12029: a last line with no `\n` is a torn append, not a claim.
+    let whole = blob.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let text = std::str::from_utf8(&blob[..whole]).map_err(|_| bad(1))?;
     let mut out = BTreeMap::new();
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    for (n, line) in lines.iter().enumerate() {
+    for (n, line) in text.split_terminator('\n').enumerate() {
         let claim = line
-            .strip_suffix('\n')
-            .and_then(|l| l.strip_prefix("writer "))
+            .strip_prefix("writer ")
             .and_then(|l| l.split_once(' '))
             .and_then(|(class, coll)| Some((WriterClass::parse(class)?, coll)))
-            .filter(|(_, coll)| !coll.is_empty());
+            .filter(|(_, coll)| claimable(coll));
         let Some((class, coll)) = claim else {
             return Err(bad(n + 1));
         };
         // A second line for a collection never changes its owner.
-        out.entry(coll.to_owned()).or_insert(class);
+        out.entry(key(coll)).or_insert(class);
     }
-    Ok(out)
+    Ok((out, whole as u64))
 }
+
+/// The claims recorded in `<root>/.lock`: lower-cased collection to class.
+///
+/// # Errors
+/// [`DashError::WriterClass`] for a complete line that is not a claim;
+/// [`DashError::Io`] when the file cannot be read.
+#[cfg(test)]
+pub(crate) fn claims(root: &Path) -> Result<BTreeMap<String, WriterClass>, DashError> {
+    read_claims(root).map(|(c, _)| c)
+}
+
+/// The append step of [`admit`]; a seam so a test can fail it.
+type Append<'w> = dyn FnMut(&mut File, &[u8]) -> std::io::Result<()> + 'w;
 
 /// Why: AC2 says a collection has exactly one writer class; the guard must
 /// hold in code, not by convention.
-/// What: refuses the batch when any of `colls` is claimed by a class other
-/// than `class`; otherwise claims the unclaimed ones for `class`. The caller
-/// holds the exclusive store lock, so two writers cannot both claim one
-/// collection.
+/// What: refuses a collection name outside `[A-Za-z0-9_.-]`, and the batch
+/// when any of `colls` is claimed (letter case ignored) by a class other than
+/// `class`; otherwise claims the unclaimed ones for `class`. The caller holds
+/// the exclusive store lock, so two writers cannot both claim one collection.
 /// Test: `a_second_writer_class_on_one_collection_is_refused`,
-/// `each_class_keeps_its_own_collections`, `an_unreadable_claim_refuses_the_batch`.
+/// `a_case_variant_of_a_claimed_collection_is_refused_across_classes`,
+/// `a_collection_name_with_a_newline_is_refused_before_its_claim`.
 ///
 /// # Errors
-/// [`DashError::WriterClass`] naming the collection and its owner, or an
-/// unreadable claim; [`DashError::Io`] when the claim cannot be appended.
+/// [`DashError::WriterClass`] naming the collection and its owner, an
+/// unclaimable name or an unreadable claim; [`DashError::Io`] when the claim
+/// cannot be appended (the lock file is cut back to its complete lines).
 pub(crate) fn admit<'a>(
     root: &Path,
     colls: impl IntoIterator<Item = &'a str>,
     class: WriterClass,
 ) -> Result<(), DashError> {
-    let held = claims(root)?;
-    let mut new = BTreeSet::new();
+    admit_with(root, colls, class, &mut |f, b| f.write_all(b))
+}
+
+/// [`admit`] with the append step given.
+fn admit_with<'a>(
+    root: &Path,
+    colls: impl IntoIterator<Item = &'a str>,
+    class: WriterClass,
+    append: &mut Append<'_>,
+) -> Result<(), DashError> {
+    let (held, whole) = read_claims(root)?;
+    let mut new = BTreeMap::new();
     for coll in colls {
-        match held.get(coll) {
+        // #12029: Python's `$` lets `items\n` through `_check_id`; its claim
+        // line would be unreadable, so the name is refused before any write.
+        if !claimable(coll) {
+            return Err(DashError::WriterClass(format!(
+                "collection {coll:?} cannot be claimed: use letters, digits, '_', '-', '.'"
+            )));
+        }
+        match held.get(&key(coll)) {
             Some(owner) if *owner != class => {
                 return Err(DashError::WriterClass(format!(
                     "{coll} is written by the {} writer class; the {} writer is refused \
@@ -123,7 +169,7 @@ pub(crate) fn admit<'a>(
             }
             Some(_) => {}
             None => {
-                new.insert(coll);
+                new.entry(key(coll)).or_insert(coll);
             }
         }
     }
@@ -131,7 +177,7 @@ pub(crate) fn admit<'a>(
         return Ok(());
     }
     let text: String = new
-        .iter()
+        .values()
         .map(|c| format!("writer {} {c}\n", class.name()))
         .collect();
     let path = root.join(LOCK_FILE);
@@ -140,68 +186,18 @@ pub(crate) fn admit<'a>(
         .create(true)
         .open(&path)
         .map_err(DashError::io(&path))?;
-    f.write_all(text.as_bytes()).map_err(DashError::io(&path))?;
-    f.sync_data().map_err(DashError::io(&path))
+    // #12029: drop a torn last line so the new claim starts a line.
+    f.set_len(whole).map_err(DashError::io(&path))?;
+    if let Err(e) = append(&mut f, text.as_bytes()).and_then(|()| f.sync_data()) {
+        // #12029: a failed append (ENOSPC) leaves no part of its line behind.
+        if let Err(cut) = f.set_len(whole).and_then(|()| f.sync_data()) {
+            tracing::error!(error = %cut, path = %path.display(), "dashboard store: torn claim not cut back");
+        }
+        return Err(DashError::io(&path)(e));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::dashboard::store::py::PyStore;
-    use crate::dashboard::store::{Format, Store};
-    use serde_json::json;
-
-    fn rust_store(root: &Path) -> Store {
-        Store::new(root, Format::Dir).with_secret_scan(|_| None)
-    }
-
-    #[test]
-    fn a_second_writer_class_on_one_collection_is_refused() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let tmp = tempfile::tempdir()?;
-        let py = PyStore::for_test(tmp.path(), "dir");
-        py.set_json("items", "A01", r#"{"status": "open"}"#)?;
-        let got = rust_store(tmp.path()).set("items", "A02", json!({"status": "open"}), None);
-        assert!(matches!(got, Err(DashError::WriterClass(_))), "{got:?}");
-        assert!(!tmp.path().join("items/A02.json").exists());
-        // The other way round: a Rust-owned collection refuses the Python class.
-        rust_store(tmp.path()).set("notes", "N01", json!({"t": 1}), None)?;
-        let got = py.set_json("notes", "N02", r#"{"t": 2}"#);
-        assert!(got.is_err_and(|e| e.to_string().contains("one writer class")));
-        assert!(!tmp.path().join("notes/N02.json").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn each_class_keeps_its_own_collections() -> Result<(), Box<dyn std::error::Error>> {
-        let tmp = tempfile::tempdir()?;
-        let py = PyStore::for_test(tmp.path(), "dir");
-        py.set_json("items", "A01", r#"{"status": "open"}"#)?;
-        py.set_json("items", "A02", r#"{"status": "open"}"#)?;
-        rust_store(tmp.path()).set("notes", "N01", json!({"t": 1}), None)?;
-        rust_store(tmp.path()).set("notes", "N02", json!({"t": 2}), None)?;
-        let owners = claims(tmp.path())?;
-        assert_eq!(owners.get("items"), Some(&WriterClass::Python));
-        assert_eq!(owners.get("notes"), Some(&WriterClass::Rust));
-        let lock = std::fs::read_to_string(tmp.path().join(LOCK_FILE))?;
-        assert_eq!(lock, "writer python items\nwriter rust notes\n");
-        Ok(())
-    }
-
-    #[test]
-    fn an_unreadable_claim_refuses_the_batch() -> Result<(), Box<dyn std::error::Error>> {
-        let tmp = tempfile::tempdir()?;
-        for text in ["writer python items", "writer go items\n", "junk\n"] {
-            std::fs::write(tmp.path().join(LOCK_FILE), text)?;
-            let got = rust_store(tmp.path()).set("other", "X1", json!({}), None);
-            assert!(
-                matches!(got, Err(DashError::WriterClass(_))),
-                "{text:?}: {got:?}"
-            );
-            let got = PyStore::for_test(tmp.path(), "dir").set_json("other", "X1", "{}");
-            assert!(got.is_err(), "{text:?}");
-        }
-        assert!(!tmp.path().join("other").exists());
-        Ok(())
-    }
-}
+#[path = "writer_tests.rs"]
+mod tests;

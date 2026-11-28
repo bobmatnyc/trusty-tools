@@ -23,7 +23,8 @@
 //! df-G01). [`Store::fsck`] and
 //! [`Store::validate`] check a whole store. A batch claims its collections
 //! for the Rust writer class and is refused on one the Python class owns
-//! ([`writer`], #12029 AC2); [`py`] is the prototype's own port.
+//! ([`writer`], #12029 AC2) only on a test-built store until the P2g
+//! cutover; [`py`] is the prototype's own port, which always claims.
 //! Test: `tests/dashboard_golden.rs` (prototype bytes and outcomes),
 //! `tests/dashboard_store.rs` (conflict, rollback, refusals, lock, corrupt files),
 //! `tests/dashboard_case.rs` (case variants), `tests/dashboard_log.rs`
@@ -183,6 +184,9 @@ pub struct Store {
     actor: String,
     /// #10063: a `set` with no `if_version` on an existing document is a conflict.
     refuse_blind_set: bool,
+    /// #12029 AC2: claim each written collection for the Rust class; off
+    /// until the P2g cutover, so a live root gets no claim line.
+    claim_writer: bool,
 }
 
 impl fmt::Debug for Store {
@@ -196,6 +200,7 @@ impl fmt::Debug for Store {
             .field("secret_scan", &self.scan.is_some())
             .field("actor", &self.actor)
             .field("refuse_blind_set", &self.refuse_blind_set)
+            .field("claim_writer", &self.claim_writer)
             .finish()
     }
 }
@@ -205,7 +210,8 @@ impl Store {
     /// check, no delete archive, no secret scan (so it refuses writes), the
     /// system clock, actor `unknown` (the prototype's default), a
     /// [`LOCK_WAIT`] lock wait, and a `set` with no `if_version` replacing an
-    /// existing document (the prototype store's).
+    /// existing document (the prototype store's), and no writer-class
+    /// claim (#12029).
     pub fn new(root: impl Into<PathBuf>, format: Format) -> Self {
         Self {
             root: root.into(),
@@ -217,7 +223,22 @@ impl Store {
             clock: Arc::new(SystemClock),
             actor: "unknown".into(),
             refuse_blind_set: false,
+            claim_writer: false,
         }
+    }
+
+    /// Why: #12029 AC2 is enforced in tests and the Python-class port only;
+    /// the live daemon writes no claim to a live root until the P2g cutover.
+    /// What: claims each written collection for [`writer::WriterClass::Rust`]
+    /// and refuses one the Python class owns. Test-only, so no live call
+    /// site can turn it on.
+    /// Test: `a_second_writer_class_on_one_collection_is_refused`,
+    /// `the_default_store_writes_no_claim`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_writer_claim(mut self) -> Self {
+        self.claim_writer = true;
+        self
     }
 
     /// Refuses any op holding a string (key or value, collection or id) that
@@ -468,14 +489,16 @@ impl Store {
             .map(|op| self.stage(&mut staged, op, &now))
             .collect::<Result<Vec<_>, _>>()?;
         self.check_schemas(&staged)?;
+        // #12029 AC2: refused before `changes::prepare` can create or rotate the log.
+        if self.claim_writer {
+            writer::admit(
+                &self.root,
+                staged.slots.iter().map(|s| s.coll.as_str()),
+                writer::WriterClass::Rust,
+            )?;
+        }
         // #10063 df-G01: the log's checks refuse the batch before any write.
         let seq = changes::prepare(self, &now)?;
-        // #12029 AC2: a collection the Python writer class owns is refused here.
-        writer::admit(
-            &self.root,
-            staged.slots.iter().map(|s| s.coll.as_str()),
-            writer::WriterClass::Rust,
-        )?;
         self.archive_removed(&staged, &now)?;
         self.commit(&staged)?;
         // #10063 PR 2: after the commit; a failure is reported, never dropped.

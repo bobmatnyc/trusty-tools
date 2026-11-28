@@ -117,3 +117,25 @@ fn a_lock_that_cannot_be_taken_is_an_error_and_writes_nothing()
     );
     Ok(())
 }
+
+/// #12029: `add` mints `uuid4().hex[:20]`: version nibble 4, variant 8-b.
+#[test]
+fn a_jsonl_add_id_has_the_uuid4_shape() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    let store = PyStore::for_test(tmp.path(), "jsonl");
+    let out = store.add(
+        &PyValue::Str("items".into()),
+        Some(&loads("{}").map_err(|e| e.py_str())?),
+        None,
+    )?;
+    let id = out.id.as_bytes();
+    assert_eq!(id.len(), 20, "{}", out.id);
+    assert!(
+        id.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{}",
+        out.id
+    );
+    assert_eq!(id[12], b'4', "{}", out.id);
+    assert!(b"89ab".contains(&id[16]), "{}", out.id);
+    Ok(())
+}
