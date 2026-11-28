@@ -2674,7 +2674,7 @@ fn isolated_layout_deploys_into_a_tier_the_spawn_reads() {
     // for `launch`, the live checkout for `connect`, the project dir for
     // `meta launch`.
     let project_dir = std::path::Path::new("/work/some-checkout");
-    let fw = isolated_framework_paths(project_dir);
+    let fw = isolated_framework_paths(&crate::core::config_base::config_base(), project_dir);
 
     // `<cwd>/.claude` is exactly what the `project` (and `local`) tiers read.
     assert_eq!(
@@ -2708,7 +2708,7 @@ fn isolated_layout_deploys_into_a_tier_the_spawn_reads() {
 #[serial_test::serial]
 fn isolated_layout_keeps_framework_source_at_the_install_root() {
     let project_dir = std::path::Path::new("/work/some-checkout");
-    let fw = isolated_framework_paths(project_dir);
+    let fw = isolated_framework_paths(&crate::core::config_base::config_base(), project_dir);
 
     assert_eq!(
         fw.root,
@@ -2725,6 +2725,48 @@ fn isolated_layout_keeps_framework_source_at_the_install_root() {
         "skill SOURCE must never resolve inside the deploy destination; got {}",
         fw.skill_source_dir().display()
     );
+}
+
+/// #11821: a malformed or unreadable `install.toml` under the named home
+/// refuses the shared isolated prep with a fatal error naming the file, and
+/// nothing is deployed under the home's `.trusty-mpm` fallback.
+#[test]
+fn isolated_prep_refuses_a_bad_install_toml_11821() {
+    use trusty_common::install_paths::{MPM_DIR_NAME, TOOLS_DIR_NAME};
+    // (case, malformed file body; `None` puts a directory at the path, which
+    // exists but cannot be read).
+    for (case, body) in [
+        (
+            "malformed",
+            Some("config_dir = \"/elsewhere\"\nbogus = 1\n"),
+        ),
+        ("unreadable", None),
+    ] {
+        let tmp = crate::test_support::hermetic_temp_dir();
+        let home = tmp.path().join("home");
+        let install = home.join(TOOLS_DIR_NAME).join("install.toml");
+        match body {
+            Some(body) => {
+                std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+                std::fs::write(&install, body).unwrap();
+            }
+            None => std::fs::create_dir_all(&install).unwrap(),
+        }
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let err = prepare_isolated_session_under(&project, None, Some(&home))
+            .expect_err("a bad install.toml must refuse the isolated prep");
+        assert!(err.is_fatal(), "{case}: the refusal must be fatal: {err}");
+        assert!(
+            err.to_string().contains("install.toml"),
+            "{case}: the error must name the file: {err}"
+        );
+        assert!(
+            !home.join(MPM_DIR_NAME).exists(),
+            "{case}: prep fell back to <home>/{MPM_DIR_NAME}"
+        );
+    }
 }
 
 /// // #4181: `resolve_palace_slug` outlives the memory injector that used to be

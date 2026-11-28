@@ -272,14 +272,16 @@ pub fn prepare_session_for_managed_from(
 /// and the load silently finds nothing. Naming the correct layout ONCE, here,
 /// is what lets every isolated caller share it instead of each re-deriving it
 /// (and three of them getting it wrong independently).
-/// What: `FrameworkPaths::for_managed_workspace(project_dir)` — the deploy
-/// DESTINATION becomes `<project_dir>/.claude/{agents,skills}`, which the
-/// `project` and `local` tiers read, while every framework SOURCE path still
-/// resolves from the home-relative install root (#1931).
+/// What: `FrameworkPaths::for_managed_workspace_under(base, project_dir)` —
+/// the deploy DESTINATION becomes `<project_dir>/.claude/{agents,skills}`,
+/// which the `project` and `local` tiers read, while every framework SOURCE
+/// path still resolves from the install root under `base`, the config dir
+/// (#1931).
 /// Test: `isolated_layout_deploys_into_a_tier_the_spawn_reads`,
 /// `isolated_layout_keeps_framework_source_at_the_install_root`.
-pub(crate) fn isolated_framework_paths(project_dir: &Path) -> FrameworkPaths {
-    FrameworkPaths::for_managed_workspace(project_dir)
+pub(crate) fn isolated_framework_paths(base: &Path, project_dir: &Path) -> FrameworkPaths {
+    // #11821: the caller resolves `base` fail-closed; see `prepare_isolated_session_under`.
+    FrameworkPaths::for_managed_workspace_under(base, project_dir)
 }
 
 /// Prepare a session whose harness will be spawned with
@@ -314,11 +316,13 @@ pub fn prepare_isolated_session(
 /// keeps its framework source and user-global writes under a temp dir.
 /// What: resolves [`isolated_framework_paths`] for `project_dir` (the cwd the
 /// harness is spawned in) — under `home` when one is given — and runs the
-/// same pipeline [`prepare_session_with_repo_url`] does.
+/// same pipeline [`prepare_session_with_repo_url`] does. A malformed or
+/// unreadable `install.toml` refuses with [`PrepError::InstallPaths`] before
+/// any write; an absent one resolves the default config dir.
 /// #10025: the user tier is `CLAUDE_CONFIG_DIR` under the process home only;
 /// see [`super::user_tier::config_dir_for_home`].
 /// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
-/// drives it under a temp home.
+/// drives it under a temp home; `isolated_prep_refuses_a_bad_install_toml_11821`.
 pub fn prepare_isolated_session_under(
     project_dir: &Path,
     repo_url: Option<&str>,
@@ -343,14 +347,18 @@ pub(super) fn prepare_isolated_session_in(
     home: Option<&Path>,
     claude_config_dir: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
-    let fw = match home {
-        // #11821 P3: the framework source under `home`'s configured config dir.
-        Some(home) => FrameworkPaths::for_managed_workspace_under(
-            crate::core::config_base::config_base_under(home),
-            project_dir,
-        ),
-        None => isolated_framework_paths(project_dir),
+    // #11821: resolve the config dir fail-closed; the lenient readers fell
+    // back to `$HOME` on a bad `install.toml`. No home keeps its old base.
+    let base = match home {
+        Some(home) => crate::core::config_base::try_config_base_under(home)?,
+        None => match crate::core::config_base::try_config_base() {
+            Err(trusty_common::install_paths::InstallPathsError::NoHome) => {
+                FrameworkPaths::home_base()
+            }
+            resolved => resolved?,
+        },
     };
+    let fw = isolated_framework_paths(&base, project_dir);
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
         &fw,

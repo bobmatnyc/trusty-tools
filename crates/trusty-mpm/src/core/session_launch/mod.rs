@@ -540,6 +540,11 @@ pub enum PrepError {
         /// The write failure.
         source: Box<PrepError>,
     },
+    /// #11821: `install.toml` exists but is malformed or unreadable, so the
+    /// config dir is unknown. Fatal: refused before any write, never `$HOME`.
+    /// Test: `isolated_prep_refuses_a_bad_install_toml_11821`.
+    #[error("refusing to prepare the session: {0}")]
+    InstallPaths(#[from] trusty_common::install_paths::InstallPathsError),
 }
 
 impl PrepError {
@@ -561,6 +566,7 @@ impl PrepError {
                 | Self::Content { .. }
                 | Self::ClaudeVersion(_)
                 | Self::ArchitectHooks { .. }
+                | Self::InstallPaths(_) // #11821: unknown config dir refuses
         )
     }
 }
