@@ -114,7 +114,8 @@ fn the_sweep_relinks_forced_strandings() {
         "the damage must strand at least one node"
     );
 
-    let relinked = relink_stranded(&index, n, BLOBS.dim, 4, "relink test", &read).expect("relink");
+    let relinked =
+        relink_stranded(&index, n, BLOBS.dim, 4, "relink test", "test", &read).expect("relink");
     let after = find_stranded(&index, n, BLOBS.dim, 4, &read).expect("find");
     assert!(
         after.is_empty(),
@@ -162,8 +163,16 @@ fn add_parallel_sweeps_what_the_build_strands() {
         buf.copy_from_slice(&vectors.lock().expect("vectors")[i]);
         Ok(Some(i as u64))
     };
-    let missing =
-        add_parallel(&index, n, BLOBS.dim, "wiring test", &no_fault(), &read).expect("build");
+    let missing = add_parallel(
+        &index,
+        n,
+        BLOBS.dim,
+        "wiring test",
+        "test",
+        &no_fault(),
+        &read,
+    )
+    .expect("build");
     assert_eq!(missing, 0, "every item was present during the add phase");
     let by_churn = stranded_by_churn.load(Ordering::Acquire);
     eprintln!(
