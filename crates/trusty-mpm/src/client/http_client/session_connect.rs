@@ -114,10 +114,12 @@ impl DaemonClient {
         // startup; it lives in `/tmp` and is superseded by the next launch — no
         // explicit cleanup is performed.
         // #8286: a prompt that cannot be written refuses the launch; no bare claude.
+        // #12077: the `--settings` body lands under the home prep ran under.
         let claude_spec = client_prompt_spec(
             &std::env::temp_dir(),
             workdir,
             config_root.as_deref(),
+            self.home.as_deref(),
             "launch",
         )?;
 
@@ -159,10 +161,12 @@ impl DaemonClient {
         // deployment of agents/skills/hooks into the project — `connect` only
         // skips the latter (`prepare_session`). #8286: written BEFORE the daemon
         // POST, so a prompt that cannot be written refuses with nothing registered.
+        // #12077: the `--settings` body lands under the pinned home, if any.
         let claude_spec = client_prompt_spec(
             &std::env::temp_dir(),
             workdir,
             config_root.as_deref(),
+            self.home.as_deref(),
             "connect",
         )?;
         // #10101: D3c — the CLI's name rule, after the #10459 floor check.
@@ -381,11 +385,13 @@ impl DaemonClient {
 /// Test: `launch_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
 /// `connect_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
 /// `client_prompt_spec_trims_a_pm_launch`,
-/// `an_architect_client_prompt_spec_carries_the_lockdown`.
+/// `an_architect_client_prompt_spec_carries_the_lockdown`,
+/// `launch_session_writes_the_settings_body_under_the_pinned_home_12077`.
 fn client_prompt_spec(
     dir: &std::path::Path,
     workdir: &str,
     config_root: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
     action: &str,
 ) -> anyhow::Result<crate::runtime::launch_spec::LaunchSpec> {
     let project = std::path::Path::new(workdir);
@@ -396,16 +402,19 @@ fn client_prompt_spec(
     // Architect's Claude Code floor is checked here, before the prompt write,
     // the daemon POST and the spawn.
     crate::core::architect_claude_version::require_for_profile(profile)?;
-    client_prompt_spec_as(dir, project, config_root, action, profile)
+    client_prompt_spec_as(dir, project, config_root, home, action, profile)
 }
 
 /// [`client_prompt_spec`] for a resolved `profile` (#10127 test seam).
 ///
-/// Test: `an_architect_client_prompt_spec_carries_the_lockdown`.
+/// #12077: `home` is the launch's pinned home; `None` is the process home.
+/// Test: `an_architect_client_prompt_spec_carries_the_lockdown`,
+/// `launch_session_writes_the_settings_body_under_the_pinned_home_12077`.
 fn client_prompt_spec_as(
     dir: &std::path::Path,
     project: &std::path::Path,
     config_root: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
     action: &str,
     profile: crate::core::session_profile::SessionProfile,
 ) -> anyhow::Result<crate::runtime::launch_spec::LaunchSpec> {
@@ -428,7 +437,17 @@ fn client_prompt_spec_as(
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
     // #8992: the same profile decides whether the skill and tool parts apply.
     // #11821: a broken install.toml refuses the launch (df-D1w).
-    let settings = crate::core::launch_policy::provision_settings_default(project, None, profile)?;
+    // #12077: the body and the project exclude record resolve from the
+    // launch's home, as prep's do; unpinned, from the process home as before.
+    let settings = match home {
+        Some(home) => {
+            let root = crate::core::paths::FrameworkPaths::try_under_home(home)
+                .map_err(|err| anyhow::anyhow!("refusing to launch: {err}"))?
+                .crate_config_root();
+            crate::core::launch_policy::provision_settings(&root, project, None, profile)?
+        }
+        None => crate::core::launch_policy::provision_settings_default(project, None, profile)?,
+    };
     // #10127: the owner file and an Architect's deny as ONE `--settings`.
     crate::core::architect_lockdown::Lockdown::PRODUCTION.apply_to_spec(
         profile,
@@ -468,7 +487,7 @@ mod prompt_refusal_tests {
         let not_a_dir = tmp.path().join("not-a-dir");
         std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
         let workdir = tmp.path().to_string_lossy().into_owned();
-        let err = super::client_prompt_spec(&not_a_dir, &workdir, None, action)
+        let err = super::client_prompt_spec(&not_a_dir, &workdir, None, None, action)
             .expect_err("a PM launch without its prompt must be refused");
         (err.to_string(), not_a_dir.to_string_lossy().into_owned())
     }
@@ -498,7 +517,7 @@ mod prompt_refusal_tests {
         let dir = tempfile::tempdir().expect("prompt dir");
         let workdir = project.path().to_string_lossy().into_owned();
         for action in ["launch", "connect"] {
-            let spec = super::client_prompt_spec(dir.path(), &workdir, None, action)
+            let spec = super::client_prompt_spec(dir.path(), &workdir, None, None, action)
                 .expect("a writable prompt dir builds the spec");
             assert!(
                 spec.env_set
@@ -526,6 +545,7 @@ mod prompt_refusal_tests {
             let spec = super::client_prompt_spec_as(
                 dir.path(),
                 project.path(),
+                None,
                 None,
                 action,
                 crate::core::session_profile::SessionProfile::Architect,
