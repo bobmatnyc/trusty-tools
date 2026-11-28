@@ -416,13 +416,16 @@ mod tests {
     /// idempotent no-op so plain `tctl ensure` still exits 0 pre-boot. Since
     /// #9214 "not running" is a socket nothing serves: a missing path, or a
     /// stale socket file a dead daemon left behind.
-    /// What: both shapes → `ok`, `!changed`, "not running".
+    /// What: both shapes → `ok`, `!changed`, "not running". The bound fd stays
+    /// open across the calls, as a child a concurrent test forked would hold
+    /// it (#12083).
     /// Test: This is the test.
     #[tokio::test]
     async fn register_index_dead_or_missing_socket_is_skipped() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let stale = tmp.path().join("stale.sock");
-        drop(std::os::unix::net::UnixListener::bind(&stale).expect("bind"));
+        // #12083: an inherited copy of a listening fd made the probe `Serving`.
+        let _inherited = crate::commands::test_support::stale_socket(&stale);
         assert!(stale.exists(), "the stale socket file must remain");
         for socket in [tmp.path().join("absent.sock"), stale] {
             let out = register_index(&socket, std::path::Path::new("/tmp/proj"))
