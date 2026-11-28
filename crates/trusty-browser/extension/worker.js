@@ -110,7 +110,7 @@ async function connect() {
     }, 5000);
     // Grants recorded after this hello survive the acknowledgement's prune.
     const fresh = codes.watchMints();
-    const lost = () => { settleReady(false); codes.unwatch(fresh); void codes.offline.lost(); };
+    const lost = () => { settleReady(false); codes.unwatch(fresh); };
     function drop() {
       if (connection !== port) return;
       connection = null;
@@ -195,7 +195,6 @@ function reconnect() {
   settleReady(false);
   void TrustyControlIndicator.clearAll();
   void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
-  void codes.offline.lost();
   const port = connection;
   connection = null;
   port?.disconnect();
@@ -267,9 +266,9 @@ chrome.identity.onSignInChanged.addListener(reconnect);
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "reconnect") { void connect(); void codes.tick().catch(() => {}); }
+  // #11570: the alarm only reconnects; no quiet period ends a grant while the browser is open.
+  if (alarm.name === "reconnect") void connect();
 });
 chrome.alarms.create("reconnect", {periodInMinutes:1});
-// A (re)started worker is offline until the broker acknowledges it; the acknowledgement prunes the table.
-void codes.offline.lost();
+// A (re)started worker's table waits for the broker's acknowledgement, which prunes it.
 void connect();

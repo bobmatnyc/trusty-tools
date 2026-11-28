@@ -8,7 +8,7 @@
 //! What: [`Broker::start`] opens the registry (0700 dir, 0600 file), takes a
 //! non-blocking exclusive `flock` on `service.lock`, replaces a stale socket
 //! (refusing a non-socket at the path), binds each socket and `chmod`s it
-//! 0600, then serves each accept loop. [`Broker::close`] stops the sweeper,
+//! 0600, then serves each accept loop. [`Broker::close`] stops
 //! the listeners and every connection, and unlinks the sockets.
 //! Test: `broker_sockets_have_python_paths_and_modes`,
 //! `a_second_broker_is_refused_by_the_lock`, `a_non_socket_at_a_socket_path_is_refused`
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use rusqlite::Connection;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
-use tokio::task::{AbortHandle, JoinSet};
+use tokio::task::JoinSet;
 
 use crate::audit::{Audit, Clock, SystemClock};
 use crate::entropy::{Entropy, Monotonic, OsEntropy, SystemMonotonic};
@@ -183,10 +183,8 @@ pub struct Inner {
     pub claims: Vec<Claim>,
     /// Attached agent sessions.
     pub sessions: Vec<SessionRef>,
-    /// Set by `close`; no sweep runs after it.
+    /// Set by `close`; no background task acts after it.
     pub halted: bool,
-    /// The deadline sweep task.
-    pub sweeper: Option<AbortHandle>,
     /// Last session id handed out.
     pub next_session: u64,
 }
@@ -304,7 +302,6 @@ impl Broker {
             claims: Vec::new(),
             sessions: Vec::new(),
             halted: false,
-            sweeper: None,
             next_session: 0,
         };
         let core = Arc::new_cyclic(|this| Core {
@@ -326,7 +323,7 @@ impl Broker {
             this: this.clone(),
             inner: Mutex::new(inner),
         });
-        // #11528: bring back persisted grants, still subject to the reconnect grace.
+        // #11528: bring back persisted grants; #11570: they wait for their worker with no deadline.
         core.restore_grants(&mut core.lock());
         let mut broker = Broker {
             core,
@@ -358,14 +355,11 @@ impl Broker {
         &self.core
     }
 
-    /// Stop serving: halt the sweeper, close every connection, unlink the sockets.
+    /// Stop serving: halt background tasks, close every connection, unlink the sockets.
     pub async fn close(mut self) {
         {
             let mut inner = self.core.lock();
             inner.halted = true;
-            if let Some(task) = inner.sweeper.take() {
-                task.abort();
-            }
             for peer in &inner.peers {
                 peer.kill();
             }
