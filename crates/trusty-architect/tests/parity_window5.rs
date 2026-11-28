@@ -1,5 +1,7 @@
 //! parity window 5: one regression test per divergence class (B, C,
-//! D), each red on the pre-fix commit. Class E lives in the token watcher's
+//! D), each red on the pre-fix commit. #11826: the C grace and the D settle
+//! rule were withdrawn for window 8 (the target is fleet-poll.py); their
+//! inverse tests live in `tests/parity_window8.rs`. Class E lives in the token watcher's
 //! own tests (`src/poller/token/tests.rs`), because its state is crate-private.
 //! The epochs keep window 5's values where the brief gives them in full and
 //! its suffixes where it gives only those (`…695`, `…704`).
@@ -66,32 +68,6 @@ fn window5_plan_limit_ignores_prose_but_keeps_the_banner() {
 
 // --- C: one idle episode, one alert -------------------------------------------
 
-/// Window 5, class C: tm-agentic-bi alerted `since-…695` at 05:21:57 and
-/// `since-…704` at 05:28:12 inside one idle episode. A single not-idle read
-/// re-armed the epoch. It must not.
-#[test]
-fn window5_transient_not_idle_read_keeps_the_idle_epoch() {
-    let mut ps = PaneState::default();
-    let e695 = 1_795_408_695.0;
-    let screen = idle_with("");
-    assert!(step(&screen, &mut ps, e695).is_empty());
-    let first = step(&screen, &mut ps, e695 + 602.0);
-    assert_eq!(
-        first,
-        [format!("since-1795408695-{}", parse_pane(&screen).screen)]
-    );
-    // One cycle reads the pane not idle; the next reads it idle again.
-    assert!(step(&busy(), &mut ps, e695 + 662.0).is_empty());
-    let mut seen = Vec::new();
-    for k in 0..12 {
-        seen.extend(step(&screen, &mut ps, e695 + 722.0 + 60.0 * f64::from(k)));
-    }
-    assert!(
-        seen.iter().all(|f| f.starts_with("since-1795408695-")),
-        "re-armed: {seen:?}"
-    );
-}
-
 /// The other side of C: a real busy stretch ends the episode, and the next
 /// idle stretch gets its own epoch and its own alert.
 #[test]
@@ -126,26 +102,4 @@ fn window5_plan_limit_banner_variants() {
     for line in banners {
         assert!(parse_pane(&idle_with(line)).limit.is_some(), "{line}");
     }
-}
-
-// --- D: an alerted epoch does not alert on an unsettled screen -------------------
-
-/// Window 5, class D: tm-trusty-computer at 05:24:02 alerted epoch
-/// 1795296612, already alerted at 04:46:39, with the new screen hash, 18 s
-/// before the new episode began at 1795411460. An alerted epoch does not
-/// alert on an unsettled new screen.
-#[test]
-fn window5_alerted_epoch_does_not_alert_again_on_a_new_screen() {
-    let old = 1_795_296_612.0;
-    let mut ps = PaneState::default();
-    let before = idle_with("⏺ Merged #12.");
-    step(&before, &mut ps, old);
-    assert_eq!(step(&before, &mut ps, old + 600.0).len(), 1);
-    // The screen changed but the held epoch did not move.
-    let after = idle_with("⏺ Started the release notes.");
-    assert_ne!(parse_pane(&before).screen, parse_pane(&after).screen);
-    let got = step(&after, &mut ps, 1_795_411_442.0);
-    assert!(got.is_empty(), "stale epoch re-alerted: {got:?}");
-    // The same alert stays a candidate on its own screen (dedup keeps it).
-    assert_eq!(step(&before, &mut ps, 1_795_411_502.0).len(), 1);
 }
