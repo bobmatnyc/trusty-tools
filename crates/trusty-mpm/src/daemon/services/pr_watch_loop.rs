@@ -18,10 +18,13 @@
 //!
 //! # Fail direction
 //!
-//! No failed step advances state. A failed emit, ledger write or wake leaves
-//! its mark and the row's (head, verdict) unchanged, so the next tick detects
-//! the same transition, under the same key, and retries that step. Only a
-//! delivered wake records the new (head, verdict).
+//! No failed step advances state. A failed emit or wake leaves its mark and
+//! the row's (head, verdict) unchanged, so the next tick detects the same
+//! transition, under the same key, and retries that step. Only a delivered
+//! wake records the new (head, verdict). A failed ledger write is the one
+//! exception: it is reported and the wake still goes ahead, because a refusal
+//! that never clears (state.json over its size bar) would otherwise hold the
+//! wake back forever (#12112).
 //! Test: `pr_watch_loop_tests.rs`.
 
 use std::sync::Arc;
@@ -116,6 +119,8 @@ pub struct TickReport {
     pub removed: usize,
     /// Steps that failed and will be retried.
     pub failed: usize,
+    /// #12112: ledger writes refused; the wake went ahead without them.
+    pub ledger_failed: usize,
     /// #11673: reads refused for want of a GitHub identity; one log line per tick.
     pub identity_failed: usize,
     /// Whether a rate-limit refusal ended the tick.
@@ -250,7 +255,7 @@ impl PrWatchLoop {
             verdict,
             required,
         };
-        if self.deliver(row, &t).await {
+        if self.deliver(row, &t, report).await {
             report.woken += 1;
         } else {
             report.failed += 1;
@@ -260,9 +265,13 @@ impl PrWatchLoop {
 
     /// Deliver `t` in its three steps; `true` once the wake is recorded.
     ///
+    /// What: a failed emit or wake returns `false` and advances nothing. A
+    /// failed ledger write is counted in `report.ledger_failed` and the wake
+    /// still runs (#12112).
     /// Test: `a_failed_wake_retries_next_tick_and_never_re_emits`,
-    /// `a_failed_emit_advances_nothing`.
-    async fn deliver(&self, row: &WatchRow, t: &Transition) -> bool {
+    /// `a_failed_emit_advances_nothing`,
+    /// `a_refused_ledger_write_still_wakes_the_owner_once`.
+    async fn deliver(&self, row: &WatchRow, t: &Transition, report: &mut TickReport) -> bool {
         let key = Some(t.key.clone());
         if row.emitted_key != key {
             if let Err(e) = self.ports.emitter.emit(transition_event(row, t)).await {
@@ -278,16 +287,22 @@ impl PrWatchLoop {
             }
         }
         if row.ledger_key != key {
-            if let Err(e) = self.ports.ledger.set_ci_wait(row, t).await {
-                warn!(
-                    "pr watch: {}: ledger update failed; retrying next tick: {e:#}",
-                    t.key
-                );
-                return false;
-            }
-            let k = key.clone();
-            if !self.record(row, move |r| r.ledger_key = k).await {
-                return false;
+            match self.ports.ledger.set_ci_wait(row, t).await {
+                Ok(()) => {
+                    let k = key.clone();
+                    if !self.record(row, move |r| r.ledger_key = k).await {
+                        return false;
+                    }
+                }
+                // #12112: a refused ledger write (e.g. state.json over its size
+                // bar) is reported and left unmarked; it no longer blocks the wake.
+                Err(e) => {
+                    report.ledger_failed += 1;
+                    warn!(
+                        "pr watch: {}: ledger update failed; waking {} without it: {e:#}",
+                        t.key, row.owner
+                    );
+                }
             }
         }
         if row.last_woken_key != key
