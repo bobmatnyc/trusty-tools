@@ -4,14 +4,15 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::rig::{BUNDLE, Rig, WINDOW, consent, grant_req, pid};
 use serde_json::{Value, json};
 
 use std::time::{Duration, Instant};
 
+use trusty_common::exec_stub::write_executable;
 use trusty_computer::app_quit::{
     CHECKED_MARK, GRANT_FLAG, PENDING_HINT, QUIT_TOOL, QuitOutcome, Quitter, SystemQuitter,
 };
@@ -163,12 +164,71 @@ fn pending_quit_is_not_an_error() {
 /// A stand-in for `osascript`: a shell script that ignores its arguments.
 fn fake_osascript(dir: &tempfile::TempDir, body: &str) -> SystemQuitter {
     let path = dir.path().join("osascript");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // #11990: an in-process write fd, inherited by a sibling's fork, made the exec fail with ETXTBSY.
+    write_executable(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     SystemQuitter {
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_millis(300),
     }
+}
+
+/// The quit ended in a timeout error.
+fn assert_timed_out(r: Result<QuitOutcome, String>) {
+    let e = r.expect_err("timeout");
+    // #11990: print the error, so a non-timeout failure says what it was.
+    assert!(e.contains("timed out"), "want a timeout error, got: {e}");
+}
+
+/// #11990: a non-timeout error fails the check and is printed in the message.
+#[test]
+#[should_panic(expected = "got: osascript: Text file busy (os error 26)")]
+fn a_non_timeout_error_is_printed() {
+    assert_timed_out(Err("osascript: Text file busy (os error 26)".into()));
+}
+
+/// #11990: the check stays strict; a quit that did not fail is not a timeout.
+#[test]
+#[should_panic(expected = "timeout")]
+fn a_success_is_not_a_timeout() {
+    assert_timed_out(Ok(QuitOutcome::Accepted));
+}
+
+/// #11990: a fresh fake script execs while sibling threads fork and exec.
+/// A fork that inherits the script's write fd makes the exec fail with
+/// `ETXTBSY` on Linux, which is the race the issue saw.
+#[test]
+fn fake_osascript_spawns_while_siblings_fork() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let forkers: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("/bin/true").status();
+                }
+            })
+        })
+        .collect();
+    let mut failures = Vec::new();
+    for run in 0..100 {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut q = fake_osascript(&dir, "exit 0");
+        // A wide deadline: this test is about the spawn, not the timeout.
+        q.timeout = Duration::from_secs(10);
+        match q.quit(1, "x.y") {
+            Ok(QuitOutcome::Accepted) => {}
+            other => failures.push(format!("run {run}: {other:?}")),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for f in forkers {
+        f.join().expect("forker");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of 100 failed: {failures:?}",
+        failures.len()
+    );
 }
 
 /// The live save-prompt case: the bundle id was checked and quit sent, then
@@ -191,11 +251,8 @@ fn system_quitter_timeout_after_check_is_pending() {
 fn system_quitter_timeout_before_check_is_an_error() {
     let dir = tempfile::tempdir().expect("tmp");
     let hung = fake_osascript(&dir, "exec sleep 30");
-    assert!(
-        hung.quit(1, "x.y")
-            .expect_err("timeout")
-            .contains("timed out")
-    );
+    assert_eq!(hung.timeout, Duration::from_millis(300));
+    assert_timed_out(hung.quit(1, "x.y"));
     let dir = tempfile::tempdir().expect("tmp");
     let ok = fake_osascript(&dir, &format!("echo {CHECKED_MARK} >&2"));
     assert_eq!(ok.quit(1, "x.y"), Ok(QuitOutcome::Accepted));
