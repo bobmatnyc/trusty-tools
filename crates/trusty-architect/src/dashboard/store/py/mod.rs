@@ -24,6 +24,8 @@
 //! tests in `tests`.
 
 mod cases;
+mod fsio;
+mod jsonl;
 #[cfg(test)]
 mod tests;
 mod value;

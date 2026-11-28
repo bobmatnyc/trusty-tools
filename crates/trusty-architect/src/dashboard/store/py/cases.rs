@@ -123,7 +123,7 @@ impl Driver {
             }
             "write" => {
                 let parent = super::dirname(path);
-                super::write::makedirs(if parent.is_empty() { "." } else { parent })?;
+                super::fsio::makedirs(if parent.is_empty() { "." } else { parent })?;
                 let blob = match get(c, "hex") {
                     Some(PyValue::Str(h)) => hex(h),
                     _ => s(c, "text").as_bytes().to_vec(),
@@ -136,7 +136,7 @@ impl Driver {
                 ok
             }
             "mkdir" => {
-                super::write::makedirs(path)?;
+                super::fsio::makedirs(path)?;
                 ok
             }
             "chmod" => {

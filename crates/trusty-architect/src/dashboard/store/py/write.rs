@@ -5,44 +5,39 @@
 //! in the prune log before anything is removed (fail closed), and a write
 //! that fails midway restores the earlier files. Every failure of the lock,
 //! the temp-file write or the replace is returned, never logged and passed.
-//! What: [`PyStore::batch`] and the one-op forms; `apply` writes the plan
-//! through `atomic_write` (temp file, fsync, `rename`) and on any failure
-//! restores the earlier paths in reverse, returning the restore's own error
-//! when a restore fails (as Python's handler re-raises its own exception).
-//! The jsonl commit validates touched documents, renders each collection
-//! file, then appends the change log; a change-log failure is a stderr line
-//! after the commit, as in the prototype.
+//! What: [`PyStore::batch`] (lock, stage, the AC2 claim, prune log, commit)
+//! and the one-op forms, `add` and `seed_meta`. The dir commit goes through
+//! `fsio::apply`; the jsonl commit lives in `jsonl`.
 //! Test: `dashboard_store_recordings_replay_clean_against_the_port`
 //! (`errors`, `lock`), `a_failed_replace_is_an_error_and_restores_the_batch`,
 //! `a_lock_that_cannot_be_taken_is_an_error_and_writes_nothing`.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-use serde_json::Value;
-
+use super::fsio::{apply, makedirs, random_hex};
 use super::value::{
     check_body, check_id, next_version, normalize_timestamps, refuse_duplicate_request, render,
     restore_on_brief, sorted,
 };
-use super::{Fmt, Found, PyStore, PyStoreError, dirname, from_jsonl};
-use crate::dashboard::pyjsonl::{self, join};
+use super::{Fmt, Found, PyStore, PyStoreError, dirname};
+use crate::dashboard::pyjsonl;
 use crate::dashboard::store::{lock, writer};
 use crate::pyjson_load::{PyInt, PyValue};
 use crate::pyval::{dumps, get, repr};
 
 /// One staged document (`staged[(coll, id)]`).
-struct Slot {
-    coll: String,
-    id: String,
-    path: String,
-    exists: bool,
-    version: PyInt,
-    data: Vec<(String, PyValue)>,
-    dirty: bool,
-    old: Option<Found>,
+pub(super) struct Slot {
+    pub(super) coll: String,
+    pub(super) id: String,
+    pub(super) path: String,
+    pub(super) exists: bool,
+    pub(super) version: PyInt,
+    pub(super) data: Vec<(String, PyValue)>,
+    pub(super) dirty: bool,
+    pub(super) old: Option<Found>,
 }
 
 /// What one op did: `{collection, id, version}` or `{collection, id, deleted}`.
@@ -56,138 +51,11 @@ pub(crate) struct OpOut {
 
 /// The staged documents in insertion order, and the jsonl lines read once per collection.
 #[derive(Default)]
-struct Staged {
-    slots: Vec<Slot>,
-    index: HashMap<(String, String), usize>,
-    fresh: HashMap<String, Vec<pyjsonl::Line>>,
-    op_of: HashMap<(String, String), String>,
-}
-
-/// `os.makedirs(path, exist_ok=True)`, with the `OSError` of the deepest failing `mkdir`.
-pub(crate) fn makedirs(path: &str) -> Result<(), PyStoreError> {
-    let trimmed = path.trim_end_matches('/');
-    let head = dirname(trimmed);
-    if !head.is_empty() && head != trimmed && !Path::new(head).exists() {
-        match makedirs(head) {
-            Err(PyStoreError::Os { errno, .. }) if errno == libc::EEXIST => {}
-            other => other?,
-        }
-    }
-    match fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(_) if Path::new(path).is_dir() => Ok(()),
-        Err(e) => Err(PyStoreError::os(path, &e)),
-    }
-}
-
-/// `_atomic_write(path, payload)`: a temp file in the same directory, fsynced, then `os.replace`.
-fn atomic_write(path: &str, payload: &[u8]) -> Result<(), PyStoreError> {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    let tmp = join(
-        dirname(path),
-        &format!(".{base}.{}.{}.tmp", std::process::id(), random_hex(8)),
-    );
-    let result = (|| {
-        let mut f = File::create(&tmp).map_err(|e| PyStoreError::os(&tmp, &e))?;
-        f.write_all(payload)
-            .map_err(|e| PyStoreError::os(&tmp, &e))?;
-        f.sync_all().map_err(|e| PyStoreError::os(&tmp, &e))?;
-        // #12029: the replace's failure is the batch's failure, never a warning.
-        fs::rename(&tmp, path).map_err(|e| PyStoreError::os(&tmp, &e))
-    })();
-    if Path::new(&tmp).exists() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-/// `n` lowercase hex digits from the process's random hasher keys and the clock.
-pub(crate) fn random_hex(n: usize) -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut out = String::new();
-    while out.len() < n {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u128(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos()),
-        );
-        out.push_str(&format!("{:016x}", h.finish()));
-    }
-    out.truncate(n);
-    out
-}
-
-/// `dj.fsync_dir(path)`.
-fn fsync_dir(path: &str) -> Result<(), PyStoreError> {
-    File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| PyStoreError::os(path, &e))
-}
-
-/// `Store._apply(plan, fsync_dirs)`: write in order; on failure restore every earlier path.
-fn apply(plan: &[(String, Option<Vec<u8>>)], fsync_dirs: bool) -> Result<(), PyStoreError> {
-    let mut backups: Vec<(&str, Option<Vec<u8>>)> = Vec::new();
-    fn step<'a>(
-        path: &'a str,
-        payload: &Option<Vec<u8>>,
-        backups: &mut Vec<(&'a str, Option<Vec<u8>>)>,
-        fsync_dirs: bool,
-    ) -> Result<(), PyStoreError> {
-        let old = if Path::new(path).exists() {
-            Some(fs::read(path).map_err(|e| PyStoreError::os(path, &e))?)
-        } else {
-            None
-        };
-        let had = old.is_some();
-        backups.push((path, old));
-        match payload {
-            None if had => fs::remove_file(path).map_err(|e| PyStoreError::os(path, &e))?,
-            None => {}
-            Some(bytes) => {
-                makedirs(dirname(path))?;
-                atomic_write(path, bytes)?;
-            }
-        }
-        if fsync_dirs {
-            fsync_dir(dirname(path))?;
-        }
-        Ok(())
-    }
-    for (path, payload) in plan {
-        if let Err(first) = step(path, payload, &mut backups, fsync_dirs) {
-            for (path, old) in backups.iter().rev() {
-                match old {
-                    None if Path::new(path).exists() => {
-                        fs::remove_file(path).map_err(|e| PyStoreError::os(path, &e))?;
-                    }
-                    None => {}
-                    Some(bytes) => atomic_write(path, bytes)?,
-                }
-            }
-            return Err(first);
-        }
-    }
-    Ok(())
-}
-
-/// A [`PyValue`] as the schema validator's JSON (a big int as a float, a non-finite float as `null`).
-fn to_json(v: &PyValue) -> Value {
-    match v {
-        PyValue::Null => Value::Null,
-        PyValue::Bool(b) => Value::Bool(*b),
-        PyValue::Int(PyInt::Small(n)) => Value::from(*n),
-        PyValue::Int(i) => {
-            serde_json::Number::from_f64(crate::pyval::int_text(i).parse().unwrap_or(f64::NAN))
-                .map_or(Value::Null, Value::Number)
-        }
-        PyValue::Float(f) => serde_json::Number::from_f64(*f).map_or(Value::Null, Value::Number),
-        PyValue::Str(s) => Value::String(s.clone()),
-        PyValue::List(items) => Value::Array(items.iter().map(to_json).collect()),
-        PyValue::Dict(pairs) => {
-            Value::Object(pairs.iter().map(|(k, v)| (k.clone(), to_json(v))).collect())
-        }
-    }
+pub(super) struct Staged {
+    pub(super) slots: Vec<Slot>,
+    pub(super) index: HashMap<(String, String), usize>,
+    pub(super) fresh: HashMap<String, Vec<pyjsonl::Line>>,
+    pub(super) op_of: HashMap<(String, String), String>,
 }
 
 impl PyStore {
@@ -391,7 +259,7 @@ impl PyStore {
     }
 
     /// A lock or claim failure as the prototype would raise it.
-    fn lock_error(&self, e: crate::dashboard::DashError) -> PyStoreError {
+    pub(super) fn lock_error(&self, e: crate::dashboard::DashError) -> PyStoreError {
         use crate::dashboard::DashError;
         match e {
             DashError::Io { path, source } => PyStoreError::os(&path.to_string_lossy(), &source),
@@ -440,149 +308,6 @@ impl PyStore {
             .map_err(os)?;
         f.write_all(recs.as_bytes()).map_err(os)?;
         f.sync_all().map_err(os)
-    }
-
-    /// `_check_schema(staged)`: the error list; enforce mode refuses.
-    fn check_schema(&self, st: &Staged) -> Result<Vec<String>, PyStoreError> {
-        if self.schema_mode == "off" {
-            return Ok(Vec::new());
-        }
-        let mut touched: Vec<&Slot> = st.slots.iter().filter(|s| s.dirty && s.exists).collect();
-        touched.sort_by(|a, b| (&a.coll, &a.id).cmp(&(&b.coll, &b.id)));
-        let mut errs = Vec::new();
-        for s in touched {
-            let data = to_json(&PyValue::Dict(s.data.clone()));
-            let got = crate::dashboard::schema_check::script::validate(
-                &self.schema_dir,
-                &s.coll,
-                &s.id,
-                &data,
-            )
-            .map_err(|e| PyStoreError::Schema(e.to_string()))?;
-            errs.extend(got);
-        }
-        if !errs.is_empty() && self.schema_mode == "enforce" {
-            return Err(PyStoreError::SchemaInvalid(errs));
-        }
-        for e in &errs {
-            self.warn(&format!("dashboard-store: schema warning: {e}\n"));
-        }
-        Ok(errs)
-    }
-
-    /// `_commit_jsonl(staged, fresh, actor, op_of)`.
-    fn commit_jsonl(&self, st: &Staged, actor: &str) -> Result<(), PyStoreError> {
-        let warnings = self.check_schema(st)?;
-        let mut colls: Vec<&str> = st
-            .slots
-            .iter()
-            .filter(|s| s.dirty)
-            .map(|s| s.coll.as_str())
-            .collect();
-        colls.sort_unstable();
-        colls.dedup();
-        let (mut plan, mut entries) = (Vec::new(), Vec::new());
-        for coll in colls {
-            let mine: Vec<&Slot> = st
-                .slots
-                .iter()
-                .filter(|s| s.dirty && s.coll == coll)
-                .collect();
-            let mut docs: Vec<(String, PyValue, PyValue)> = st
-                .fresh
-                .get(coll)
-                .into_iter()
-                .flatten()
-                .filter(|(id, _, _)| !mine.iter().any(|s| &s.id == id))
-                .map(|(id, v, d)| (id.clone(), PyValue::Int(v.clone()), d.clone()))
-                .collect();
-            for s in mine.iter().filter(|s| s.exists) {
-                docs.push((
-                    s.id.clone(),
-                    PyValue::Int(s.version.clone()),
-                    PyValue::Dict(s.data.clone()),
-                ));
-            }
-            let text = pyjsonl::render_file(&docs)
-                .map_err(|e| PyStoreError::Store(format!("{coll}: {e}")))?;
-            plan.push((
-                pyjsonl::coll_path(&self.root, coll),
-                (!text.is_empty()).then(|| text.into_bytes()),
-            ));
-            let mut order = mine;
-            order.sort_by(|a, b| a.id.cmp(&b.id));
-            for s in order {
-                entries.push(self.entry(st, s, actor, &warnings)?);
-            }
-        }
-        apply(&plan, true)?;
-        if let Err(e) = pyjsonl::append_changes(&self.root, &entries, &self.now_iso()).map(|a| {
-            if let Some(w) = a.warning {
-                self.warn(&w);
-            }
-        }) {
-            self.warn(&format!("dashboard-store: change log not written: {e}\n"));
-        }
-        Ok(())
-    }
-
-    /// One change-log entry for a staged document, with its schema warnings.
-    fn entry(
-        &self,
-        st: &Staged,
-        s: &Slot,
-        actor: &str,
-        warnings: &[String],
-    ) -> Result<PyValue, PyStoreError> {
-        let text = |v: &str| PyValue::Str(v.to_owned());
-        let mut e = vec![
-            ("actor".into(), text(actor)),
-            ("coll".into(), text(&s.coll)),
-            ("id".into(), text(&s.id)),
-        ];
-        if s.exists {
-            let data = PyValue::Dict(s.data.clone());
-            let old = s.old.as_ref().map(|(_, d)| PyValue::Dict(d.clone()));
-            let keys = pyjsonl::changed_keys(old.as_ref(), Some(&data)).map_err(from_jsonl)?;
-            let version = PyValue::Int(s.version.clone());
-            let sv = PyValue::Int(PyInt::Small(pyjsonl::SV));
-            let line = pyjsonl::render_line(&s.id, &version, &data, &sv).map_err(from_jsonl)?;
-            let op = st
-                .op_of
-                .get(&(s.coll.clone(), s.id.clone()))
-                .cloned()
-                .unwrap_or_default();
-            e.extend([
-                (
-                    "keys".into(),
-                    PyValue::List(keys.into_iter().map(PyValue::Str).collect()),
-                ),
-                ("op".into(), PyValue::Str(op)),
-                (
-                    "sha256".into(),
-                    PyValue::Str(pyjsonl::sha256(line.as_bytes())),
-                ),
-                ("version".into(), version),
-            ]);
-        } else {
-            let version = s.old.as_ref().map_or(PyInt::Small(0), |o| o.0.clone());
-            e.extend([
-                ("keys".into(), PyValue::List(Vec::new())),
-                ("op".into(), text("delete")),
-                ("sha256".into(), PyValue::Null),
-                ("version".into(), PyValue::Int(version)),
-            ]);
-        }
-        let prefix = format!("{}/{}:", s.coll, s.id);
-        let mine: Vec<PyValue> = warnings
-            .iter()
-            .filter(|w| w.starts_with(&prefix))
-            .map(|w| text(w))
-            .collect();
-        if !mine.is_empty() {
-            e.push(("warnings".into(), PyValue::List(mine)));
-        }
-        Ok(PyValue::Dict(e))
     }
 
     /// One op as a one-op batch.
