@@ -45,6 +45,8 @@ mod pane_launch_line_8233;
 mod prompt_refusal_before_post_8286;
 // #8878 PR2a: `TRUSTY_SANDBOX=1` alone keeps the presence key in the Keychain.
 mod presence_key_sandbox_8878;
+// #8928 criterion 3: an opted-in connect and session start carry the sandbox.
+mod sandbox_opt_in_applied_8928;
 mod scratch_home_tmux_gate;
 mod scratch_root_tmux_gate;
 mod session_manager_mvp;
