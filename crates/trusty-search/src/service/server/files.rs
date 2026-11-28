@@ -308,6 +308,8 @@ pub(crate) async fn index_chunks_report(
     let indexer = handle.indexer.read().await;
     // #10533: a page read is use; the residency grace period reads this clock.
     indexer.touch_activity();
+    // #10534: and the retention clock reads the persisted stamp.
+    super::query_stamp::record_query_stamp(state, &index_id).await;
 
     // Cursor mode (issue #1325): opt-in by sending the `after` param at all —
     // even an empty string, which means "start from the first chunk". The
@@ -526,6 +528,8 @@ pub(crate) async fn grep_report(
         return Err((status, body.0));
     }
 
+    // #10534: a grep is use; the retention clock reads this stamp.
+    super::query_stamp::record_query_stamp(state, &index_id).await;
     let started = std::time::Instant::now();
     let mut matches = Vec::new();
     // #5917: an unreadable corpus greps no files at all. Reporting that as
@@ -603,6 +607,8 @@ pub(crate) async fn global_grep_report(
             break;
         }
         if let Some(handle) = state.registry.get(&id) {
+            // #10534: each swept index records the read.
+            super::query_stamp::record_query_stamp(state, &id).await;
             // #6581: same rule, one state over — a migrating index contributes
             // no files, and this flat response has no per-index field to say so.
             if let Some((status, body)) = super::degraded::migration_refusal(&id.0, &handle).await {

@@ -69,6 +69,8 @@ mod embed_missing;
 #[cfg(test)]
 mod embed_missing_tests;
 mod quantize_handlers;
+// #10534: the shared `last_queried_unix` stamp every read path records.
+mod query_stamp;
 mod reindex_handlers;
 // #10110: `search.index.files.remove`, the batch removal by prefix or list.
 #[cfg(test)]
@@ -87,6 +89,10 @@ mod remove_path;
 mod residency_pins;
 mod residency_pull;
 mod residency_sweep;
+// #10534: 30-day evict of idle duplicate and unregistered indexes.
+mod retention;
+#[cfg(test)]
+mod retention_10534_tests;
 // #4289: the create-index-time containment guard over registered index roots.
 mod root_overlap;
 mod router;

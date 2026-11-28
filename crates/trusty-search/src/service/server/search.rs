@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use crate::core::indexer::{query_timings, QueryPhase};
 use crate::core::{classifier::QueryClassifier, indexer::SearchQuery, registry::IndexId};
-use crate::service::lazy_loader::LAST_QUERIED_WRITE_INTERVAL_SECS;
 
 use super::helpers::file_is_within_any_root;
 use super::state::{DaemonEvent, SearchAppState};
@@ -83,6 +82,21 @@ pub(crate) async fn delete_index_report(
     id: &str,
     params: DeleteIndexParams,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    delete_index_report_checked(state, id, params, None).await
+}
+
+/// A last check the delete runs under the teardown lock (#10534).
+///
+/// `false` refuses the delete with `409 index_in_use` and changes nothing.
+pub(super) type DeleteRecheck<'a> = &'a (dyn Fn() -> bool + Send + Sync);
+
+/// [`delete_index_report`] with an optional [`DeleteRecheck`] (#10534).
+pub(super) async fn delete_index_report_checked(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    params: DeleteIndexParams,
+    recheck: Option<DeleteRecheck<'_>>,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     // #6380: a fast-path refusal before anything is torn down. An id is derived
     // from its root path, so a path deleted and recreated between a census and
     // this call names a DIFFERENT, live index under the same id. This comparison
@@ -97,6 +111,7 @@ pub(crate) async fn delete_index_report(
         id,
         params.delete_data,
         params.expected_root_path.as_deref(),
+        recheck,
     )
     .await;
     // #6380: the under-lock re-check refused, so nothing was torn down. The
@@ -328,11 +343,15 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// mapping before deregistering — see [`super::delete_close::close_index_files`].
 /// An unquiesced one closes them in the background once the writer finishes —
 /// see [`super::delete_close::close_after_writer_drains`].
+///
+/// #10534: an optional [`DeleteRecheck`] runs under the exclusive teardown
+/// guard right after the `expected_root_path` re-check.
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
     delete_data: bool,
     expected_root_path: Option<&str>,
+    recheck: Option<DeleteRecheck<'_>>,
 ) -> UnregisterOutcome {
     let index_id = IndexId::new(id.to_string());
     // #3049: signal BEFORE waiting so a writer that is between batches stops at
@@ -433,6 +452,27 @@ pub(super) async fn unregister_index(
                 refusal: Some(refusal),
             };
         }
+    }
+    // #10534: the caller's own last check, under the same guard. A retention
+    // evict passes one so an index loaded, made live or used since its scan
+    // is kept.
+    if recheck.is_some_and(|still_wanted| !still_wanted()) {
+        tracing::info!("delete[{id}]: REFUSED — the caller's recheck no longer holds (#10534)");
+        crate::service::reindex::clear_index_cancel(&index_id);
+        return UnregisterOutcome {
+            removed: false,
+            data_deleted: false,
+            quiesced,
+            registered: true,
+            error: None,
+            refusal: Some((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "id": id, "ok": false, "removed": false, "data_deleted": false,
+                    "error": "index_in_use",
+                }),
+            )),
+        };
     }
     // #8167/#8232: close the index's files BEFORE deregistering, so a close
     // that cannot finish abandons a delete that changed nothing. When not
@@ -714,48 +754,8 @@ pub(crate) async fn search_report(
     // whose start failed is retried rather than hidden behind a live sibling.
     // #10533: shared with the active-set pre-wake.
     super::residency_pull::resume_watcher(state, &handle).await;
-    // Issue #993: rate-limited write of last_queried_unix (max once per
-    // LAST_QUERIED_WRITE_INTERVAL_SECS) so the LRU sort key stays current for
-    // future selective warm-boots without hammering indexes.toml on every query.
-    //
-    // PR #1103 PERF: the previous code called `persistence::read_last_queried_unix`
-    // here, which opens + parses indexes.toml synchronously on the async handler
-    // for EVERY query to a warm index. Replace with the in-memory
-    // `last_queried_write_cache` DashMap so the hot path does zero disk I/O.
-    // The background write task below updates the map after a successful write so
-    // the rate-limit semantics are fully preserved.
-    {
-        let now_unix = crate::core::project_map::now_unix();
-        // Consult the in-memory cache — no disk read.
-        let stale = state
-            .last_queried_write_cache
-            .get(&index_id)
-            .map(|prev| now_unix.saturating_sub(*prev) >= LAST_QUERIED_WRITE_INTERVAL_SECS)
-            .unwrap_or(true); // absent = never written for this session → write now
-        if stale {
-            let id_str = index_id.0.clone();
-            // Update the in-memory cache immediately so concurrent queries within
-            // the same interval don't all race to spawn a write task.
-            state
-                .last_queried_write_cache
-                .insert(index_id.clone(), now_unix);
-            // Review MEDIUM: `spawn_blocking`, not `spawn`. This body takes the
-            // process-wide registry `std::sync::Mutex` (#4871) and then does
-            // synchronous file I/O — parking an async worker thread on a lock
-            // another blocking writer holds. On the blocking pool that is what
-            // the pool is for; on a worker it starves the runtime.
-            let _stamp = tokio::task::spawn_blocking(move || {
-                if let Err(e) =
-                    crate::service::persistence::update_last_queried_unix(&id_str, now_unix)
-                {
-                    tracing::debug!("last_queried_unix update failed for '{id_str}': {e}");
-                }
-            });
-            // #9684: a test joins the stamp so it writes inside its serial_test guard.
-            #[cfg(test)]
-            let _ = _stamp.await;
-        }
-    }
+    // Issue #993 / #10534: rate-limited write of `last_queried_unix`.
+    super::query_stamp::record_query_stamp(state, &index_id).await;
     // Use the same domain-aware classifier as `CodeIndexer::search` so the
     // intent reported back to the caller matches what was used for routing.
     let intent = QueryClassifier::classify_with_domain(&query.text, &handle.domain_terms);
