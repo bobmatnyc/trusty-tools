@@ -430,8 +430,6 @@ impl CodeIndexer {
         content: &str,
         _path_lock: &supersede::PathWriteGuard<'_>,
     ) -> Result<IndexFileOutcome> {
-        // #12064: recorded for a staged run's carryover copy, on every outcome.
-        let _journal = self.journal_files([file_path.to_string()]);
         // #8167: a handle that outlived DELETE must not write into it.
         self.refuse_if_deleted()?;
         // #9459: a corpus closed for shutdown would take this write in memory
@@ -716,11 +714,10 @@ impl CodeIndexer {
         if files.is_empty() {
             return Ok(0);
         }
-        let _journal = self.journal_files(files.iter().map(|(p, _)| p.clone())); // #12064
-                                                                                 // #10738: the watcher rescan commits here; in a staged swap's detach
-                                                                                 // window the batch would land in memory only and answer `Ok`, so the
-                                                                                 // rescan recorded fingerprints for content live never got. The
-                                                                                 // reindex's own batches call `commit_parsed_batch` on staging directly.
+        // #10738: the watcher rescan commits here; in a staged swap's detach
+        // window the batch would land in memory only and answer `Ok`, so the
+        // rescan recorded fingerprints for content live never got. The
+        // reindex's own batches call `commit_parsed_batch` on staging directly.
         self.refuse_if_corpus_detached()?;
         let parsed = self.parse_and_embed_files(files.to_vec()).await?;
         let timings = self

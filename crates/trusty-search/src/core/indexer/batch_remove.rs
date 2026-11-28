@@ -204,8 +204,6 @@ impl CodeIndexer {
             counts,
             source,
         };
-        // #12064: recorded for a staged run's carryover copy, on every outcome.
-        let _journal = self.journal_selection(sel);
         self.refuse_if_closed_for_shutdown()
             .map_err(|e| fail(BatchRemoveCounts::default(), e))?;
         // #10738: a delete in a staged swap's detach window misses redb, and

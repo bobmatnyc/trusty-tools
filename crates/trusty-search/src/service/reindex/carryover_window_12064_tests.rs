@@ -75,10 +75,7 @@ async fn a_write_and_a_delete_in_the_carryover_window_survive_the_promotion() {
 
     let guard = handle.indexer.read().await;
     let run = begin_until_swap_queued(&handle).await;
-    guard
-        .index_file("a.rs", A_V2)
-        .await
-        .expect("rewrite in the window");
+    guard.index_file("a.rs", A_V2).await.expect("rewrite in the window");
     guard
         .index_file(PUSHED, PUSHED_BODY)
         .await
@@ -89,19 +86,9 @@ async fn a_write_and_a_delete_in_the_carryover_window_survive_the_promotion() {
         .expect("delete in the window");
     assert!(removed > 0 && committed, "the delete hit live");
     drop(guard);
-    let tmp = run
-        .await
-        .expect("begin task")
-        .expect("staging")
-        .expect("staged");
+    let tmp = run.await.expect("begin task").expect("staging").expect("staged");
     assert!(
-        !resolve(
-            &handle,
-            &tmp,
-            &super::staging::StagingResolution::Commit,
-            false
-        )
-        .await,
+        !resolve(&handle, &tmp, &super::staging::StagingResolution::Commit, false).await,
         "the promotion lands"
     );
 
@@ -123,61 +110,8 @@ async fn a_write_and_a_delete_in_the_carryover_window_survive_the_promotion() {
     );
     match indexer.vector_coverage().await {
         VectorCoverage::Measured { missing, .. } => {
-            assert!(
-                missing.is_empty(),
-                "corpus chunks without a vector: {missing:?}"
-            );
+            assert!(missing.is_empty(), "corpus chunks without a vector: {missing:?}");
         }
         other => panic!("coverage must be measured: {other:?}"),
     }
-}
-
-/// Why: fail-open check — a re-apply that fails must not promote a staging
-/// corpus missing the window's write while the run reports success.
-/// What: inject a re-apply failure, write in the window, and assert the run
-/// returns `Err`, the staging file is gone, and the live corpus, still
-/// attached, holds the write.
-/// Test: this function IS the test.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial_test::parallel]
-async fn a_failed_reapply_aborts_the_run_and_keeps_the_write_in_live() {
-    let id = "carryover-reapply-fails-12064";
-    let (_dir, handle, _state, live) = staged_index(id).await;
-    super::carryover_resync::TEST_FAIL_REAPPLY
-        .lock()
-        .expect("seam")
-        .push(id.to_string());
-
-    let guard = handle.indexer.read().await;
-    let run = begin_until_swap_queued(&handle).await;
-    guard
-        .index_file(PUSHED, PUSHED_BODY)
-        .await
-        .expect("put in the window");
-    drop(guard);
-    let err = run
-        .await
-        .expect("begin task")
-        .expect_err("a failed re-apply must abort the run");
-    super::carryover_resync::TEST_FAIL_REAPPLY
-        .lock()
-        .expect("seam")
-        .retain(|i| i != id);
-
-    assert!(
-        format!("{err:#}").contains("not re-applied"),
-        "the error names the cause: {err:#}"
-    );
-    let tmp = live.with_file_name(crate::service::storage_layout::REDB_TMP_FILE);
-    assert!(!tmp.exists(), "staging removed: {}", tmp.display());
-    let corpus = handle.indexer.read().await.corpus_store().expect("live");
-    assert_eq!(corpus.path(), live.as_path(), "live stays attached");
-    assert!(
-        corpus
-            .list_indexed_files()
-            .expect("list")
-            .iter()
-            .any(|f| f == PUSHED),
-        "the write stays in live"
-    );
 }

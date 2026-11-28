@@ -170,7 +170,7 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     }
     // Quick read-lock probe: nothing to stage if no durable corpus.
     // Also capture the live corpus Arc for the incremental copy path (#839).
-    let (live_corpus, writes_before, journal) = {
+    let (live_corpus, writes_before) = {
         let indexer = handle.indexer.read().await;
         if !indexer.has_corpus_store() {
             return Ok(None);
@@ -180,16 +180,8 @@ async fn begin_staged_corpus_swap_with_schema_reader(
         // no chunks — still has to carry the contributed overlay across the
         // swap (ADR-0009), because nothing in the pipeline can regenerate it.
         // #10738: the finished-write count, taken before the copy begins.
-        // #12064: armed before the copy's snapshot, so every live write that
-        // finishes after it is re-applied to staging before the swap.
-        let journal = (!force).then(|| indexer.arm_carryover_journal());
-        (
-            indexer.corpus_store(),
-            indexer.path_writes_finished(),
-            journal,
-        )
+        (indexer.corpus_store(), indexer.path_writes_finished())
     };
-    let live_for_reapply = live_corpus.clone();
     // Whether this is an incremental (carryover) reindex — tracked so the
     // error path can distinguish a copy failure from a staging-open failure.
     // Derived from `force` rather than from `live_corpus`, which is now `Some`
@@ -323,26 +315,12 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     // Swap the staging store onto the indexer. The prior live store's `Arc` is
     // dropped here; reads during the reindex are served from the in-memory
     // `chunks` HashMap, so dropping the durable handle does not affect search.
-    let staged = std::sync::Arc::new(staged);
     let mut indexer = handle.indexer.write().await;
-    // #12064: no writer is in flight under the write guard; re-copy what the
-    // window wrote or deleted, or abandon the run with live attached.
-    if let Some(journal) = journal {
-        let keys = journal.take();
-        super::carryover_resync::reapply_window_writes(
-            &index_id.0,
-            keys,
-            live_for_reapply,
-            &staged,
-            &tmp_path,
-        )
-        .await?;
-    }
     // #10738: mark the promotion to bump if a path write finished after the
     // copy began (#839), and the outgoing live corpus so a restart or a
     // re-attach bumps; either write failing abandons the run.
     index_identity::mark_before_swap(&indexer, &staged, &tmp_path, writes_before, force)?;
-    let _prev = indexer.swap_corpus_store(staged);
+    let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
     drop(indexer);
     tracing::info!(
         "staged corpus swap: staging corpus opened for '{}' at {}",
