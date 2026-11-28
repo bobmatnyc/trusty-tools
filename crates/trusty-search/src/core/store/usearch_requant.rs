@@ -220,15 +220,27 @@ impl UsearchStore {
         let source = self.index.clone().read_owned().await;
         let dim = self.dim;
         let label = label.to_string();
+        // #11891: the snapshot path names the index in the re-link warnings.
+        let path = self.snapshot_path_label().await;
         // #9450: the add loop is seconds of blocking FFI at 150K vectors; run
         // it on the blocking pool so it never pins a runtime worker (#1746).
         tokio::task::spawn_blocking(move || -> Result<(Index, usize)> {
             let rebuilt = new_rebuild_index(dim, quantization, keys.len(), &label)?;
-            let missing = copy_vectors(&source, &rebuilt, &keys, dim, &label, &fault)?;
+            let missing = copy_vectors(&source, &rebuilt, &keys, dim, &label, &path, &fault)?;
             Ok((rebuilt, missing))
         })
         .await
         .map_err(|e| anyhow!("usearch rebuild task panicked: {e}"))?
+    }
+
+    /// The snapshot file that names this index in a rebuild log line, or
+    /// `<unsaved>` before the first save (#11891).
+    pub(super) async fn snapshot_path_label(&self) -> String {
+        self.hnsw_path
+            .read()
+            .await
+            .as_deref()
+            .map_or_else(|| "<unsaved>".to_string(), |p| p.display().to_string())
     }
 }
 
@@ -284,21 +296,30 @@ fn copy_vectors(
     keys: &[u64],
     dim: usize,
     label: &str,
+    path: &str,
     fault: &RebuildFault,
 ) -> Result<usize> {
-    add_parallel(rebuilt, keys.len(), dim, label, fault, &|i, buffer| {
-        let key = keys[i];
-        match source.get(key, buffer) {
-            Ok(n) if n > 0 => Ok(Some(key)),
-            // The key map named a vector the graph does not hold.
-            // Pre-existing drift, not caused here — count and skip.
-            Ok(_) => Ok(None),
-            Err(e) => {
-                tracing::warn!("usearch: rebuild could not read key {key}: {e} — skipping");
-                Ok(None)
+    add_parallel(
+        rebuilt,
+        keys.len(),
+        dim,
+        label,
+        path,
+        fault,
+        &|i, buffer| {
+            let key = keys[i];
+            match source.get(key, buffer) {
+                Ok(n) if n > 0 => Ok(Some(key)),
+                // The key map named a vector the graph does not hold.
+                // Pre-existing drift, not caused here — count and skip.
+                Ok(_) => Ok(None),
+                Err(e) => {
+                    tracing::warn!("usearch: rebuild could not read key {key}: {e} — skipping");
+                    Ok(None)
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 /// Reads item `i` of a rebuild source into the buffer and returns its key,
@@ -315,6 +336,7 @@ pub(super) fn add_parallel(
     n: usize,
     dim: usize,
     label: &str,
+    path: &str,
     fault: &RebuildFault,
     read: &ReadItem<'_>,
 ) -> Result<usize> {
@@ -356,6 +378,6 @@ pub(super) fn add_parallel(
         return Err(e);
     }
     // #9450: a build can strand a node; the sweep re-links any, on every build.
-    super::usearch_relink::relink_stranded(rebuilt, n, dim, threads, label, read)?;
+    super::usearch_relink::relink_stranded(rebuilt, n, dim, threads, label, path, read)?;
     Ok(missing.into_inner())
 }

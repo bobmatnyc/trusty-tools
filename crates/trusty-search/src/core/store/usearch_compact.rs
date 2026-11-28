@@ -302,7 +302,9 @@ impl UsearchStore {
             .map_or("the live precision", |q| q.label())
             .to_string();
 
-        let (rebuilt, missing) = build_from_snapshot(snapshot, label, fault).await?;
+        // #11891: the snapshot path names the index in the re-link warnings.
+        let path = self.snapshot_path_label().await;
+        let (rebuilt, missing) = build_from_snapshot(snapshot, label, path, fault).await?;
         // #9450: the next `IfDue` waits at least this long for quiet writes.
         let built_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.compact

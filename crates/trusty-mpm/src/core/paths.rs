@@ -204,6 +204,30 @@ impl FrameworkPaths {
         Self::under_split(crate::core::config_base::config_base_under(home), home)
     }
 
+    /// [`under_home`](Self::under_home) for a writer (#12048).
+    ///
+    /// What: fails closed on a malformed `install.toml` under `home`; a missing
+    /// one still answers [`under`](Self::under)`(home)`.
+    /// Test: `launch_session_refuses_a_malformed_install_toml_12048`.
+    pub fn try_under_home(
+        home: impl AsRef<Path>,
+    ) -> Result<Self, trusty_common::install_paths::InstallPathsError> {
+        let home = home.as_ref();
+        let base = crate::core::config_base::try_config_base_under(home)?;
+        Ok(Self::under_split(base, home))
+    }
+
+    /// The writer layout for an optional home (#12048):
+    /// [`try_under_home`](Self::try_under_home) with one,
+    /// [`try_default`](Self::try_default) without.
+    ///
+    /// Test: `session_start_refuses_a_malformed_install_toml_12048`.
+    pub fn try_for_home(
+        home: Option<&Path>,
+    ) -> Result<Self, trusty_common::install_paths::InstallPathsError> {
+        home.map_or_else(Self::try_default, Self::try_under_home)
+    }
+
     /// [`under`](Self::under) with the config trees and `.claude` on separate
     /// bases (#11821 P3).
     ///
