@@ -868,6 +868,54 @@ mod tests {
         );
     }
 
+    /// Why: #11965 — a drift-harness seed sat in `memory_remember` calls for
+    /// about 15 minutes. The bridge must answer each call by itself even when
+    /// the daemon accepts the request and never replies, so one call costs at
+    /// most [`REQUEST_TIMEOUT`] and a caller's wait is bounded per call.
+    /// What: a listener that reads the frame and holds the connection without
+    /// replying; the bridge's `memory_remember` must come back as an error
+    /// carrying the request id, no earlier than and within 5 s of
+    /// [`REQUEST_TIMEOUT`] on the paused test clock.
+    /// Test: itself.
+    #[tokio::test(start_paused = true)]
+    async fn a_remember_the_daemon_never_answers_errors_within_the_request_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("sockets").join("stalled.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stalled socket");
+
+        // #11965: reads the request, then holds the connection open forever.
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut frame = Vec::new();
+            let _ = conn.read_to_end(&mut frame).await;
+            let _held = conn;
+            std::future::pending::<()>().await;
+        });
+
+        let started = tokio::time::Instant::now();
+        let resp = build_bridge(socket, None, None, None)
+            .answer(a_request_with_id(5))
+            .await;
+        let elapsed = started.elapsed();
+
+        let message = resp
+            .error
+            .expect("a daemon that never replies is an error")
+            .message;
+        assert!(
+            message.contains("did not complete the exchange"),
+            "the error must say the exchange timed out, got: {message}"
+        );
+        assert_eq!(resp.id, Some(json!(5)), "the error answers request 5");
+        assert!(
+            elapsed >= REQUEST_TIMEOUT && elapsed < REQUEST_TIMEOUT + Duration::from_secs(5),
+            "the call must end at the request timeout {REQUEST_TIMEOUT:?}, took {elapsed:?}"
+        );
+    }
+
     /// Why: MCP spec §4.1 forbids a reply to a notification, and emitting one
     /// would corrupt the stdio channel. This is the one case where an absent id
     /// is correct, and it must be decided before the daemon is dialled.
