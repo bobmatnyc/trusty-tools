@@ -287,13 +287,18 @@ async fn search_log_splits_the_vector_lane() {
     let mut indexer = indexer;
     indexer.set_store(Arc::new(view));
 
-    let registry = IndexRegistry::new();
-    registry.register(IndexHandle::bare(
+    let handle = IndexHandle::bare(
         IndexId::new("split-12108".to_string()),
         Arc::new(tokio::sync::RwLock::new(indexer)),
         tmp.path().to_path_buf(),
-    ));
-    let state = Arc::new(SearchAppState::new(registry));
+    );
+    // The vector lane runs only once the semantic stage reads ready.
+    handle.stages.write().await.semantic.status = crate::core::registry::StageStatus::Ready;
+    let registry = IndexRegistry::new();
+    registry.register(handle);
+    let state = SearchAppState::new(registry);
+    state.install_embedder(embedder).await;
+    let state = Arc::new(state);
 
     let (cap, _guard) = capture(tracing::Level::INFO);
     let body = super::search::search_report(&state, "split-12108", query("shared symbol lookup"))
