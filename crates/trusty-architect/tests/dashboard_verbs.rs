@@ -383,7 +383,8 @@ fn dashboard_verbs_render_the_prototype_shapes() -> R {
         },
     )?;
     assert_eq!(ids.next.as_deref(), Some("D02"));
-    assert_eq!(ids.free, 255);
+    // #12029 P2d: 1,155 issuable base-34 ids, one used.
+    assert_eq!(ids.free, 1154);
     let bad = verbs::ids(
         &env(),
         &IdsRequest {

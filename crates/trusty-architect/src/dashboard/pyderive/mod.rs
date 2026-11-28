@@ -3,9 +3,11 @@
 //! Why: the frozen Python owns the rules for "open", "parked", the next id,
 //! stale tasks and the owner events that wake the Architect; the port must
 //! give the same answer for every document shape, so it works on
-//! [`PyValue`]s, which keep Python's types and key order. The serde-based
-//! [`super::derive`], [`super::pending`](mod@super::pending), [`super::ids`]
-//! and [`super::tally`](mod@super::tally) serve the live verbs and are left as they are (see #12029).
+//! [`PyValue`]s, which keep Python's types and key order. The live
+//! [`super::ids`] and [`super::derive::is_parked`] run these rules (#12029
+//! P2d); the serde [`super::pending`](mod@super::pending), [`super::tally`](mod@super::tally)
+//! and the rest of [`super::derive`] still serve the live verbs with their
+//! own rules (see #12029).
 //! What: the predicates here ([`building_brief`], [`is_parked`],
 //! [`is_selftest`], [`is_relayed`]) and the shared time and equality helpers;
 //! `counts` (`decision_counts`, `tally`, `run_progress`, `running_count`),
@@ -20,7 +22,7 @@
 
 mod cases;
 mod counts;
-mod ids;
+pub(crate) mod ids; // #12029 P2d: the live `dashboard::ids` runs these rules
 mod order;
 mod pending;
 pub(crate) mod stale;

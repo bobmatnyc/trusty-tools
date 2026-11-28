@@ -214,7 +214,8 @@ pub fn ids(env: &Env, r: &IdsRequest) -> Result<IdsResponse, DashError> {
         prefix: r.prefix.clone(),
         next: next_id(&snap, p),
         free: free_count(&snap, p),
-        retire: retire_candidates(&snap, p, KEEP_FREE),
+        // #12029 P2d: the derive retire rules need `now` (the 24 h guard).
+        retire: retire_candidates(&snap, p, KEEP_FREE, env.clock.now_unix()),
     })
 }
 

@@ -1,0 +1,3 @@
+Fixed
+- The dashboard `tally` and footer count an open item as parked when `parked` is a bare flag or note, or a choice of `indefinite`, as the frozen `dashboard_derive.is_parked` does; `derive::is_parked` now runs that one rule (#12029).
+- The dashboard `ids` verb and `dashboard::ids` issue base-34 ids (`0-9a-z` without `l` and `o`, 1,155 per prefix, `00` never issued) instead of hex ids, keep the 25% free floor (289) and retire by the frozen `retire_candidates` rules: answered-and-relayed, cancelled and won't-do items too, never one touched in the last 24 hours or marked `keep`. A hex-era id on disk is two valid base-34 digits, so it stays counted as used and is never issued again. `retire_candidates` takes `now` (#12029).

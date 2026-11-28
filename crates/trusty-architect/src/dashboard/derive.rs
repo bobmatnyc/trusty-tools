@@ -3,8 +3,8 @@
 //! Why: three scripts and the page each computed "open" their own way; one
 //! module owns the rules and callers pass an explicit `now` (DOC-82 LDG-5.7,
 //! `dashboard_derive.py`).
-//! What: [`is_parked`] (an open item parked with a wake date, or by
-//! `clarify`/`stale`), [`is_running`] (an open item whose `run_start`..`run_end`
+//! What: [`is_parked`] (the [`super::pyderive`] rule: a bare flag or note,
+//! a wake date, or `clarify`/`stale`/`indefinite`), [`is_running`] (an open item whose `run_start`..`run_end`
 //! window holds `now`; a date-only end runs to 23:59:59 UTC) and
 //! [`running_count`], plus [`run_progress`], [`ordered`] and [`goal_sessions`]
 //! (#10403). No function reads the clock or the filesystem; the
@@ -17,16 +17,15 @@ use serde_json::{Map, Value};
 use super::store::Doc;
 use crate::classify::alerts::{civil_from_days, days_from_civil};
 
-/// An open item the owner parked with a wake date, or by `clarify` / `stale`
-/// (the page's `isParked`).
+/// Why: the footer and `tally` count parked items apart, by the page's `isParked`.
+/// What: `dashboard_derive.is_parked`, run through [`super::pyderive`]: an
+/// open item whose `parked` is a bare flag or note, or a dict with a wake
+/// date or a `clarify` / `stale` / `indefinite` choice.
+/// Test: `derive_parked_follows_the_page_rule`,
+/// `a_bare_parked_flag_and_an_indefinite_choice_count_as_parked`.
+// #12029 P2d: one rule; a bare flag and `indefinite` park, as in Python.
 pub fn is_parked(data: &Map<String, Value>) -> bool {
-    let open = data.get("status").and_then(Value::as_str) == Some("open");
-    let Some(pk) = data.get("parked").and_then(Value::as_object) else {
-        return false;
-    };
-    let until = pk.get("until").is_some_and(super::ids::truthy);
-    let choice = pk.get("choice").and_then(Value::as_str);
-    open && (until || matches!(choice, Some("clarify" | "stale")))
+    super::pyderive::is_parked(&super::ids::py_map(data))
 }
 
 /// Whether `item` is open and `now` (Unix seconds) is inside its run window.
@@ -283,7 +282,9 @@ mod tests {
         assert!(is_parked(&open(json!({"choice": "clarify"}))));
         assert!(is_parked(&open(json!({"choice": "stale"}))));
         assert!(!is_parked(&open(json!({"choice": "later", "until": ""}))));
-        assert!(!is_parked(&open(json!(true))));
+        assert!(!is_parked(&open(json!({}))));
+        assert!(!is_parked(&open(json!(false))));
+        assert!(!is_parked(&obj(json!({"status": "open"}))));
         assert!(!is_parked(&obj(
             json!({"status": "done", "parked": {"until": "x"}})
         )));
