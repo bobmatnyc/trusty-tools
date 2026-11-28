@@ -33,8 +33,13 @@ function browser({frames, allowed = [TOP + "/*"], injected = null, cdp = {}}) {
   const view = {owners:[{node:50, frame:"F7", url:CHILD + "/"}], quad:[100, 200, 500, 200, 500, 500, 100, 500],
     at:{backendNodeId:50}, hit:true, ...cdp};
   const DOMS = {
-    "DOM.getDocument":() => ({root:{nodeName:"#document", children:view.owners.map(o =>
-      ({nodeName:"IFRAME", backendNodeId:o.node, frameId:o.frame}))}}),
+    "DOM.getDocument":() => {
+      const iframes = view.owners.map(o => ({nodeName:"IFRAME", backendNodeId:o.node, frameId:o.frame}));
+      // #11808: `shadow` puts the owners inside an open shadow root of a host <div>, as a pierced read reports.
+      const children = view.shadow ? [{nodeName:"DIV", backendNodeId:40, children:[],
+        shadowRoots:[{nodeName:"#document-fragment", shadowRootType:"open", children:iframes}]}] : iframes;
+      return {root:{nodeName:"#document", children}};
+    },
     "Page.getFrameTree":() => ({frameTree:{frame:{id:"TOP", url:TOP + "/"}}}),
     "DOM.getBoxModel":() => ({model:{content:view.moving?.length ? view.moving.shift() : view.quad}}),
     "DOM.getNodeForLocation":() => view.at,
@@ -381,6 +386,22 @@ test("a trusted click in a child frame lands at the top-frame point", async () =
   const tp = turned.input.find(([m, p]) => m === "Input.dispatchMouseEvent" && p.type === "mousePressed")[1];
   assert.deepEqual([tp.x, tp.y], [Math.round(100 + 200 * 10 / 400 - 50 * 20 / 300),
     Math.round(200 + 100 * 10 / 400 + 100 * 20 / 300)]);
+});
+
+// #11808: AC4 keeps #11300 working; the child's owner <iframe> sits in an open shadow root, and a
+// same-origin top-document click still aims in the top document and names no frame.
+test("a click finds a child frame's owner inside an open shadow root", async () => {
+  const b = browser({frames:form(), allowed:[TOP + "/*", CHILD + "/*"], cdp:{shadow:true}});
+  const cmds = commands(b);
+  const top = await lease(cmds);
+  const reply = plain(await act(cmds, "page_click", {ref:"7:22.1", dialog:"dismiss"}, top));
+  assert.deepEqual(reply.result, {document:"D0", frame:{id:7, origin:CHILD}});
+  const mouse = b.input.filter(([m]) => m === "Input.dispatchMouseEvent").map(([, p]) => [p.type, p.x, p.y]);
+  assert.deepEqual(mouse, [["mouseMoved", 110, 220], ["mousePressed", 110, 220], ["mouseReleased", 110, 220]]);
+  assert.deepEqual(b.input.find(([m]) => m === "DOM.getBoxModel")[1].backendNodeId, 50);
+  const own = plain(await act(cmds, "page_click", {ref:"11.0", dialog:"dismiss"}, top));
+  assert.deepEqual(own.result, {document:"D0"});
+  assert.deepEqual(ran(b, "pageTarget").at(-1).target.documentIds, ["D0"]);
 });
 
 // #11808: the child's scrollIntoView scrolls the top after the first box-model read; the click aims at the
