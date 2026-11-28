@@ -9,7 +9,7 @@
   "required": ["goal", "title", "by", "created", "status"],
   "additionalProperties": false,
   "properties": {
-    "goal": {"type": "string", "pattern": "^G[0-9a-f]{2}$"},
+    "goal": {"type": "string", "pattern": "^G[0-9a-km-np-z]{2}$"},
     "title": {"type": "string"},
     "by": {"type": "string"},
     "created": {"$ref": "#/$defs/iso"},

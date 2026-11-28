@@ -12,7 +12,7 @@
   "properties": {
     "asked": {"type": "string", "minLength": 1},
     "asked_at": {"$ref": "#/$defs/iso_or_empty"},
-    "task": {"type": "string", "pattern": "^T[0-9a-f]+$"},
+    "task": {"type": "string", "pattern": "^T[0-9a-km-np-z]+$"},
     "answer": {"type": "string"},
     "links": {"type": "array", "items": {"type": "object", "required": ["label", "url"], "additionalProperties": false,
       "properties": {"label": {"type": "string", "minLength": 1}, "url": {"type": "string", "pattern": "^https?://"}}}},

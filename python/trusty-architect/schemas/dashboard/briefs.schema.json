@@ -13,7 +13,7 @@
     "answer": {"type": "string"},
     "project": {"type": "string", "minLength": 1},
     "session": {"type": "string"},
-    "goal": {"type": "string", "pattern": "^G[0-9a-f]{2}$"},
+    "goal": {"type": "string", "pattern": "^G[0-9a-km-np-z]{2}$"},
     "doc": {"type": "string", "pattern": "^docs/briefs/[^/].*[.]md$"},
     "status": {"enum": ["open", "done"]},
     "created": {"$ref": "#/$defs/iso"},
