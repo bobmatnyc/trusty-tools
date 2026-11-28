@@ -72,6 +72,20 @@ pub fn user_tier_config_dir(
     }
 }
 
+/// The user tier's config dir for a CLI launch under `home` (#10025).
+///
+/// Why: a CLI launch names its home, and production names the process home.
+/// `CLAUDE_CONFIG_DIR` belongs to that home only, so a sandbox or test home
+/// must never read it, the case [`user_tier_config_dir`] guards for the daemon.
+/// What: [`user_tier_config_dir`], with `home` pinned when it is not
+/// `dirs::home_dir()`; the process home (or none) reads `CLAUDE_CONFIG_DIR`.
+/// Test: `a_cli_home_reads_the_config_dir_only_as_the_process_home_10025`.
+pub(super) fn config_dir_for_home(home: Option<&Path>) -> Option<PathBuf> {
+    let process_home = dirs::home_dir();
+    let pinned = home.filter(|home| process_home.as_deref() != Some(*home));
+    user_tier_config_dir(pinned, None)
+}
+
 /// [`resolve`], declined unless the location is absolute.
 ///
 /// Why (#5544): a relative or absent base would send a user-global write beside
@@ -139,5 +153,16 @@ mod tests {
             user_tier_config_dir(None, Some(cfg)),
             crate::core::session_record::claude_config_dir_override()
         );
+    }
+
+    /// #10025: a sandbox or test home never reads the ambient
+    /// `CLAUDE_CONFIG_DIR`; the process home reads it, as the daemon does.
+    #[test]
+    fn a_cli_home_reads_the_config_dir_only_as_the_process_home_10025() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(config_dir_for_home(Some(temp.path())), None);
+        let ambient = crate::core::session_record::claude_config_dir_override();
+        assert_eq!(config_dir_for_home(dirs::home_dir().as_deref()), ambient);
+        assert_eq!(config_dir_for_home(None), ambient);
     }
 }

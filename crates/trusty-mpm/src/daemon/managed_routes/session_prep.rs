@@ -36,15 +36,18 @@ use crate::session_manager::ManagedSessionId;
 /// failure, logs a `tracing::warn!` and returns — mirroring
 /// the clone provisioner's non-fatal handling of the identical
 /// call, so a prep failure never blocks the session from spawning.
+/// #10025: the user tier lands under `host` — its home, relocated to its
+/// config dir — the same host the deployment repair uses.
 ///
-/// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
-/// submodule.
+/// Test: `prepare_inproject_session_writes_statusline`,
+/// `prepare_inproject_session_writes_the_user_tier_under_the_config_dir_10025`.
 pub(super) fn prepare_inproject_session(
     fw: &crate::core::paths::FrameworkPaths,
     session_id: &ManagedSessionId,
     worktree: &std::path::Path,
     session_dir: &std::path::Path,
     repo_url: Option<&str>,
+    host: &super::deployment_check::RepairHost,
 ) -> Result<(), String> {
     // A session composes from its own directory, never the managed checkout.
     match crate::core::session_launch::prepare_session_for_managed_from(
@@ -53,6 +56,9 @@ pub(super) fn prepare_inproject_session(
         session_dir,
         repo_url,
         &session_id.to_string(),
+        // #10025: `RepairHost::for_state`, as the repair after it uses.
+        host.home.as_deref(),
+        host.claude_config_dir.as_deref(),
     ) {
         Ok(report) => {
             info!(

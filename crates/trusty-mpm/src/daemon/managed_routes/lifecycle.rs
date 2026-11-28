@@ -850,7 +850,9 @@ pub(super) async fn spawn_managed_inproject(
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
     let repo_url = source.repo_url.as_deref();
-    prepare_inproject_session(&fw, session_id, &worktree, &worktree, repo_url)?;
+    // #10025: the user tier `CLAUDE_CONFIG_DIR` names; the repair below reuses it.
+    let host = RepairHost::for_state(state);
+    prepare_inproject_session(&fw, session_id, &worktree, &worktree, repo_url, &host)?;
 
     // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
@@ -916,8 +918,7 @@ pub(super) async fn spawn_managed_inproject(
 
     // Deployment-completeness check (#2158, made non-blocking by #2172): a
     // false positive must never withhold the runtime launch. Reuses the `fw`
-    // already resolved above for `prepare_inproject_session`.
-    let host = RepairHost::for_state(state);
+    // already resolved above for `prepare_inproject_session`, and its `host`.
     let url = record.repo_url.as_deref();
     if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, host) {
         warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");

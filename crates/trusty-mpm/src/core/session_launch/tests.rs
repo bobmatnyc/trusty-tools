@@ -1,7 +1,7 @@
 // #7685: the public entry points moved to `entry.rs`; the ones re-exported at
 // the module boundary still arrive via `use super::*` below, and this one —
 // which has no production caller outside `entry` — is imported directly.
-use super::entry::isolated_framework_paths;
+use super::entry::{isolated_framework_paths, prepare_isolated_session_in};
 use super::search_index::register_project_index;
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, is_stale_bare_statusline_command,
@@ -2969,4 +2969,41 @@ fn write_enabled_plugins_skips_without_a_config_dir() {
         !project.join(".claude").join("settings.json").exists(),
         "nothing to decide means nothing to write"
     );
+}
+
+/// #10025: the isolated prep (`tm launch`, `tm connect`, `tm fleet init`, meta
+/// launch) writes the user tier under the named config dir, never `<home>/.claude`.
+///
+/// What: [`prepare_isolated_session_in`] with one temp dir as the home and
+/// another as the config dir, both arguments; no process environment is written.
+/// Test: itself.
+#[test]
+fn isolated_prep_writes_the_user_tier_under_the_config_dir_10025() {
+    let home = tempdir().unwrap();
+    let config_dir = tempdir().unwrap();
+    let project = tempdir().unwrap();
+
+    prepare_isolated_session_in(
+        project.path(),
+        None,
+        Some(home.path()),
+        Some(config_dir.path()),
+    )
+    .expect("prep succeeds");
+
+    let user = std::fs::read_to_string(config_dir.path().join("settings.json"))
+        .expect("the user-tier settings.json lands in the config dir");
+    assert!(user.contains("statusLine"), "{user}");
+    let claude_json = std::fs::read_to_string(config_dir.path().join(".claude.json"))
+        .expect("the trust seed lands in <config_dir>/.claude.json");
+    assert!(
+        claude_json.contains("hasTrustDialogAccepted"),
+        "{claude_json}"
+    );
+    for stray in [".claude/settings.json", ".claude.json"] {
+        assert!(
+            !home.path().join(stray).exists(),
+            "{stray} must not be written under the home when a config dir is named"
+        );
+    }
 }

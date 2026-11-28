@@ -184,7 +184,9 @@ pub(super) async fn spawn_managed_on_main(
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
     // The content comes from the launch directory, not the managed checkout.
     let repo_url = source.repo_url.as_deref();
-    prepare_inproject_session(&fw, session_id, local_path, dirs.launch, repo_url)?;
+    // #10025: the user tier `CLAUDE_CONFIG_DIR` names, as the repair below uses.
+    let host = RepairHost::for_state(state);
+    prepare_inproject_session(&fw, session_id, local_path, dirs.launch, repo_url, &host)?;
 
     emit(ProvisioningStage::CreatingTmuxSession);
     let record = mgr
@@ -241,7 +243,7 @@ pub(super) async fn spawn_managed_on_main(
         local_path,
         record.repo_url.as_deref(),
         session_id,
-        RepairHost::for_state(state),
+        host,
     ) {
         warn!(
             id = %session_id,
