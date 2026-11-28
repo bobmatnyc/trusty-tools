@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use super::{QuestionsError, TmuxCli, env_or, run_command};
 use crate::clock::Clock;
+use crate::install_paths;
 use crate::spec_drift::Outcome;
 
 /// Bound on `python3 <questions_rc>` and `python3 <input-state.py>`: the poller's 300 s.
@@ -264,8 +265,19 @@ fn helper(script: &str, args: &[&str], out: &mut Outcome) -> Outcome {
 /// The stopped-session branch: start it, then log its Remote Control URL.
 fn launch(o: &Options<'_>, v: &Vars, out: &mut Outcome) -> Result<(), QuestionsError> {
     let home = (o.env)("HOME").unwrap_or_default();
-    let cfg = env_or(o.env, "CLAUDE_CONFIG_DIR")
-        .unwrap_or_else(|| format!("{home}/.trusty-tools/trusty-mpm/claude-config"));
+    // #12029: the default claude-config dir comes from the install_paths resolver,
+    // the one config reader, so `TRUSTY_MPM_CONFIG_DIR` and `install.toml` move it.
+    let cfg = match env_or(o.env, "CLAUDE_CONFIG_DIR") {
+        Some(dir) => dir,
+        None => {
+            let base = install_paths::config_dir(Path::new(&home), o.env)
+                .map_err(|e| QuestionsError::Read(e.to_string()))?
+                .path;
+            base.join(".trusty-tools/trusty-mpm/claude-config")
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
     if !Path::new(&cfg).is_dir() {
         out.stderr
             .push_str(&format!("no Claude config dir: {cfg}\n"));

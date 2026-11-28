@@ -112,7 +112,7 @@ impl ExactTarget {
 ///
 /// Why: the frozen scripts run `tmux` by `PATH`, so any directory put first
 /// on `PATH` would answer for the fleet's tmux. The port separates the two
-/// uses (#12029 P2f, Architect ruling 2026-11-28 C2 and C4).
+/// uses (#12029 P2f, tmux rules C2 and C4).
 /// What: argv is `<program> [-L name | -S path] <args>`, run with stdin closed
 /// and a 10 s bound. [`TmuxCli::live`] resolves an absolute binary from
 /// [`LIVE_TMUX`] and uses tmux's own server resolution, as the scripts do;

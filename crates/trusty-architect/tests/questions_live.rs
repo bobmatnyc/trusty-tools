@@ -4,7 +4,7 @@
 //! Every tmux call here goes to `tests/fixtures/questions/fake_server.sh`,
 //! copied into a temp dir and run on a private `-S` socket in that dir; no
 //! test reaches the fleet's tmux server or starts, prompts or kills a real
-//! session (Architect ruling 2026-11-28, C1 to C4).
+//! session (See #12029, rules C1 to C4).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
