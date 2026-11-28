@@ -36,7 +36,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use cases::replay_cases;
-pub(crate) use value::normalize_timestamps;
+// #12029 P2d: the ids and qual driver mirrors share these.
+pub(crate) use cases::{error_line, file_op};
+pub(crate) use fsio::makedirs;
+pub(crate) use value::{normalize_timestamps, sorted, with_key};
 
 use super::writer::WriterClass;
 use crate::clock::Clock;

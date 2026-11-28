@@ -603,3 +603,66 @@ $R record --clock 1795784400 --out $D/dashboard_store/dir.json --seed $S/schemas
 $R record --clock 1795784400 --out $D/dashboard_store/driver-usage.json -- $P/dst_driver.py
 $R replay $D/dashboard_store/*.json -- <target>/debug/examples/replay_port dashboard_store
 ```
+
+## dashboard_ids and dashboard_qual (#12029 P2d)
+
+Six runs of the frozen Python reference (architect commit `0fbbc81eed`),
+recorded on 2026-11-28 with `--clock 1795784400` and replayed in
+`tests/replay_ids_qual.rs` against `examples/replay_port.rs`, which hands
+each to the library's driver mirror (`dashboard::pyids` and
+`dashboard::pyqual`, `replay_cases`). Every store, document, counter file
+and brief registry is synthetic. No recording declares fakes: neither
+module starts a process. Each driver points the modules' defaults at the
+sandbox root: the default store is `local/owner-queue`, the brief registry
+`local/briefs/registry.jsonl`, the schemas `schemas/`.
+
+- `dashboard_ids/`: `driver.py CASES.json`, copied beside `dashboard_ids.py`,
+  `brief_ids.py`, `ids36.py`, `dashboard_derive.py`, `dashboard_store.py`,
+  `dashboard_jsonl.py` and `dashboard_schema.py` as `di_driver.py`, three
+  recordings. `functions` covers `next_id` per prefix across every id
+  collection (and a collection outside them), `used` and `free_count` with
+  odd ids (`A1`, `a01`, `A0o`, `A0l`, `A0F`, `A00`, `Azz`), the counter
+  file (`record_issued` past the top id and at `zz`, so `next` wraps to
+  `01`; refused digits; a hex-era `int` counter; a string with a final
+  newline; non-object and broken files), a corrupt document, the
+  other-format guard, a jsonl store and the brief space. `retire` covers
+  `retire_apply` dry and applied (the archive line, the prune log with the
+  stored version, a second run doing nothing), `retire_plan` across every
+  prefix and collection (a non-string title, a 200-character cut of
+  `asked`), every finished kind, `keep`, the 24 h guard, `age_days` (an
+  `int` and a `float`), a floor of `00` that frees no id, and an archive
+  directory that cannot be created (every row skipped, nothing deleted).
+  `floor` fills 863 open items on the default root and covers the usage
+  pass (the 48 h rule, `interactive`, `parked`, a blank `relayed_at`, a
+  `relayed` status with no time), the 289-free floor after it, and the
+  command line: `retire` dry (the usage-pass preview) and `--apply`, with
+  and without `--now`, and the listing with and without `--age-days`.
+- `dashboard_qual/`: `driver.py CASES.json`, copied beside
+  `dashboard_qual.py`, `dashboard_store.py`, `dashboard_jsonl.py` and
+  `dashboard_schema.py` as `dq_driver.py`, one recording. It covers `split`
+  (each digit rule, a final newline, an empty local id), `qualify`,
+  `store_sid` (an S id in `meta/state`, the default root as `S14` after
+  path normalisation, every non-S-id value, a missing and a corrupt
+  `meta/state`, a jsonl store), `resolve` (the owner hint), `with_qualifier`
+  on `items` (replacing a stored `qualified` key) and other collections,
+  and the alias rules (malformed rules dropped, an own document kept, a
+  bad collection name raised).
+
+Each directory also holds a `driver-usage.json` run. Not recorded:
+`next_id` returning `None` (a full prefix; the `dashboard_derive/ids`
+recording covers it); a delete refused by a version conflict between the
+plan and the delete (`a_refused_delete_leaves_the_archived_item_in_place`
+covers the port); a bad `--now` or `--age-days` value and an exhausted
+brief space, which end in a traceback; a symlinked default root. Regenerate
+with the modules and drivers copied to a sandbox directory `P` and the case
+lists in `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/dashboard_ids/floor.json --seed $S/ids-floor.json=cases.json \
+  -- $P/di_driver.py cases.json
+$R record --clock 1795784400 --out $D/dashboard_qual/cases.json --seed $S/qual-cases.json=cases.json \
+  -- $P/dq_driver.py cases.json
+$R replay $D/dashboard_ids/*.json -- <target>/debug/examples/replay_port dashboard_ids
+$R replay $D/dashboard_qual/*.json -- <target>/debug/examples/replay_port dashboard_qual
+```

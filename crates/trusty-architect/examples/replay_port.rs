@@ -15,7 +15,8 @@
 //! (#12028 P1g) and `ruling_pack` (#12028 P1i), `ids36` and
 //! `dashboard_schema` (#12029 P2a), `dashboard_jsonl` and `dashboard_derive`
 //! (#12029 P2b, mirrored in the library), `dashboard_store` (#12029 P2c,
-//! mirrored in the library). `gh-session-track` (#12087)
+//! mirrored in the library), `dashboard_ids` and `dashboard_qual` (#12029
+//! P2d, mirrored in the library). `gh-session-track` (#12087)
 //! runs the script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
@@ -30,8 +31,10 @@
 //! `ids36_recordings_replay_clean_against_the_port`,
 //! `dashboard_schema_recordings_replay_clean_against_the_port`,
 //! `dashboard_jsonl_recordings_replay_clean_against_the_port`,
-//! `dashboard_derive_recordings_replay_clean_against_the_port` and
-//! `dashboard_store_recordings_replay_clean_against_the_port`.
+//! `dashboard_derive_recordings_replay_clean_against_the_port`,
+//! `dashboard_store_recordings_replay_clean_against_the_port`,
+//! `dashboard_ids_recordings_replay_clean_against_the_port` and
+//! `dashboard_qual_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -492,6 +495,17 @@ fn main() -> ExitCode {
                 Arc::new(FakeClock::new(at)),
             )
         }
+        // See #12029 P2d: the ids and qual `driver.py` mirrors, on the frozen clock.
+        "dashboard_ids" | "dashboard_qual" => {
+            let at = Arc::new(FakeClock::new(
+                frozen.map_or_else(|| SystemClock.now_unix(), |t| t as f64),
+            ));
+            if script == "dashboard_ids" {
+                trusty_architect::dashboard::pyids::replay_cases(&rest, at)
+            } else {
+                trusty_architect::dashboard::pyqual::replay_cases(&rest, at)
+            }
+        }
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
@@ -500,7 +514,7 @@ fn main() -> ExitCode {
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
                  il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
                  gh-session-track, ruling_pack, ids36, dashboard_schema, dashboard_jsonl, \
-                 dashboard_derive, dashboard_store"
+                 dashboard_derive, dashboard_store, dashboard_ids, dashboard_qual"
             );
             return ExitCode::from(2);
         }

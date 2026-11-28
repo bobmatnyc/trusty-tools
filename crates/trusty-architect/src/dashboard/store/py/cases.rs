@@ -78,7 +78,8 @@ fn doc_line(d: &PyDocOut) -> String {
     )
 }
 
-fn error_line(e: &PyStoreError) -> String {
+/// The driver's line for a raised `StoreError` or `OSError`.
+pub(crate) fn error_line(e: &PyStoreError) -> String {
     match (e, e.http()) {
         (_, Some((status, code))) => format!("{} {status} {code}: {e}", e.class()),
         (PyStoreError::Os { class, errno, .. }, None) => format!("{class}: errno {errno}"),
@@ -96,6 +97,55 @@ fn os_err(path: &str) -> impl Fn(std::io::Error) -> PyStoreError + '_ {
     move |e| PyStoreError::os(path, &e)
 }
 
+/// Why: every dashboard replay driver lays out its sandbox with the same file ops.
+/// What: `write` (`text`, or `hex` bytes; parents made), `rm`, `mkdir`,
+/// `chmod` (`mode` in octal) and `cat` (`repr` of the text, `absent` when
+/// missing) on `path`; `None` for any other op. Shared by the `dashboard_ids`
+/// and `dashboard_qual` mirrors (#12029 P2d).
+/// Test: `dashboard_store_recordings_replay_clean_against_the_port`,
+/// `dashboard_ids_recordings_replay_clean_against_the_port`.
+pub(crate) fn file_op(c: &PyValue) -> Option<Result<Vec<String>, PyStoreError>> {
+    file_op_run(c).transpose()
+}
+
+fn file_op_run(c: &PyValue) -> Result<Option<Vec<String>>, PyStoreError> {
+    let path = s(c, "path");
+    let ok = Some(vec!["ok".to_owned()]);
+    Ok(match s(c, "op") {
+        "write" => {
+            let parent = super::dirname(path);
+            super::fsio::makedirs(if parent.is_empty() { "." } else { parent })?;
+            let blob = match get(c, "hex") {
+                Some(PyValue::Str(h)) => hex(h),
+                _ => s(c, "text").as_bytes().to_vec(),
+            };
+            std::fs::write(path, blob).map_err(os_err(path))?;
+            ok
+        }
+        "rm" => {
+            std::fs::remove_file(path).map_err(os_err(path))?;
+            ok
+        }
+        "mkdir" => {
+            super::fsio::makedirs(path)?;
+            ok
+        }
+        "chmod" => {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = u32::from_str_radix(s(c, "mode"), 8).unwrap_or(0o755);
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .map_err(os_err(path))?;
+            ok
+        }
+        "cat" => match std::fs::read(path) {
+            Ok(b) => Some(vec![py_repr(&String::from_utf8_lossy(&b))]),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(vec!["absent".into()]),
+            Err(e) => return Err(PyStoreError::os(path, &e)),
+        },
+        _ => None,
+    })
+}
+
 impl Driver {
     fn store(&self, c: &PyValue) -> Result<&PyStore, PyStoreError> {
         let name = opt_str(c, "store").unwrap_or_else(|| "s".into());
@@ -105,7 +155,9 @@ impl Driver {
     }
 
     fn setup(&mut self, c: &PyValue) -> Result<Option<Vec<String>>, PyStoreError> {
-        let path = s(c, "path");
+        if let Some(lines) = file_op(c) {
+            return lines.map(Some);
+        }
         let ok = Ok(Some(vec!["ok".to_owned()]));
         match s(c, "op") {
             "env" => {
@@ -121,38 +173,6 @@ impl Driver {
                 }
                 ok
             }
-            "write" => {
-                let parent = super::dirname(path);
-                super::fsio::makedirs(if parent.is_empty() { "." } else { parent })?;
-                let blob = match get(c, "hex") {
-                    Some(PyValue::Str(h)) => hex(h),
-                    _ => s(c, "text").as_bytes().to_vec(),
-                };
-                std::fs::write(path, blob).map_err(os_err(path))?;
-                ok
-            }
-            "rm" => {
-                std::fs::remove_file(path).map_err(os_err(path))?;
-                ok
-            }
-            "mkdir" => {
-                super::fsio::makedirs(path)?;
-                ok
-            }
-            "chmod" => {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = u32::from_str_radix(s(c, "mode"), 8).unwrap_or(0o755);
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-                    .map_err(os_err(path))?;
-                ok
-            }
-            "cat" => match std::fs::read(path) {
-                Ok(b) => Ok(Some(vec![py_repr(&String::from_utf8_lossy(&b))])),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(Some(vec!["absent".into()]))
-                }
-                Err(e) => Err(PyStoreError::os(path, &e)),
-            },
             "changes" => {
                 let all = pyjsonl::read_changes(s(c, "root")).map_err(super::from_jsonl)?;
                 Ok(Some(if all.is_empty() {
