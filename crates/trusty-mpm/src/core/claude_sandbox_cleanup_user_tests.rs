@@ -515,3 +515,133 @@ fn a_dir_tm_never_wrote_is_never_cleaned_12077() {
     );
     assert!(!gone.exists(), "the config dir is not created");
 }
+
+/// #12077 (PR #12133 round 1): an `envVars` entry with tm's name but another
+/// mode is the operator's own value; it stays, and tm's ten exact entries go.
+#[test]
+fn an_env_var_with_tms_name_and_another_mode_stays_12077() {
+    let fx = Fx::new();
+    let mut planted = v1_14_15_user_tier();
+    let mine = json!({"name": "ANTHROPIC_API_KEY", "mode": "allow"});
+    if let Some(list) = planted
+        .pointer_mut("/sandbox/credentials/envVars")
+        .and_then(Value::as_array_mut)
+    {
+        list[0] = mine.clone();
+    }
+    write_json(&fx.user_file(), &planted);
+    let outcome = fx.clean().expect("cleanup");
+    let UserCleanupOutcome::Cleaned { removed, kept } = outcome else {
+        panic!("expected Cleaned, got {outcome:?}");
+    };
+    assert_eq!(removed.len(), 12, "{removed:?}");
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let after = read_json(&fx.user_file());
+    assert_eq!(
+        after.pointer("/sandbox/credentials/envVars"),
+        Some(&json!([mine])),
+        "{after}"
+    );
+}
+
+/// #12077 (PR #12133 round 1): `allowedDomains` goes only when equal to tm's
+/// whole list. The tag list plus an entry, and a prefix of the tag list, are
+/// the operator's lists: both stay whole, and the key is reported.
+#[test]
+fn an_allowed_domains_list_that_is_not_tms_whole_list_stays_12077() {
+    let mut longer: Vec<&str> = TAG_DOMAINS.to_vec();
+    longer.push("example.com");
+    let prefix: Vec<&str> = TAG_DOMAINS[..5].to_vec();
+    for (label, domains) in [("tag list plus one", longer), ("first five", prefix)] {
+        let fx = Fx::new();
+        let mut planted = v1_14_15_user_tier();
+        planted["sandbox"]["network"]["allowedDomains"] = json!(domains);
+        write_json(&fx.user_file(), &planted);
+        let outcome = fx.clean().expect("cleanup");
+        let UserCleanupOutcome::Cleaned { removed, kept } = outcome else {
+            panic!("{label}: expected Cleaned, got {outcome:?}");
+        };
+        assert_eq!(removed.len(), 12, "{label}: {removed:?}");
+        assert_eq!(kept, ["sandbox.network.allowedDomains"], "{label}");
+        let after = read_json(&fx.user_file());
+        assert_eq!(
+            after.pointer("/sandbox/network"),
+            Some(&json!({"allowedDomains": domains})),
+            "{label}: {after}"
+        );
+    }
+}
+
+/// #12077 Fail-Open Check: the user-tier marker cannot be written. The call
+/// is an error naming the marker, no marker exists, the file is untouched,
+/// and the next run writes the marker. The file here holds nothing of tm's
+/// (a prune that rewrote would need the same directory write the marker
+/// does, so the marker failure cannot be isolated after a rewrite without a
+/// seam).
+///
+/// Mutant: `write_marker(..)?` in `clean_tm_user_sandbox_keys_once` becomes
+/// `let _ = write_marker(..)`; the call then returns `Ok(Cleaned)`.
+#[cfg(unix)]
+#[test]
+fn a_user_tier_marker_write_failure_is_an_error_and_retries_12077() {
+    let fx = Fx::new();
+    write_json(&fx.user_file(), &operator_keys());
+    let before = std::fs::read(fx.user_file()).expect("read");
+    if !read_only(&fx.config) {
+        return;
+    }
+    let first = fx.clean();
+    writable(&fx.config);
+    let err = first.expect_err("a marker write failure is an error");
+    assert!(matches!(err, SandboxCleanupError::Marker { .. }), "{err}");
+    assert!(
+        err.to_string().contains(USER_CLEANUP_MARKER_FILE),
+        "the error names the marker: {err}"
+    );
+    assert!(!fx.user_marker().exists(), "a failure must not finish");
+    assert_eq!(std::fs::read(fx.user_file()).expect("read"), before);
+    fx.clean().expect("the retry");
+    assert!(fx.user_marker().exists(), "the retry wrote the marker");
+}
+
+/// #12077 Fail-Open Check: deleting the role record fails (the directory is
+/// read-only). The launch warns, the record and the project marker stay, and
+/// the next flag-off launch deletes the record.
+///
+/// Mutants: the `Err(e)` arm in `clean_tm_sandbox_keys_on_launch` made
+/// silent (`Err(_) => {}`) fails the warn assertion; the same arm also
+/// removing the project marker (the retry's guard) fails the retry.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_role_record_delete_failure_warns_and_retries_12077() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let fx = Fx::new();
+    fx.plant_project(PROJECT);
+    // An opted-in pass finishes the project tier and keeps the record.
+    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, true);
+    assert!(fx.project_marker().exists() && fx.record().exists());
+    let tm_dir = fx.ws.join(".trusty-mpm");
+    if !read_only(&tm_dir) {
+        return;
+    }
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, false);
+    });
+    let (record, marker) = (fx.record().exists(), fx.project_marker().exists());
+    writable(&tm_dir);
+    let logged = buffer.tail(256).join("\n");
+    assert!(
+        logged.contains("deleting the sandbox role record failed"),
+        "the failure must warn: {logged}"
+    );
+    assert!(record, "a failed delete leaves the record");
+    assert!(marker, "a failed delete advances nothing");
+    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, false);
+    assert!(!fx.record().exists(), "the next flag-off launch retries");
+}

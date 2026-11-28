@@ -2577,6 +2577,73 @@ fn a_managed_launch_refuses_an_opt_in_with_no_home_12077() {
     assert!(!config.join("settings.json").exists(), "no user-tier write");
 }
 
+/// #12077: a workspace holding a 1.14.14 role record and a project file, and
+/// the home and config dir a managed launch hands the sandbox step.
+fn record_workspace() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+    let (ws, home, config) = (
+        root.join("ws"),
+        root.join("home"),
+        root.join("claude-config"),
+    );
+    for dir in [&ws.join(".claude"), &ws.join(".trusty-mpm"), &home, &config] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    std::fs::write(
+        ws.join(".trusty-mpm")
+            .join(crate::core::claude_sandbox::ROLE_RECORD_FILE),
+        serde_json::json!({"pm": {"sandbox": {"enabled": true}}}).to_string(),
+    )
+    .expect("record");
+    std::fs::write(
+        ws.join(".claude/settings.json"),
+        r#"{"sandbox":{"enabled":true},"model":"opus"}"#,
+    )
+    .expect("settings");
+    (tmp, ws, home, config)
+}
+
+/// #12077 (PR #12133 round 1): the role-record delete follows the launch's
+/// own opt-in, not the daemon's env. A resumed opted-in session under a
+/// daemon with no `TM_CLAUDE_SANDBOX` keeps the record.
+#[test]
+#[serial_test::serial]
+fn an_opted_in_managed_launch_keeps_the_role_record_without_the_env_12077() {
+    use crate::core::claude_sandbox::{ROLE_RECORD_FILE, SANDBOX_OPT_IN_ENV};
+    use crate::secret_source::test_env::EnvVarGuard;
+    let _unset = EnvVarGuard::unset(SANDBOX_OPT_IN_ENV);
+    let (_tmp, ws, home, config) = record_workspace();
+    let pm = crate::core::session_profile::SessionProfile::Pm;
+    super::managed_sandbox_at(&ws, Some(&home), &config, pm, true).expect("opted in");
+    assert!(
+        ws.join(".trusty-mpm").join(ROLE_RECORD_FILE).exists(),
+        "an opted-in launch keeps the record whatever the daemon's env says"
+    );
+}
+
+/// #12077 (PR #12133 round 1): the mirror — a launch that did not opt in
+/// deletes the record even when the daemon's env holds the switch.
+#[test]
+#[serial_test::serial]
+fn a_default_managed_launch_deletes_the_role_record_despite_the_env_12077() {
+    use crate::core::claude_sandbox::{ROLE_RECORD_FILE, SANDBOX_OPT_IN_ENV};
+    use crate::secret_source::test_env::EnvVarGuard;
+    let _on = EnvVarGuard::set(SANDBOX_OPT_IN_ENV, "1");
+    let (_tmp, ws, home, config) = record_workspace();
+    let pm = crate::core::session_profile::SessionProfile::Pm;
+    super::managed_sandbox_at(&ws, Some(&home), &config, pm, false).expect("default");
+    assert!(
+        !ws.join(".trusty-mpm").join(ROLE_RECORD_FILE).exists(),
+        "a launch that did not opt in deletes the record whatever the env says"
+    );
+}
+
 /// #12077 (criterion 4): a record that says OFF yields a spawn and resume
 /// spec that unset the switch, even with `TM_CLAUDE_SANDBOX=1` in the
 /// daemon's (and so the tmux server's) environment, so the pane's relaunch
