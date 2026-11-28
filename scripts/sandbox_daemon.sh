@@ -90,7 +90,9 @@
 #                                  [--credential NAME=<ref>]
 #                                  [--allow-stale] [--dry-run]
 #                                  [--projects-root PATH] [--config-dir PATH]
-#   --bin PATH  the tm binary (default: `tm` on PATH). A build-lease slot's
+#   --bin PATH  the tm binary (default: `tm` on PATH; a mise shim there is
+#               replaced by `mise which tm`, else the next non-shim tm on
+#               PATH, #11804). A build-lease slot's
 #               binary is <slot>/debug/tm; the lease prints <slot> on stderr
 #   --allow-stale  run a build artifact older than its sources, with a warning
 #   --port N    ignored, with a notice (#6288 S3a: the daemon binds no TCP
@@ -207,9 +209,56 @@ if [ -n "$CRED_SPEC" ]; then
   [ -n "$CRED_REF" ] || die "--credential $CRED_NAME has an empty reference"
 fi
 
+# is_mise_shim PATH: 0 when PATH is a mise shim, a link to a binary named
+# `mise` or an entry of a `.../mise/shims` directory.
+is_mise_shim() {
+  local t
+  case "$1" in */mise/shims/*) return 0 ;; esac
+  [ -L "$1" ] || return 1
+  t="$(readlink "$1")" || return 1
+  [ "${t##*/}" = mise ]
+}
+
+# mise_real_tm SHIM: the real tm a mise shim stands for, on stdout. First
+# `mise which tm`, run here with the caller's env and cwd, outside the
+# sandbox; only its stdout (a path) is read. Then the first non-shim `tm` on
+# PATH, the binary the shim itself falls back to. Returns 1 when neither names one.
+mise_real_tm() {
+  local mise p t dir
+  local -a dirs
+  mise="$(command -v mise || true)"
+  if [ -z "$mise" ] && [ -L "$1" ]; then
+    t="$(readlink "$1")"
+    case "$t" in /*) mise="$t" ;; *) mise="${1%/*}/$t" ;; esac
+  fi
+  if [ -n "$mise" ]; then
+    p="$("$mise" which tm </dev/null 2>/dev/null || true)"
+    if [ -n "$p" ] && [ -f "$p" ] && [ -x "$p" ] && ! is_mise_shim "$p"; then
+      echo "sandbox_daemon: tm on PATH is a mise shim ($1); using \`mise which tm\`: $p" >&2
+      printf '%s\n' "$p"
+      return 0
+    fi
+  fi
+  IFS=: read -r -a dirs <<< "$PATH"
+  for dir in ${dirs[@]+"${dirs[@]}"}; do
+    p="${dir:-.}/tm"
+    if [ -f "$p" ] && [ -x "$p" ] && ! is_mise_shim "$p"; then
+      echo "sandbox_daemon: tm on PATH is a mise shim ($1); using the next tm on PATH: $p" >&2
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -z "$BIN" ]; then
   BIN="$(command -v tm || true)"
   [ -n "$BIN" ] || die "no tm binary on PATH; pass --bin"
+  # #11804: a mise shim re-adds __MISE_* names, which the daemon refuses; launch the real tm.
+  if is_mise_shim "$BIN"; then
+    BIN="$(mise_real_tm "$BIN")" \
+      || die "tm on PATH is a mise shim and neither \`mise which tm\` nor PATH names a real tm; pass --bin"
+  fi
 fi
 [ -x "$BIN" ] || die "--bin is not an executable file: $BIN"
 # Absolute, so a relative --bin still names the same file from the sandbox cwd.
