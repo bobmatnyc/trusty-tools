@@ -5,7 +5,7 @@
 //! that `TRUSTY_MPM_CONFIG_DIR` or `install.toml` can move off `$HOME`.
 //! What: [`resolve_launch_home`] is the pure core; [`sandbox_launch_home`]
 //! reads the process env and refuses when no home resolves.
-//! Test: `a_split_config_base_sandbox_names_the_real_home`,
+//! Test: `a_split_config_base_launch_writes_no_sandbox_12077`,
 //! `sandboxed_launch_home_is_the_sandbox_home_not_the_process_home`.
 
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// derived from that root left the real `~/.ssh` and `~/.aws` readable.
 /// What: [`resolve_launch_home`] over the process env and `dirs::home_dir()`.
 /// FAIL-CLOSED: no resolvable home is an error, never a fallback.
-/// Test: `a_split_config_base_sandbox_names_the_real_home`.
+/// Test: `a_split_config_base_launch_writes_no_sandbox_12077`.
 pub fn sandbox_launch_home() -> Result<PathBuf, String> {
     resolve_launch_home(
         std::env::var_os("TRUSTY_SANDBOX").as_deref(),

@@ -410,15 +410,15 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     Ok(())
 }
 
-/// Write and verify the sandbox for a `tm run` launch (#10102).
+/// The sandbox step of a `tm run` launch (#10102).
 ///
-/// Why: #8928 step 6 — `tm run` starts a PM `claude`, so it starts only inside
-/// the PM's verified sandbox, like every other launch path.
+/// Why: #8928 step 6 — `tm run` starts a PM `claude`, so it goes through the
+/// same sandbox step as every other launch path.
 /// What: [`crate::core::session_launch::apply_launch_sandbox`] for `profile`'s
-/// role in `repo_path`, with `claude_config_dir` as the user tier.
-/// FAIL-CLOSED: an error refuses the run.
-/// Test: `run_sandbox_applies_and_verifies_the_pm_policy`,
-/// `run_sandbox_refuses_a_workspace_that_does_not_verify`.
+/// role in `repo_path`, with `claude_config_dir` as the user tier. #12077:
+/// enforcement is off, so it writes nothing and refuses nothing.
+/// Test: `run_sandbox_writes_no_sandbox_settings_12077`,
+/// `run_sandbox_leaves_a_local_override_untouched_12077`.
 pub fn run_sandbox(
     repo_path: &Path,
     home: &Path,

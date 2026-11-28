@@ -58,16 +58,16 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
     dir
 }
 
-/// Write and verify the launch's sandbox in `workspace` (#10102).
+/// The launch's sandbox step in `workspace` (#10102).
 ///
 /// Why: #8928 step 6 — `tm launch`, `tm connect` and the Architect launch
 /// start `claude` only inside the sandbox their role asked for.
 /// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
 /// `profile`'s role, with `config_dir` (the relocated `CLAUDE_CONFIG_DIR`) as
-/// the user tier. FAIL-CLOSED: no home, no config dir, or a read-back that
-/// does not verify is an error, and every caller refuses its launch on it.
-/// Test: `apply_sandbox_refuses_without_a_config_dir_and_applies_with_one`,
-/// `apply_sandbox_refuses_a_workspace_that_does_not_verify`.
+/// the user tier. #12077: enforcement is off, so that call writes nothing and
+/// refuses nothing; only an unresolved home is still an error.
+/// Test: `apply_sandbox_writes_nothing_with_or_without_a_config_dir_12077`,
+/// `apply_sandbox_leaves_a_local_override_untouched_12077`.
 pub(crate) fn apply_sandbox(
     workspace: &Path,
     home: Option<&Path>,
@@ -201,41 +201,46 @@ mod tests {
         }
     }
 
-    /// #10102: no config dir refuses; a tm-owned one applies and verifies.
+    /// #12077: with or without a config dir the launch goes ahead and no
+    /// sandbox file is written in the workspace, the config dir or `~/.claude`.
     #[test]
-    fn apply_sandbox_refuses_without_a_config_dir_and_applies_with_one() {
+    fn apply_sandbox_writes_nothing_with_or_without_a_config_dir_12077() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(tmp.path()).expect("canonical");
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).expect("mkdir");
         let home = root.join("home");
         let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
-        let err = apply_sandbox(&ws, Some(&home), None, pm).expect_err("unset refuses");
-        assert!(err.to_string().contains("CLAUDE_CONFIG_DIR"), "{err}");
-        assert!(!home.join(".claude").exists(), "no `~/.claude` write");
         let config =
             trusty_mpm::core::paths::FrameworkPaths::under(&home).managed_claude_config_dir();
-        apply_sandbox(&ws, Some(&home), Some(&config), pm).expect("applies");
-        assert!(config.join("settings.json").exists());
+        for dir in [None, Some(config.as_path())] {
+            apply_sandbox(&ws, Some(&home), dir, pm).expect("not refused");
+        }
+        assert!(!home.join(".claude").exists(), "no `~/.claude` write");
+        assert!(!config.join("settings.json").exists(), "no user-tier write");
+        assert!(
+            !ws.join(".claude/settings.json").exists(),
+            "no project write"
+        );
+        assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
     }
 
-    /// #10102 Fail-Open Check: a workspace whose read-back fails is an error.
+    /// #12077: a local override that turns the sandbox off no longer refuses
+    /// the launch, and is left as it was.
     #[test]
-    fn apply_sandbox_refuses_a_workspace_that_does_not_verify() {
+    fn apply_sandbox_leaves_a_local_override_untouched_12077() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(tmp.path()).expect("canonical");
         let ws = root.join("ws");
         std::fs::create_dir_all(ws.join(".claude")).expect("mkdir");
-        std::fs::write(
-            ws.join(".claude/settings.local.json"),
-            r#"{"sandbox":{"enabled":false}}"#,
-        )
-        .expect("plant");
+        let local = ws.join(".claude/settings.local.json");
+        let planted = r#"{"sandbox":{"enabled":false}}"#;
+        std::fs::write(&local, planted).expect("plant");
         let home = root.join("home");
         let config =
             trusty_mpm::core::paths::FrameworkPaths::under(&home).managed_claude_config_dir();
         let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
-        let err = apply_sandbox(&ws, Some(&home), Some(&config), pm).expect_err("refuses");
-        assert!(err.to_string().contains("settings.local.json"), "{err}");
+        apply_sandbox(&ws, Some(&home), Some(&config), pm).expect("not refused");
+        assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
     }
 }

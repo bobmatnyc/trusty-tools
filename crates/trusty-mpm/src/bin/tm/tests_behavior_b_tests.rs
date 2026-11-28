@@ -2626,11 +2626,11 @@ fn sandbox_launch_fixture(
     (repos_root, base, live, origin)
 }
 
-/// #10102: `tm launch` writes the PM sandbox into the worktree and tm's user
-/// tier, and the launch goes ahead only once both verify.
+/// #12077: `tm launch` writes no sandbox into the worktree, and the sandbox
+/// step is never what stops the launch.
 #[tokio::test]
 #[serial_test::serial]
-async fn guided_fallback_applies_the_pm_sandbox_before_the_session() {
+async fn guided_fallback_writes_no_sandbox_before_the_session_12077() {
     let (repos_root, base, live, _origin) = sandbox_launch_fixture("10102a");
     let _env = ReposRootEnv::set(&repos_root.path().canonicalize().unwrap());
     let fw_home = crate::test_support::hermetic_temp_dir();
@@ -2655,23 +2655,21 @@ async fn guided_fallback_applies_the_pm_sandbox_before_the_session() {
         .map(|e| e.path())
         .next()
         .expect("one worktree");
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(worktree.join(".claude/settings.json")).expect("settings"),
-    )
-    .expect("json");
-    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
+    if let Ok(raw) = std::fs::read_to_string(worktree.join(".claude/settings.json")) {
+        let settings: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert!(settings.get("sandbox").is_none(), "{settings}");
+    }
     assert!(
-        worktree.join(".trusty-mpm/sandbox-roles.json").exists(),
-        "the PM role is recorded"
+        !worktree.join(".trusty-mpm/sandbox-roles.json").exists(),
+        "no role is recorded"
     );
 }
 
-/// #10102 Fail-Open Check: a worktree whose sandbox does not verify — a
-/// committed `settings.local.json` turning it off — refuses `tm launch`, and
-/// no session starts.
+/// #12077: a worktree with a committed `settings.local.json` turning the
+/// sandbox off no longer refuses `tm launch` at the sandbox step.
 #[tokio::test]
 #[serial_test::serial]
-async fn guided_fallback_refuses_a_sandbox_that_does_not_verify() {
+async fn guided_fallback_is_not_refused_over_a_committed_local_override_12077() {
     let (repos_root, base, live, _origin) = sandbox_launch_fixture("10102b");
     std::fs::create_dir_all(base.join(".claude")).unwrap();
     std::fs::write(
@@ -2702,16 +2700,11 @@ async fn guided_fallback_refuses_a_sandbox_that_does_not_verify() {
         Some(fw_home.path()),
     )
     .await;
-    let err = run
-        .result
-        .expect_err("an unverified sandbox refuses the launch");
-    assert!(
-        format!("{err:#}").contains("settings.local.json"),
-        "{err:#}"
-    );
-    assert!(
-        run.private_sessions.is_empty(),
-        "{:?}",
-        run.private_sessions
-    );
+    if let Err(err) = &run.result {
+        let text = format!("{err:#}");
+        assert!(
+            !text.contains("#8928") && !text.contains("settings.local.json"),
+            "{text}"
+        );
+    }
 }

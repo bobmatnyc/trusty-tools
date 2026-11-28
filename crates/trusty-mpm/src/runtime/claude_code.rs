@@ -338,17 +338,18 @@ fn owner_settings(
         .map_err(|err| RuntimeError::Spawn(err.to_string()))
 }
 
-/// Write and verify the sandbox for a managed launch in `cwd` (#10102).
+/// The sandbox step of a managed launch in `cwd` (#10102).
 ///
-/// Why: #8928 step 6 — a managed spawn, resume or in-place relaunch starts
-/// only inside the sandbox its profile's role asked for.
+/// Why: #8928 step 6 — a managed spawn, resume or in-place relaunch goes
+/// through the same sandbox step as every other launch path.
 /// What: [`crate::core::session_launch::apply_launch_sandbox`] for
 /// `profile`'s role, with `config_dir` as the user tier and the home from
-/// [`crate::core::launch_home::sandbox_launch_home`]. FAIL-CLOSED: an
-/// error, or no resolvable home, refuses the launch.
-/// Test: `spawn_writes_and_verifies_the_sandbox_before_the_line`,
-/// `spawn_refuses_when_the_sandbox_does_not_verify`,
-/// `a_split_config_base_sandbox_names_the_real_home`.
+/// [`crate::core::launch_home::sandbox_launch_home`]. #12077: enforcement is
+/// off, so it writes nothing and refuses nothing; no resolvable home is still
+/// an error.
+/// Test: `spawn_writes_no_sandbox_settings_12077`,
+/// `spawn_and_resume_go_ahead_over_a_local_override_12077`,
+/// `a_split_config_base_launch_writes_no_sandbox_12077`.
 fn managed_sandbox(
     cwd: &Path,
     config_dir: &Path,

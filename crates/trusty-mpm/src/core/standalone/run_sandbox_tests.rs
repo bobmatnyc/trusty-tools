@@ -1,4 +1,4 @@
-//! #10102: `tm run`'s sandbox step.
+//! #10102: `tm run`'s sandbox step; #12077: it writes nothing.
 
 use super::run_sandbox;
 use crate::core::session_profile::SessionProfile;
@@ -19,28 +19,27 @@ fn fixture() -> (
     (tmp, repo, home, config)
 }
 
-/// #10102: `tm run` writes the PM policy into the repo and its config dir.
+/// #12077: `tm run` writes no sandbox key into the repo or its config dir.
 #[test]
-fn run_sandbox_applies_and_verifies_the_pm_policy() {
+fn run_sandbox_writes_no_sandbox_settings_12077() {
     let (_tmp, repo, home, config) = fixture();
-    run_sandbox(&repo, &home, &config, SessionProfile::Pm).expect("applies");
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(repo.join(".claude/settings.json")).expect("settings"),
-    )
-    .expect("json");
-    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
-    assert!(config.join("settings.json").exists());
+    run_sandbox(&repo, &home, &config, SessionProfile::Pm).expect("not refused");
+    assert!(
+        !repo.join(".claude/settings.json").exists(),
+        "no project write"
+    );
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+    assert!(!repo.join(".trusty-mpm/sandbox-roles.json").exists());
 }
 
-/// #10102 Fail-Open Check: a repo whose sandbox does not verify refuses.
+/// #12077: a local override that turns the sandbox off no longer refuses the
+/// run, and is left as it was.
 #[test]
-fn run_sandbox_refuses_a_workspace_that_does_not_verify() {
+fn run_sandbox_leaves_a_local_override_untouched_12077() {
     let (_tmp, repo, home, config) = fixture();
-    std::fs::write(
-        repo.join(".claude/settings.local.json"),
-        r#"{"sandbox":{"enabled":false}}"#,
-    )
-    .expect("plant");
-    let err = run_sandbox(&repo, &home, &config, SessionProfile::Pm).expect_err("refuses");
-    assert!(err.to_string().contains("settings.local.json"), "{err}");
+    let local = repo.join(".claude/settings.local.json");
+    let planted = r#"{"sandbox":{"enabled":false}}"#;
+    std::fs::write(&local, planted).expect("plant");
+    run_sandbox(&repo, &home, &config, SessionProfile::Pm).expect("not refused");
+    assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
 }

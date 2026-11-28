@@ -7,8 +7,7 @@ use tempfile::TempDir;
 
 use super::{
     ALLOWED_DOMAINS, DENIED_ENV_VARS, SandboxInputs, SandboxRole, SandboxSettingsError,
-    apply_launch_sandbox, project_policy, user_policy, verify_sandbox_settings,
-    write_sandbox_settings,
+    project_policy, user_policy, verify_sandbox_settings, write_sandbox_settings,
 };
 
 /// A scratch workspace, home and user config dir.
@@ -1145,10 +1144,11 @@ fn a_foreign_user_domain_refuses_the_launch() {
 #[test]
 fn a_launch_write_repairs_a_strict_allowlist_with_no_domains() {
     let fx = Fx::new();
-    apply_launch_sandbox(SandboxRole::Pm, &fx.inputs, Some(&fx.user)).expect("first launch");
+    // #12077: the launch entry writes nothing; the writer is what repairs.
+    write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("first write");
     hostless_user_file(&fx);
     refused(verify(&fx, SandboxRole::Pm), "the 1.14.14 user file");
-    apply_launch_sandbox(SandboxRole::Pm, &fx.inputs, Some(&fx.user)).expect("repairing launch");
+    write_sandbox_settings(SandboxRole::Pm, &fx.inputs, &fx.user).expect("repairing write");
     let user = read(&fx.user.join("settings.json"));
     assert_eq!(user["theme"], json!("dark"), "operator key kept: {user}");
     assert_eq!(

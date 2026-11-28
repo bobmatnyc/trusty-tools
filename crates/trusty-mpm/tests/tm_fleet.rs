@@ -2205,41 +2205,34 @@ fn architect_restart_on_a_busy_box_exits_2_and_stops_nothing() {
     assert_eq!(env.launches(2).len(), 1, "restart launched a claude");
 }
 
-/// #10102: the Architect launch writes its unsandboxed policy into its
-/// directory and verifies it before the session starts.
+/// #12077: the Architect launch writes no sandbox policy and no role record
+/// into its directory.
 #[test]
-fn fleet_init_applies_the_architect_sandbox_before_the_session() {
+fn fleet_init_writes_no_architect_sandbox_12077() {
     let env = FleetEnv::new();
     let dir = env.dir();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
-    let settings: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.join(".claude/settings.json")).expect("project settings"),
-    )
-    .expect("json");
-    assert_eq!(settings["sandbox"]["enabled"], false, "{settings}");
-    let record = std::fs::read_to_string(dir.join(".trusty-mpm/sandbox-roles.json"))
-        .expect("the role record");
-    assert!(record.contains("\"architect\""), "{record}");
+    if let Ok(raw) = std::fs::read_to_string(dir.join(".claude/settings.json")) {
+        let settings: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert!(settings.get("sandbox").is_none(), "{settings}");
+    }
+    assert!(!dir.join(".trusty-mpm/sandbox-roles.json").exists());
 }
 
-/// #10102 Fail-Open Check: a sandbox the Architect cannot apply refuses the
-/// launch — here the directory already holds a sandboxed PM's policy — and
-/// no session starts.
+/// #12077: a directory that already holds a sandboxed PM's role record no
+/// longer refuses the Architect launch, and the record is left as it was.
 #[test]
-fn fleet_init_refuses_when_the_architect_sandbox_cannot_be_applied() {
+fn fleet_init_is_not_refused_over_a_pm_role_record_12077() {
     let env = FleetEnv::new();
     let dir = env.dir();
     std::fs::create_dir_all(dir.join(".trusty-mpm")).expect("mkdir");
-    std::fs::write(
-        dir.join(".trusty-mpm/sandbox-roles.json"),
-        r#"{"pm":{"sandbox":{"enabled":true}}}"#,
-    )
-    .expect("plant a PM record");
+    let record = dir.join(".trusty-mpm/sandbox-roles.json");
+    let planted = r#"{"pm":{"sandbox":{"enabled":true}}}"#;
+    std::fs::write(&record, planted).expect("plant a PM record");
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
-    assert!(!out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("`pm` role"), "{}", text(&out));
-    assert!(!env.has_session("tm-architect"), "{}", text(&out));
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(std::fs::read_to_string(&record).expect("read"), planted);
 }
 
 /// A tmux server of the test's own on an explicit socket, standing in for
