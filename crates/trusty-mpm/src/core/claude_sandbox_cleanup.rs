@@ -1,5 +1,6 @@
 //! The one-time removal of the sandbox keys tm 1.14.14 and 1.14.15 wrote into
-//! a project's `<ws>/.claude/settings.json` (#12077 slice 3).
+//! a project's `<ws>/.claude/settings.json` (#12077 slice 3), and the launch
+//! pass that also runs the user tier and deletes the role record.
 //!
 //! Why (#12077): "tm removes its own keys once. At the next
 //! launch tm deletes only the keys it wrote, then never writes that file
@@ -8,11 +9,13 @@
 //! file only, each key and list entry that equals the workspace's role record
 //! (the detector's matching rule), then writes a done marker
 //! (`<ws>/.trusty-mpm/`[`CLEANUP_MARKER_FILE`]). [`clean_tm_sandbox_keys_on_launch`]
-//! is the launch wrapper: it logs a failure and never refuses the launch.
+//! is the launch wrapper: it runs the project tier, then tm's user tier
+//! (`claude_sandbox_cleanup_user.rs`), then deletes the role record when the
+//! switch is off; it logs a failure and never refuses the launch.
 //! `settings.local.json` is never touched: 1.14.14 and 1.14.15 only read it
 //! (`sandbox_settings_verify.rs`), and their one writer, `write_project_tier`,
-//! went through `merge_settings`, which writes `settings.json` alone. The user
-//! tiers are out of scope (owner decision pending).
+//! went through `merge_settings`, which writes `settings.json` alone.
+//! `~/.claude/settings.json` is never touched: the 1.14.14 writer refused it.
 //! Test: `claude_sandbox_cleanup_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -20,8 +23,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::TmSandboxKey;
+use super::cleanup_user::{clean_tm_user_sandbox_keys_once, log_user_outcome};
 use super::detect::{project_keys_in, read_object, recorded_project_policy};
-use crate::core::session_launch::SandboxSettingsError;
+use crate::core::session_launch::{SandboxRole, SandboxSettingsError};
 
 /// The done marker's file name under `<ws>/.trusty-mpm/`.
 pub const CLEANUP_MARKER_FILE: &str = "sandbox-cleanup.json";
@@ -123,57 +127,85 @@ pub fn clean_tm_sandbox_keys_once(workspace: &Path) -> Result<CleanupOutcome, Sa
     // Checked before the lock, whose sidecar would create `.claude/`.
     let Some(settings) = read_object(&file)? else {
         // #12077: mark an absent file done, or a file written later is cleaned.
-        write_marker(&marker, Vec::new(), true)?;
+        write_marker(&marker, &marker_body("project", &[], true))?;
         return Ok(CleanupOutcome::NoSettingsFile);
     };
     let removed = if project_keys_in(&file, &settings, &ours).is_empty() {
         Vec::new()
     } else {
-        let write = |source| SandboxCleanupError::Write {
-            path: file.clone(),
-            source,
-        };
-        let locked = crate::core::settings_lock::with_settings_lock(
-            &file,
-            || -> Result<Option<Vec<TmSandboxKey>>, SandboxCleanupError> {
-                // Re-read inside the lock: another writer may have published.
-                let Some(mut settings) = read_object(&file)? else {
-                    return Ok(None);
-                };
-                let removed = project_keys_in(&file, &settings, &ours);
-                if prune(&mut settings, &ours) {
-                    crate::core::settings_lock::publish(&file, &settings).map_err(write)?;
-                }
-                Ok(Some(removed))
-            },
-        )
-        .map_err(write)?;
-        match locked? {
-            Some(removed) => removed,
+        // #12077 slice 3b: the one write path both tiers share.
+        match prune_locked(&file, &ours, &[])? {
+            Some(read) => project_keys_in(&file, &read, &ours),
             None => {
                 // #12077: the file went while we waited; mark it done as absent.
-                write_marker(&marker, Vec::new(), true)?;
+                write_marker(&marker, &marker_body("project", &[], true))?;
                 return Ok(CleanupOutcome::NoSettingsFile);
             }
         }
     };
-    let labels = removed.iter().map(|k| k.key.clone()).collect();
-    write_marker(&marker, labels, false)?;
+    write_marker(
+        &marker,
+        &marker_body("project", &removed_labels(&removed), false),
+    )?;
     Ok(CleanupOutcome::Cleaned(removed))
 }
 
-/// Write the done marker: the removed key labels, plus `"settings": "absent"`
-/// when there was no settings file (#12077).
-fn write_marker(
-    marker: &Path,
-    removed: Vec<String>,
-    absent: bool,
-) -> Result<(), SandboxCleanupError> {
-    let mut body = json!({"issue": 12077, "removed": removed});
+/// Under `file`'s settings lock, re-read it, remove each leaf of `ours` it
+/// holds with tm's value ([`prune`]) and publish only when something went.
+///
+/// Why: #12077 — both tiers take the same lock, temp-file and rename path.
+/// What: returns the object as read inside the lock, before the prune, so the
+/// caller labels what went; `None` when the file went while we waited. A list
+/// under a key in `whole` is tm's only when it equals tm's list.
+///
+/// # Errors
+///
+/// [`SandboxCleanupError::Read`] for a re-read failure,
+/// [`SandboxCleanupError::Write`] for a lock or publish failure.
+pub(super) fn prune_locked(
+    file: &Path,
+    ours: &Value,
+    whole: &[&str],
+) -> Result<Option<Value>, SandboxCleanupError> {
+    let write = |source| SandboxCleanupError::Write {
+        path: file.to_path_buf(),
+        source,
+    };
+    crate::core::settings_lock::with_settings_lock(
+        file,
+        || -> Result<Option<Value>, SandboxCleanupError> {
+            // Re-read inside the lock: another writer may have published.
+            let Some(read) = read_object(file)? else {
+                return Ok(None);
+            };
+            let mut pruned = read.clone();
+            if prune(&mut pruned, ours, whole) {
+                crate::core::settings_lock::publish(file, &pruned).map_err(write)?;
+            }
+            Ok(Some(read))
+        },
+    )
+    .map_err(write)?
+}
+
+/// The key labels of `removed`, for a marker.
+pub(super) fn removed_labels(removed: &[TmSandboxKey]) -> Vec<String> {
+    removed.iter().map(|k| k.key.clone()).collect()
+}
+
+/// A done marker's body: the tier that ran (#12077 slice 3b), the removed key
+/// labels, plus `"settings": "absent"` when there was no settings file.
+pub(super) fn marker_body(tier: &str, removed: &[String], absent: bool) -> Value {
+    let mut body = json!({"issue": 12077, "tier": tier, "removed": removed});
     if absent {
         body["settings"] = json!("absent");
     }
-    crate::core::settings_lock::publish(marker, &body).map_err(|source| {
+    body
+}
+
+/// Write the done marker `body` (#12077).
+pub(super) fn write_marker(marker: &Path, body: &Value) -> Result<(), SandboxCleanupError> {
+    crate::core::settings_lock::publish(marker, body).map_err(|source| {
         SandboxCleanupError::Marker {
             path: marker.to_path_buf(),
             source,
@@ -181,15 +213,121 @@ fn write_marker(
     })
 }
 
-/// [`clean_tm_sandbox_keys_once`] for a launch: never refuses it.
+/// The one-time cleanup pass of a launch: never refuses it.
 ///
 /// Why: #12077 — the cleanup must never block a launch, and a failure must
-/// not be silent.
-/// What: logs the removed keys at info; logs a failure, which names the file,
-/// at warn and returns, so the launch goes ahead and a later one retries.
-/// Test: `the_shared_launch_step_runs_the_cleanup_and_never_refuses_12077`.
-pub fn clean_tm_sandbox_keys_on_launch(workspace: &Path) {
-    match clean_tm_sandbox_keys_once(workspace) {
+/// not be silent. MB1693 answers 1 and 2: the same pass cleans tm's user tier
+/// and then deletes the role record.
+/// What, in order, each step run whatever the others returned:
+/// 1. the project tier, [`clean_tm_sandbox_keys_once`];
+/// 2. tm's user tier `<config_dir>/settings.json` when the launch has a
+///    config dir, [`clean_tm_user_sandbox_keys_once`];
+/// 3. when `opted_in` is false and the project tier's marker exists, so
+///    step 1 has read the record, the role record is deleted, but only when
+///    `role` could have shared it ([`delete_role_record`]).
+///
+/// Each tier writes its own marker, and only when it finished, so a partial
+/// success re-runs only the tier that did not finish. Removed keys log at
+/// info; kept user-tier values, a symlink skip and every failure (naming its
+/// file) log at warn, and the launch goes ahead.
+///
+/// Test: `the_shared_launch_step_runs_the_cleanup_and_never_refuses_12077`,
+/// `the_role_record_is_deleted_only_when_the_flag_is_off_12077`,
+/// `a_launch_keeps_a_record_of_a_role_it_never_shared_12077`,
+/// `a_user_tier_write_failure_marks_only_the_project_tier_then_retries_12077`,
+/// `a_file_with_no_tm_key_is_byte_identical_in_both_tiers_12077`.
+pub fn clean_tm_sandbox_keys_on_launch(
+    workspace: &Path,
+    config_dir: Option<&Path>,
+    home: &Path,
+    role: SandboxRole,
+    opted_in: bool,
+) {
+    log_project_outcome(workspace, clean_tm_sandbox_keys_once(workspace));
+    // #12077 slice 3b: owner answer 1, the user tier, in the same pass.
+    if let Some(dir) = config_dir {
+        log_user_outcome(dir, clean_tm_user_sandbox_keys_once(dir, home));
+    }
+    // #12077 slice 3b: owner answer 2 — the record goes once the project tier
+    // has read it and finished; an opted-in launch keeps it.
+    let tm_dir = workspace.join(".trusty-mpm");
+    if !opted_in && tm_dir.join(CLEANUP_MARKER_FILE).exists() {
+        delete_role_record(&tm_dir, role);
+    }
+}
+
+/// Delete `<ws>/.trusty-mpm/sandbox-roles.json` when every role it names is
+/// one `role` could have shared it with under 1.14.14/1.14.15.
+///
+/// Why: #12077 (PR #12133) — `tm fleet init` is an Architect launch, and it
+/// deleted a PM's record. 1.14.14/1.14.15 refused an Architect launch over a
+/// PM or agent entry (`sandbox_roles::conflicting_role`), so that record is
+/// never one the Architect's launch wrote.
+/// What: a PM or agent launch deletes a record naming only `pm`/`agent`; an
+/// Architect launch one naming only `architect`. A record naming another
+/// role, an empty record, or one that cannot be read is kept and logged.
+fn delete_role_record(tm_dir: &Path, role: SandboxRole) {
+    let record = tm_dir.join(super::ROLE_RECORD_FILE);
+    match read_object(&record) {
+        Ok(None) => return,
+        Ok(Some(roles)) if shares_record(&roles, role) => {}
+        // #12077: another role's record, so not this launch's to delete.
+        Ok(Some(roles)) => {
+            let named: Vec<&str> = roles
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::info!(
+                path = %record.display(),
+                ?role,
+                ?named,
+                "#12077: kept the sandbox role record; it names a role this launch never shared it with"
+            );
+            return;
+        }
+        // #12077: an unreadable record names no owner, so it is kept.
+        Err(err) => {
+            tracing::warn!(
+                path = %record.display(),
+                error = %err,
+                "#12077: the sandbox role record cannot be read, so it is kept; a later launch retries"
+            );
+            return;
+        }
+    }
+    match std::fs::remove_file(&record) {
+        Ok(()) => tracing::info!(
+            path = %record.display(),
+            "#12077: deleted the sandbox role record tm 1.14.14/1.14.15 wrote"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            path = %record.display(),
+            error = %e,
+            "#12077: deleting the sandbox role record failed; a later launch retries"
+        ),
+    }
+}
+
+/// Whether `role` could have shared the role record `roles` (#12077): a
+/// non-empty object whose every key is a role of `role`'s sandbox class.
+///
+/// What: the keys are `sandbox_roles::role_key`'s, frozen with the 1.14.15
+/// record format; `pm` and `agent` shared one record, `architect` none.
+fn shares_record(roles: &Value, role: SandboxRole) -> bool {
+    let class: &[&str] = if role == SandboxRole::Architect {
+        &["architect"]
+    } else {
+        &["pm", "agent"]
+    };
+    roles
+        .as_object()
+        .is_some_and(|m| !m.is_empty() && m.keys().all(|k| class.contains(&k.as_str())))
+}
+
+/// Log one project-tier run (#12077).
+fn log_project_outcome(workspace: &Path, outcome: Result<CleanupOutcome, SandboxCleanupError>) {
+    match outcome {
         Ok(CleanupOutcome::Cleaned(removed)) if !removed.is_empty() => {
             let keys: Vec<&str> = removed.iter().map(|k| k.key.as_str()).collect();
             tracing::info!(
@@ -215,11 +353,12 @@ pub fn clean_tm_sandbox_keys_on_launch(workspace: &Path) {
 /// Remove from `have` each leaf of `ours` it holds with the same value;
 /// `true` when `have` changed.
 ///
-/// What: the detector's rule (`collect` with no whole-list keys) applied as a
-/// removal. Objects recurse by key; a list loses each entry `ours` lists; a
-/// scalar key goes when equal. A container emptied by the removal goes too.
-/// `retain` keeps the remaining keys and entries in their order.
-fn prune(have: &mut Value, ours: &Value) -> bool {
+/// What: the detector's rule (`collect`) applied as a removal. Objects recurse
+/// by key; a list under a key in `whole` goes only when equal to tm's list,
+/// any other list loses each entry `ours` lists; a scalar key goes when equal.
+/// A container emptied by the removal goes too. `retain` keeps the remaining
+/// keys and entries in their order.
+fn prune(have: &mut Value, ours: &Value, whole: &[&str]) -> bool {
     match (have, ours) {
         (Value::Object(map), Value::Object(wanted)) => {
             let mut changed = false;
@@ -228,8 +367,10 @@ fn prune(have: &mut Value, ours: &Value) -> bool {
                     continue;
                 };
                 let drop = match value {
+                    // #12077 slice 3b: a whole-list key is tm's only when equal.
+                    Value::Array(_) if whole.contains(&key.as_str()) => child == value,
                     Value::Object(_) | Value::Array(_) => {
-                        let pruned = prune(child, value);
+                        let pruned = prune(child, value, whole);
                         changed |= pruned;
                         pruned && is_empty_container(child)
                     }

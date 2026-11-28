@@ -70,7 +70,7 @@ pub fn detect_tm_sandbox_keys(
     }
     let file = user_tier_dir.join("settings.json");
     if let (Some(settings), Some(ours)) = (read_object(&file)?, user_policy(SandboxRole::Pm)) {
-        collect(&file, &settings, &ours, "", &["allowedDomains"], &mut found);
+        found.extend(user_keys_in(&file, &settings, &ours));
     }
     Ok(found)
 }
@@ -107,6 +107,19 @@ pub(super) fn recorded_project_policy(
 pub(super) fn project_keys_in(file: &Path, settings: &Value, ours: &Value) -> Vec<TmSandboxKey> {
     let mut found = Vec::new();
     collect(file, settings, ours, "", &[], &mut found);
+    found
+}
+
+/// The user-tier lists that are tm's only as a whole: 1.14.15 replaced
+/// `allowedDomains` outright, so a list that differs at all is the user's.
+pub(super) const USER_WHOLE_LISTS: &[&str] = &["allowedDomains"];
+
+/// Each user-tier key or list entry of `settings` (read from `file`) that
+/// equals tm's exact value set `ours` (#12077): the detector's and the
+/// cleanup's one matching rule for that tier.
+pub(super) fn user_keys_in(file: &Path, settings: &Value, ours: &Value) -> Vec<TmSandboxKey> {
+    let mut found = Vec::new();
+    collect(file, settings, ours, "", USER_WHOLE_LISTS, &mut found);
     found
 }
 
@@ -166,7 +179,7 @@ fn collect(
 }
 
 /// A list entry's label: an object's `name`, a string's text, else its JSON.
-fn entry_label(entry: &Value) -> String {
+pub(super) fn entry_label(entry: &Value) -> String {
     match entry {
         Value::String(text) => text.clone(),
         Value::Object(map) => match map.get("name") {

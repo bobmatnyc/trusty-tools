@@ -362,7 +362,8 @@ fn a_default_launch_writes_no_sandbox_key_12077() {
     }
     let inputs = fx.inputs("/t/a");
     for role in [SandboxRole::Pm, SandboxRole::Agent, SandboxRole::Architect] {
-        apply_launch_sandbox(role, &inputs, Some(&fx.config)).expect("a launch is never refused");
+        apply_launch_sandbox(role, &inputs, Some(&fx.config), false)
+            .expect("a launch is never refused");
     }
     assert_eq!(fx.project(), json!({ "theme": "dark" }));
     assert_eq!(read(&local), json!({ "model": "x" }));
@@ -381,7 +382,7 @@ fn a_launch_with_no_config_dir_is_not_refused_12077() {
     let inputs = fx.inputs("/t/a");
     let operators = inputs.home.join(".claude");
     for dir in [None, Some(operators.as_path()), Some(Path::new("rel"))] {
-        apply_launch_sandbox(SandboxRole::Pm, &inputs, dir).expect("not refused");
+        apply_launch_sandbox(SandboxRole::Pm, &inputs, dir, false).expect("not refused");
     }
     assert!(!operators.exists(), "no `~/.claude` write");
     assert!(!fx.root.join("ws/.claude/settings.json").exists());

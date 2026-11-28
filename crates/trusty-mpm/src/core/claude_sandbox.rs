@@ -11,7 +11,8 @@
 //! [`crate::core::architect_lockdown::Lockdown::with_sandbox`], so no Claude
 //! settings file is written. [`detect_tm_sandbox_keys`] reports, read-only,
 //! which sandbox keys tm 1.14.14 and 1.14.15 wrote into those files, and
-//! [`clean_tm_sandbox_keys_once`] removes them from the project file, once.
+//! [`clean_tm_sandbox_keys_once`] removes them from the project file, once;
+//! [`clean_tm_user_sandbox_keys_once`] from tm's user-tier file, once.
 //! Test: `claude_sandbox_tests.rs`.
 
 use std::path::Path;
@@ -32,6 +33,13 @@ mod cleanup;
 pub use cleanup::{
     CLEANUP_MARKER_FILE, CleanupOutcome, SandboxCleanupError, clean_tm_sandbox_keys_on_launch,
     clean_tm_sandbox_keys_once,
+};
+
+// #12077 slice 3b: the same one-time pass over tm's user-tier settings file.
+#[path = "claude_sandbox_cleanup_user.rs"]
+mod cleanup_user;
+pub use cleanup_user::{
+    USER_CLEANUP_MARKER_FILE, UserCleanupOutcome, clean_tm_user_sandbox_keys_once,
 };
 
 /// The one opt-in switch: `TM_CLAUDE_SANDBOX=1` turns the sandbox on.
@@ -167,3 +175,7 @@ mod tests;
 #[cfg(test)]
 #[path = "claude_sandbox_cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "claude_sandbox_cleanup_user_tests.rs"]
+mod cleanup_user_tests;
