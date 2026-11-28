@@ -1274,3 +1274,49 @@ fn an_unreadable_launch_record_is_a_gap_never_a_pass_12077() {
         );
     }
 }
+
+/// #12077 part 4c: a project file owes tm no hook, so a hookless settings
+/// file is complete — the `HooksMissing` gap whose repair wrote hooks back on
+/// every boot reconcile is retired.
+#[test]
+fn a_hookless_settings_file_is_not_a_gap_12077() {
+    let tmp = TempDir::new().unwrap();
+    let fw = fully_provisioned(tmp.path());
+    write_settings(&fw, r#"{"outputStyle": "trusty-mpm"}"#);
+    let report = validate_workspace(&fw);
+    assert!(report.is_complete(), "{:?}", report.gaps);
+}
+
+/// #12077 part 4c (Q6): boot reconcile runs `validate_and_repair`; its repair
+/// must never write tm's hooks into the project file, or it undoes 4c on
+/// every daemon start.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn a_repair_never_writes_hooks_into_the_project_file_12077() {
+    let fake_home = TempDir::new().unwrap();
+    let _home_guard = {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        HomeGuard(prior)
+    };
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+    fw.trusty_mpm_root = None;
+    seed_agent_source(&fw, &["engineer"]);
+    seed_skill_source(&fw, &["tm-doctor"]);
+
+    let outcome = validate_and_repair(&fw, &workspace, None);
+    assert!(outcome.repair_error.is_none(), "{:?}", outcome.repair_error);
+    for name in ["settings.json", "settings.local.json"] {
+        let path = workspace.join(".claude").join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("hooks").is_none(), "{}: {value}", path.display());
+    }
+}

@@ -485,3 +485,31 @@ fn clean_settings_file_spares_a_provisioned_files_own_hooks() {
         vec!["PreToolUse".to_string()]
     );
 }
+
+/// #12077 part 4c: a file tm's project tier provisioned (PM guard present) is
+/// stale now — the #10565 exemption is gone, so `--force` strips its tm
+/// entries, the installed lifecycle triad included.
+#[test]
+fn clean_settings_file_strips_a_provisioned_files_hooks_12077() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+    let guard = json!({
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard" }]
+    });
+    let mut val = tm_settings();
+    val["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, guard);
+    std::fs::write(&path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
+
+    assert_eq!(
+        contamination_event_names(&val),
+        vec!["PreToolUse".to_string()]
+    );
+    let outcome = clean_settings_file(&path, true).unwrap().expect("stripped");
+    assert_eq!(outcome.removed_events, vec!["PreToolUse".to_string()]);
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(contamination_event_names(&after).is_empty(), "{after}");
+}

@@ -520,3 +520,30 @@ fn missing_group_row_names_the_launch_that_restores_the_guard_12077() {
     );
     assert!(missing.message.contains("guard"), "{}", missing.message);
 }
+
+/// #12077 part 4c: a file an older managed launch provisioned — the PM guard
+/// (here exec form, as the Architect wrote it) beside the lifecycle triad — is
+/// stale now that the body carries tm's hooks, so it IS contamination (the
+/// #10565 exemption is gone).
+#[test]
+fn check_hooks_hygiene_warns_on_a_provisioned_file_12077() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("architect");
+    let mut val = tm_hooks_value();
+    val["hooks"]["PreToolUse"].as_array_mut().unwrap().insert(
+        0,
+        serde_json::json!({ "matcher": "", "hooks": [{
+            "type": "command", "command": "/usr/local/bin/tm",
+            "args": ["hook", "--pm-guard"], "onFailure": "block"
+        }] }),
+    );
+    write_settings(&project, &val);
+
+    let (contamination, ..) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(
+        contamination.status,
+        CheckStatus::Warn,
+        "{}",
+        contamination.message
+    );
+}
