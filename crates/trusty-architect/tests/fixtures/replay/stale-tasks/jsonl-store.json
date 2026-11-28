@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q",
+    "--json"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_FORMAT": "jsonl",
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/goals.jsonl": "{\"data\":{\"rank\":3},\"id\":\"G01\",\"sv\":1,\"version\":1}\n{\"data\":{\"rank\":1},\"id\":\"G02\",\"sv\":1,\"version\":1}\n{\"data\":{\"rank\":3},\"id\":\"G03\",\"sv\":1,\"version\":1}\n{\"data\":{\"rank\":true},\"id\":\"G04\",\"sv\":1,\"version\":1}\n",
+    "q/items.jsonl": "{\"data\":{\"goal\":\"G01\",\"kind\":\"task\",\"progress_at\":\"2026-11-26T07:00:00Z\",\"session\":\"s1\",\"status\":\"open\",\"title\":\"Port the checker\",\"version\":4},\"id\":\"T01\",\"sv\":1,\"version\":1}\n{\"data\":{\"goal\":\"G02\",\"kind\":\"task\",\"progress_at\":\"2026-11-26T12:59:59Z\",\"session\":\"s2\",\"status\":\"open\",\"steps\":[\"a\",\"b\"],\"title\":\"24 h and a second\"},\"id\":\"T04\",\"sv\":1,\"version\":1}\n{\"data\":{\"kind\":\"task\",\"status\":\"open\",\"title\":\"never dated\"},\"id\":\"T05\",\"sv\":1,\"version\":1}\n{\"data\":{\"goal\":\"G03\",\"kind\":\"task\",\"parked\":{\"at\":\"2026-11-19T12:00:00Z\",\"note\":\"later\"},\"session\":\"s3\",\"status\":\"open\",\"title\":\"parked eight days\"},\"id\":\"T07\",\"sv\":1,\"version\":1}\n{\"data\":{\"goal\":\"Gzz\",\"kind\":\"task\",\"log\":[{\"at\":\"2026-11-24T00:00Z\"},\"x\",{\"at\":\"bad\"}],\"progress\":{\"eta\":\"2026-11-26T00:00Z\",\"pct\":40},\"progress_at\":\"2026-11-25T10:00:00+05:00\",\"reported\":{\"at\":\"2026-11-25T01:00Z\"},\"session\":\" \",\"status\":\"open\",\"title\":\"offset café\",\"updated\":\"2026-11-27T12:00:00Z\"},\"id\":\"T12\",\"sv\":1,\"version\":1}\n"
+  },
+  "reads": [
+    "q/goals.jsonl",
+    "q/items.jsonl"
+  ],
+  "stdout": "[\n {\n  \"id\": \"T04\",\n  \"session\": \"s2\",\n  \"goal\": \"G02\",\n  \"rank\": 1,\n  \"last\": \"2026-11-26T12:59:59Z\",\n  \"age_h\": 24.0,\n  \"days\": 1.0,\n  \"touch_h\": null,\n  \"flags\": [],\n  \"kind\": \"stale\",\n  \"title\": \"24 h and a second\"\n },\n {\n  \"id\": \"T07\",\n  \"session\": \"s3\",\n  \"goal\": \"G03\",\n  \"rank\": 3,\n  \"last\": \"2026-11-19T12:00:00Z\",\n  \"age_h\": 193.0,\n  \"days\": 8.0,\n  \"touch_h\": null,\n  \"flags\": [\n   \"no_progress\",\n   \"park_no_event\"\n  ],\n  \"kind\": \"parked\",\n  \"title\": \"parked eight days\"\n },\n {\n  \"id\": \"T01\",\n  \"session\": \"s1\",\n  \"goal\": \"G01\",\n  \"rank\": 3,\n  \"last\": \"2026-11-26T07:00:00Z\",\n  \"age_h\": 30.0,\n  \"days\": 1.2,\n  \"touch_h\": null,\n  \"flags\": [\n   \"no_progress\"\n  ],\n  \"kind\": \"stale\",\n  \"title\": \"Port the checker\"\n },\n {\n  \"id\": \"T05\",\n  \"session\": \"\",\n  \"goal\": null,\n  \"rank\": null,\n  \"last\": null,\n  \"age_h\": null,\n  \"days\": null,\n  \"touch_h\": null,\n  \"flags\": [\n   \"no_progress\",\n   \"no_session\"\n  ],\n  \"kind\": \"stale\",\n  \"title\": \"never dated\"\n },\n {\n  \"id\": \"T12\",\n  \"session\": \" \",\n  \"goal\": \"Gzz\",\n  \"rank\": null,\n  \"last\": \"2026-11-25T10:00:00Z\",\n  \"age_h\": 56.0,\n  \"days\": 2.3,\n  \"touch_h\": 1.0,\n  \"flags\": [\n   \"past_eta\",\n   \"no_session\"\n  ],\n  \"kind\": \"stale\",\n  \"title\": \"offset caf\\u00e9\"\n }\n]\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

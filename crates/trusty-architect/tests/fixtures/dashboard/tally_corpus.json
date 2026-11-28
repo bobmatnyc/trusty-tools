@@ -1,0 +1,25 @@
+{
+  "items": {
+    "D01": {"kind": "question", "status": "open"},
+    "D02": {"kind": "decision", "status": "open"},
+    "D03": {"kind": "question", "status": "interactive", "title": "talk it over"},
+    "D04": {"kind": "question", "status": "open", "selftest": true},
+    "D05": {"kind": "question", "status": "open", "title": "Selftest canary 9"},
+    "D06": {"kind": "question", "status": "answered", "answer": "Yes"},
+    "D07": {"kind": "question", "status": "answered", "answer": "Yes", "relayed_at": "2026-11-20T10:00:00Z"},
+    "D08": {"kind": "question", "status": "answered", "answer": "Yes", "answer_note": " Relayed to pm-1"},
+    "D09": {"kind": "question", "status": "answered", "answer": "Yes", "relayed": true},
+    "D0a": {"kind": "question", "status": "relayed", "answer": "Yes"},
+    "D0b": {"kind": "question", "status": "answered", "answer": "Yes", "selftest": true},
+    "D0c": {"kind": "question", "status": "open", "parked": {"until": "2999-01-01"}},
+    "B01": {"kind": "action", "status": "open"},
+    "B02": {"kind": "action", "status": "interactive"},
+    "A01": {"kind": "action", "status": "open"},
+    "T01": {"kind": "task", "status": "open", "run_start": "2000-01-01", "run_end": "2999-01-01"},
+    "T02": {"kind": "task", "status": "open", "parked": true}
+  },
+  "questions": {
+    "Q01": {"status": "open"},
+    "Q02": {"status": "cleared"}
+  }
+}

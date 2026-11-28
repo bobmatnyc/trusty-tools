@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "argv": [
+    "sample-app",
+    "q",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\"other\": {}}\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "",
+  "stderr": "ruling_pack: projects\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "read",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "q/meta/settings.json": "{\"technical_level\": \"wizard\"}\n"
+  },
+  "reads": [
+    "q/meta/settings.json"
+  ],
+  "stdout": "read pm\nTECHNICAL LEVEL: pm (outcome, cost, risk, reversibility, 4-6 sentences; issue and PR links ok, no file paths, SHAs, flags or job names)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

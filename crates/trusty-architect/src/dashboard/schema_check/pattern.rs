@@ -7,15 +7,24 @@
 //! What: [`Pattern::compile`] parses literals, `.`, `[...]` / `[^...]` with
 //! ranges, `\` before punctuation, `^`, `$`, groups `(...)` / `(?:...)` with
 //! `|`, and the quantifiers `?`, `*`, `+`, `{n}`, `{n,}`, `{n,m}`; anything
-//! else (`\d`, look-around, backreferences, lazy quantifiers) is refused.
+//! else (`\b`, look-around, backreferences, lazy quantifiers) is refused.
+//! #12029 P2g: the frozen Architect schemas use `\s`, `\S` and `\n`, so
+//! `\d`, `\D`, `\s`, `\S`, `\w`, `\W` (also inside a class) and the
+//! `\n`, `\t`, `\r`, `\f`, `\v` escapes are taken too, with Python's
+//! Unicode classes.
 //! The parse is compiled to a Thompson NFA; a repeat count above
 //! [`MAX_COUNT`] or a program past [`MAX_PROGRAM`] steps is refused.
 //! [`Pattern::search`] answers Python's `re.search` over code points with a
 //! Pike VM (two thread lists, no recursion), so stack use does not depend on
 //! the input and time is O(input × program) (#10063 df-G01): `.` skips `\n`,
 //! `$` also matches before one final `\n`.
+//! [`Pattern::compile_python`] (#12028) also takes `\b` and `\B`, for
+//! patterns a manifest supplies at run time.
 //! Test: `pattern_matches_like_python_re_search`, `pattern_refuses_unsupported_syntax`,
-//! `shipped_patterns_match_a_megabyte_on_a_small_stack`.
+//! `shipped_patterns_match_a_megabyte_on_a_small_stack`,
+//! `python_shorthands_match_like_re_search`.
+
+use crate::pystr::{is_digit, is_space, is_word};
 
 /// The largest `{n}` / `{n,m}` count a pattern may use.
 pub const MAX_COUNT: usize = 1000;
@@ -36,9 +45,13 @@ enum Inst {
     Class {
         negate: bool,
         ranges: Vec<(char, char)>,
+        shorts: Vec<(Short, bool)>,
     },
     Start,
     End,
+    // See #12028: `\d`/`\s`/`\w` (negated: `\D`/`\S`/`\W`) and `\b`/`\B`.
+    Short(Short, bool),
+    Boundary(bool),
     Split(usize, usize),
     Jmp(usize),
     Match,
@@ -51,9 +64,12 @@ enum Node {
     Class {
         negate: bool,
         ranges: Vec<(char, char)>,
+        shorts: Vec<(Short, bool)>,
     },
     Start,
     End,
+    Short(Short, bool),
+    Boundary(bool),
     Group(Vec<Vec<Node>>),
     Repeat {
         node: Box<Node>,
@@ -62,10 +78,40 @@ enum Node {
     },
 }
 
+/// A Python shorthand class.
+#[derive(Debug, Clone, Copy)]
+enum Short {
+    Digit,
+    Space,
+    Word,
+}
+
+impl Short {
+    fn test(self, c: char) -> bool {
+        match self {
+            Self::Digit => is_digit(c),
+            Self::Space => is_space(c),
+            Self::Word => is_word(c),
+        }
+    }
+}
+
+/// `\d \D \s \S \w \W`: the class and whether it is negated.
+fn short_of(c: char) -> Option<(Short, bool)> {
+    let class = match c.to_ascii_lowercase() {
+        'd' => Short::Digit,
+        's' => Short::Space,
+        'w' => Short::Word,
+        _ => return None,
+    };
+    Some((class, c.is_ascii_uppercase()))
+}
+
 struct Parser<'a> {
     chars: Vec<char>,
     pos: usize,
     source: &'a str,
+    python: bool,
 }
 
 impl Pattern {
@@ -74,10 +120,23 @@ impl Pattern {
     /// # Errors
     /// A message naming the unsupported or malformed part.
     pub fn compile(source: &str) -> Result<Self, String> {
+        Self::compile_with(source, false)
+    }
+
+    /// Parses `source` with the Python shorthands as well (see the module doc).
+    ///
+    /// # Errors
+    /// A message naming the unsupported or malformed part.
+    pub fn compile_python(source: &str) -> Result<Self, String> {
+        Self::compile_with(source, true)
+    }
+
+    fn compile_with(source: &str, python: bool) -> Result<Self, String> {
         let mut p = Parser {
             chars: source.chars().collect(),
             pos: 0,
             source,
+            python,
         };
         let alts = p.alternation()?;
         if p.pos != p.chars.len() {
@@ -141,6 +200,13 @@ impl Pattern {
                 Inst::End if i == s.len() || (i + 1 == s.len() && s[i] == '\n') => {
                     stack.push(pc + 1);
                 }
+                Inst::Boundary(want) => {
+                    let before = i > 0 && is_word(s[i - 1]);
+                    let after = s.get(i).is_some_and(|c| is_word(*c));
+                    if (before != after) == want {
+                        stack.push(pc + 1);
+                    }
+                }
                 _ => {}
             }
         }
@@ -152,8 +218,15 @@ impl Pattern {
         match &self.prog[pc] {
             Inst::Char(c) => *c == ch,
             Inst::Any => ch != '\n',
-            Inst::Class { negate, ranges } => {
-                ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&ch)) != *negate
+            Inst::Short(class, negate) => class.test(ch) != *negate,
+            Inst::Class {
+                negate,
+                ranges,
+                shorts,
+            } => {
+                let member = ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&ch))
+                    || shorts.iter().any(|(c, n)| c.test(ch) != *n);
+                member != *negate
             }
             _ => false,
         }
@@ -236,14 +309,21 @@ impl Emitter {
         match node {
             Node::Char(c) => self.push(Inst::Char(*c)).map(drop),
             Node::Any => self.push(Inst::Any).map(drop),
-            Node::Class { negate, ranges } => self
+            Node::Class {
+                negate,
+                ranges,
+                shorts,
+            } => self
                 .push(Inst::Class {
                     negate: *negate,
                     ranges: ranges.clone(),
+                    shorts: shorts.clone(),
                 })
                 .map(drop),
             Node::Start => self.push(Inst::Start).map(drop),
             Node::End => self.push(Inst::End).map(drop),
+            Node::Short(c, n) => self.push(Inst::Short(*c, *n)).map(drop),
+            Node::Boundary(b) => self.push(Inst::Boundary(*b)).map(drop),
             Node::Group(inner) => self.alts(inner),
             Node::Repeat { node, min, max } => {
                 for _ in 0..*min {
@@ -314,7 +394,18 @@ impl Parser<'_> {
             '$' => Node::End,
             '.' => Node::Any,
             '[' => self.class()?,
-            '\\' => Node::Char(self.escaped()?),
+            '\\' => match self.peek() {
+                Some(c @ ('b' | 'B')) if self.python => {
+                    self.pos += 1;
+                    Node::Boundary(c == 'b')
+                }
+                Some(c) if short_of(c).is_some() => {
+                    self.pos += 1;
+                    let (class, negate) = short_of(c).unwrap_or((Short::Word, false));
+                    Node::Short(class, negate)
+                }
+                _ => Node::Char(self.escaped()?),
+            },
             '(' => {
                 if self.peek() == Some('?') {
                     if self.chars.get(self.pos + 1) != Some(&':') {
@@ -334,9 +425,22 @@ impl Parser<'_> {
         })
     }
 
-    /// The character after `\`: only escaped punctuation is supported.
+    /// The character after `\`: escaped punctuation, or a control escape
+    /// (`\n`, `\t`, `\r`, `\f`, `\v`; #12029 P2g).
     fn escaped(&mut self) -> Result<char, String> {
         let c = self.peek().ok_or_else(|| self.fail("trailing backslash"))?;
+        let control = match c {
+            'n' => Some('\n'),
+            't' => Some('\t'),
+            'r' => Some('\r'),
+            'f' => Some('\u{c}'),
+            'v' => Some('\u{b}'),
+            _ => None,
+        };
+        if let Some(ch) = control {
+            self.pos += 1;
+            return Ok(ch);
+        }
         if !c.is_ascii_punctuation() {
             // #10697: name the escape found; "like \d" sent a `\s` report after `\d`.
             return Err(self.fail(&format!("escape class \\{c} is not supported")));
@@ -350,7 +454,7 @@ impl Parser<'_> {
         if negate {
             self.pos += 1;
         }
-        let mut ranges = Vec::new();
+        let (mut ranges, mut shorts) = (Vec::new(), Vec::new());
         let mut first = true;
         loop {
             let c = self.peek().ok_or_else(|| self.fail("missing ']'"))?;
@@ -359,6 +463,19 @@ impl Parser<'_> {
                 break;
             }
             first = false;
+            // #12029 P2g: `[^/\s]` in the frozen items schema.
+            if c == '\\'
+                && let Some(short) = self.peek().and_then(short_of)
+            {
+                self.pos += 1;
+                if self.peek() == Some('-')
+                    && self.chars.get(self.pos + 1).is_some_and(|n| *n != ']')
+                {
+                    return Err(self.fail("bad range"));
+                }
+                shorts.push(short);
+                continue;
+            }
             let lo = if c == '\\' { self.escaped()? } else { c };
             let is_range =
                 self.peek() == Some('-') && self.chars.get(self.pos + 1).is_some_and(|n| *n != ']');
@@ -375,7 +492,11 @@ impl Parser<'_> {
                 ranges.push((lo, lo));
             }
         }
-        Ok(Node::Class { negate, ranges })
+        Ok(Node::Class {
+            negate,
+            ranges,
+            shorts,
+        })
     }
 
     fn quantified(&mut self, node: Node) -> Result<Node, String> {
@@ -464,7 +585,8 @@ mod tests {
     #[test]
     fn pattern_refuses_unsupported_syntax() {
         for bad in [
-            "\\d+",
+            "\\b",
+            "\\q",
             "(?=x)",
             "a*?",
             "a{2",
@@ -482,5 +604,32 @@ mod tests {
             assert!(Pattern::compile(bad).is_err(), "{bad}");
         }
         assert!(Pattern::compile("a{1000}").is_ok());
+    }
+
+    #[test]
+    fn python_shorthands_match_like_re_search() -> Result<(), String> {
+        let word = Pattern::compile_python("\\bAcme\\b")?;
+        assert!(word.search("an Acme host") && word.search("Acme"));
+        assert!(!word.search("Acmes") && !word.search("_Acme"));
+        assert!(Pattern::compile_python("build-\\d+")?.search("build-\u{663}"));
+        assert!(Pattern::compile_python("a\\s+b")?.search("a \u{a0}b"));
+        assert!(Pattern::compile_python("^\\w\\W\\S\\D$")?.search("x-yz"));
+        assert!(
+            Pattern::compile_python("a\\Bb")?.search("ab")
+                && !Pattern::compile_python("a\\B")?.search("a")
+        );
+        assert!(Pattern::compile_python("ws-[a-z-]+-0[0-9]")?.search("ws-main-branch-07"));
+        assert!(Pattern::compile("\\b").is_err());
+        // #12029 P2g: a shorthand inside a class, and the control escapes.
+        let class = Pattern::compile_python("^[\\d_]+$")?;
+        assert!(class.search("1_\u{663}") && !class.search("1a"));
+        assert!(
+            Pattern::compile("^[^\\n]{1,3}$")?.search("abc")
+                && !Pattern::compile("^[^\\n]{1,3}$")?.search("a\nb")
+        );
+        assert!(
+            Pattern::compile("^\\d+$")?.search("\u{663}7") && Pattern::compile("[\\s-x]").is_err()
+        );
+        Ok(())
     }
 }

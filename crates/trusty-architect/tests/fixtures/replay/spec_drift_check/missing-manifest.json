@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "docs/README.md": "# No manifest here\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "FAIL spec_drift_check: cannot read docs/specs/architect-components.manifest.json: [Errno 2] No such file or directory: '{ROOT}/docs/specs/architect-components.manifest.json'\n",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

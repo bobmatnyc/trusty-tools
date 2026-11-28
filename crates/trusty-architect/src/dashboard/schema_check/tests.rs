@@ -77,7 +77,8 @@ fn walk_refuses_unknown_keywords_and_refs() {
         err,
         Err("items/properties/x: unsupported keyword 'format'".to_owned())
     );
-    let bad_pattern = json!({"oneOf": [{"pattern": "\\d+"}]});
+    // #12029 P2g: `\d` is taken now; a look-ahead is still refused.
+    let bad_pattern = json!({"oneOf": [{"pattern": "(?=x)\\d+"}]});
     assert!(check_keywords(&bad_pattern, "x", &mut patterns).is_err());
     let dangling = json!({"$ref": "#/$defs/nope"});
     assert!(matches!(
@@ -196,7 +197,8 @@ const SHIPPED: [&str; 17] = [
 ];
 
 /// #10697: the status-brief pattern, `^[^/\s]+/\S+\.md$` with `\s` spelled
-/// out, loads and refuses exactly Python's whitespace; the old form names `\s`.
+/// out, loads and refuses exactly Python's whitespace; #12029 P2g: so does
+/// the `\s` form the frozen schema keeps.
 #[test]
 fn status_brief_pattern_matches_python_whitespace() -> Result<(), String> {
     let brief = Pattern::compile(SHIPPED[15])?;
@@ -224,10 +226,17 @@ fn status_brief_pattern_matches_python_whitespace() -> Result<(), String> {
         );
     }
     assert!(brief.search("p/a\u{feff}\u{200b}b.md"));
-    let old = Pattern::compile("^[^/\\s]+/\\S+\\.md$")
-        .err()
-        .unwrap_or_default();
-    assert!(old.contains("escape class \\s is not supported"), "{old}");
+    // #12029 P2g: the frozen Architect schema keeps the `\s` / `\S` form; it
+    // now loads and agrees with the spelled-out form on every code point.
+    let old = Pattern::compile("^[^/\\s]+/\\S+\\.md$")?;
+    for cp in 0..=0x3000_u32 {
+        let Some(c) = char::from_u32(cp) else {
+            continue;
+        };
+        for text in [format!("{c}/a.md"), format!("p/a{c}b.md")] {
+            assert_eq!(old.search(&text), brief.search(&text), "U+{cp:04X}");
+        }
+    }
     Ok(())
 }
 

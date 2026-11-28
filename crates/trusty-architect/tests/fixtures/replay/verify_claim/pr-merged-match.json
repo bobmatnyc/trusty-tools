@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"merged\", \"repo\": \"Example-Repo\", \"pr\": \"0013\", \"merge_sha\": \"5555555555\", \"claims\": {\"merged_at\": \"2026-11-20\"}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MATCH pr 13 merge_sha 5555555555\nMATCH pr 13 state MERGED\nMATCH pr 13 merged_at 2026-11-20\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "13",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "mergeCommit,state,mergedAt"
+          ],
+          "stdout": "{\"mergeCommit\": {\"oid\": \"5555555555eeeeeeeeee6666666666ffffffffff\"}, \"state\": \"MERGED\", \"mergedAt\": \"2026-11-20T10:00:00Z\"}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "13",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "mergeCommit,state,mergedAt"
+      ]
+    ]
+  }
+}

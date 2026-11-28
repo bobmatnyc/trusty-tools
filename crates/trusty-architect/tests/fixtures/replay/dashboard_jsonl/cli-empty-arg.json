@@ -1,0 +1,24 @@
+{
+  "version": 3,
+  "argv": [
+    "cli",
+    ""
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "bad/items.jsonl": "{\"id\":\"A01\",\"data\":{},\"sv\":1,\"version\":1}\n",
+    "clean/items.jsonl": "{\"data\":{\"t\":\"one\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n{\"data\":{\"t\":\"two\"},\"id\":\"A02\",\"sv\":1,\"version\":3}\n",
+    "items.jsonl": "{\"data\":{\"t\":\"one\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n{\"data\":{\"t\":\"two\"},\"id\":\"A02\",\"sv\":1,\"version\":3}\n"
+  },
+  "reads": [
+    "items.jsonl"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

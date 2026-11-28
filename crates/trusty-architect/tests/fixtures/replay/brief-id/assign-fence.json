@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "local/briefs/f.md"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/f.md": "~~~\n# inside\n~~~\n#\tMB0009: Real title é\n"
+  },
+  "reads": [
+    "local/briefs/f.md"
+  ],
+  "stdout": "MB0000\tassigned\tlocal/briefs/f.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/briefs/f.md": "<!-- brief-id: MB0000 -->\n~~~\n# inside\n~~~\n# MB0000: Real title é\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0000\", \"path\": \"local/briefs/f.md\", \"title\": \"Real title é\", \"created\": \"2026-11-27T13:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "clock": 1795784400
+}

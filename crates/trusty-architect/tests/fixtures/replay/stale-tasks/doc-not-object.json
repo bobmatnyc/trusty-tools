@@ -1,0 +1,22 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items/T01.json": "[1, 2]\n"
+  },
+  "reads": [
+    "q/items/T01.json"
+  ],
+  "stdout": "",
+  "stderr": "stale-tasks: cannot read store: document {ROOT}/q/items/T01.json is not a JSON object\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

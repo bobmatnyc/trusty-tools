@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "--strict",
+    "--level",
+    "pm",
+    "--file",
+    "empty.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "empty.md": ""
+  },
+  "reads": [
+    "empty.md"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

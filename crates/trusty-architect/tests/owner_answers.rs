@@ -96,3 +96,48 @@ fn an_unreadable_store_after_a_read_raises_one_error_and_keeps_the_answer_key() 
     assert_eq!(n, 1, "{again:?}");
     Ok(())
 }
+
+/// #12029 P2e: the poller's alerts over `alert_corpus.json` are the frozen
+/// `fleet-poll.py` `owner_answer_alerts` + `owner_wont_do_alerts` on the same
+/// items (relayed answers, `relayed_at`, a "Relayed" note, interactive,
+/// decision, canary, parked and ILIO items), in the same order. #12029 P2g:
+/// an answered item's text carries its trimmed `answer_note` (`D02`, `D0r`),
+/// the intended divergence from the frozen derive.
+#[test]
+fn poller_owner_answers_follow_the_python_pending_rule() -> TestResult {
+    use trusty_architect::dashboard::Format;
+    use trusty_architect::poller::owner_answers::{AnswerStore, owner_answer_alerts};
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/owner_answers/alert_corpus.json"))?;
+    let tmp = tempfile::tempdir()?;
+    let items = tmp.path().join("items");
+    fs::create_dir_all(&items)?;
+    for (id, data) in corpus.as_object().ok_or("corpus")? {
+        let mut doc = data.clone();
+        doc["version"] = serde_json::json!(1);
+        fs::write(items.join(format!("{id}.json")), doc.to_string())?;
+    }
+    let store = AnswerStore {
+        root: tmp.path().to_path_buf(),
+        format: Format::Dir,
+        ilio_trial: false,
+    };
+    let got: Vec<String> = owner_answer_alerts(&store, 1_795_784_400.0, true)
+        .map_err(|e| format!("{e:?}"))?
+        .into_iter()
+        .map(|a| format!("{}|{}|{}", a.kind, a.fingerprint, a.display))
+        .collect();
+    let want = [
+        "owner_answer|D01@2026-11-20T09:15:00Z|[owner] D01 answered 09:15Z: Option A",
+        "owner_answer|D02@2026-11-20T09:16:00Z|[owner] D02 answered 09:16Z: Option B: but keep it small",
+        "owner_answer|D03@2026-11-20T09:17:00Z|[owner] D03 answered 09:17Z: Ship it",
+        "owner_answer|D08@2026-11-20T09:22:00Z|[owner] D08 answered 09:22Z: Yes",
+        "owner_answer|D09@2026-11-20T09:23:00Z|[owner] D09 answered 09:23Z: Architect Do",
+        "owner_answer|D0a@2026-11-20T09:24:00Z|[owner] D0a answered 09:24Z: Architect Do (needs target resolution): via the PM",
+        "owner_answer|D0b@2026-11-20T09:25:00Z|[owner] D0b cancelled 09:25Z: dropped",
+        "owner_answer|D0r@2026-11-20T09:38:00Z|[owner] D0r answered 09:38Z: Other: ship the small one",
+        "owner_wont_do|D0e@2026-11-20T09:28:00Z|[owner] D0e won't do: out of scope",
+    ];
+    assert_eq!(got, want);
+    Ok(())
+}

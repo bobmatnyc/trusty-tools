@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [
+    "cli",
+    "next",
+    "ff"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "fg\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

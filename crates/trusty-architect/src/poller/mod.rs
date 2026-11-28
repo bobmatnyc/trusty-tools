@@ -52,7 +52,8 @@ mod messages;
 pub mod owner_answers;
 pub mod pm_intake;
 pub mod push;
-mod pyfmt;
+// See #12028: `architect_config` reads numbers through it too.
+pub(crate) mod pyfmt;
 pub mod routines;
 mod run;
 mod self_ctx_alerts;

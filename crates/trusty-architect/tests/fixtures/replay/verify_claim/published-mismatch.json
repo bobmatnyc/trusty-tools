@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"status\", \"crate\": \"sample-crate\", \"claims\": {\"crates_io_max\": \"0.4.0\"}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MISMATCH crates_io_max sample-crate 0.4.0: expected 0.4.0, got 0.3.9\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "curl": [
+        {
+          "argv": [
+            "-fsS",
+            "-m",
+            "20",
+            "-A",
+            "trusty-architect",
+            "https://crates.io/api/v1/crates/sample-crate"
+          ],
+          "stdout": "{\"crate\": {\"max_version\": \"0.3.9\"}}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "curl",
+        "-fsS",
+        "-m",
+        "20",
+        "-A",
+        "trusty-architect",
+        "https://crates.io/api/v1/crates/sample-crate"
+      ]
+    ]
+  }
+}

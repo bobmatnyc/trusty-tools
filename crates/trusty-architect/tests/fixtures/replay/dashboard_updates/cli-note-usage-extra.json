@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "argv": [
+    "cli",
+    "note",
+    "Tqce",
+    "a",
+    "b"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/owner-queue/.lock": "",
+    "local/owner-queue/items/B01.json": "{\n  \"created\": \"2026-11-20T00:00:00Z\",\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"task\": \"Tqce\",\n  \"title\": \"parser task\",\n  \"updates\": [\n    {\n      \"at\": \"2026-11-26T10:00:00Z\",\n      \"by\": \"architect\",\n      \"text\": \"already here\"\n    }\n  ],\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/B02.json": "{\n  \"created\": \"2026-11-01T00:00:00Z\",\n  \"kind\": \"task\",\n  \"status\": \"done\",\n  \"task\": \"ar-T01\",\n  \"title\": \"old parser task\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/B03.json": "{\n  \"created\": \"2026-11-22T00:00:00Z\",\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"task\": \"T01\",\n  \"title\": \"newer twin\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/B04.json": "{\n  \"created\": \"2026-11-21T00:00:00Z\",\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"task\": \"T01\",\n  \"title\": \"older twin\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/B06.json": "{\n  \"created\": \"2026-11-21T00:00:00Z\",\n  \"kind\": \"task\",\n  \"status\": \"open\",\n  \"status_at\": \"2026-11-26T00:00:00Z\",\n  \"task\": \"Tqcg\",\n  \"title\": \"noted task\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D01.json": "{\n  \"answer\": \"yes\",\n  \"answer_note\": \"after review\",\n  \"answered_at\": \"2026-11-26T12:00:00Z\",\n  \"kind\": \"question\",\n  \"relayed_at\": \"2026-11-26T12:05:00Z\",\n  \"session\": \"pm-alpha\",\n  \"status\": \"answered\",\n  \"task\": \"Tqce\",\n  \"title\": \"ship it?\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D02.json": "{\n  \"answer\": \"ok\",\n  \"answered_at\": \"2026-11-10T00:00:00Z\",\n  \"done_at\": \"2026-11-26T13:00:00Z\",\n  \"kind\": \"question\",\n  \"outcome\": \"merged\",\n  \"status\": \"done\",\n  \"task\": \"ar-T01\",\n  \"title\": \"merge?\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D03.json": "{\n  \"answer\": \"no\",\n  \"answered_at\": \"2026-11-26T05:00:00Z\",\n  \"kind\": \"question\",\n  \"status\": \"answered\",\n  \"task\": \"Tqcg\",\n  \"title\": \"later answer\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D04.json": "{\n  \"answer\": \"maybe\",\n  \"answered_at\": \"2026-11-26T05:00:00Z\",\n  \"kind\": \"question\",\n  \"status\": \"answered\",\n  \"task\": \"Tqjj\",\n  \"title\": \"no task item\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D05.json": "{\n  \"kind\": \"question\",\n  \"relayed_at\": \"2026-11-26T06:00:00Z\",\n  \"status\": \"open\",\n  \"task\": \"T01\",\n  \"title\": \"relayed without session\",\n  \"version\": 1\n}\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: dashboard_updates.py note <task-id> \"<text>\" [--by <who>]\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

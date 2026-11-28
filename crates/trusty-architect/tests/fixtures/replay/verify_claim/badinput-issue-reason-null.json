@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"fyi\", \"claims\": {\"issues\": [{\"n\": 5, \"state\": \"open\", \"reason\": null}]}}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json"
+  ],
+  "stdout": "",
+  "stderr": "BADINPUT claims.issues must be a list of {n: integer, state: open|closed, reason?: string}\n",
+  "exit": 2,
+  "writes": {}
+}

@@ -735,24 +735,24 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 3 open dashboard items: 1 question, 1 action, 1 task (2 parked)",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 1 decisions, 0 blockers",
     "free": {
-     "A": 255,
-     "D": 251,
-     "G": 252,
-     "P": 256,
-     "Q": 256,
-     "R": 256,
-     "S": 254,
-     "T": 255
+     "A": 1154,
+     "D": 1150,
+     "G": 1151,
+     "P": 1155,
+     "Q": 1155,
+     "R": 1155,
+     "S": 1153,
+     "T": 1154
     },
     "next": {
      "A": "A02",
      "D": "D06",
      "G": "G05",
-     "P": "P00",
-     "Q": "Q00",
-     "R": "R00",
+     "P": "P01",
+     "Q": "Q01",
+     "R": "R01",
      "S": "S03",
      "T": "T02"
     },
@@ -837,13 +837,15 @@
     "tally": {
      "actions": 1,
      "answered_unrelayed": 1,
+     "blockers": 0,
+     "decisions": 1,
      "open": 3,
      "parked": 2,
      "questions": 1,
      "running": 0,
      "tasks": 1
     },
-    "tally_line": "3 open dashboard items: 1 question, 1 action, 1 task (2 parked)"
+    "tally_line": "1 decisions, 0 blockers"
    },
    "name": "synthetic"
   },
@@ -5647,24 +5649,24 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 2 open dashboard items: 0 questions, 1 action, 1 task",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 decisions, 0 blockers",
     "free": {
-     "A": 248,
-     "D": 225,
-     "G": 238,
-     "P": 256,
-     "Q": 244,
-     "R": 256,
-     "S": 246,
-     "T": 255
+     "A": 1147,
+     "D": 1124,
+     "G": 1137,
+     "P": 1155,
+     "Q": 1143,
+     "R": 1155,
+     "S": 1145,
+     "T": 1154
     },
     "next": {
      "A": "A09",
-     "D": "D20",
+     "D": "D1g",
      "G": "G13",
-     "P": "P00",
+     "P": "P01",
      "Q": "Q0d",
-     "R": "R00",
+     "R": "R01",
      "S": "S0b",
      "T": "T02"
     },
@@ -6084,14 +6086,16 @@
     },
     "tally": {
      "actions": 1,
-     "answered_unrelayed": 31,
+     "answered_unrelayed": 24,
+     "blockers": 0,
+     "decisions": 0,
      "open": 2,
      "parked": 0,
      "questions": 0,
      "running": 0,
      "tasks": 1
     },
-    "tally_line": "2 open dashboard items: 0 questions, 1 action, 1 task"
+    "tally_line": "0 decisions, 0 blockers"
    },
    "name": "live"
   },
@@ -7295,26 +7299,26 @@
     }
    ],
    "derived": {
-    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 open dashboard items: 0 questions, 0 actions, 0 tasks",
+    "footer": "Dashboard: [local](http://127.0.0.1:7890/) · [tail](https://dash.example.ts.net:7890/) — 0 decisions, 0 blockers",
     "free": {
-     "A": 256,
-     "D": 256,
-     "G": 256,
-     "P": 256,
-     "Q": 256,
-     "R": 256,
-     "S": 256,
-     "T": 256
+     "A": 1155,
+     "D": 1155,
+     "G": 1155,
+     "P": 1155,
+     "Q": 1155,
+     "R": 1155,
+     "S": 1155,
+     "T": 1155
     },
     "next": {
-     "A": "A00",
-     "D": "D00",
-     "G": "G00",
-     "P": "P00",
-     "Q": "Q00",
-     "R": "R00",
-     "S": "S00",
-     "T": "T00"
+     "A": "A01",
+     "D": "D01",
+     "G": "G01",
+     "P": "P01",
+     "Q": "Q01",
+     "R": "R01",
+     "S": "S01",
+     "T": "T01"
     },
     "retire": {
      "A": [],
@@ -7355,13 +7359,15 @@
     "tally": {
      "actions": 0,
      "answered_unrelayed": 0,
+     "blockers": 0,
+     "decisions": 0,
      "open": 0,
      "parked": 0,
      "questions": 0,
      "running": 0,
      "tasks": 0
     },
-    "tally_line": "0 open dashboard items: 0 questions, 0 actions, 0 tasks"
+    "tally_line": "0 decisions, 0 blockers"
    },
    "name": "edge"
   }

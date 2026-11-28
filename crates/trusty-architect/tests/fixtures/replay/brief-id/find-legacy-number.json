@@ -1,0 +1,22 @@
+{
+  "version": 3,
+  "argv": [
+    "find",
+    "MB0003"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/registry.jsonl": "{\"id\": \"B0003\", \"path\": \"local/briefs/legacy.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0010\", \"path\": \"local/briefs/b.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB00ab\", \"path\": \"/opt/sample/c.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"mb0011\", \"path\": \"local/briefs/lower.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "reads": [
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "{ROOT}/local/briefs/legacy.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

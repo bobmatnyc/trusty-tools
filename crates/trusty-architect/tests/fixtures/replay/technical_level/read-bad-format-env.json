@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "read",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_FORMAT": "xml"
+  },
+  "files": {
+    "q/meta/settings.json": "{\n  \"technical_level\": \"engineer\",\n  \"tz\": \"UTC\",\n  \"version\": 2\n}\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "read raised StoreError\n",
+  "exit": 1,
+  "writes": {}
+}

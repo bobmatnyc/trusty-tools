@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {
+    "LOAD_FACTOR": "nan"
+  },
+  "files": {
+    "r/README.md": "no config here\n"
+  },
+  "reads": [],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: environment: LOAD_FACTOR: must be a number above 0\n",
+  "exit": 1,
+  "writes": {}
+}

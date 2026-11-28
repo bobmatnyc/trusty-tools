@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "./local/briefs/../briefs/m.md"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/m.md": "<!-- brief-id: MB0005 -->\n# MB0005: Kept\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0001\", \"path\": \"local/briefs/a.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "reads": [
+    "local/briefs/m.md",
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "MB0005\tkept\t./local/briefs/../briefs/m.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0001\", \"path\": \"local/briefs/a.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0005\", \"path\": \"local/briefs/m.md\", \"title\": \"Kept\", \"created\": \"2026-11-27T13:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "clock": 1795784400
+}

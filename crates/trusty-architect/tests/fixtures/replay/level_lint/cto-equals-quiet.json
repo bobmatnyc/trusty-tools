@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "--level=cto",
+    "--strict",
+    "cargo",
+    "test",
+    "src/lib.rs"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

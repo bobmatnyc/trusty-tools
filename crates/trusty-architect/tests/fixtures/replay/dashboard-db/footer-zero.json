@@ -1,0 +1,61 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "local/owner-queue",
+    "footer"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/owner-queue/items/D01.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 1 word \",\n  \"answered_at\": \"2026-11-26T01:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D02.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 2 word word \",\n  \"answered_at\": \"2026-11-26T02:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D03.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 3 word word word \",\n  \"answered_at\": \"2026-11-26T03:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D04.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 4 word word word word \",\n  \"answered_at\": \"2026-11-26T04:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D05.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 5 word word word word word \",\n  \"answered_at\": \"2026-11-26T05:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D06.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 6 word word word word word word \",\n  \"answered_at\": \"2026-11-26T06:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D07.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 7 word word word word word word word \",\n  \"answered_at\": \"2026-11-26T07:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D08.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 8 word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T08:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D09.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 9 word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T09:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0a.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 10 word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T10:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0b.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 11 word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T11:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0c.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 12 word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T12:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0d.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 13 word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T13:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0e.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 14 word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T14:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0f.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 15 word word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T15:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0g.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 16 word word word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T16:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0h.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 17 word word word word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T17:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0i.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 18 word word word word word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T18:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0j.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 19 word word word word word word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T19:00:00Z\",\n  \"session\": \"pm-alpha\",\n  \"version\": 1\n}\n",
+    "local/owner-queue/items/D0k.json": "{\n  \"kind\": \"decision\",\n  \"status\": \"answered\",\n  \"answer\": \"answer 20 word word word word word word word word word word word word word word word word word word word word \",\n  \"answered_at\": \"2026-11-26T20:00:00Z\",\n  \"session\": null,\n  \"version\": 1\n}\n"
+  },
+  "reads": [
+    "local/owner-queue/items/D01.json",
+    "local/owner-queue/items/D02.json",
+    "local/owner-queue/items/D03.json",
+    "local/owner-queue/items/D04.json",
+    "local/owner-queue/items/D05.json",
+    "local/owner-queue/items/D06.json",
+    "local/owner-queue/items/D07.json",
+    "local/owner-queue/items/D08.json",
+    "local/owner-queue/items/D09.json",
+    "local/owner-queue/items/D0a.json",
+    "local/owner-queue/items/D0b.json",
+    "local/owner-queue/items/D0c.json",
+    "local/owner-queue/items/D0d.json",
+    "local/owner-queue/items/D0e.json",
+    "local/owner-queue/items/D0f.json",
+    "local/owner-queue/items/D0g.json",
+    "local/owner-queue/items/D0h.json",
+    "local/owner-queue/items/D0i.json",
+    "local/owner-queue/items/D0j.json",
+    "local/owner-queue/items/D0k.json"
+  ],
+  "stdout": "Dashboard: [local](http://127.0.0.1:7890/) — 0 decisions, 0 blockers\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

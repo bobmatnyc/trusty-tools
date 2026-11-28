@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md",
+    "--keep",
+    " +99_999_999_999_999_999_999 "
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "local/state.md": "# Architect state\n\npreamble line\n\n## NEXT IDS\nNEXT IDS: G 3a, P 4b\npoll_count: 7\n\n## 2026-11-27 handoff (newest)\nnewest notes\n\n## UPDATE 2026-11-26\nupdate body\n\n## Open questions\n- one\n\n## Handoff 2026-11-25 Zoë\nthird kept\n\n## 2026-11-24 HANDOFF\nfirst moved éé\n\n## update lower is not a handoff\nkept\n\n## UPDATE 2026-11-23\nsecond moved\nlast_consumed_ts: 1795784400\n"
+  },
+  "reads": [
+    "local/state.md"
+  ],
+  "stdout": "moved 0 sections to local/state-archive.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

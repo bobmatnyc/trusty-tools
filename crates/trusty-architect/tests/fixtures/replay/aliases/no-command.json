@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "usage: aliases.py [-h] {resolve,list,check,add} ...\n\naliases.py: deterministic alias table for the owner's nicknames and project\nreferences.\n\npositional arguments:\n  {resolve,list,check,add}\n\noptions:\n  -h, --help            show this help message and exit\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

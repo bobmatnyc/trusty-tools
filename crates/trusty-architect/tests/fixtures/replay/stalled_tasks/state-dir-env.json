@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "DATG_STATE_DIR": "{ROOT}/alt",
+    "TZ": "UTC"
+  },
+  "files": {
+    "alt/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [\n    {\n      \"id\": \"ar-T0001\",\n      \"status\": \"open\",\n      \"priority\": 1,\n      \"progress_at\": \"2026-11-27T10:59Z\",\n      \"remaining\": \"review the port\"\n    }\n  ],\n  \"session\": {}\n}\n",
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"ar\",\n  \"v\": 7,\n  \"next\": {\n    \"T\": \"11\"\n  },\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": [],\n  \"session\": {}\n}\n",
+    "local/owner-queue/items/.keep": ""
+  },
+  "reads": [
+    "alt/state.json",
+    "local/owner-queue/items/.keep"
+  ],
+  "stdout": "STALLED (no progress past priority limit): ar-T0001 P1 2.0h waits: review the port\nnone\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

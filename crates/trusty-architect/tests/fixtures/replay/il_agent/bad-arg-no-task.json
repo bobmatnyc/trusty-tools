@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "brief"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: il_agent.py brief [-h] task [extras ...]\nil_agent.py brief: error: the following arguments are required: task\n",
+  "exit": 2,
+  "writes": {}
+}

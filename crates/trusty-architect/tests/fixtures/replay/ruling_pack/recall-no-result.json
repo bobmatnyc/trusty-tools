@@ -1,0 +1,97 @@
+{
+  "version": 3,
+  "argv": [
+    " SAMPLE-APP-IDX ",
+    "q",
+    "--type",
+    "decision",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "# Ruling pack: sample-app @ 2026-11-27T13:00:00Z\nQuestion: q\nType: decision. Repo: example-org/sample-app. Palaces: sample-app, supervisor. Index: sample-app-idx (last_indexed n/a).\n\n## Prior rulings (memory)\n- none found\n\n## Facts (search + exact grep)\n- none found\n\n## Direct read-only check to run\n- open the cited doc section under {ROOT}/proj; check CODEOWNERS and the issue criteria\n\n## Backend problems (counted as not found)\n- sample-app: recall failed: 'result'\n- sample-app-idx: search output not JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\nMake these MCP calls instead:\n- memory_recall(palace=\"sample-app\", query=\"q\", top_k=3, min_score=0.4)\n- memory_recall(palace=\"supervisor\", query=\"q\", top_k=3, min_score=0.4)\n- grep(index_id=\"sample-app-idx\", pattern=\"<identifier>\", compact=true) / search(index_id=\"sample-app-idx\", query=\"q\", mode=\"text\", compact=true, top_k=5)\n\nPrior ruling: no. Fact: no. Direct check done: NO (run it, then rerun with --checked).\nConfidence: LOW. Rule: HIGH = prior ruling + fact + direct check agree; MEDIUM = two of three; LOW = PM report only. Downgrade if sources disagree.\nRelay line: `Confidence: <label>. Checked: <items I read>. From PM report: <items>. Prior rulings: <ids or none found>.`\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "rg": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "trusty-memory": [
+        {
+          "argv": [
+            "serve"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0,
+          "rpc": {
+            "1": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}}}",
+            "2": "{\"jsonrpc\": \"2.0\", \"id\": 2}",
+            "3": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"other\\\": 1}\"}]}}"
+          }
+        }
+      ],
+      "trusty-search": [
+        {
+          "stdout": "{bad json",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "trusty-memory",
+        "serve"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2024-11-05\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"ruling_pack\", \"version\": \"1\"}}}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"memory_recall\", \"arguments\": {\"palace\": \"sample-app\", \"query\": \"q\", \"top_k\": 3, \"min_score\": 0.4}}}"
+      ],
+      [
+        "trusty-memory",
+        "<stdin>",
+        "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"memory_recall\", \"arguments\": {\"palace\": \"supervisor\", \"query\": \"q\", \"top_k\": 3, \"min_score\": 0.4}}}"
+      ],
+      [
+        "trusty-search",
+        "search",
+        "-i",
+        "sample-app-idx",
+        "--json",
+        "-k",
+        "5",
+        "q"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

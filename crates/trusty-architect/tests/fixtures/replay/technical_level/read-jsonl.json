@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "read",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_FORMAT": "jsonl"
+  },
+  "files": {
+    "q/meta.jsonl": "{\"data\":{\"technical_level\":\"senior-engineer\"},\"id\":\"settings\",\"sv\":1,\"version\":3}\n"
+  },
+  "reads": [
+    "q/meta.jsonl"
+  ],
+  "stdout": "read senior-engineer\nTECHNICAL LEVEL: senior-engineer (design trade-offs, failure modes, rollout and rollback, file:line evidence, blast radius)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

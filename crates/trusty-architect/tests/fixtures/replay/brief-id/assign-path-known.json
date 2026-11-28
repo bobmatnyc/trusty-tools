@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "local/briefs/r.md"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/r.md": "\r\n# B0002:   Rewritten brief\r\nnew text\r\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"B0002\", \"path\": \"local/briefs/r.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0007\", \"path\": \"local/briefs/r.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "reads": [
+    "local/briefs/r.md",
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "MB0007\tkept\tlocal/briefs/r.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/briefs/r.md": "<!-- brief-id: MB0007 -->\n\n# MB0007: Rewritten brief\nnew text\n"
+  },
+  "clock": 1795784400
+}

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "resolve",
+    "nothing here"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{\n  \"version\": 1,\n  \"people\": [\n    {\n      \"name\": \"Sam Sample\",\n      \"aliases\": [\n        \"Sam\",\n        \"S-P\",\n        \"the writer\"\n      ],\n      \"source\": \"sample\",\n      \"confirmed\": true,\n      \"github\": [\n        \"sample-gh\"\n      ],\n      \"slack_user_id\": null,\n      \"email_location\": \"directory\",\n      \"role\": \"owner\",\n      \"quiet\": [\n        \"the writer\"\n      ]\n    },\n    {\n      \"name\": \"Zoë Example\",\n      \"aliases\": [\n        \"Zo\"\n      ],\n      \"source\": \"sample\",\n      \"confirmed\": false,\n      \"github\": [],\n      \"slack_user_id\": \"U000\",\n      \"email_location\": \"directory\",\n      \"role\": \"engineer\"\n    },\n    {\n      \"name\": \"Kit\",\n      \"aliases\": [\n        \"box\"\n      ],\n      \"source\": \"sample\",\n      \"confirmed\": true,\n      \"github\": [],\n      \"slack_user_id\": null,\n      \"email_location\": \"directory\",\n      \"role\": \"engineer\",\n      \"display\": \"Kit (on call)\"\n    }\n  ],\n  \"projects\": [\n    {\n      \"name\": \"demo-api\",\n      \"aliases\": [\n        \"demo api\",\n        \"dapi\"\n      ],\n      \"source\": \"sample\",\n      \"confirmed\": true,\n      \"sessions\": [\n        \"demo-pm\",\n        \"demo-two\",\n        \"demo-three\"\n      ],\n      \"repo_path\": null,\n      \"github_repo\": \"sample/demo-api\",\n      \"palace\": null,\n      \"index_id\": null\n    },\n    {\n      \"name\": \"widgets\",\n      \"aliases\": [\n        \"wid\"\n      ],\n      \"source\": \"sample\",\n      \"confirmed\": false,\n      \"sessions\": [],\n      \"repo_path\": \"/opt/sample/widget-repo/\",\n      \"github_repo\": null,\n      \"palace\": \"w\",\n      \"index_id\": \"w1\"\n    }\n  ],\n  \"hosts\": [\n    {\n      \"name\": \"build-box\",\n      \"aliases\": [\n        \"box\",\n        \"bb\"\n      ],\n      \"source\": \"sample\",\n      \"confirmed\": true,\n      \"hostname\": null,\n      \"role\": \"ci\"\n    }\n  ]\n}\n"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

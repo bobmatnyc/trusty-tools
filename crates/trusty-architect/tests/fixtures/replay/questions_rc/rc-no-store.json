@@ -1,0 +1,266 @@
+{
+  "version": 3,
+  "argv": [
+    "rc"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_SESSION": "qna-alpha",
+    "QUESTIONS_RC_STATE": "",
+    "TZ": "UTC"
+  },
+  "files": {
+    "inbox/interactive-queue.txt": "D01\n"
+  },
+  "reads": [
+    "inbox/interactive-queue.txt"
+  ],
+  "stdout": "questions_rc: count=0 action=rc_off session=up rc=on\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "inbox/questions-rc.json": "{\"rc\": \"on\", \"url\": \"https://claude.ai/code/session_NEW02\", \"count\": 0, \"time\": \"2026-11-27T13:00:00Z\"}"
+  },
+  "fakes": {
+    "stubs": {
+      "rc-disconnect.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "rc-restore.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "start-architect-questions.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "capture-pane",
+            "-t",
+            "=qna-alpha:",
+            "-p",
+            "-J",
+            "-S",
+            "-200"
+          ],
+          "stdout": "Remote Control: https://claude.ai/code/session_OLD01\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nsee https://claude.ai/code/session_NEW02 now\n  ⏵⏵ bypass permissions on · /rc\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "rc-disconnect.sh",
+        "qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}

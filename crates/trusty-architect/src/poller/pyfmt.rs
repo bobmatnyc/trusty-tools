@@ -88,12 +88,18 @@ pub(crate) fn py_float(s: &str) -> Option<f64> {
 /// Python `int(s)` for an environment value; `None` where Python raises (or
 /// past `i64`).
 pub(crate) fn py_int(s: &str) -> Option<i64> {
+    py_int_text(s)?.parse().ok()
+}
+
+/// The ASCII decimal text Python `int(s)` reads (sign kept), whatever its
+/// size; `None` where Python raises (#12028: a value past `i64`).
+pub(crate) fn py_int_text(s: &str) -> Option<String> {
     let t = drop_digit_underscores(&ascii_digits(strip(s)));
     let digits = t.strip_prefix(['+', '-']).unwrap_or(&t);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    t.parse().ok()
+    Some(t)
 }
 
 #[cfg(test)]

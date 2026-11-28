@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md",
+    "--dry-run",
+    "--keep",
+    "5"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "local/state.md": "## handoff only\na\n"
+  },
+  "reads": [
+    "local/state.md"
+  ],
+  "stdout": "would move 0 sections; state.md 18 -> 18 bytes\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "pm",
+    "words",
+    "--strict",
+    "more"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: level_lint.py [-h] [--level LEVEL] [--strict] [--file FILE] [text ...]\nlevel_lint.py: error: unrecognized arguments: more\n",
+  "exit": 2,
+  "writes": {}
+}

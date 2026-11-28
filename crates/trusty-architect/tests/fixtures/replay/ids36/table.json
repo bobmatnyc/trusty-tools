@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "table"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "DIGITS 0123456789abcdefghijkmnpqrstuvwxyz\nBASE 34\nSPACE 1156\nDIGIT_RE [0-9a-km-np-z]{2}\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

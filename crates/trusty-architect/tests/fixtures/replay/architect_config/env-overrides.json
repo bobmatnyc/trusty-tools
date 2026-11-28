@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCHITECT_MEMORY_PALACE": "env-palace",
+    "ARCHITECT_OWNER_NAME": "Env-Owner",
+    "ARCHITECT_PROJECTS_ROOT": "~/p",
+    "CLAUDE_CONFIG_DIR": "rel/cc",
+    "DASHBOARD_PORT": " 8_080 ",
+    "DASHBOARD_TAILNET_URL": "http://box.example.test:7890/",
+    "LOAD_FACTOR": "2"
+  },
+  "files": {
+    "r/local/architect.json": "{\"caps\": {\"load_factor\": 1.5, \"other\": 3}, \"owner_name\": \"File Owner\", \"dashboard_port\": 7000}\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/rel/cc\npath: {ROOT}/r/local/architect.json\nowner_name: Env-Owner\nmemory_palace: env-palace\ndashboard_port: 8080\ntailnet_url: http://box.example.test:7890/\ncap load_factor: 2.0\ncap other: 3\nunknown: \nprojects_root: {ROOT}/p\nclaude_config_dir: {ROOT}/rel/cc\npoll_interval_s: 60\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

@@ -1,0 +1,39 @@
+{
+  "version": 3,
+  "argv": [
+    "dec",
+    "00",
+    "01",
+    "0f",
+    "0g",
+    "0z",
+    "10",
+    "zz",
+    "ff",
+    "0f\n",
+    "0f\n\n",
+    "\n0f",
+    "G7",
+    "0O",
+    "o1",
+    "1l",
+    "00x",
+    "7",
+    "",
+    "A1",
+    "ZZ",
+    "0 ",
+    "\t0"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "dec '00' -> 0\ndec '01' -> 1\ndec '0f' -> 15\ndec '0g' -> 16\ndec '0z' -> 33\ndec '10' -> 34\ndec 'zz' -> 1155\ndec 'ff' -> 525\ndec '0f\\n' -> 15\ndec '0f\\n\\n' ValueError: not two base-34 digits: '0f\\n\\n'\ndec '\\n0f' ValueError: not two base-34 digits: '\\n0f'\ndec 'G7' ValueError: not two base-34 digits: 'G7'\ndec '0O' ValueError: not two base-34 digits: '0O'\ndec 'o1' ValueError: not two base-34 digits: 'o1'\ndec '1l' ValueError: not two base-34 digits: '1l'\ndec '00x' ValueError: not two base-34 digits: '00x'\ndec '7' ValueError: not two base-34 digits: '7'\ndec '' ValueError: not two base-34 digits: ''\ndec 'A1' ValueError: not two base-34 digits: 'A1'\ndec 'ZZ' ValueError: not two base-34 digits: 'ZZ'\ndec '0 ' ValueError: not two base-34 digits: '0 '\ndec '\\t0' ValueError: not two base-34 digits: '\\t0'\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

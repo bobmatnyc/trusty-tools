@@ -3,38 +3,57 @@
 //! Why: the footer, `tally` and any report count must come from one function,
 //! never a hand count, and a store that cannot be read must give an error,
 //! never a zero (DOC-82 LDG-5.7, #10063 AC 6).
-//! What: [`tally`] reads `items` and `questions` from a [`Store`] and counts
-//! open items by kind (parked counted apart, never in `open`),
-//! answered-not-relayed, running, and open `questions` as `answers_waiting`
-//! (absent when zero). [`tally_line`] and [`footer`] render it in the
-//! prototype's words (`dashboard-db.py`); the two links are the caller's
-//! (the prototype hard-codes one host's names). A missing root, a corrupt
+//! What: [`tally`] reads `items` and `questions` from a [`Store`]: the
+//! counts are `dashboard_derive.tally` (the [`super::pyderive`] port:
+//! self-test canaries skipped, `interactive` items open, a `decision` counted
+//! as a question, relayed answers left out, `decisions` and `blockers`),
+//! then `running` and open `questions` as `answers_waiting` (absent when
+//! zero), as `dashboard-db.py tally` adds them. [`tally_line`] and [`footer`]
+//! render it in the frozen `dashboard-db.py`'s words (#12029 P2g): `<d>
+//! decisions, <b> blockers`, then ` · questions: N` (linked when the
+//! caller has the questions session's live URL) while interactive items
+//! wait, and the `Reminders (ack): ...` line the caller read. The links are
+//! the caller's (the prototype hard-codes one host's names); no tailnet URL
+//! drops the tail link, as the script does. A missing root, a corrupt
 //! document and a store in the other format are errors.
 //! Test: `footer_equals_tally_line`, `unreadable_store_is_error_not_zero`,
-//! `tally_counts_kinds_parked_running_and_waiting`.
+//! `footer_links_the_questions_part_and_carries_the_reminders_line`,
+//! `tally_counts_kinds_parked_running_and_waiting`,
+//! `tally_follows_the_python_rule_for_canaries_interactive_decisions_and_relays`.
 
 use serde::Serialize;
 use serde_json::Value;
 
-use super::derive::{is_parked, running_count};
+use super::derive::running_count;
 use super::error::DashError;
+use super::ids::py_doc;
 use super::store::{ListQuery, Store};
+use crate::pyjson_load::{PyInt, PyValue};
+use crate::pyval::get;
+use crate::tasks::store_read::PyDoc;
 
 /// Counts over the store, in the prototype's key order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Tally {
-    /// Open, unparked items of kind question, action or task.
+    /// Open (or interactive), unparked items of kind question, decision, action or task.
     pub open: usize,
-    /// Open, unparked questions (D).
+    /// Open, unparked questions and decisions (D).
     pub questions: usize,
     /// Open, unparked actions (A).
     pub actions: usize,
     /// Open, unparked tasks (T).
     pub tasks: usize,
-    /// Answered items whatever their relay state.
+    /// Answered items not yet relayed.
     pub answered_unrelayed: usize,
     /// Parked open items (never counted in `open`).
     pub parked: usize,
+    /// Open, unparked `D` items (`decision_counts`' `to_decide`).
+    pub decisions: usize,
+    /// Open, unparked `B` items.
+    pub blockers: usize,
+    /// Open items in `interactive` status; absent from the JSON when zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<usize>,
     /// Open items inside their run window.
     pub running: usize,
     /// Open `questions` documents; absent from the JSON when zero.
@@ -42,22 +61,30 @@ pub struct Tally {
     pub answers_waiting: Option<usize>,
 }
 
-/// The two dashboard links the footer names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the footer names besides the counts: the dashboard links, the
+/// questions session's link and the reminders line.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FooterLinks {
     /// The loopback URL.
     pub local: String,
-    /// The tailnet URL.
+    /// The tailnet URL; `""` drops the tail link.
     pub tailnet: String,
+    /// The questions session's live Remote Control URL (`questions-rc.json`
+    /// with `rc` "on"); `None` leaves `questions: N` unlinked.
+    pub questions_url: Option<String>,
+    /// The `Reminders (ack): ...` line; `""` for none.
+    pub reminders: String,
 }
 
-/// The footer line and the tally it was built from.
+/// The footer line, the tally it was built from and the reminders line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Footer {
     /// The one-line reply footer.
     pub footer: String,
     /// The counts in it.
     pub tally: Tally,
+    /// The second footer line (`""` for none); #12029 P2g.
+    pub reminders: String,
 }
 
 /// Counts over `store` at `now` (Unix seconds).
@@ -75,24 +102,25 @@ pub fn tally(store: &Store, now: f64) -> Result<Tally, DashError> {
         });
     }
     let items = store.list("items", &ListQuery::default())?;
-    let mut t = Tally::default();
-    for doc in &items {
-        let d = &doc.data;
-        let status = d.get("status").and_then(Value::as_str);
-        if is_parked(d) {
-            t.parked += 1;
-        } else if status == Some("open") {
-            match d.get("kind").and_then(Value::as_str) {
-                Some("question") => t.questions += 1,
-                Some("action") => t.actions += 1,
-                Some("task") => t.tasks += 1,
-                _ => {}
-            }
-        } else if status == Some("answered") {
-            t.answered_unrelayed += 1;
-        }
-    }
-    t.open = t.questions + t.actions + t.tasks;
+    // #12029 P2e: the one count rule is `dashboard_derive.tally`'s port.
+    let py: Vec<PyDoc> = items.iter().map(py_doc).collect();
+    let counts = super::pyderive::counts::tally(&py);
+    let n = |k: &str| match get(&counts, k) {
+        Some(PyValue::Int(PyInt::Small(v))) => usize::try_from(*v).unwrap_or(0),
+        _ => 0,
+    };
+    let mut t = Tally {
+        open: n("open"),
+        questions: n("questions"),
+        actions: n("actions"),
+        tasks: n("tasks"),
+        answered_unrelayed: n("answered_unrelayed"),
+        parked: n("parked"),
+        decisions: n("decisions"),
+        blockers: n("blockers"),
+        interactive: get(&counts, "interactive").map(|_| n("interactive")),
+        ..Tally::default()
+    };
     t.running = running_count(&items, now);
     let waiting = store
         .list("questions", &ListQuery::default())?
@@ -103,42 +131,51 @@ pub fn tally(store: &Store, now: f64) -> Result<Tally, DashError> {
     Ok(t)
 }
 
-/// `"<N> open dashboard items: <q> questions, <a> actions, <t> tasks"` plus
-/// the parked, running and answers-waiting parts when non-zero.
+/// `"<d> decisions, <b> blockers"`: the frozen `dashboard-db.py`'s
+/// `tally_line` (#12029 P2g: only decision and blocker counts are reported).
+// #12029 P2g: the open/kind wording was an older prototype's.
 pub fn tally_line(t: &Tally) -> String {
-    let n = |v: usize, word: &str| format!("{v} {word}{}", if v == 1 { "" } else { "s" });
-    let mut line = format!(
-        "{} open dashboard item{}: {}, {}, {}",
-        t.open,
-        if t.open == 1 { "" } else { "s" },
-        n(t.questions, "question"),
-        n(t.actions, "action"),
-        n(t.tasks, "task"),
-    );
-    if t.parked > 0 {
-        line.push_str(&format!(" ({} parked)", t.parked));
+    format!("{} decisions, {} blockers", t.decisions, t.blockers)
+}
+
+/// `questions_part(n)`: `""` for none waiting, else `questions: N`, linked
+/// to `url` when the questions session has one.
+pub fn questions_part(n: usize, url: Option<&str>) -> String {
+    match (n, url.filter(|u| !u.is_empty())) {
+        (0, _) => String::new(),
+        (n, Some(u)) => format!("[questions: {n}]({u})"),
+        (n, None) => format!("questions: {n}"),
     }
-    if t.running > 0 {
-        line.push_str(&format!(" ({} running)", t.running));
-    }
-    if let Some(w) = t.answers_waiting.filter(|w| *w > 0) {
-        line.push_str(&format!(", {w} answers waiting"));
-    }
-    line
 }
 
 /// The reply footer: `Dashboard: [local](…) · [tail](…) — <tally line>`,
-/// from [`tally`] only.
+/// then ` · <questions part>` while interactive items wait, from [`tally`]
+/// only; the reminders line rides along.
 ///
 /// # Errors
 /// Whatever [`tally`] reports; no footer is built from a guessed count.
 pub fn footer(store: &Store, now: f64, links: &FooterLinks) -> Result<Footer, DashError> {
     let tally = tally(store, now)?;
-    let footer = format!(
-        "Dashboard: [local]({}) \u{b7} [tail]({}) \u{2014} {}",
+    let tail = if links.tailnet.is_empty() {
+        String::new()
+    } else {
+        format!(" \u{b7} [tail]({})", links.tailnet)
+    };
+    let mut footer = format!(
+        "Dashboard: [local]({}){tail} \u{2014} {}",
         links.local,
-        links.tailnet,
         tally_line(&tally)
     );
-    Ok(Footer { footer, tally })
+    let q = questions_part(
+        tally.interactive.unwrap_or(0),
+        links.questions_url.as_deref(),
+    );
+    if !q.is_empty() {
+        footer.push_str(&format!(" \u{b7} {q}"));
+    }
+    Ok(Footer {
+        footer,
+        tally,
+        reminders: links.reminders.clone(),
+    })
 }

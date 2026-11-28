@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "argv": [
+    "cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "cases.json": "[\n  {\"op\": \"canonical\", \"value\": {\"b\": [1, 2.5, -0.0, 1e100, 1.5e-7, true, null], \"a\": {\"z\": \"é\", \"y\": \"\\u0001\\t\\n\\\"\\\\/\"}, \"\": \" 😀\"}},\n  {\"op\": \"canonical\", \"value\": 123456789012345678901234567890},\n  {\"op\": \"canonical\", \"value\": \"plain\"},\n  {\"op\": \"canonical\", \"value\": [NaN]},\n  {\"op\": \"canonical\", \"value\": {\"x\": Infinity}},\n  {\"op\": \"canonical\", \"value\": -Infinity},\n  {\"op\": \"canonical\", \"value\": {\"b\": 1, \"a\": 2, \"b\": 3}},\n  {\"op\": \"render_line\", \"id\": \"A3e\", \"version\": 7, \"data\": {\"z\": 1, \"a\": \"x\"}},\n  {\"op\": \"render_line\", \"id\": \"Zoë\", \"version\": 1, \"data\": {}, \"sv\": 2},\n  {\"op\": \"render_line\", \"id\": \"N01\", \"version\": 1, \"data\": {\"v\": NaN}},\n  {\"op\": \"sort_ids\", \"ids\": [\"b\", \"B\", \"a.b\", \"a-b\", \"0x\", \"é\", \"z\", \"ÿ\", \"😀\", \"～\", \"\"]},\n  {\"op\": \"render_file\", \"docs\": {}},\n  {\"op\": \"render_file\", \"docs\": {\"b\": [2, {\"k\": \"v\"}], \"a\": [1, {}], \"É\": [3, {\"n\": null}]}},\n  {\"op\": \"sha256\", \"text\": \"\"},\n  {\"op\": \"sha256\", \"text\": \"{\\\"data\\\":{},\\\"id\\\":\\\"A01\\\",\\\"sv\\\":1,\\\"version\\\":1}\\n\"},\n  {\"op\": \"changed_keys\"},\n  {\"op\": \"changed_keys\", \"old\": {\"a\": 1, \"b\": [1, 2], \"c\": {\"x\": 1, \"y\": 2}, \"d\": 1, \"e\": null},\n   \"new\": {\"a\": 1, \"b\": [1, 3], \"c\": {\"y\": 2, \"x\": 1}, \"d\": 1.0, \"f\": null}},\n  {\"op\": \"changed_keys\", \"old\": null, \"new\": {\"z\": 1, \"a\": 2}},\n  {\"op\": \"changed_keys\", \"old\": {\"q\": 1}, \"new\": {}},\n  {\"op\": \"changed_keys\", \"old\": {\"n\": NaN}, \"new\": {\"n\": NaN}},\n  {\"op\": \"changed_keys\", \"old\": {\"n\": true}, \"new\": {\"n\": 1}}\n]\n"
+  },
+  "reads": [
+    "cases.json"
+  ],
+  "stdout": "case 0 canonical\n  {\"\":\" 😀\",\"a\":{\"y\":\"\\u0001\\t\\n\\\"\\\\/\",\"z\":\"é\"},\"b\":[1,2.5,-0.0,1e+100,1.5e-07,true,null]}\ncase 1 canonical\n  123456789012345678901234567890\ncase 2 canonical\n  \"plain\"\ncase 3 canonical\n  JsonlError: not canonically encodable: Out of range float values are not JSON compliant: nan\ncase 4 canonical\n  JsonlError: not canonically encodable: Out of range float values are not JSON compliant: inf\ncase 5 canonical\n  JsonlError: not canonically encodable: Out of range float values are not JSON compliant: -inf\ncase 6 canonical\n  {\"a\":2,\"b\":3}\ncase 7 render_line\n  '{\"data\":{\"a\":\"x\",\"z\":1},\"id\":\"A3e\",\"sv\":1,\"version\":7}\\n'\ncase 8 render_line\n  '{\"data\":{},\"id\":\"Zoë\",\"sv\":2,\"version\":1}\\n'\ncase 9 render_line\n  JsonlError: not canonically encodable: Out of range float values are not JSON compliant: nan\ncase 10 sort_ids\n  ['', '0x', 'B', 'a-b', 'a.b', 'b', 'z', 'é', 'ÿ', '～', '😀']\ncase 11 render_file\n  ''\ncase 12 render_file\n  '{\"data\":{},\"id\":\"a\",\"sv\":1,\"version\":1}\\n{\"data\":{\"k\":\"v\"},\"id\":\"b\",\"sv\":1,\"version\":2}\\n{\"data\":{\"n\":null},\"id\":\"É\",\"sv\":1,\"version\":3}\\n'\ncase 13 sha256\n  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\ncase 14 sha256\n  3a6b01695e7988da41f4608574a47c9b0999a5b2df108cbc366f8aceb91d8857\ncase 15 changed_keys\n  []\ncase 16 changed_keys\n  ['b', 'd', 'e', 'f']\ncase 17 changed_keys\n  ['a', 'z']\ncase 18 changed_keys\n  ['q']\ncase 19 changed_keys\n  JsonlError: not canonically encodable: Out of range float values are not JSON compliant: nan\ncase 20 changed_keys\n  ['n']\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

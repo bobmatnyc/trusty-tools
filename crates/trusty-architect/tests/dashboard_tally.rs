@@ -21,6 +21,7 @@ fn links() -> FooterLinks {
     FooterLinks {
         local: "L".into(),
         tailnet: "T".into(),
+        ..FooterLinks::default()
     }
 }
 
@@ -55,10 +56,11 @@ fn tally_counts_kinds_parked_running_and_waiting() -> R {
         let store = Store::new(tmp.path(), format).with_secret_scan(no_secret);
         mixed(&store)?;
         let t = tally(&store, NOW)?;
+        // #12029 P2e: the frozen tally adds `decisions` and `blockers`.
         assert_eq!(
             serde_json::to_value(&t)?,
             json!({"open": 3, "questions": 1, "actions": 1, "tasks": 1, "answered_unrelayed": 1,
-                   "parked": 1, "running": 1, "answers_waiting": 2})
+                   "parked": 1, "decisions": 1, "blockers": 0, "running": 1, "answers_waiting": 2})
         );
         let one = Store::new(tmp.path().join("one"), format).with_secret_scan(no_secret);
         one.set(
@@ -68,10 +70,8 @@ fn tally_counts_kinds_parked_running_and_waiting() -> R {
             None,
         )?;
         let t1 = tally(&one, NOW)?;
-        assert_eq!(
-            tally_line(&t1),
-            "1 open dashboard item: 0 questions, 1 action, 0 tasks"
-        );
+        // #12029 P2g: the frozen `dashboard-db.py` line names decisions and blockers only.
+        assert_eq!(tally_line(&t1), "0 decisions, 0 blockers");
         assert!(serde_json::to_value(&t1)?.get("answers_waiting").is_none());
     }
     Ok(())
@@ -86,13 +86,89 @@ fn footer_equals_tally_line() -> R {
         let f = footer(&store, NOW, &links())?;
         assert_eq!(
             f.footer,
-            "Dashboard: [local](L) \u{b7} [tail](T) \u{2014} 3 open dashboard items: 1 question, 1 action, \
-             1 task (1 parked) (1 running), 2 answers waiting"
+            "Dashboard: [local](L) \u{b7} [tail](T) \u{2014} 1 decisions, 0 blockers"
         );
+        assert_eq!(f.reminders, "");
         assert_eq!(f.tally, tally(&store, NOW)?);
         assert!(f.footer.ends_with(&tally_line(&f.tally)));
         assert_eq!(footer(&store, NOW, &links())?, f, "footer is deterministic");
     }
+    Ok(())
+}
+
+/// #12029 P2e: `tally_corpus.json` through the live count path gives the
+/// frozen `dashboard-db.py tally` (derive.tally + running + answers_waiting)
+/// on the same documents at the same clock: canaries skipped, `interactive`
+/// open, a `decision` counted as a question, relayed answers left out, and
+/// the `decisions`, `blockers` and `interactive` keys in Python's order.
+#[test]
+fn tally_follows_the_python_rule_for_canaries_interactive_decisions_and_relays() -> R {
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/dashboard/tally_corpus.json"))?;
+    let tmp = tempfile::tempdir()?;
+    let store = Store::new(tmp.path(), Format::Dir).with_secret_scan(no_secret);
+    for (coll, docs) in corpus.as_object().ok_or("corpus")? {
+        for (id, data) in docs.as_object().ok_or("docs")? {
+            store.set(coll, id, data.clone(), None)?;
+        }
+    }
+    let t = tally(&store, 1_795_784_400.0)?;
+    let reply = trusty_architect::dashboard::verbs::Reply::Tally(t.clone(), true);
+    assert_eq!(
+        trusty_architect::dashboard::verbs::render(&reply),
+        "{\n  \"open\": 7,\n  \"questions\": 3,\n  \"actions\": 3,\n  \"tasks\": 1,\n  \
+         \"answered_unrelayed\": 1,\n  \"parked\": 2,\n  \"decisions\": 3,\n  \"blockers\": 2,\n  \
+         \"interactive\": 2,\n  \"running\": 1,\n  \"answers_waiting\": 1\n}\n"
+    );
+    assert_eq!(tally_line(&t), "3 decisions, 2 blockers");
+    Ok(())
+}
+
+/// #12029 P2g: the frozen footer's questions part and reminders line. Two
+/// interactive items wait: `questions: 2`, linked when the caller has the
+/// questions session's URL; no tailnet URL drops the tail link; the
+/// reminders line is the second line `render` prints.
+#[test]
+fn footer_links_the_questions_part_and_carries_the_reminders_line() -> R {
+    let tmp = tempfile::tempdir()?;
+    let store = Store::new(tmp.path(), Format::Dir).with_secret_scan(no_secret);
+    for (id, data) in [
+        ("D01", json!({"kind": "decision", "status": "interactive"})),
+        ("D02", json!({"kind": "decision", "status": "interactive"})),
+        ("B01", json!({"kind": "blocker", "status": "open"})),
+    ] {
+        store.set("items", id, data, None)?;
+    }
+    let plain = footer(&store, NOW, &links())?;
+    assert_eq!(
+        plain.footer,
+        "Dashboard: [local](L) \u{b7} [tail](T) \u{2014} 2 decisions, 1 blockers \u{b7} questions: 2"
+    );
+    let linked = FooterLinks {
+        local: "L".into(),
+        tailnet: String::new(),
+        questions_url: Some("https://claude.ai/code/session_SampleQna".into()),
+        reminders: "Reminders (ack): s-T01#1 check".into(),
+    };
+    let f = footer(&store, NOW, &linked)?;
+    assert_eq!(
+        f.footer,
+        "Dashboard: [local](L) \u{2014} 2 decisions, 1 blockers \u{b7} \
+         [questions: 2](https://claude.ai/code/session_SampleQna)"
+    );
+    use trusty_architect::dashboard::verbs::{Reply, render};
+    assert_eq!(
+        render(&Reply::Footer(f.clone(), false)),
+        format!("{}\nReminders (ack): s-T01#1 check\n", f.footer)
+    );
+    assert!(
+        render(&Reply::Footer(f, true))
+            .ends_with("\"reminders\": \"Reminders (ack): s-T01#1 check\"\n}\n")
+    );
+    assert_eq!(
+        trusty_architect::dashboard::questions_part(0, Some("u")),
+        ""
+    );
     Ok(())
 }
 

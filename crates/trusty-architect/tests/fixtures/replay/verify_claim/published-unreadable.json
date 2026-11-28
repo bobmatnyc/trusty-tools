@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"published\", \"crate\": \"sample-crate\", \"version\": \"0.3.1\"}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED crates_io_max sample-crate: crates.io lookup failed: curl: (22) The requested URL returned error: 404\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "curl": [
+        {
+          "argv": [
+            "-fsS",
+            "-m",
+            "20",
+            "-A",
+            "trusty-architect",
+            "https://crates.io/api/v1/crates/sample-crate"
+          ],
+          "stdout": "",
+          "stderr": "curl: (22) The requested URL returned error: 404\n",
+          "exit": 22
+        }
+      ]
+    },
+    "calls": [
+      [
+        "curl",
+        "-fsS",
+        "-m",
+        "20",
+        "-A",
+        "trusty-architect",
+        "https://crates.io/api/v1/crates/sample-crate"
+      ]
+    ]
+  }
+}

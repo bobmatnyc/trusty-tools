@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "list"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{\n  \"people\": [,]\n}\n"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "error: Expecting value: line 2 column 14 (char 15)\n",
+  "exit": 1,
+  "writes": {}
+}

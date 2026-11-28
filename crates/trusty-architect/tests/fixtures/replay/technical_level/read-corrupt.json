@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "read",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "q/meta/settings.json": "{\"technical_level\": \"cto\",\n"
+  },
+  "reads": [
+    "q/meta/settings.json"
+  ],
+  "stdout": "",
+  "stderr": "read raised StoreError\n",
+  "exit": 1,
+  "writes": {}
+}

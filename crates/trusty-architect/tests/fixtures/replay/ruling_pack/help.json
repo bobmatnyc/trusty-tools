@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "-h"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "usage: ruling_pack.py [-h] [--issue ISSUE] [--pr PR] [--file FILE]\n                      [--symbol SYMBOL]\n                      [--type {merge,prod-write,spec,decision,waiver}]\n                      [--checked] [--keys KEYS] [--no-write]\n                      project question\n\nBuild a ruling context pack.\n\npositional arguments:\n  project\n  question\n\noptions:\n  -h, --help            show this help message and exit\n  --issue ISSUE\n  --pr PR\n  --file FILE\n  --symbol SYMBOL\n  --type {merge,prod-write,spec,decision,waiver}\n  --checked             the direct read-only check was run and agrees\n  --keys KEYS\n  --no-write\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

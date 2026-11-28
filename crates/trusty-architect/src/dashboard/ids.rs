@@ -1,43 +1,45 @@
 //! Dashboard names and the recycled id space.
 //!
-//! Why: ids are a prefix letter plus two hex digits, 256 per prefix, so the
-//! next id must come from the store itself and wrap past `ff` (LDG-2.2.3),
-//! and done items must be retired before the space runs out (LDG-2.2.4).
-//! Separately, every collection name and doc id becomes a path component, so
-//! it must be path-safe (#10062 gap G2: that check is path safety only).
+//! Why: ids are a prefix letter plus two base-34 digits, 1,156 per prefix
+//! (`00` is never issued), so the next id must come from the store itself
+//! and wrap past `zz` (LDG-2.2.3), and finished items must be retired before
+//! the space runs out (LDG-2.2.4). Separately, every collection name and doc
+//! id becomes a path component, so it must be path-safe (#10062 gap G2: that
+//! check is path safety only).
 //! What: [`check_name`] (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$`), and over a
 //! [`Snapshot`] of [`ID_COLLECTIONS`]: [`used_ids`], [`free_count`],
-//! [`next_id`] (first free after the highest used, wrapping to the lowest
-//! free; `None` when full) and [`retire_candidates`] (oldest `done` by
-//! `done_at`, then `updated`, then `created`). The bare id grammar is
-//! [`crate::ledger::is_bare_id`], defined once (LDG-1.1). Pure: no clock, no
-//! filesystem.
-//! Test: `ids_next_wraps_past_ff_to_lowest_free`, `ids_next_counts_media_ids`,
-//! `ids_retire_oldest_done_until_keep_free`, `ids_names_are_path_safe`.
+//! [`next_id`] and [`retire_candidates`]. These four are the
+//! `dashboard_derive.py` rules of [`super::pyderive`], run on the serde
+//! snapshot through [`py_snap`]; this module holds no id rule of its own
+//! (#12029 P2d). A hex-era id (`D9c`, `Dff`) is two valid base-34 digits, so
+//! it stays used and is never issued again. Pure: no clock, no filesystem.
+//! Test: `ids_next_wraps_past_zz_to_lowest_free`, `ids_next_counts_media_ids`,
+//! `ids_retire_follows_the_derive_rules`, `ids_names_are_path_safe`,
+//! `ids_verb_issues_base34_and_never_collides_with_old_hex_ids`.
 
 use std::collections::BTreeSet;
 
 use serde_json::Value;
 
 use super::error::DashError;
+use super::pyderive::ids as rules;
+use super::pyderive::{PySnap, ids::Retire};
 use super::store::{Doc, Snapshot};
-use crate::ledger::is_bare_id;
+use crate::FakeClock;
+use crate::ids36;
+use crate::pyjson_load::{PyInt, PyValue};
 use crate::pystr::py_repr;
+use crate::tasks::store_read::PyDoc;
 
 /// Collections whose doc ids share the per-prefix id space.
 // #10063 PR 2: `media` as in `dashboard_derive.py:17`.
-pub const ID_COLLECTIONS: [&str; 6] = [
-    "items",
-    "goals",
-    "priorities",
-    "sessions",
-    "questions",
-    "media",
-];
-/// Ids per prefix (`00`..`ff`).
-pub const SPACE: usize = 256;
-/// Free ids [`retire_candidates`] keeps by default (LDG-2.2.4).
-pub const KEEP_FREE: usize = 64;
+pub const ID_COLLECTIONS: [&str; 6] = rules::ID_COLLECTIONS;
+/// Ids per prefix (`00`..`zz`, base 34).
+// #12029: base 34, as `dashboard_derive.SPACE` (was 256 hex ids).
+pub const SPACE: usize = ids36::SPACE;
+/// Free ids [`retire_candidates`] keeps by default: the 25% floor (LDG-2.2.4).
+// #12029: `dashboard_derive.KEEP_FREE` (was 64 of 256).
+pub const KEEP_FREE: usize = SPACE / 4;
 
 /// `value` when it is a path-safe collection name or doc id.
 ///
@@ -58,60 +60,82 @@ pub fn check_name<'a>(kind: &str, value: &'a str) -> Result<&'a str, DashError> 
     )))
 }
 
-/// The id number of a bare id with this prefix.
-fn number(id: &str, prefix: char) -> Option<u8> {
-    let mut chars = id.chars();
-    (is_bare_id(id) && chars.next() == Some(prefix))
-        .then(|| u8::from_str_radix(chars.as_str(), 16).ok())
-        .flatten()
+/// A serde JSON value as the [`PyValue`] `json.load` gives (keys in map order).
+pub(crate) fn py_value(v: &Value) -> PyValue {
+    match v {
+        Value::Null => PyValue::Null,
+        Value::Bool(b) => PyValue::Bool(*b),
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => PyValue::Int(PyInt::Small(i)),
+            (None, Some(u)) => PyValue::Int(PyInt::Big(u.to_string())),
+            _ => PyValue::Float(n.as_f64().unwrap_or(f64::NAN)),
+        },
+        Value::String(s) => PyValue::Str(s.clone()),
+        Value::Array(a) => PyValue::List(a.iter().map(py_value).collect()),
+        Value::Object(o) => py_map(o),
+    }
 }
 
-fn id_docs<'a>(snap: &'a Snapshot) -> impl Iterator<Item = &'a Doc> + 'a {
-    ID_COLLECTIONS.iter().filter_map(|c| snap.get(*c)).flatten()
+/// A document body as a [`PyValue`] dict.
+pub(crate) fn py_map(m: &serde_json::Map<String, Value>) -> PyValue {
+    PyValue::Dict(m.iter().map(|(k, v)| (k.clone(), py_value(v))).collect())
+}
+
+/// A serde [`Doc`] as a [`PyDoc`]; #12029 P2e: the tally and the poller read through it.
+pub(crate) fn py_doc(d: &Doc) -> PyDoc {
+    PyDoc {
+        id: d.id.clone(),
+        data: py_map(&d.data),
+        version: d.version,
+    }
+}
+
+/// Why: the live verbs read a serde [`Snapshot`]; the id rules read Python values.
+/// What: the snapshot's [`ID_COLLECTIONS`] as a [`PySnap`]; other collections are left out.
+/// Test: `ids_next_wraps_past_zz_to_lowest_free`.
+pub(crate) fn py_snap(snap: &Snapshot) -> PySnap {
+    ID_COLLECTIONS
+        .iter()
+        .filter_map(|c| snap.get(*c).map(|docs| ((*c).to_owned(), docs)))
+        .map(|(c, docs)| (c, docs.iter().map(py_doc).collect()))
+        .collect()
 }
 
 /// The numbers in use for `prefix` across [`ID_COLLECTIONS`].
-pub fn used_ids(snap: &Snapshot, prefix: char) -> BTreeSet<u8> {
-    id_docs(snap)
-        .filter_map(|d| number(&d.id, prefix))
+pub fn used_ids(snap: &Snapshot, prefix: char) -> BTreeSet<usize> {
+    rules::used_ids(&py_snap(snap), &prefix.to_string())
+        .into_iter()
+        .filter_map(|n| usize::try_from(n).ok())
         .collect()
 }
 
-/// Ids of `prefix` still free.
+/// Ids of `prefix` still free (`00` is never free).
 pub fn free_count(snap: &Snapshot, prefix: char) -> usize {
-    SPACE - used_ids(snap, prefix).len()
+    usize::try_from(rules::free_count(&py_snap(snap), &prefix.to_string())).unwrap_or(0)
 }
 
-/// The first free id after the highest used, wrapping past `ff` to the lowest
-/// free; `None` when all 256 are used.
+/// The lowest free id after the highest used, wrapping past `zz` to the
+/// lowest free and never `00`; `None` when all 1,155 are used.
 pub fn next_id(snap: &Snapshot, prefix: char) -> Option<String> {
-    let used = used_ids(snap, prefix);
-    let top = used.last().map_or(-1, |n| i32::from(*n));
-    (1..=SPACE as i32)
-        .map(|k| (top + k).rem_euclid(SPACE as i32))
-        .find(|c| u8::try_from(*c).is_ok_and(|c| !used.contains(&c)))
-        .map(|c| format!("{prefix}{c:02x}"))
+    rules::next_id(&py_snap(snap), &prefix.to_string(), None)
 }
 
-/// The oldest `done` ids of `prefix` (by `done_at`, else `updated`, else
-/// `created`, then number) to retire so at least `keep_free` stay free.
-pub fn retire_candidates(snap: &Snapshot, prefix: char, keep_free: usize) -> Vec<String> {
-    let need = keep_free.saturating_sub(free_count(snap, prefix));
-    let mut done: Vec<(String, u8)> = id_docs(snap)
-        .filter(|d| d.data.get("status").and_then(Value::as_str) == Some("done"))
-        .filter_map(|d| {
-            let when = ["done_at", "updated", "created"]
-                .iter()
-                .find_map(|k| d.data.get(*k).filter(|v| truthy(v)))
-                .map_or_else(String::new, py_str);
-            number(&d.id, prefix).map(|n| (when, n))
-        })
-        .collect();
-    done.sort();
-    done.into_iter()
-        .take(need)
-        .map(|(_, n)| format!("{prefix}{n:02x}"))
-        .collect()
+/// Why: done items must be retired before the space runs out (LDG-2.2.4).
+/// What: the oldest finished ids of `prefix` to retire so at least
+/// `keep_free` stay free, by the `dashboard_derive.retire_candidates` rules
+/// at `now` (Unix seconds): `done`, answered and relayed, `cancelled` and
+/// `wont_do` items; never one finished or updated in the last 24 h, never
+/// one with `keep` true, never `00` for the floor.
+/// Test: `ids_retire_follows_the_derive_rules`, `ids_verb_retires_by_the_derive_rules`.
+pub fn retire_candidates(snap: &Snapshot, prefix: char, keep_free: usize, now: f64) -> Vec<String> {
+    let r = Retire {
+        keep_free: i64::try_from(keep_free).unwrap_or(i64::MAX),
+        age_days: None,
+        now: Some(now),
+    };
+    // `now` is given, so the clock is never read.
+    let clock = FakeClock::new(now);
+    rules::retire_candidates(&py_snap(snap), &prefix.to_string(), r, &clock)
 }
 
 /// Python truthiness of a JSON value.
@@ -143,6 +167,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 2026-10-21T10:00:00Z.
+    const NOW: f64 = 1_792_576_800.0;
+
     fn snap(ids: &[(&str, Value)]) -> Snapshot {
         let mut s = Snapshot::new();
         for (id, data) in ids {
@@ -160,26 +187,31 @@ mod tests {
         s
     }
 
+    fn b34(prefix: char, n: usize) -> String {
+        format!("{prefix}{}", ids36::enc(n as i64).unwrap_or_default())
+    }
+
+    // #12029: base 34, wrapping past `zz`, never `00`.
     #[test]
-    fn ids_next_wraps_past_ff_to_lowest_free() {
+    fn ids_next_wraps_past_zz_to_lowest_free() {
         let empty = snap(&[]);
-        assert_eq!(next_id(&empty, 'D').as_deref(), Some("D00"));
+        assert_eq!(next_id(&empty, 'D').as_deref(), Some("D01"));
         let s = snap(&[
             ("D01", json!({})),
             ("D05", json!({})),
-            ("Dzz", json!({})),
+            ("D0f", json!({})),
             ("G09", json!({})),
         ]);
-        assert_eq!(next_id(&s, 'D').as_deref(), Some("D06"));
+        assert_eq!(next_id(&s, 'D').as_deref(), Some("D0g"));
         assert_eq!(next_id(&s, 'G').as_deref(), Some("G0a"));
-        assert_eq!(free_count(&s, 'D'), 254);
-        let top = snap(&[("D00", json!({})), ("D01", json!({})), ("Dff", json!({}))]);
+        assert_eq!(free_count(&s, 'D'), SPACE - 1 - 3);
+        let top = snap(&[("D00", json!({})), ("D01", json!({})), ("Dzz", json!({}))]);
         assert_eq!(next_id(&top, 'D').as_deref(), Some("D02"));
-        let all: Vec<(String, Value)> = (0..=255)
-            .map(|n| (format!("T{n:02x}"), json!({})))
-            .collect();
+        assert_eq!(free_count(&top, 'D'), SPACE - 1 - 2, "00 is never free");
+        let all: Vec<(String, Value)> = (1..SPACE).map(|n| (b34('T', n), json!({}))).collect();
         let refs: Vec<(&str, Value)> = all.iter().map(|(i, v)| (i.as_str(), v.clone())).collect();
         assert_eq!(next_id(&snap(&refs), 'T'), None);
+        assert_eq!(used_ids(&snap(&refs), 'T').len(), SPACE - 1);
     }
 
     // #10063 PR 2: `media` docs use the same per-prefix id space.
@@ -187,30 +219,37 @@ mod tests {
     fn ids_next_counts_media_ids() {
         let mut s = Snapshot::new();
         s.entry("media".to_owned()).or_default().push(Doc {
-            id: "B00".to_owned(),
+            id: "B01".to_owned(),
             version: 1,
             data: serde_json::Map::new(),
         });
-        assert_eq!(next_id(&s, 'B').as_deref(), Some("B01"));
-        assert_eq!(free_count(&s, 'B'), SPACE - 1);
+        assert_eq!(next_id(&s, 'B').as_deref(), Some("B02"));
+        assert_eq!(free_count(&s, 'B'), SPACE - 2);
     }
 
+    // #12029: the floor, the 24 h guard, `keep` and the finished kinds.
     #[test]
-    fn ids_retire_oldest_done_until_keep_free() {
-        let mut docs: Vec<(String, Value)> = (0..200)
-            .map(|n| (format!("A{n:02x}"), json!({"status": "open"})))
+    fn ids_retire_follows_the_derive_rules() {
+        let old = "2026-10-01T00:00:00Z";
+        let mut docs: Vec<(String, Value)> = (1..=880)
+            .map(|n| (b34('A', n), json!({"status": "open"})))
             .collect();
-        docs[3].1 = json!({"status": "done", "done_at": "2026-10-03T00:00:00Z"});
-        docs[1].1 = json!({"status": "done", "done_at": "2026-10-01T00:00:00Z"});
-        docs[2].1 = json!({"status": "done", "done_at": "", "updated": "2026-10-02T00:00:00Z"});
+        docs[2].1 = json!({"status": "done", "done_at": "2026-10-03T00:00:00Z"});
+        docs[0].1 = json!({"status": "done", "done_at": old});
+        docs[1].1 =
+            json!({"status": "answered", "relayed": "x", "relayed_at": "2026-10-02T00:00:00Z"});
+        docs[3].1 = json!({"status": "done", "done_at": old, "keep": true});
+        docs[4].1 = json!({"status": "done", "done_at": "2026-10-21T09:00:00Z"});
+        docs[5].1 = json!({"status": "cancelled", "cancelled_at": "2026-10-04T00:00:00Z"});
         let refs: Vec<(&str, Value)> = docs.iter().map(|(i, v)| (i.as_str(), v.clone())).collect();
         let s = snap(&refs);
-        assert_eq!(retire_candidates(&s, 'A', 58), vec!["A01", "A02"]);
+        assert_eq!(free_count(&s, 'A'), 275);
+        assert_eq!(retire_candidates(&s, 'A', 277, NOW), vec!["A01", "A02"]);
         assert_eq!(
-            retire_candidates(&s, 'A', KEEP_FREE),
-            vec!["A01", "A02", "A03"]
+            retire_candidates(&s, 'A', KEEP_FREE, NOW),
+            vec!["A01", "A02", "A03", "A06"]
         );
-        assert!(retire_candidates(&s, 'A', 56).is_empty());
+        assert!(retire_candidates(&s, 'A', 275, NOW).is_empty());
     }
 
     #[test]

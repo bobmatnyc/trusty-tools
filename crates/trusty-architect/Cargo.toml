@@ -27,6 +27,82 @@ path = "src/bin/trusty-architect-il.rs"
 name = "trusty-architect-replay"
 path = "src/bin/trusty-architect-replay.rs"
 
+# #12028: the spec_drift_check.py port.
+[[bin]]
+name = "trusty-architect-spec-drift-check"
+path = "src/bin/trusty-architect-spec-drift-check.rs"
+
+# #12028: the level_lint.py port (owner-facing text against the technical level).
+[[bin]]
+name = "trusty-architect-level-lint"
+path = "src/bin/trusty-architect-level-lint.rs"
+
+# #12028 P1d: the task checker ports (stale-tasks.py, stalled_tasks.py, task_wait_check.py).
+[[bin]]
+name = "trusty-architect-stale-tasks"
+path = "src/bin/trusty-architect-stale-tasks.rs"
+
+[[bin]]
+name = "trusty-architect-stalled-tasks"
+path = "src/bin/trusty-architect-stalled-tasks.rs"
+
+[[bin]]
+name = "trusty-architect-task-wait-check"
+path = "src/bin/trusty-architect-task-wait-check.rs"
+
+# #12028 P1e: the state writer ports (state-archive.py, brief-id.py, aliases.py).
+[[bin]]
+name = "trusty-architect-state-archive"
+path = "src/bin/trusty-architect-state-archive.rs"
+
+[[bin]]
+name = "trusty-architect-brief-id"
+path = "src/bin/trusty-architect-brief-id.rs"
+
+[[bin]]
+name = "trusty-architect-aliases"
+path = "src/bin/trusty-architect-aliases.rs"
+
+# #12028 P1f: the il_agent.py port.
+[[bin]]
+name = "trusty-architect-il-agent"
+path = "src/bin/trusty-architect-il-agent.rs"
+
+# #12028 P1g: the verify-claim.py port.
+[[bin]]
+name = "trusty-architect-verify-claim"
+path = "src/bin/trusty-architect-verify-claim.rs"
+
+# #12087: the gh-session-track.py port.
+[[bin]]
+name = "trusty-architect-gh-session-track"
+path = "src/bin/trusty-architect-gh-session-track.rs"
+
+# #12028 P1i: the ruling_pack.py port.
+[[bin]]
+name = "trusty-architect-ruling-pack"
+path = "src/bin/trusty-architect-ruling-pack.rs"
+
+# #12029 P2a: the ids36.py port (`next <two digits>`).
+[[bin]]
+name = "trusty-architect-ids36"
+path = "src/bin/trusty-architect-ids36.rs"
+
+# #12029 P2b: the dashboard_jsonl.py port (`fsck [ROOT]`).
+[[bin]]
+name = "trusty-architect-dashboard-jsonl"
+path = "src/bin/trusty-architect-dashboard-jsonl.rs"
+
+# #12029 P2g: the `dashboard-db.py` port.
+[[bin]]
+name = "trusty-architect-dashboard-db"
+path = "src/bin/trusty-architect-dashboard-db.rs"
+
+# #12029 P2h: the `dashboard_updates.py` port.
+[[bin]]
+name = "trusty-architect-dashboard-updates"
+path = "src/bin/trusty-architect-dashboard-updates.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

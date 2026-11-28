@@ -112,6 +112,47 @@ fn fsck_reports_dangling_links_depends_on_and_goal() -> R {
     Ok(())
 }
 
+/// #12029: the live `ids` verb issues base-34 ids (`D1g`, `Dzz`), so a
+/// reference to a missing one is dangling; present base-34 ids and a
+/// hex-era id are judged the same way.
+#[test]
+fn fsck_reports_dangling_references_to_base34_ids() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let (s, _) = store(tmp.path(), format)?;
+        s.set("goals", "Gk2", json!({"title": "g"}), None)?;
+        s.set(
+            "items",
+            "D1h",
+            json!({"status": "open", "goal": "Gk2"}),
+            None,
+        )?;
+        s.set("items", "Dff", json!({"status": "open"}), None)?;
+        s.set(
+            "items",
+            "Dx0",
+            json!({"status": "open", "goal": "G1g", "depends_on": ["D1h", "D1g", "Dff", "D9c"]}),
+            None,
+        )?;
+        let links = json!(["Dzz", "D1h", {"label": "x", "item": "Dzz"}, {"item": "Dff"}]);
+        s.set(
+            "items",
+            "Dx1",
+            json!({"status": "open", "links": links}),
+            None,
+        )?;
+        let want = [
+            "items/Dx0: /goal: G1g is not a goal id in the store",
+            "items/Dx0: /depends_on/1: D1g is not an id in the store",
+            "items/Dx0: /depends_on/3: D9c is not an id in the store",
+            "items/Dx1: /links/0: Dzz is not an id in the store",
+            "items/Dx1: /links/2/item: Dzz is not an id in the store",
+        ];
+        assert_eq!(s.fsck()?, want, "{format}");
+    }
+    Ok(())
+}
+
 /// Legacy documents, written before the store had a change log, are a
 /// baseline the first Rust write records; a later hand edit is still found.
 #[test]

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "--lev",
+    "pm",
+    "--s",
+    "--",
+    "--not-an-option",
+    "tmux"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "level_lint [pm]: flag `--not-an-option` (line 1)\nlevel_lint [pm]: tool `tmux` (line 1)\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {}
+}

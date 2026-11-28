@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md",
+    "--keep",
+    "1",
+    "--dry-run"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "local/state.md": "## NEXT notes\nnone here\n## handoff 1\na\n## handoff 2\nNEXT IDS: S 9z\n"
+  },
+  "reads": [
+    "local/state.md"
+  ],
+  "stdout": "",
+  "stderr": "state-archive: refusing, the move would remove the only NEXT IDS line\n",
+  "exit": 1,
+  "writes": {}
+}

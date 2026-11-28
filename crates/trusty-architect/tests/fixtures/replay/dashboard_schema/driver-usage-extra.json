@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "argv": [
+    "cases.json",
+    "cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "cases.json": "[\n  {\"op\": \"name\", \"coll\": \"items\", \"id\": \"D01\"},\n  {\"op\": \"name\", \"coll\": \"sessions\"},\n  {\"op\": \"name\", \"coll\": \"goals\", \"id\": \"G01\"},\n  {\"op\": \"name\", \"coll\": \"goal_reorders\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"goal_removals\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"step_progress\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"accounts\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"effort_tunes\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"il_steers\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"briefs\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"questions\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"media\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"instructions\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"meta\", \"id\": \"state\"},\n  {\"op\": \"name\", \"coll\": \"meta\", \"id\": \"settings\"},\n  {\"op\": \"name\", \"coll\": \"meta\", \"id\": \"seen\"},\n  {\"op\": \"name\", \"coll\": \"meta\", \"id\": \"gh_track\"},\n  {\"op\": \"name\", \"coll\": \"meta\", \"id\": \"other\"},\n  {\"op\": \"name\", \"coll\": \"meta\"},\n  {\"op\": \"name\", \"coll\": \"Items\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"priorities\", \"id\": \"x\"},\n  {\"op\": \"name\", \"coll\": \"\", \"id\": \"\"},\n  {\"op\": \"mode\", \"env\": {}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \"\"}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \"off\"}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \"warn\"}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \"enforce\"}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \"Warn\"}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \" warn\"}},\n  {\"op\": \"mode\", \"env\": {\"DASHBOARD_SCHEMA\": \"it's\"}},\n  {\"op\": \"mode\", \"env\": {\"OTHER\": \"enforce\"}},\n  {\"op\": \"missing\", \"data\": {}},\n  {\"op\": \"missing\", \"data\": {\"task\": \"ar-T01\", \"session\": \"s1\"}},\n  {\"op\": \"missing\", \"data\": {\"task\": \" \", \"projects\": []}},\n  {\"op\": \"missing\", \"data\": {\"task\": 0, \"projects\": [0, \"\", null, false, [], {}]}},\n  {\"op\": \"missing\", \"data\": {\"task\": \"x\", \"projects\": [\"p\"]}},\n  {\"op\": \"missing\", \"data\": {\"task\": [], \"session\": \"　\\t\"}},\n  {\"op\": \"missing\", \"data\": {\"task\": true, \"session\": {\"a\": 1}}},\n  {\"op\": \"missing\", \"data\": {\"task\": \"t\", \"projects\": \"notalist\"}},\n  {\"op\": \"missing\", \"data\": {\"task\": 0.5, \"session\": 0.0, \"projects\": [[], {}, 0.0]}},\n  {\"op\": \"missing\", \"data\": {\"task\": null, \"session\": null, \"projects\": null}},\n  {\"op\": \"missing\", \"data\": [\"task\"]},\n  {\"op\": \"missing\", \"data\": \"task\"},\n  {\"op\": \"missing\", \"data\": null}\n]\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: driver.py CASES.json\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

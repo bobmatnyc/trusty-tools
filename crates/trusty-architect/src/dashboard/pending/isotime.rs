@@ -3,8 +3,8 @@
 //! Why: `_ts` in `dashboard_derive.py` decides whether a park is due and
 //! whether a task is stale; a parser that accepts a different set of strings
 //! changes which events the Architect sees (#10403).
-//! What: [`ts`] is `_ts(value)`: Python `str(value)`, every `Z` replaced by
-//! `+00:00`, then `fromisoformat`; a naive result is read as UTC. The answer is
+//! What: [`from_iso`] is `fromisoformat` (the caller replaces `Z` by
+//! `+00:00` first, as `_ts` does); a naive result is read as UTC. The answer is
 //! microseconds since the Unix epoch, or `None` where Python raises. The date
 //! half follows `_pydatetime` (calendar, basic and week dates, any
 //! one-character separator); the time half follows CPython's C parser, which
@@ -12,20 +12,18 @@
 //! refuses (`T10:Z`, `T104Z`).
 //! Test: `isotime_matches_python_fromisoformat` (2,900 strings CPython 3.14 parsed).
 
-use serde_json::Value;
-
 use super::super::derive::days_in_month;
-use super::super::ids::py_str;
 use crate::classify::alerts::days_from_civil;
-
-/// `_ts(value)`: microseconds since the epoch, or `None` where Python's
-/// `fromisoformat` raises.
-pub(crate) fn ts(value: &Value) -> Option<i64> {
-    from_iso(&py_str(value).replace('Z', "+00:00"))
-}
 
 /// `datetime.fromisoformat(s)` as UTC microseconds (naive read as UTC).
 pub(crate) fn from_iso(s: &str) -> Option<i64> {
+    from_iso_parts(s).map(|(local, offset)| local - offset)
+}
+
+/// `datetime.fromisoformat(s)` as `(wall-clock microseconds, UTC offset
+/// microseconds)`; a naive result has offset 0. #12028 P1d: `strftime` of
+/// an aware value prints its own wall clock, not UTC.
+pub(crate) fn from_iso_parts(s: &str) -> Option<(i64, i64)> {
     let c: Vec<char> = s.chars().collect();
     if c.len() < 7 {
         return None;
@@ -39,7 +37,7 @@ pub(crate) fn from_iso(s: &str) -> Option<i64> {
         return None;
     }
     if tstr.is_empty() {
-        return Some(day * 86_400_000_000);
+        return Some((day * 86_400_000_000, 0));
     }
     let (h, mi, sec, us, offset) = parse_time(tstr)?;
     let mut hour = h;
@@ -58,7 +56,7 @@ pub(crate) fn from_iso(s: &str) -> Option<i64> {
         return None;
     }
     let local = (day * 86_400 + hour * 3600 + mi * 60 + sec) * 1_000_000 + us;
-    Some(local - offset)
+    Some((local, offset))
 }
 
 fn digit(c: char) -> bool {

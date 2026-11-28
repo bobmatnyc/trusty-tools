@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "brief",
+    "-h"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: il_agent.py brief [-h] task [extras ...]\n\npositional arguments:\n  task\n  extras\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

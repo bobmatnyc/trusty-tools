@@ -14,6 +14,13 @@
 //! PR 3 adds [`rpc`] (the `mpm.architect.dashboard.*` request types and
 //! exit classes) and [`verbs`] (one body per verb and the CLI's stdout),
 //! which the daemon, the MCP tool and `tm architect dashboard` share.
+//! #12029 P2d adds [`pyids`] and [`pyqual`], the `dashboard_ids.py` and
+//! `dashboard_qual.py` ports on the [`store::py`] store. #12029 P2e adds
+//! [`pyanswers`] (`owner_answers.py`, `pending-answers.py`) and runs the live
+//! tally and the poller's owner events on [`pyderive`]'s rules. #12029 P2g
+//! adds [`pydb`] (`dashboard-db.py`'s command line on that store). #12029
+//! P2h adds [`pyupdates`] (`dashboard_updates.py`) and [`pyattach`]
+//! (`dashboard_attach.py`).
 //! Test: `tests/dashboard_golden.rs`, `tests/dashboard_store.rs`,
 //! `tests/dashboard_tally.rs`, `tests/dashboard_case.rs`, `tests/dashboard_log.rs`,
 //! `tests/dashboard_hardening.rs`, `tests/dashboard_verbs.rs`.
@@ -28,6 +35,14 @@ mod error;
 pub mod ids;
 // #10063 PR 3: the method types and the verb bodies.
 pub mod pending;
+pub mod pyanswers; // See #12029 P2e
+pub mod pyattach; // See #12029 P2h
+pub mod pydb; // See #12029 P2g
+pub mod pyderive; // See #12029 P2b
+pub mod pyids; // See #12029 P2d
+pub mod pyjsonl; // See #12029 P2b
+pub mod pyqual; // See #12029 P2d
+pub mod pyupdates; // See #12029 P2h
 pub mod rpc;
 pub mod schema_check;
 pub mod store;
@@ -36,12 +51,9 @@ pub mod verbs;
 
 pub use derive::{GoalSessions, RunProgress, goal_sessions, ordered, run_progress};
 pub use error::DashError;
-pub use pending::{
-    Pending, PendingEvent, SkippedField, StaleTask, StaleTasks, last_activity, pending, stale_tasks,
-};
 pub use schema_check::{SchemaDir, SchemaMode, SchemaSet};
 pub use store::{
     DeleteArchive, Doc, Format, ListQuery, Op, OpResult, PruneLog, Removed, Snapshot, Store,
     Validation,
 };
-pub use tally::{Footer, FooterLinks, Tally, footer, tally, tally_line};
+pub use tally::{Footer, FooterLinks, Tally, footer, questions_part, tally, tally_line};

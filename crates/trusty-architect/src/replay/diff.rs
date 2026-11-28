@@ -7,7 +7,12 @@
 //! the target with the recorded argv, stdin and env, scrubs the output with
 //! the same path tokens the recorder used, and returns one [`Mismatch`] per
 //! differing channel. A `.py` target runs under the recorder's open probe, so
-//! a Python self-replay sees the same interpreter frames.
+//! a Python self-replay sees the same interpreter frames. A recording with
+//! fakes replays with the same stubs first on `PATH`, and its call list is
+//! one more channel (#12028). A recording with a clock replays with its
+//! instant in [`super::CLOCK_ENV`], which a `.py` target's probe freezes on
+//! and a Rust replay entry point reads (#12028). Written files that
+//! [`super::skip_written_file`] names are compared on neither side (#12087).
 //! Test: `replay_reports_a_one_byte_change_in_each_channel`,
 //! `replay_of_an_unchanged_program_is_clean`.
 
@@ -16,10 +21,11 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::fakes::{FakeDir, calls_diff};
 use super::record::{Python, run_scrubber};
 use super::sandbox::{Sandbox, changes};
 use super::scrub::leaks;
-use super::{Recording, ReplayError};
+use super::{CLOCK_ENV, Recording, ReplayError, skip_written_file};
 
 /// Longest excerpt, in bytes, of a differing line shown in a [`Mismatch`].
 const EXCERPT: usize = 100;
@@ -44,6 +50,8 @@ pub enum Channel {
     Exit,
     /// A written file, by relative path.
     File(String),
+    /// The calls to fake executables, in order (#12028).
+    FakeCalls,
 }
 
 /// A channel that differs from the recording.
@@ -145,9 +153,24 @@ pub fn replay(
         None => (target.program.clone(), Vec::new()),
     };
     prefix.extend(target.prefix.iter().cloned());
-    let fin = sb.run(&program, &prefix, &rec.argv, &env, &rec.stdin, timeout)?;
+    if let Some(t) = rec.clock {
+        env.insert(CLOCK_ENV.into(), t.to_string()); // See #12028
+    }
+    // See #12028: the recorded stubs, so the target meets the same answers.
+    let fake_dir = match &rec.fakes {
+        Some(f) => Some(FakeDir::new(&f.stubs, &|t| sb.expand(t))?),
+        None => None,
+    };
+    let bin = fake_dir.as_ref().map(FakeDir::bin);
+    let fin = sb.run(&program, &prefix, &rec.argv, &env, &rec.stdin, timeout, bin)?;
     let after = sb.snapshot()?;
-    let scrub = run_scrubber(&sb, &target.program, python.as_ref(), parent_env);
+    let scrub = run_scrubber(
+        &sb,
+        &target.program,
+        python.as_ref(),
+        fake_dir.as_ref(),
+        parent_env,
+    );
     let as_text = |b: Vec<u8>| String::from_utf8(b).map(|s| scrub.text(&s));
 
     let mut out = Vec::new();
@@ -170,11 +193,28 @@ pub fn replay(
         Some(code) => push(Channel::Exit, format!("want {}, got {code}", rec.exit)),
         None => push(Channel::Exit, format!("want {}, got a signal", rec.exit)),
     }
+    if let (Some(want), Some(dir)) = (&rec.fakes, &fake_dir) {
+        let got: Vec<Vec<String>> = dir
+            .calls()?
+            .iter()
+            .map(|c| c.iter().map(|a| scrub.text(a)).collect())
+            .collect();
+        if let Some(d) = calls_diff(&want.calls, &got, &want.stubs) {
+            push(Channel::FakeCalls, d);
+        }
+    }
     let got_writes: BTreeMap<String, Option<Result<String, _>>> = changes(&before, &after)
         .into_iter()
         .map(|(k, v)| (scrub.text(&k), v.map(as_text)))
         .collect();
-    let keys: BTreeSet<&String> = rec.writes.keys().chain(got_writes.keys()).collect();
+    // #12087: the store lock and change logs are compared on neither side.
+    let compared = |k: &&String| !skip_written_file(k.rsplit('/').next().unwrap_or(k));
+    let keys: BTreeSet<&String> = rec
+        .writes
+        .keys()
+        .chain(got_writes.keys())
+        .filter(compared)
+        .collect();
     for k in keys {
         let file = Channel::File(k.clone());
         match (rec.writes.get(k), got_writes.get(k)) {

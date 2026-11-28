@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"status\", \"repo\": \"example-org/example-repo\", \"pr\": 18, \"claims\": {\"pr_state\": 5}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "",
+  "stderr": "AttributeError: 'int' object has no attribute 'upper'\n",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "18",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "state"
+          ],
+          "stdout": "{\"state\": \"OPEN\"}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "18",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "state"
+      ]
+    ]
+  }
+}

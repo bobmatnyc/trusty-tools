@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "argv": [
+    "sample-app",
+    "foo_bar",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "# Ruling pack: sample-app @ 2026-11-27T13:00:00Z\nQuestion: foo_bar\nType: decision. Repo: example-org/sample-app. Palaces: sample-app, supervisor. Index: sample-app-idx (last_indexed n/a).\n\n## Prior rulings (memory)\n- none found\n\n## Facts (search + exact grep)\n- none found\n\n## Direct read-only check to run\n- open the cited doc section under {ROOT}/proj; check CODEOWNERS and the issue criteria\n\n## Backend problems (counted as not found)\n- sample-app: memory unavailable: [Errno 2] No such file or directory: 'trusty-memory'\n- supervisor: memory unavailable: [Errno 2] No such file or directory: 'trusty-memory'\n- sample-app-idx: search unavailable: [Errno 2] No such file or directory: 'trusty-search'\n- grep skipped: root missing or rg absent\nMake these MCP calls instead:\n- memory_recall(palace=\"sample-app\", query=\"foo_bar\", top_k=3, min_score=0.4)\n- memory_recall(palace=\"supervisor\", query=\"foo_bar\", top_k=3, min_score=0.4)\n- grep(index_id=\"sample-app-idx\", pattern=\"<identifier>\", compact=true) / search(index_id=\"sample-app-idx\", query=\"foo_bar\", mode=\"text\", compact=true, top_k=5)\n\nPrior ruling: no. Fact: no. Direct check done: NO (run it, then rerun with --checked).\nConfidence: LOW. Rule: HIGH = prior ruling + fact + direct check agree; MEDIUM = two of three; LOW = PM report only. Downgrade if sources disagree.\nRelay line: `Confidence: <label>. Checked: <items I read>. From PM report: <items>. Prior rulings: <ids or none found>.`\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "argv": [
+    "cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "cases.json": "[\n  {\"op\": \"validate\", \"coll\": \"goals\", \"id\": \"G01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"goals\", \"id\": \"G02\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"briefs\", \"id\": \"B01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"questions\", \"id\": \"Q01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"goal_reorders\", \"id\": \"R01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"goal_removals\", \"id\": \"R02\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"sessions\", \"id\": \"S01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"accounts\", \"id\": \"A01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"il_steers\", \"id\": \"I01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"step_progress\", \"id\": \"P01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"effort_tunes\", \"id\": \"E01\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"effort_tunes\", \"id\": \"E02\", \"data\": {\"x\": 1}},\n  {\"op\": \"validate\", \"coll\": \"media\", \"id\": \"M01\", \"data\": {\"alt\": 3, \"deep\": \"x\"}},\n  {\"op\": \"validate\", \"coll\": \"media\", \"id\": \"M02\", \"data\": {\"src\": \"x\"}},\n  {\"op\": \"validate\", \"coll\": \"items\", \"id\": \"D01\", \"data\": {\"format\": \"plain\", \"n\": 1}},\n  {\"op\": \"validate\", \"coll\": \"items\", \"id\": \"D02\", \"data\": {\"format\": 2, \"kind\": \"x\"}},\n  {\"op\": \"validate\", \"coll\": \"meta\", \"id\": \"seen\", \"data\": {}},\n  {\"op\": \"validate\", \"coll\": \"items\", \"id\": \"D03\", \"data\": {\"v\": 1}, \"dir\": \"crlf\"},\n  {\"op\": \"validate\", \"coll\": \"items\", \"id\": \"D04\", \"data\": {}, \"dir\": \"crlf\"},\n  {\"op\": \"validate\", \"coll\": \"items\", \"id\": \"D05\", \"data\": {}, \"dir\": \"absent\"},\n  {\"op\": \"store\", \"docs\": {\"items\": [{\"id\": \"D06\", \"data\": {\"n\": \"x\"}}], \"goals\": [{\"id\": \"G03\", \"data\": {}}]}},\n  {\"op\": \"store\", \"docs\": {\"items\": [{\"id\": \"D07\", \"data\": {\"n\": \"x\"}}]}}\n]\n",
+    "crlf/items.schema.json": "{\r\n  \"type\": \"object\",\r\n  \"required\": [\"v\"]\r\n}\r\n",
+    "schemas/accounts.schema.json": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"a\": {\"oneOf\": [{\"type\": \"string\"}, {\"type\": \"array\", \"items\": {\"type\": \"string\", \"uniqueItems\": true}}]}\n  }\n}\n",
+    "schemas/briefs.schema.json/keep": "a directory where a schema file should be\n",
+    "schemas/effort_tunes.schema.json": "{\n  \"type\": \"object\",\n  \"properties\": {\"x\": {\"$ref\": \"other.schema.json#/x\"}}\n}\n",
+    "schemas/goal_removals.schema.json": "{\r\n  \"type\": \"object\",\r\n  \"required\": [1,\r\n}\r\n",
+    "schemas/goal_reorders.schema.json": "",
+    "schemas/il_steers.schema.json": "{\n  \"$defs\": {\"bad\": {\"type\": \"string\", \"examples\": [\"x\"]}},\n  \"type\": \"object\"\n}\n",
+    "schemas/items.schema.json": "{\n  \"type\": \"object\",\n  \"properties\": {\"format\": {\"type\": \"string\"}, \"kind\": {\"type\": \"url\"}, \"n\": {\"type\": \"integer\"}}\n}\n",
+    "schemas/media.schema.json": "{\n  \"type\": \"object\",\n  \"$defs\": {\"ok\": {\"type\": \"string\"}},\n  \"properties\": {\"src\": {\"$ref\": \"#/$defs/nope\"}, \"alt\": {\"$ref\": \"#/$defs/ok\"}, \"deep\": {\"$ref\": \"#/$defs/ok/type\"}}\n}\n",
+    "schemas/questions.schema.json": "{\n  \"type\": \"object\",\n}\n",
+    "schemas/sessions.schema.json": "{\n  \"type\": \"object\",\n  \"format\": \"date-time\"\n}\n",
+    "schemas/step_progress.schema.json": "{\n  \"type\": \"object\",\n  \"additionalProperties\": {\"type\": \"string\", \"maxLength\": 3}\n}\n"
+  },
+  "reads": [
+    "cases.json",
+    "crlf/items.schema.json",
+    "schemas/accounts.schema.json",
+    "schemas/effort_tunes.schema.json",
+    "schemas/goal_removals.schema.json",
+    "schemas/goal_reorders.schema.json",
+    "schemas/il_steers.schema.json",
+    "schemas/items.schema.json",
+    "schemas/media.schema.json",
+    "schemas/questions.schema.json",
+    "schemas/sessions.schema.json",
+    "schemas/step_progress.schema.json"
+  ],
+  "stdout": "case 0 validate\n  SchemaError: cannot load schema schemas/goals.schema.json: [Errno 2] No such file or directory: 'schemas/goals.schema.json'\ncase 1 validate\n  SchemaError: cannot load schema schemas/goals.schema.json: [Errno 2] No such file or directory: 'schemas/goals.schema.json'\ncase 2 validate\n  SchemaError: cannot load schema schemas/briefs.schema.json: [Errno 21] Is a directory: 'schemas/briefs.schema.json'\ncase 3 validate\n  SchemaError: cannot load schema schemas/questions.schema.json: Illegal trailing comma before end of object: line 2 column 19 (char 20)\ncase 4 validate\n  SchemaError: cannot load schema schemas/goal_reorders.schema.json: Expecting value: line 1 column 1 (char 0)\ncase 5 validate\n  SchemaError: cannot load schema schemas/goal_removals.schema.json: Expecting value: line 4 column 1 (char 40)\ncase 6 validate\n  SchemaError: sessions: unsupported keyword 'format'\ncase 7 validate\n  SchemaError: accounts/properties/a/oneOf/1/items: unsupported keyword 'uniqueItems'\ncase 8 validate\n  SchemaError: il_steers/$defs/bad: unsupported keyword 'examples'\ncase 9 validate\n  SchemaError: step_progress/additionalProperties: unsupported keyword 'maxLength'\ncase 10 validate\n  ok\ncase 11 validate\n  SchemaError: unsupported $ref 'other.schema.json#/x'\ncase 12 validate\n  media/M01: /alt: expected string, got int\ncase 13 validate\n  SchemaError: unresolved $ref '#/$defs/nope'\ncase 14 validate\n  ok\ncase 15 validate\n  SchemaError: unsupported type 'url'\ncase 16 validate\n  SchemaError: cannot load schema schemas/meta-seen.schema.json: [Errno 2] No such file or directory: 'schemas/meta-seen.schema.json'\ncase 17 validate\n  ok\ncase 18 validate\n  items/D04: /v: required property is missing\ncase 19 validate\n  SchemaError: cannot load schema absent/items.schema.json: [Errno 2] No such file or directory: 'absent/items.schema.json'\ncase 20 store\n  SchemaError: cannot load schema schemas/goals.schema.json: [Errno 2] No such file or directory: 'schemas/goals.schema.json'\ncase 21 store\n  items/D07: /n: expected integer, got str\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}
