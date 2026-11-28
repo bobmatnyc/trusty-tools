@@ -1,5 +1,43 @@
+import adapter from '@sveltejs/adapter-vercel';
 import { sveltekit } from '@sveltejs/kit/vite';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vitest/config';
+
+/**
+ * Why: the public marketing/docs site (#5097) deploys to Vercel from the
+ * `website/` subdirectory of this Rust workspace, so the adapter — not a
+ * static export — is what Vercel's build container expects to find.
+ * What: SvelteKit config, passed to the `sveltekit()` plugin because
+ * SvelteKit 3 no longer reads `svelte.config.js`. `adapter-vercel` emits
+ * `.vercel/output/` in the Build Output API v3 layout; every route here is
+ * prerendered (`src/routes/+layout.ts`), so in practice the adapter writes
+ * static HTML and provisions no serverless function. No `runtime` is passed on
+ * purpose: adapter-vercel then derives `nodejs<major>.x` from the Node that
+ * runs the build, which is the Vercel project's "Node.js Version" setting. A
+ * pinned `nodejs20.x` (#5117) broke every deploy once Vercel discontinued it
+ * (2026-10-01); following the project setting survives the next retirement.
+ * Test: `pnpm build` in `tests/build-smoke.test.ts` asserts the prerendered
+ * `index.html` lands in `.vercel/output/static/`.
+ *
+ * The doc reader (#5098) attaches at `src/routes/docs/` — see
+ * `src/lib/docs/README.md` for the seam contract.
+ */
+const sveltekitConfig = {
+	preprocess: vitePreprocess(),
+	adapter: adapter(),
+	alias: {
+		// SvelteKit 3 no longer generates `$lib`; declaring it here keeps every
+		// existing `$lib/...` import resolving. `alias` is deprecated in favour
+		// of `#lib` subpath imports — moving to those is a separate change.
+		$lib: 'src/lib',
+		// The doc reader (#5098) reads `docs/public-manifest.tsv` and the
+		// Markdown sources it points at, both of which live OUTSIDE
+		// `website/`. This alias is the single declared path to them, so
+		// the "Include source files outside of the Root Directory" Vercel
+		// setting has exactly one thing to satisfy (see README.md).
+		$repo: '../'
+	}
+};
 
 /**
  * Why: the token-parity suite is a plain Node test over two CSS files, while
@@ -53,7 +91,7 @@ const CORPUS_TIMEOUT_MS = 300_000;
 const SMOKE_TIMEOUT_MS = 900_000;
 
 export default defineConfig({
-	plugins: [sveltekit()],
+	plugins: [sveltekit(sveltekitConfig)],
 	test: {
 		projects: [
 			{
