@@ -1,8 +1,8 @@
 //! `dashboard_derive.py`'s counts and run windows (#12029 P2b).
 //!
 //! Why: the footer, `dashboard-db.py summary` and the page share one
-//! decision count (ar-T79), and an `interactive` item stays open until its
-//! answer is written (owner 2026-11-15).
+//! decision count, and an `interactive` item stays open until its
+//! answer is written. See #12029.
 //! What: [`decision_counts`], [`tally`] (the `interactive` key only when
 //! non-zero), [`run_progress`] and [`running_count`]. `now` is Unix seconds
 //! (UTC); a run date is `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]Z` with any
@@ -83,7 +83,7 @@ pub(crate) fn tally(items: &[PyDoc]) -> PyValue {
         ("tasks".into(), int(t)),
         ("answered_unrelayed".into(), int(answered)),
         ("parked".into(), int(parked)),
-        // ar-T79: the decision count is `decision_counts`' own.
+        // See #12029: the decision count is `decision_counts`' own.
         ("decisions".into(), int(decision_counts(items).0)),
         ("blockers".into(), int(blockers)),
     ];

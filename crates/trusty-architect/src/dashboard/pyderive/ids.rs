@@ -1,7 +1,7 @@
 //! `dashboard_derive.py`'s recycled id space: base-34, 1,156 values per prefix (#12029 P2b).
 //!
 //! Why: ids recycle, so the next id and the retire list come from the
-//! store itself; the digits are base 34 (owner 2026-11-12), never hex, and
+//! store itself; the digits are base 34, never hex, and
 //! `00` is never issued. The serde [`crate::dashboard::ids`] still does hex
 //! arithmetic over 256 ids; moving it to these rules is #12029 P2d.
 //! What: over [`ID_COLLECTIONS`], ids matching `^[A-Z][0-9a-km-np-z]{2}$`
