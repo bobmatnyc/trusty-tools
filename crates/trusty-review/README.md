@@ -851,7 +851,7 @@ Rules:
   `loaded` (`name`, `sha256` of the exact file bytes, `bytes`) and `skipped`
   (`name`, `kind`, `reason`). It is absent when no skill is configured.
 
-The hosted webhook path does not load repo skills yet.
+The hosted webhook path loads repo skills too: it reads `.trusty-review.toml` and `.claude/skills/<name>/SKILL.md` through the GitHub Contents API at the PR base SHA (test `hosted_review_options_read_through_the_contents_api`). A fork PR gets no skill text.
 
 ## Report generation
 
