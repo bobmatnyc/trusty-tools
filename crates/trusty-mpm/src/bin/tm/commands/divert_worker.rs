@@ -298,11 +298,13 @@ pub(crate) struct WorkerSandbox<'a> {
 /// [`trusty_mpm::core::session_launch::SandboxRole::Agent`]; on success
 /// [`spawn_worker_at`]. #12077: enforcement is off, so that step writes and
 /// refuses nothing; with no home resolved it is skipped. When `opted_in`, the
-/// agent policy rides inline on the worker's argv as `--settings '<json>'`.
+/// agent policy rides inline on the worker's argv as `--settings '<json>'`,
+/// and an opt-in with no home is refused before the worker starts.
 /// Test: `a_worker_starts_without_a_config_dir_or_over_a_local_override_12077`,
 /// `a_worker_runs_with_no_sandbox_written_12077`,
 /// `a_worker_runs_with_no_home_12077`,
-/// `an_opted_in_worker_carries_the_agent_sandbox_inline_12077`.
+/// `an_opted_in_worker_carries_the_agent_sandbox_inline_12077`,
+/// `an_opted_in_worker_with_no_home_is_refused_12077`.
 pub(crate) async fn spawn_sandboxed_worker_at(
     program: &Path,
     model: &str,
@@ -311,7 +313,12 @@ pub(crate) async fn spawn_sandboxed_worker_at(
     sandbox: &WorkerSandbox<'_>,
 ) -> Result<WorkerReply, String> {
     use trusty_mpm::core::session_launch as sl;
-    // #12077: no home is no sandbox refusal; the step is skipped.
+    // #12077: Fail-Open Check — an opt-in with no home refuses the worker.
+    if sandbox.opted_in && sandbox.home.is_none() {
+        let workspace = sandbox.workspace.to_path_buf();
+        return Err(trusty_mpm::core::claude_sandbox::NoHomeForSandbox { workspace }.to_string());
+    }
+    // #12077: a default worker with no home skips the step.
     let mut settings = None;
     if let Some(home) = sandbox.home {
         let inputs = sl::launch_sandbox_inputs(sandbox.workspace, home);

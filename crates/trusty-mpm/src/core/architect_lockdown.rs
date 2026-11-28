@@ -385,15 +385,22 @@ impl<'a> Lockdown<'a> {
 
     /// Unset [`Self::env_unset`] in `spec`, and drop any assignment of it.
     ///
-    /// Test: `architect_launch_unsets_the_env_list_and_a_pm_launch_does_not`.
+    /// #12077: the sandbox switch is set to `1` when a payload is carried and
+    /// unset otherwise, so the pane's own relaunch and divert worker see
+    /// exactly this launch's choice, never a stale value from the tmux server.
+    /// Test: `architect_launch_unsets_the_env_list_and_a_pm_launch_does_not`,
+    /// `an_off_launch_unsets_a_stale_switch_12077`.
     pub fn scrub_spec_env(&self, profile: SessionProfile, spec: &mut LaunchSpec) {
+        let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
         let unset = self.env_unset(profile);
-        spec.env_set.retain(|(name, _)| !unset.contains(name));
+        spec.env_set
+            .retain(|(name, _)| !unset.contains(name) && name != switch);
         spec.env_unset.extend(unset);
         // #12077: the session's own relaunch and divert worker read the switch.
         if self.sandbox.is_some() {
-            let on = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV.to_owned();
-            spec.env_set.push((on, "1".to_owned()));
+            spec.env_set.push((switch.to_owned(), "1".to_owned()));
+        } else {
+            spec.env_unset.push(switch.to_owned());
         }
     }
 
@@ -411,9 +418,12 @@ impl<'a> Lockdown<'a> {
         for name in self.env_unset(profile) {
             cmd.env_remove(name);
         }
-        // #12077: as in `scrub_spec_env`.
+        // #12077: as in `scrub_spec_env` — set when carried, removed otherwise.
+        let switch = crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV;
         if self.sandbox.is_some() {
-            cmd.env(crate::core::claude_sandbox::SANDBOX_OPT_IN_ENV, "1");
+            cmd.env(switch, "1");
+        } else {
+            cmd.env_remove(switch);
         }
         Ok(())
     }

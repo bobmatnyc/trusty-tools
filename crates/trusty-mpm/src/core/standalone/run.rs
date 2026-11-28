@@ -389,7 +389,7 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
             &repo_path,
             home.as_deref(),
             cli.profile,
-        ),
+        )?,
     };
     let mut cmd = run_launch_command(
         // #8405: the operator's config decides the renderer.
@@ -447,14 +447,21 @@ pub fn run_sandbox(
 
 /// The inline sandbox payload a `tm run` of `profile` in `repo_path` carries
 /// (#12077): [`crate::core::claude_sandbox::opted_in_launch_sandbox`] for the
-/// profile's role; `None` unless `opted_in` and a home resolved.
-/// Test: `run_carries_the_sandbox_inline_only_when_opted_in_12077`.
+/// profile's role; `None` unless `opted_in`.
+///
+/// # Errors
+///
+/// [`crate::core::claude_sandbox::NoHomeForSandbox`] when opted in with no
+/// home (#12077 Fail-Open Check).
+///
+/// Test: `run_carries_the_sandbox_inline_only_when_opted_in_12077`,
+/// `run_refuses_an_opt_in_with_no_home_12077`.
 pub fn run_sandbox_payload(
     opted_in: bool,
     repo_path: &Path,
     home: Option<&Path>,
     profile: crate::core::session_profile::SessionProfile,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, crate::core::claude_sandbox::NoHomeForSandbox> {
     let role = crate::core::session_launch::sandbox_role_for(profile);
     crate::core::claude_sandbox::opted_in_launch_sandbox(opted_in, role, repo_path, home)
 }

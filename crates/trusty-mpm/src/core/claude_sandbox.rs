@@ -66,25 +66,57 @@ pub fn inline_sandbox_settings(role: SandboxRole, inputs: &SandboxInputs) -> Val
     payload
 }
 
+/// An opt-in that cannot be honoured: the switch is on but no home resolved
+/// (#12077 Fail-Open Check).
+///
+/// Why: the policy names the home's `.ssh`, `.aws` and tool caches; without a
+/// home there is no policy, and launching unsandboxed after an explicit
+/// opt-in would hide exactly the error the operator asked to watch for.
+/// Test: `an_opt_in_with_no_home_refuses_naming_the_switch_12077`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "TM_CLAUDE_SANDBOX=1 asks for the Claude Code sandbox in `{}`, but no home directory \
+     resolved to build its policy from; refusing the launch rather than starting it \
+     unsandboxed (#12077). Set HOME, or unset TM_CLAUDE_SANDBOX to launch without the sandbox",
+    .workspace.display()
+)]
+pub struct NoHomeForSandbox {
+    /// The workspace the refused launch was for.
+    pub workspace: std::path::PathBuf,
+}
+
 /// The sandbox payload a launch of `role` in `workspace` carries, if any.
 ///
-/// Why: #12077 — the default launch carries no sandbox at all.
-/// What: `None` unless `opted_in` and a `home` resolved; otherwise
-/// [`inline_sandbox_settings`] over [`launch_sandbox_inputs`]. Reads and
-/// writes no file.
+/// Why: #12077 — the default launch carries no sandbox at all, and an
+/// explicit opt-in is honoured or refused, never dropped.
+/// What: `Ok(None)` unless `opted_in`; opted in, [`inline_sandbox_settings`]
+/// over [`launch_sandbox_inputs`], or [`NoHomeForSandbox`] when `home` is
+/// `None`. Reads and writes no file.
+///
+/// # Errors
+///
+/// [`NoHomeForSandbox`] when `opted_in` and no home resolved.
+///
 /// Test: `a_default_launch_gets_no_sandbox_payload`,
-/// `an_opted_in_pm_payload_carries_both_tiers`.
+/// `an_opted_in_pm_payload_carries_both_tiers`,
+/// `an_opt_in_with_no_home_refuses_naming_the_switch_12077`.
 pub fn opted_in_launch_sandbox(
     opted_in: bool,
     role: SandboxRole,
     workspace: &Path,
     home: Option<&Path>,
-) -> Option<Value> {
-    let home = home.filter(|_| opted_in)?;
-    Some(inline_sandbox_settings(
+) -> Result<Option<Value>, NoHomeForSandbox> {
+    if !opted_in {
+        return Ok(None);
+    }
+    // #12077: Fail-Open Check — an opt-in with no home refuses, never drops.
+    let home = home.ok_or_else(|| NoHomeForSandbox {
+        workspace: workspace.to_path_buf(),
+    })?;
+    Ok(Some(inline_sandbox_settings(
         role,
         &launch_sandbox_inputs(workspace, home),
-    ))
+    )))
 }
 
 /// Merge `payload` into `slot`: objects recurse, lists gain each entry they

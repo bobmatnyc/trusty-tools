@@ -35,30 +35,34 @@ pub(super) fn managed_sandbox(
     // #10102: the real (sandbox-aware) home, never `fw.root`'s parent — that is
     // the config base, which can sit off `$HOME`.
     let home = crate::core::launch_home::sandbox_launch_home().map_err(RuntimeError::Spawn)?;
-    managed_sandbox_at(cwd, home.as_deref(), config_dir, profile)?;
-    let role = crate::core::session_launch::sandbox_role_for(profile);
-    Ok(crate::core::claude_sandbox::opted_in_launch_sandbox(
-        opted_in,
-        role,
-        cwd,
-        home.as_deref(),
-    ))
+    managed_sandbox_at(cwd, home.as_deref(), config_dir, profile, opted_in)
 }
 
-/// [`managed_sandbox`] with the home passed in; `None` skips the step (#12077).
-/// Test: `managed_sandbox_goes_ahead_with_no_home_12077`.
+/// [`managed_sandbox`] with the home passed in (#12077).
+///
+/// What: with no home, a default launch skips the step and an opted-in one
+/// is refused ([`crate::core::claude_sandbox::NoHomeForSandbox`]); otherwise
+/// the no-write sandbox step, then the inline payload when `opted_in`.
+/// Test: `managed_sandbox_goes_ahead_with_no_home_12077`,
+/// `a_managed_launch_refuses_an_opt_in_with_no_home_12077`.
 pub(super) fn managed_sandbox_at(
     cwd: &Path,
     home: Option<&Path>,
     config_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
-) -> Result<(), RuntimeError> {
+    opted_in: bool,
+) -> Result<Option<serde_json::Value>, RuntimeError> {
     use crate::core::session_launch as sl;
-    // #12077: no home is no sandbox refusal; there is nothing to apply.
-    let Some(home) = home else { return Ok(()) };
-    let inputs = sl::launch_sandbox_inputs(cwd, home);
-    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, Some(config_dir))
-        .map_err(|err| RuntimeError::Spawn(err.to_string()))
+    let role = sl::sandbox_role_for(profile);
+    // #12077: Fail-Open Check — an opt-in with no home refuses the launch.
+    let payload = crate::core::claude_sandbox::opted_in_launch_sandbox(opted_in, role, cwd, home)
+        .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+    if let Some(home) = home {
+        let inputs = sl::launch_sandbox_inputs(cwd, home);
+        sl::apply_launch_sandbox(role, &inputs, Some(config_dir))
+            .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+    }
+    Ok(payload)
 }
 
 /// The in-place relaunch argv after `compose_inplace_args`: the owner

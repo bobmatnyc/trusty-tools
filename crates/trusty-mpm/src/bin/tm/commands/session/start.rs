@@ -362,7 +362,8 @@ async fn start_session_in_place(
     // #10102: before `POST /sessions`, so a sandbox refusal registers nothing.
     crate::commands::launch_home::apply_sandbox(path, home, claude_config_dir, profile)?;
     // #12077: the role's sandbox rides inline on argv, only when opted in.
-    let sandbox = crate::commands::launch_home::launch_sandbox(path, home, profile);
+    // #12077: an opt-in with no home refuses here, before `POST /sessions`.
+    let sandbox = crate::commands::launch_home::launch_sandbox(path, home, profile)?;
     // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
     let carrier = settings.file.as_deref();
     let spec = inplace_session_spec(path, &root, &prompt, carrier, sandbox.as_ref())?;
