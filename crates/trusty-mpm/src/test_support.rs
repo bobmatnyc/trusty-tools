@@ -689,6 +689,30 @@ pub(crate) fn relink_spool_files(dir: &Path) {
     }
 }
 
+/// Replay the settings backups a pre-#12077-part-4c launch left in `ws`.
+///
+/// Why: the project hooks writer took the timestamped `settings.json`
+/// snapshot, and it no longer runs at launch; the decommission and dirt rules
+/// that excuse tm's backups still guard clones provisioned by older releases.
+/// What: inside one provisioning-ledger window, copies `settings.json` to
+/// `settings.json.bak` when no `.bak` exists and takes one snapshot, then
+/// records the window as that launch did.
+/// Test: `owned_decommission_removes_a_clone_holding_only_tm_s_backups_11267`,
+/// `the_spawn_written_settings_backups_do_not_refuse_11218`.
+pub(crate) fn replay_pre_4c_hook_backups(ws: &std::path::Path) {
+    use crate::core::standalone::hooks::backup;
+    use crate::session_manager::provisioning_ledger::{record, snapshot};
+    let before = snapshot(ws);
+    let settings = ws.join(".claude").join("settings.json");
+    let bak = ws.join(".claude").join("settings.json.bak");
+    if !bak.exists() {
+        std::fs::copy(&settings, &bak).expect("legacy .bak");
+    }
+    backup::snapshot_then_prune(&settings, backup::HOOK_SETTINGS_SNAPSHOTS_KEPT)
+        .expect("legacy snapshot");
+    record(ws, &before).expect("record the legacy launch");
+}
+
 #[cfg(test)]
 mod tests {
     /// #9101: the identity the fake derives names the session the pane id

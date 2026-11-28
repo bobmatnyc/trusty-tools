@@ -104,20 +104,8 @@ fn spawn(ws: &Path) -> tempfile::TempDir {
         None,
     )
     .expect("the spawn preparation succeeds");
-    // #12077 part 4c: no launch writes the timestamped snapshot any more (it
-    // was the project hook writer's). Replay an older tm launch that took one:
-    // the snapshot inside a ledger window, as that launch recorded it.
-    {
-        use crate::core::standalone::hooks::backup;
-        use crate::session_manager::provisioning_ledger::{record, snapshot};
-        let before = snapshot(ws);
-        backup::snapshot_then_prune(
-            &ws.join(".claude/settings.json"),
-            backup::HOOK_SETTINGS_SNAPSHOTS_KEPT,
-        )
-        .expect("legacy snapshot");
-        record(ws, &before).expect("record the legacy launch");
-    }
+    // #12077 part 4c: no launch writes these backups now; replay an older one.
+    crate::test_support::replay_pre_4c_hook_backups(ws);
     assert!(ws.join(BAK).is_file(), "premise: the spawn wrote {BAK}");
     assert!(
         !snapshots(ws).is_empty(),

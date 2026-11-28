@@ -280,7 +280,8 @@ fn hash_stripped_stem(name: &str) -> &str {
 
 /// The seven lifecycle events [`mpm_hook_additions_with_exe`] writes a group for.
 ///
-/// Why (#7490): `tm doctor`'s `hooks_missing_tm_group` check has to name the
+/// Why (#7490; that doctor row is retired by #12077 part 4c, and the literal
+/// stays for the hook relay's event list): `tm doctor`'s `hooks_missing_tm_group` check had to name the
 /// events a settings file is MISSING, and a missing event has no group to read
 /// the name off. Deriving the list from the block itself needs a resolvable
 /// binary, which the diagnostic must not depend on; a literal that drifts from
