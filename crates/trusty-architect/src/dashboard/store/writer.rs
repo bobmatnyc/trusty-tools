@@ -6,7 +6,7 @@
 //! Two classes writing one collection in a parallel window corrupt it, so the
 //! first class to write a collection owns it and the other is refused, in
 //! code.
-//! What: [`WriterClass`] names the two classes. [`admit`] runs under the
+//! What: [`WriterClass`] names the two classes. `admit` runs under the
 //! exclusive store lock: it reads the claims from the lock file, refuses the
 //! batch with [`DashError::WriterClass`] when any touched collection is
 //! claimed by the other class, and appends one `writer <class> <collection>`

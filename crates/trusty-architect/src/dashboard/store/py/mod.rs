@@ -7,13 +7,13 @@
 //! #10063 [`super::Store`] keeps its stricter rules by design (secret scan,
 //! letter-case refusal, its own change log); this module reuses its lock and
 //! its writer-class guard and changes none of its paths.
-//! What: [`PyStore`] over an absolute root in `dir` or `jsonl`: reads
-//! ([`PyStore::get`], [`PyStore::list_docs`], [`PyStore::collections`]) take
+//! What: `PyStore` over an absolute root in `dir` or `jsonl`: reads
+//! (`PyStore::get`, `PyStore::list_docs`, `PyStore::collections`) take
 //! no lock, as the prototype's do (a replace is atomic). Writes live in
 //! `write`: one `flock` on `<root>/.lock` (shared with the prototype), the
-//! AC2 claim ([`super::writer::admit`], class [`WriterClass::Python`]),
+//! AC2 claim (`writer::admit`, class [`WriterClass::Python`]),
 //! staging, the prune log, then the commit with rollback. Values are
-//! [`PyValue`]s so Python's types survive.
+//! `PyValue`s so Python's types survive.
 //! Known gaps: the lock wait is bounded ([`super::LOCK_WAIT`]; the prototype
 //! waits forever, #9758) and ends in [`PyStoreError::Unavailable`]; the
 //! jsonl parse cache is not kept (it only skips re-reading an unchanged
