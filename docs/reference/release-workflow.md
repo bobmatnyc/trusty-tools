@@ -882,9 +882,10 @@ so the split costs nothing here.
 🟡 **Signed at install (#11587).** `tctl install` signs every installed trusty
 binary in its signing table, trusty-memory included, through one step
 (`macos_signing::install_step`), and prints one line per binary. On macOS,
-`tm install` signs trusty-browser with `tctl sign trusty-browser`. No CI or
-release workflow signs anything (owner ruling Dsf). After a local-source
-install, run the script or `tctl sign trusty-memory`.
+`tm install` signs trusty-browser with `tctl sign trusty-browser`. Signing
+happens at install time only: no CI or release workflow signs anything
+(#11587). After a local-source install, run the script or
+`tctl sign trusty-memory`.
 
 ### Signed Install: trusty-analyze
 
