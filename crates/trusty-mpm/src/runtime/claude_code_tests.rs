@@ -2515,7 +2515,7 @@ fn a_record_adapter_carries_the_sandbox_opt_in_12077() {
         let spec = sent_spec(&only_line(&fake));
         let enabled =
             inline_settings(&spec.args).and_then(|v| v.pointer("/sandbox/enabled").cloned());
-        assert_eq!(enabled, on.then(|| serde_json::json!(true)), "on = {on}");
+        assert_eq!(enabled, on.then_some(serde_json::json!(true)), "on = {on}");
     }
     assert_no_sandbox_in(home.home());
 }

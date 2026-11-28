@@ -361,7 +361,7 @@ async fn an_opted_in_worker_carries_the_agent_sandbox_inline_12077() {
     let argv_log = tmp.path().join("argv.txt");
     trusty_common::exec_stub::write_executable(
         &fake,
-        &format!(
+        format!(
             "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\n\
              cat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
             argv_log.display()
@@ -423,7 +423,7 @@ async fn an_opted_in_worker_with_no_home_is_refused_12077() {
     let ran = tmp.path().join("ran");
     trusty_common::exec_stub::write_executable(
         &fake,
-        &format!(
+        format!(
             "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"result\":\"ok\"}}'\n",
             ran.display()
         ),
