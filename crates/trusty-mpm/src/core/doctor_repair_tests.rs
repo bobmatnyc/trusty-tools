@@ -1152,3 +1152,33 @@ fn missing_group_repair_never_writes_the_project_file_12077() {
         "the file must stay byte-identical"
     );
 }
+
+/// #12077 row 9a: the refused step says the next `tm launch` restores the
+/// guard and gives the command for this project; it no longer reads as a merge.
+#[test]
+fn missing_group_refusal_names_the_launch_that_restores_the_guard_12077() {
+    let project = tempfile::tempdir().unwrap();
+    write_missing_group_settings(project.path());
+    let base = tempfile::tempdir().unwrap();
+    let fw = hermetic_fw(base.path(), project.path());
+
+    let steps = repair_missing_hook_group_with(
+        &fw,
+        project.path(),
+        Some(Path::new("/usr/local/bin/tm")),
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    let StepStatus::Refused(why) = &steps[0].status else {
+        panic!("refused: {steps:?}");
+    };
+    let launch = format!("`tm launch {}`", project.path().display());
+    assert!(why.contains(&launch), "{launch} missing: {why}");
+    assert!(why.contains("guard"), "{why}");
+    assert!(
+        !steps[0].what.contains("merge the tm hook group back"),
+        "{}",
+        steps[0].what
+    );
+}

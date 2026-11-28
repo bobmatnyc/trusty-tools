@@ -501,3 +501,22 @@ fn check_hooks_hygiene_missing_group_check_ignores_a_foreign_project() {
         missing.message
     );
 }
+
+/// #12077 row 9a: the row says the next `tm launch` restores the guard and
+/// names the command, since `--fix` no longer writes the group.
+#[test]
+fn missing_group_row_names_the_launch_that_restores_the_guard_12077() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("stale-project");
+    write_settings(&project, &missing_sessionstart_value());
+
+    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(missing.status, CheckStatus::Warn);
+    let launch = format!("`tm launch {}`", project.display());
+    assert!(
+        missing.message.contains(&launch),
+        "{launch} missing: {}",
+        missing.message
+    );
+    assert!(missing.message.contains("guard"), "{}", missing.message);
+}

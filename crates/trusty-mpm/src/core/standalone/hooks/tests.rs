@@ -1608,3 +1608,44 @@ fn write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on() {
         "{commands:?}"
     );
 }
+
+/// #12077 row 12: the launch warning names each old entry (file, event,
+/// command), gives `tm hooks clean --path ~` as a dry run and then with
+/// `--force`, says that command matches more widely, and gives the manual
+/// alternative.
+#[test]
+fn the_legacy_global_hook_warning_names_each_entry_and_the_removal_12077() {
+    use super::legacy_global::legacy_global_mpm_hooks_at;
+    let home = TempDir::new().expect("tempdir");
+    let global = home.path().join(".claude").join("settings.json");
+    plant(
+        &global,
+        &serde_json::json!({"hooks": {"PreToolUse": [
+            tm_old_pre_tool_use("/opt/bin/trusty-mpm hook"),
+            {"hooks": [{"type": "command", "command": "/usr/bin/other-tool run"}]}
+        ]}}),
+    );
+
+    let found = legacy_global_mpm_hooks_at(home.path());
+    assert_eq!(found.len(), 1, "{found:?}");
+    let text = found[0].warning();
+
+    for wanted in [
+        global.display().to_string().as_str(),
+        "PreToolUse",
+        "/opt/bin/trusty-mpm hook",
+        "tm hooks clean --path ~",
+        "--force",
+        "dry run",
+        "backs up",
+        "any plain `tm hook` entry",
+        "settings.local.json",
+        "under `hooks`",
+    ] {
+        assert!(text.contains(wanted), "missing {wanted:?} in:\n{text}");
+    }
+    assert!(
+        !text.contains("/usr/bin/other-tool"),
+        "only tm's entries are listed:\n{text}"
+    );
+}

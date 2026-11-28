@@ -440,6 +440,31 @@ mod tests {
         assert!(rendered.contains("`oauth_token`"), "{rendered}");
     }
 
+    /// #12077: the rows whose repair moved to a tm-owned target describe the
+    /// repair that runs now.
+    #[test]
+    fn tm_owned_target_rows_describe_the_current_repair_12077() {
+        let row = |name: &str| {
+            DOCTOR_CHECKS
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, d)| *d)
+                .unwrap_or_default()
+        };
+        let hooks = row("hooks_missing_tm_group");
+        assert!(hooks.contains("`tm launch"), "{hooks}");
+        assert!(!hooks.contains("`--yes` applies it"), "{hooks}");
+        let memory = row("auto_memory");
+        assert!(memory.contains("launch-settings record"), "{memory}");
+        assert!(!memory.contains("into the PROJECT tier"), "{memory}");
+        let ancestor = row("ancestor_claude_md");
+        assert!(ancestor.contains("launch-settings record"), "{ancestor}");
+        assert!(
+            !ancestor.contains("own `.claude/settings.local.json`"),
+            "{ancestor}"
+        );
+    }
+
     #[test]
     fn doctor_render_is_deterministic() {
         assert_eq!(render(), render());

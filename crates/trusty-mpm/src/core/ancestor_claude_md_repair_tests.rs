@@ -392,3 +392,115 @@ fn a_malformed_managed_settings_file_refuses_the_exclude_12077() {
     );
     assert!(!settings_of(&project).exists());
 }
+
+/// The `claudeMdExcludes` the launch-settings record of `project` carries.
+fn recorded_excludes(project: &Path) -> serde_json::Value {
+    crate::core::session_launch::read_launch_keys(project)
+        .unwrap()
+        .and_then(|keys| keys.get("claudeMdExcludes").cloned())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// #12077 row 13: the exclude goes on this project's launch-settings record,
+/// which the launch passes as `--settings`; tm's managed config dir, shared by
+/// every tm session, is not written.
+#[test]
+fn the_exclude_lands_on_the_launch_settings_record_12077() {
+    let (tmp, ancestor, project) = fixture();
+    let notes = ancestor.join("CLAUDE.md");
+    std::fs::write(&notes, "# Monorepo\n\nAll packages use pnpm.\n").unwrap();
+    let managed = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&managed).unwrap();
+
+    let steps = repair_ancestor_claude_md(
+        &project,
+        None,
+        Some(&managed),
+        "20260912",
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Applied { .. }),
+        "{steps:?}"
+    );
+    assert_eq!(
+        recorded_excludes(&project),
+        serde_json::json!([notes.display().to_string()])
+    );
+    assert!(
+        !managed.join("settings.json").exists(),
+        "the managed config dir is shared by every tm session; not written"
+    );
+    assert!(!settings_of(&project).exists(), "no project settings file");
+}
+
+/// #12077 row 13: the record is tm's own, so the exclude needs no managed
+/// config dir.
+#[test]
+fn the_exclude_needs_no_managed_config_dir_12077() {
+    let (_tmp, ancestor, project) = fixture();
+    let notes = ancestor.join("CLAUDE.md");
+    std::fs::write(&notes, "# Monorepo\n").unwrap();
+
+    let steps = repair_ancestor_claude_md(&project, None, None, "20260912", RepairMode::Apply);
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(steps[0].status, StepStatus::Applied { .. }),
+        "{steps:?}"
+    );
+    assert_eq!(
+        recorded_excludes(&project),
+        serde_json::json!([notes.display().to_string()])
+    );
+}
+
+/// #12077 row 13: an exclude on the record counts as excluded, so a second
+/// `--fix` has nothing to do.
+#[test]
+fn a_recorded_exclude_yields_no_step_12077() {
+    let (_tmp, ancestor, project) = fixture();
+    let notes = ancestor.join("CLAUDE.md");
+    std::fs::write(&notes, "# Monorepo\n").unwrap();
+    crate::core::session_launch::set_launch_key(
+        &project,
+        "claudeMdExcludes",
+        serde_json::json!([notes.display().to_string()]),
+    )
+    .unwrap();
+
+    let steps = repair_ancestor_claude_md(&project, None, None, "20260912", RepairMode::Apply);
+
+    assert!(steps.is_empty(), "{steps:?}");
+}
+
+/// #12077 row 13, Fail-Open Check: a record that cannot be read fails the
+/// step and stays byte-identical; nothing else is written in its place.
+#[test]
+fn an_unreadable_launch_record_fails_the_exclude_12077() {
+    let (tmp, ancestor, project) = fixture();
+    std::fs::write(ancestor.join("CLAUDE.md"), "# Monorepo\n").unwrap();
+    let managed = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&managed).unwrap();
+    let record = crate::core::session_launch::launch_keys_record_path(&project);
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, "{ not json").unwrap();
+
+    let steps = repair_ancestor_claude_md(
+        &project,
+        None,
+        Some(&managed),
+        "20260912",
+        RepairMode::Apply,
+    );
+
+    assert_eq!(steps.len(), 1, "{steps:?}");
+    assert!(
+        matches!(&steps[0].status, StepStatus::Failed(why) if why.contains("not valid")),
+        "{steps:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), "{ not json");
+    assert!(!managed.join("settings.json").exists());
+}

@@ -194,17 +194,7 @@ pub(crate) fn report_global_hooks(home: Option<&Path>) {
     use trusty_mpm::core::standalone::hooks::legacy_global::legacy_global_mpm_hooks_at;
     let Some(home) = home else { return };
     for file in legacy_global_mpm_hooks_at(home) {
-        match file.found {
-            Ok(n) => eprintln!(
-                "warning: {} still carries {n} of tm's old hook entries; tm no longer \
-                 edits this file (#12077) — remove them by hand",
-                file.path.display()
-            ),
-            Err(e) => eprintln!(
-                "warning: could not read {} to check for tm's old hook entries: {e}",
-                file.path.display()
-            ),
-        }
+        eprintln!("{}", file.warning());
     }
 }
 

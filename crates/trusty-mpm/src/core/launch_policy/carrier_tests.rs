@@ -704,3 +704,17 @@ fn an_unwritable_launch_key_body_refuses_the_carrier_12127() {
     assert_eq!(settings.file, None);
     assert!(settings.notice.is_some_and(|n| n.contains("NOT applied")));
 }
+
+/// #12077 row 13: the ancestor `claudeMdExcludes` the doctor repair records
+/// rides the one `--settings` payload, so the launch carries it; Claude Code
+/// unions the array with the file layers.
+#[test]
+fn the_carrier_payload_carries_the_recorded_claude_md_excludes_12077() {
+    let fx = Fx::new(USER);
+    fx.record(r#"{"issue": 12127, "settings": {"claudeMdExcludes": ["/anc/CLAUDE.md"]}}"#);
+    let settings = fx.provision();
+    assert_eq!(
+        body_of(&settings)["claudeMdExcludes"],
+        json!(["/anc/CLAUDE.md"])
+    );
+}

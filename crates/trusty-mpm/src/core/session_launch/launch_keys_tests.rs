@@ -293,3 +293,38 @@ fn the_launch_key_pass_never_refuses_12127() {
     );
     assert!(read_launch_keys(project).expect("readable").is_some());
 }
+
+/// #12077 row 13: a launch rewrites the record, and keeps the
+/// `claudeMdExcludes` `tm doctor --fix` stored on it.
+#[test]
+fn deliver_keeps_the_recorded_claude_md_excludes_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path();
+    set_launch_key(project, "claudeMdExcludes", json!(["/anc/CLAUDE.md"])).expect("recorded");
+    deliver_launch_keys(project, "trusty-mpm", SessionProfile::Pm).expect("delivered");
+    let record = read_launch_keys(project)
+        .expect("readable")
+        .expect("recorded");
+    assert_eq!(record["claudeMdExcludes"], json!(["/anc/CLAUDE.md"]));
+    assert_eq!(record["outputStyle"], json!("trusty-mpm"));
+}
+
+/// #12077 row 13, Fail-Open Check: a record that cannot be read refuses the
+/// launch and stays as it is, so the excludes on it are never dropped unseen.
+#[test]
+fn deliver_refuses_over_an_unreadable_record_12077() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path();
+    let record = record_path(project);
+    write_text(&record, "{ not json");
+    let err = deliver_launch_keys(project, "trusty-mpm", SessionProfile::Pm)
+        .expect_err("an unreadable record refuses the launch");
+    assert!(
+        err.to_string().contains(&record.display().to_string()),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("read"),
+        "{ not json"
+    );
+}

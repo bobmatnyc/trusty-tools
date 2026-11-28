@@ -730,7 +730,9 @@ fn repair_writes_the_user_tier_under_claude_config_dir() {
     let user_settings = config_dir.path().join("settings.json");
     std::fs::write(
         &user_settings,
-        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"trusty-memory hooks fire claude.stop"}]}]}}"#,
+        // #12077 row 11: the strip removes only a group equal to the one tm wrote,
+        // `timeout` included.
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"trusty-memory hooks fire claude.stop","timeout":60}]}]}}"#,
     )
     .unwrap();
     let base = TempDir::new().unwrap();
@@ -1198,5 +1200,76 @@ fn repair_plan_matches_the_branch_repair_takes() {
         RepairPlan::RerunPipeline,
     ] {
         assert!(!plan.describe().is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #12077 — `outputStyle` is delivered on the launch-settings record.
+// ---------------------------------------------------------------------------
+
+/// [`fully_provisioned`] with `outputStyle` only on the launch-settings record,
+/// as a 4a launch leaves it: the settings file carries `hooks` and no style.
+fn provisioned_with_record_style(base: &Path) -> FrameworkPaths {
+    let fw = fully_provisioned(base);
+    write_settings(&fw, r#"{"hooks": {"SessionStart": []}}"#);
+    crate::core::session_launch::set_launch_key(
+        &fw.claude_home_dir(),
+        "outputStyle",
+        serde_json::json!("trusty-mpm"),
+    )
+    .unwrap();
+    fw
+}
+
+/// #12077 item 1: a style the record carries closes the key gap, so the
+/// spawn gate and `tm validate --repair` stop looping on it.
+#[test]
+fn a_record_output_style_closes_the_key_gap_12077() {
+    let tmp = TempDir::new().unwrap();
+    let fw = provisioned_with_record_style(tmp.path());
+    let report = validate_workspace(&fw);
+    assert!(report.is_complete(), "{:?}", report.gaps);
+}
+
+/// #12077 item 1: the record's style still needs its file under
+/// `output-styles/`.
+#[test]
+fn a_record_output_style_still_needs_its_style_file_12077() {
+    let tmp = TempDir::new().unwrap();
+    let fw = provisioned_with_record_style(tmp.path());
+    std::fs::remove_dir_all(fw.claude_home_dir().join(".claude").join("output-styles")).unwrap();
+    let report = validate_workspace(&fw);
+    assert_eq!(
+        report.gaps,
+        vec![DeploymentGap::OutputStyleFileMissing(
+            "trusty-mpm".to_string()
+        )]
+    );
+}
+
+/// #12077 item 1, Fail-Open Check: a record that cannot be read or parsed is a
+/// gap naming the record, even when the settings file sets `outputStyle`.
+#[test]
+fn an_unreadable_launch_record_is_a_gap_never_a_pass_12077() {
+    // A directory at the record path is the read-error arm; `{ not json` the
+    // parse-error arm.
+    for unreadable_as_dir in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let fw = fully_provisioned(tmp.path());
+        let record = crate::core::session_launch::launch_keys_record_path(&fw.claude_home_dir());
+        if unreadable_as_dir {
+            std::fs::create_dir_all(&record).unwrap();
+        } else {
+            std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+            std::fs::write(&record, "{ not json").unwrap();
+        }
+        let report = validate_workspace(&fw);
+        assert!(!report.is_complete(), "dir={unreadable_as_dir}");
+        let shown = record.display().to_string();
+        assert!(
+            report.gaps.iter().any(|g| g.describe().contains(&shown)),
+            "dir={unreadable_as_dir}: a gap must name {shown}: {:?}",
+            report.gaps
+        );
     }
 }

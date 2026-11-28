@@ -670,3 +670,45 @@ fn legacy_ids_ok_when_none_configured() {
     let check = check_output_style_legacy_ids(Some(project.path()), home.path());
     assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
 }
+
+/// #12077 item 1: a launch delivers `outputStyle` on the launch-settings
+/// record, and the flag tier outranks every file, so the row reads it first.
+#[test]
+fn output_style_reads_the_launch_settings_record_12077() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    deploy_default_style(home.path());
+    write_settings(project.path(), r#"{"outputStyle": "claude_mpm"}"#);
+    crate::core::session_launch::set_launch_key(
+        project.path(),
+        "outputStyle",
+        serde_json::json!("trusty-mpm"),
+    )
+    .unwrap();
+    let check = check_output_style(Some(project.path()), home.path());
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    assert!(
+        check.message.contains("launch-settings"),
+        "the row names the record: {}",
+        check.message
+    );
+}
+
+/// #12077 item 1, Fail-Open Check: an unreadable record fails the row; it is
+/// never read as "no outputStyle configured".
+#[test]
+fn output_style_fails_on_an_unreadable_launch_settings_record_12077() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    deploy_default_style(home.path());
+    let record = crate::core::session_launch::launch_keys_record_path(project.path());
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, "{ not json").unwrap();
+    let check = check_output_style(Some(project.path()), home.path());
+    assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+    assert!(
+        check.message.contains(&record.display().to_string()),
+        "{}",
+        check.message
+    );
+}

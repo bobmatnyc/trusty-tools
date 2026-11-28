@@ -30,6 +30,25 @@ pub struct LegacyGlobalHooks {
     pub found: Result<usize, String>,
 }
 
+impl LegacyGlobalHooks {
+    /// The stderr warning `tm launch` prints for this file.
+    ///
+    /// Test: `the_legacy_global_hook_warning_names_each_entry_and_the_removal_12077`.
+    pub fn warning(&self) -> String {
+        match &self.found {
+            Ok(n) => format!(
+                "warning: {} still carries {n} of tm's old hook entries; tm no longer \
+                 edits this file (#12077) — remove them by hand",
+                self.path.display()
+            ),
+            Err(e) => format!(
+                "warning: could not read {} to check for tm's old hook entries: {e}",
+                self.path.display()
+            ),
+        }
+    }
+}
+
 /// The two GLOBAL Claude settings files under `home`.
 ///
 /// Why (#5875): name them; never walk the home tree.
