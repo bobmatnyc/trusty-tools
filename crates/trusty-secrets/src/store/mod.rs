@@ -113,6 +113,9 @@ pub use dotenv::parse_dotenv;
 pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
 pub use keychain::{KEYCHAIN_CALL_TIMEOUT, KeychainBackend};
+// #11786: doctor reads an existing control item under the probe's bound.
+#[cfg(feature = "server")]
+pub(crate) use keychain::{DENY_MIGRATED_SERVICE, KEYCHAIN_PROBE_TIMEOUT};
 // #9066: `mask_secret` moved to `api` for the console bridge; same path here.
 pub use crate::api::{MASK_HEAD_CHARS, mask_length_only, mask_secret};
 #[cfg(any(test, feature = "test-support"))]

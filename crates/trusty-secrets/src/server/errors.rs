@@ -504,16 +504,30 @@ const TIMEOUT_RECOVERY: &str = "answer or dismiss any open macOS Keychain access
      secrets list` before writing it again";
 
 /// The sentence for one noted time-out; see [`ErrorKind::to_rpc_noted`].
+///
+/// What: #11786 — a Keychain time-out that waited names the item's service
+/// (and the vault blob that may hold it) and says a Keychain authorization
+/// prompt on this Mac's console is the likely cause, to be answered there.
+/// Test: `timeout_reply_text_names_wait_or_refusal_and_the_recovery`,
+/// `list_timeout_reply_names_the_hung_keychain_item_and_the_prompt`.
 pub(crate) fn timeout_text(note: &TimeoutNote) -> String {
-    let backend = if note.backend == crate::api::BackendId::KEYCHAIN {
+    let keychain = note.backend == crate::api::BackendId::KEYCHAIN;
+    let backend = if keychain {
         "the Keychain".to_owned()
     } else {
         format!("the {} backend", note.backend)
     };
+    // #11786: name the item and the prompt the caller has to answer.
+    let cause = if keychain {
+        prompt_cause(note)
+    } else {
+        String::new()
+    };
     if note.abandoned_item {
         format!(
             "refused at once: an earlier call to {backend} on this item did not answer in time \
-             and is still waiting, and the item refuses calls until it ends; {TIMEOUT_RECOVERY}"
+             and is still waiting, and the item refuses calls until it ends; \
+             {cause}{TIMEOUT_RECOVERY}"
         )
     } else if note.waited.is_zero() {
         format!(
@@ -523,10 +537,31 @@ pub(crate) fn timeout_text(note: &TimeoutNote) -> String {
     } else {
         format!(
             "{backend} did not answer in time: this call waited {:.1} s and was abandoned, and \
-             the item refuses calls until it ends; {TIMEOUT_RECOVERY}",
+             the item refuses calls until it ends; {cause}{TIMEOUT_RECOVERY}",
             note.waited.as_secs_f64()
         )
     }
+}
+
+/// The likely cause of a Keychain time-out and where to answer it (#11786).
+///
+/// What: names the item's service when the note carries one, and the vault
+/// blob when the item may live inside it. Built from fixed Keychain service
+/// names or the vault the caller named, never a key or value.
+fn prompt_cause(note: &TimeoutNote) -> String {
+    let item = match (&note.service, note.in_blob) {
+        (Some(service), true) => format!(
+            " for the Keychain item `{service}` (or the vault blob `{}` that holds it after \
+             `tm secrets migrate`)",
+            crate::store::vault_blob::BLOB_SERVICE
+        ),
+        (Some(service), false) => format!(" for the Keychain item `{service}`"),
+        (None, _) => String::new(),
+    };
+    format!(
+        "the likely cause is a Keychain authorization prompt{item} waiting on this Mac's \
+         console: answer it there (Always Allow); otherwise "
+    )
 }
 
 impl From<SecretsError> for ErrorKind {

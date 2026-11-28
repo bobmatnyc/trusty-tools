@@ -58,7 +58,14 @@ pub(crate) fn read_within(
     let limit = effective_limit(limit);
     let timeout = |waited, abandoned_item| {
         // #11215: the reply and the audit row read the wait from this note.
-        super::timeout_note::note(BackendId::KEYCHAIN.to_string(), waited, abandoned_item);
+        // #11786: and the item; a named item is never inside the vault blob.
+        super::timeout_note::note(
+            BackendId::KEYCHAIN.to_string(),
+            waited,
+            abandoned_item,
+            Some(service.to_string()),
+            false,
+        );
         SecretsError::Timeout {
             backend: BackendId::KEYCHAIN.to_string(),
             operation: "get",

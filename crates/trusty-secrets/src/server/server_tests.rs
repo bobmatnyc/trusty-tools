@@ -740,11 +740,13 @@ async fn server_doctor_reports_backends_and_paths_only() {
             ("vercel", false, String::new(), Some(cli)),
         ]
     );
-    assert!(
-        bare.backends
-            .iter()
-            .all(|b| b.available == b.detail.is_none())
-    );
+    // #11786: the available Keychain row's detail says no control item was
+    // read (nothing is indexed here); every other row keeps a detail only
+    // when unavailable.
+    let (keychain, others) = bare.backends.split_at(1);
+    let note = keychain[0].detail.as_deref().unwrap_or_default();
+    assert!(note.contains("no existing Keychain control item was read"));
+    assert!(others.iter().all(|b| b.available == b.detail.is_none()));
     assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
     let with_project: DoctorResponse = serde_json::from_value(ok(call(
@@ -1916,6 +1918,10 @@ mod delete_tests;
 // #7519 P4: the doctor reason, readiness and wire tests share this fixture.
 #[path = "doctor_tests.rs"]
 mod doctor_tests;
+
+// #11786: the Keychain authorization-prompt tests share this module's fixture.
+#[path = "keychain_prompt_tests.rs"]
+mod keychain_prompt_tests;
 
 // #7524: the Keychain-to-file write posture tests share this module's fixture.
 #[path = "posture_tests.rs"]

@@ -134,11 +134,11 @@ impl TimeLimited {
         let item: Item = (part, vault.clone(), key.cloned());
         let limit = self.effective_limit();
         if limit.is_zero() {
-            return Err(self.timeout(operation, vault, key, Duration::ZERO, false));
+            return Err(self.timeout(operation, part, vault, key, Duration::ZERO, false));
         }
         // #11215: a refusal for a still-hung item is noted as such.
         if self.abandoned.items().contains_key(&item) {
-            return Err(self.timeout(operation, vault, key, Duration::ZERO, true));
+            return Err(self.timeout(operation, part, vault, key, Duration::ZERO, true));
         }
         let phase = Arc::new(Mutex::new(Phase::Running));
         let finish = Finish {
@@ -171,7 +171,7 @@ impl TimeLimited {
                 if *phase == Phase::Running {
                     *phase = Phase::Abandoned;
                     *self.abandoned.items().entry(item).or_insert(0) += 1;
-                    return Err(self.timeout(operation, vault, key, limit, false));
+                    return Err(self.timeout(operation, part, vault, key, limit, false));
                 }
                 // It ended between the timeout and the lock; take its result.
                 drop(phase);
@@ -194,19 +194,42 @@ impl TimeLimited {
     fn timeout(
         &self,
         operation: &'static str,
+        part: Part,
         vault: &VaultName,
         key: Option<&SecretKey>,
         waited: Duration,
         abandoned_item: bool,
     ) -> SecretsError {
         // #11215: the reply and the audit row read the wait from this note.
-        super::timeout_note::note(self.inner.id().to_string(), waited, abandoned_item);
+        // #11786: the note also names the Keychain item that did not answer.
+        super::timeout_note::note(
+            self.inner.id().to_string(),
+            waited,
+            abandoned_item,
+            self.service(part, vault),
+            self.inner.blob_store().is_some(),
+        );
         SecretsError::Timeout {
             backend: self.inner.id().to_string(),
             operation,
             vault: vault.to_string(),
             key: key_text(key),
             waited,
+        }
+    }
+
+    /// The Keychain service of `part` in `vault`: the vault for a value, the
+    /// control item's own service, `None` for a vault-wide call or a backend
+    /// that is not the Keychain (#11786).
+    /// Test: `time_limited_timeout_names_the_keychain_service_of_the_item`.
+    fn service(&self, part: Part, vault: &VaultName) -> Option<String> {
+        if self.inner.id().as_str() != BackendId::KEYCHAIN {
+            return None;
+        }
+        match part {
+            Part::Value => Some(vault.to_string()),
+            Part::Control(item) => Some(super::keychain::control_service(item).to_owned()),
+            Part::Vault => None,
         }
     }
 

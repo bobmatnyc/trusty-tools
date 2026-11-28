@@ -888,6 +888,8 @@ fn timeout_reply_text_names_wait_or_refusal_and_the_recovery() {
         backend: backend.to_owned(),
         waited: Duration::from_millis(ms),
         abandoned_item,
+        service: None,
+        in_blob: false,
     };
     let text = |n: &TimeoutNote| errors::timeout_text(n);
     assert!(
@@ -900,6 +902,18 @@ fn timeout_reply_text_names_wait_or_refusal_and_the_recovery() {
     for n in [note("keychain", 1, false), note("keychain", 0, true)] {
         assert!(text(&n).contains("pkill -x trusty-secrets"), "{}", text(&n));
     }
+    // #11786: the item and the vault blob that may hold it are named.
+    let named = text(&TimeoutNote {
+        service: Some("trusty-secrets.agents-deny-migrated".to_owned()),
+        in_blob: true,
+        ..note("keychain", 1_000, false)
+    });
+    assert!(
+        named.contains(
+            "`trusty-secrets.agents-deny-migrated` (or the vault blob `trusty-secrets.vault-blob`"
+        ),
+        "{named}"
+    );
     let other =
         ErrorKind::BackendFailed.to_rpc_noted(method::SET, Some(&note("keychain", 1, false)));
     assert_eq!(

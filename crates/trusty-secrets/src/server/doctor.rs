@@ -26,6 +26,7 @@
 //! `server_doctor_lists_keeper_without_spawning`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,7 +40,10 @@ use super::router::State;
 use super::tools::{self, DetectedTool};
 use crate::api::{BackendChoice, BackendId, BackendsResponse, SecretsError};
 use crate::store::config::{self, MachineSecretsConfig};
-use crate::store::{Capabilities, cli_backends, sync_target_ready, sync_targets};
+use crate::store::{
+    Capabilities, ControlItem, DENY_MIGRATED_SERVICE, KEYCHAIN_PROBE_TIMEOUT, SecretBackend,
+    cli_backends, deadline, sync_target_ready, sync_targets,
+};
 
 /// `secrets.doctor` — not among S1's method names.
 pub const DOCTOR: &str = "secrets.doctor";
@@ -75,26 +79,30 @@ struct DoctorRequest {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Unavailable {
+    // See #11786: discriminants pinned to their 0.9.3 positions.
     /// This build does not link the backend.
-    NotCompiled,
+    NotCompiled = 0,
     /// The account's machine config does not enable it.
-    NotEnabled,
+    NotEnabled = 1,
     /// Its CLI is missing, relative, or not executable.
-    CliNotInstalled,
+    CliNotInstalled = 2,
     /// A config it reads is unreadable, does not parse, or is refused.
-    ConfigInvalid,
+    ConfigInvalid = 3,
     /// The project's tracked config sets something only the machine may.
-    TrackedSettingRefused,
+    TrackedSettingRefused = 4,
     /// It reported itself locked or signed out.
-    Locked,
+    Locked = 5,
     /// It failed to open for another reason; the detail says which.
-    OpenFailed,
+    OpenFailed = 6,
     /// The server's own process has no GUI session access to it (#10589).
-    NoSession,
+    NoSession = 7,
+    /// A read of an existing Keychain item waits on an authorization prompt
+    /// (#11786).
+    AuthorizationPending = 9,
     /// A reason this client does not know.
     // #7519 P4: `serde(other)`, so a reason added later never fails a decode.
     #[serde(other)]
-    Other,
+    Other = 8,
 }
 
 impl Unavailable {
@@ -109,6 +117,7 @@ impl Unavailable {
             Self::Locked => "locked",
             Self::OpenFailed => "open_failed",
             Self::NoSession => "no_session",
+            Self::AuthorizationPending => "authorization_pending",
             Self::Other => "other",
         }
     }
@@ -151,6 +160,8 @@ pub struct BackendStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<Unavailable>,
     /// The fix, as an error's text: paths, ids and fixed hints, never a value.
+    /// #11786: on an available Keychain row, a note that no existing control
+    /// item could be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -387,14 +398,97 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId, probe: bool) -
         false => Ok(backend),
     });
     match opened {
+        // #11786: the probe item is this server's own, so it never meets the
+        // access prompt an existing item raises; read one of those too.
+        Ok(backend) if probe && id.as_str() == BackendId::KEYCHAIN => {
+            judge_control_read(state, id, backend.as_ref())
+        }
         Ok(backend) => BackendStatus::available(id, backend.capabilities()),
-        Err(e @ SecretsError::KeychainNoSession { .. }) => BackendStatus::unavailable(
+        Err(e) => failed(id, e),
+    }
+}
+
+/// The row of a backend that failed to open, probe or read with `e`.
+fn failed(id: BackendId, e: SecretsError) -> BackendStatus {
+    match e {
+        SecretsError::KeychainNoSession { .. } => BackendStatus::unavailable(
             id,
             Unavailable::of(&e),
             format!("{e}; {}", ErrorKind::KeychainNoSession.text()),
         ),
-        Err(e) => BackendStatus::unavailable(id, Unavailable::of(&e), e.to_string()),
+        e => BackendStatus::unavailable(id, Unavailable::of(&e), e.to_string()),
     }
+}
+
+/// The detail of an available Keychain row with no control item to read.
+const NO_CONTROL_ITEM: &str = "no existing Keychain control item was read: no indexed vault \
+     has a `trusty-secrets.agents-deny-migrated` marker yet, so an access prompt on an item \
+     an older trusty-secrets binary created was not checked";
+
+/// Read one existing Keychain control item, as `secrets.list` does (#11786).
+///
+/// Why: the probe writes and removes an item this server creates, so it
+/// never meets the authorization prompt an older binary's item raises;
+/// doctor said `available` while every `list` waited on that prompt.
+/// What: under [`KEYCHAIN_PROBE_TIMEOUT`] (a request deadline the backend's
+/// time limit obeys), reads each indexed vault's [`ControlItem::DenyMigrated`]
+/// marker through the backend until one exists. A read that answers keeps
+/// the `available` row. No such marker is `available` with
+/// [`NO_CONTROL_ITEM`] as the detail. A time-out is
+/// [`Unavailable::AuthorizationPending`] naming the item's service; any other
+/// error is [`failed`]. Every error is an unavailable row. The read yields
+/// presence only, never a value.
+/// Test: `doctor_keychain_row_names_a_pending_authorization_when_the_control_read_hangs`,
+/// `doctor_keychain_row_says_when_no_control_item_exists`.
+fn judge_control_read(state: &State, id: BackendId, backend: &dyn SecretBackend) -> BackendStatus {
+    let read = deadline::within(Instant::now() + KEYCHAIN_PROBE_TIMEOUT, || {
+        for vault in state.index.vaults()? {
+            if backend.control_item(ControlItem::DenyMigrated, &vault, None)? {
+                return Ok(true);
+            }
+        }
+        Ok::<_, SecretsError>(false)
+    });
+    match read {
+        Ok(true) => BackendStatus::available(id, backend.capabilities()),
+        Ok(false) => BackendStatus {
+            detail: Some(NO_CONTROL_ITEM.to_owned()),
+            ..BackendStatus::available(id, backend.capabilities())
+        },
+        // #11786: a wait is a pending prompt, never `available` or `open_failed`.
+        Err(SecretsError::Timeout { vault, waited, .. }) => BackendStatus::unavailable(
+            id,
+            Unavailable::AuthorizationPending,
+            pending_detail(&vault, waited, backend.blob_store().is_some()),
+        ),
+        Err(e) => failed(id, e),
+    }
+}
+
+/// The detail of a control-item read that did not answer (#11786).
+///
+/// What: names the item's service and account (the vault), the vault blob
+/// when the item may live in it, and the prompt to answer on the console.
+fn pending_detail(vault: &str, waited: Duration, in_blob: bool) -> String {
+    let within = if waited.is_zero() {
+        "in time".to_owned()
+    } else {
+        format!("within {:.1} s", waited.as_secs_f64())
+    };
+    let blob = if in_blob {
+        format!(
+            ", or the vault blob `{}` that holds it after `tm secrets migrate`",
+            crate::store::vault_blob::BLOB_SERVICE
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "a Keychain authorization is pending: reading the existing Keychain item \
+         `{DENY_MIGRATED_SERVICE}` (account `{vault}`{blob}) did not answer {within}; a macOS \
+         Keychain authorization prompt for it is most likely waiting on this Mac's console: \
+         answer it there (Always Allow), then run `tm secrets doctor` again"
+    )
 }
 
 /// Judge sync target `id` without a destination and without spawning.
