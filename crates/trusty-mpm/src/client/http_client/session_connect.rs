@@ -37,7 +37,8 @@ impl DaemonClient {
     /// Test: `launch_session_errors_when_daemon_unreachable`,
     /// `launch_session_writes_nothing_when_daemon_unreachable`,
     /// `launch_session_prepares_under_the_pinned_home_before_tmux`,
-    /// `launch_session_writes_the_user_tier_under_the_config_dir_9999`.
+    /// `launch_session_writes_the_user_tier_under_the_config_dir_9999`,
+    /// `launch_session_deploys_under_the_config_dir_launch_reads_12048`.
     pub async fn launch_session(&self, workdir: &str) -> anyhow::Result<String> {
         // #8405: the operator's config decides the renderer (see `client_claude_spec`).
         let config_root = crate::core::alt_screen::operator_config_root();
@@ -57,9 +58,10 @@ impl DaemonClient {
         // on disk. The exception is #4752's compiled-prompt write.
         // #8545: under the pinned home when a test set one; else the process home.
         let home = self.home.clone().or_else(dirs::home_dir);
+        // #12048: `under` ignored `install.toml` `config_dir`; launch honours it.
         let fw = home.as_deref().map_or_else(
             crate::core::paths::FrameworkPaths::default,
-            crate::core::paths::FrameworkPaths::under,
+            crate::core::paths::FrameworkPaths::under_home,
         );
         let native = crate::core::output_style::claude_supports_native_output_style();
         // #9999: the user tier `CLAUDE_CONFIG_DIR` names, unless a test pinned the home.
