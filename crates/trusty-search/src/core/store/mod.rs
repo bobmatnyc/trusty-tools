@@ -37,6 +37,9 @@ mod relink_9450_tests;
 // #11891: the re-link warnings name the index's snapshot path.
 #[cfg(test)]
 mod relink_warn_11891_tests;
+// #11891: duplicate ties read as reachable; real strands still re-link.
+#[cfg(test)]
+mod relink_dup_11891_tests;
 #[cfg(test)]
 mod tests_close_8232;
 // #8778: a rewrite that collapses ids leaves no orphan vector.

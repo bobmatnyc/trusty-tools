@@ -1,0 +1,3 @@
+Fixed
+
+- The usearch re-link sweep after an HNSW rebuild no longer reports exact-duplicate vectors as stranded: a key missing from its own top-10 self-search counts as reachable when all 10 hits hold its identical stored vector, so more than 10 duplicates no longer re-insert on every pass and warn "still stranded". A distinct stranded vector, and a stranded member of a smaller duplicate group, are still re-linked. Each sweep that sees a strand or a tie now logs one `re-link sweep` line with `path`, the per-pass strand counts (`passes`), `duplicate_ties`, `graph_stranded` and `left` (Refs #11891).

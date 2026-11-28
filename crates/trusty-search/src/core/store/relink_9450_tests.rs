@@ -23,7 +23,7 @@ use super::clustered_vectors::{clustered_points, Blobs};
 use super::usearch_relink::{find_stranded, relink_stranded};
 use super::usearch_requant::{add_parallel, new_rebuild_index, no_fault};
 
-const BLOBS: Blobs = Blobs {
+pub(super) const BLOBS: Blobs = Blobs {
     dim: 32,
     clusters: 30,
     sigma: 0.6,
@@ -82,7 +82,7 @@ fn churn(
 
 /// An f16 index of `n` keys added in order on one thread, then churned.
 /// Returns the index, the vector each key now holds, and the surviving keys.
-fn damaged_index(n: usize, seed: u64) -> (Index, Vec<Vec<f32>>, Vec<u64>) {
+pub(super) fn damaged_index(n: usize, seed: u64) -> (Index, Vec<Vec<f32>>, Vec<u64>) {
     let (index, pool) = fresh_index(n, seed);
     let mut vectors: Vec<Vec<f32>> = pool[..n].to_vec();
     for (key, v) in vectors.iter().enumerate() {
