@@ -31,6 +31,7 @@ use crate::core::pr_watch::verdict::Kind;
 use crate::daemon::DaemonState;
 use crate::daemon::action_events::{ActionPublisher, spool};
 use crate::session_manager::worktree_reclaim_gh::resolve_strict_gh_env_in;
+use crate::session_manager::{ManagedSessionId, SessionRecord};
 
 /// Per-call `gh` budget for the loop's reads.
 const GH_CALL_BUDGET: Duration = Duration::from_secs(30);
@@ -162,14 +163,43 @@ pub struct PaneWaker {
 impl Waker for PaneWaker {
     async fn wake(&self, owner: &str, line: &str) -> anyhow::Result<()> {
         let mgr = self.state.session_manager().await;
-        let record = mgr
-            .list()
-            .await
-            .into_iter()
-            .find(|r| r.tmux_name == owner)
-            .ok_or_else(|| anyhow::anyhow!("no managed session named {owner}"))?;
-        mgr.send_input(&record.id, line).await?;
+        let id = wake_target(mgr.list().await, owner)?;
+        mgr.send_input(&id, line).await?;
         Ok(())
+    }
+}
+
+/// The one live record named `owner`, the session a wake types into.
+///
+/// Why: #12050: a `Deleted` or `Decommissioned` tombstone keeps its tmux name
+/// and its dead pane id. The store lists records in hash-map order, so a
+/// first-match lookup woke the tombstone on some ticks; its pane gate refused
+/// (`recorded pane %23 … no longer exists`) while the live record sat on `%18`.
+/// What: drops terminal records, then answers the only one left. None is an
+/// error; two or more refuse and name every candidate, so the wake never
+/// picks a pane by list order.
+/// Test: `a_pr_watch_wake_skips_a_deleted_record_and_delivers_to_the_live_pane`,
+/// `a_pr_watch_wake_to_two_live_records_of_one_name_refuses_and_names_both`.
+fn wake_target(records: Vec<SessionRecord>, owner: &str) -> anyhow::Result<ManagedSessionId> {
+    // #12050: a tombstone shares the name but is never the wake's target.
+    let live: Vec<SessionRecord> = records
+        .into_iter()
+        .filter(|r| r.tmux_name == owner && !r.state.is_terminal())
+        .collect();
+    match live.as_slice() {
+        [] => Err(anyhow::anyhow!("no live managed session named {owner}")),
+        [one] => Ok(one.id),
+        many => {
+            let names: Vec<String> = many
+                .iter()
+                .map(|r| format!("{} ({})", r.id, r.state))
+                .collect();
+            Err(anyhow::anyhow!(
+                "{} live managed sessions are named {owner} ({}); refusing to pick one",
+                many.len(),
+                names.join(", ")
+            ))
+        }
     }
 }
 
