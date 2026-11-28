@@ -124,7 +124,12 @@ async fn malformed_non_error_frame_is_skipped() {
 /// Serve one HTTP response over a throwaway TCP listener and stream it through
 /// an `OllamaProvider`, returning every event the pump produced plus the pump's
 /// own `Result`.
+#[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
 async fn pump_response(headers: &str, body: &str) -> (Vec<ChatEvent>, anyhow::Result<()>) {
+    // #12082: `chat_stream` builds a client that honours HTTP_PROXY, which `http_client` tests export.
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");

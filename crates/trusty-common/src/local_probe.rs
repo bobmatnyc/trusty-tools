@@ -442,7 +442,12 @@ mod tests {
     /// live because a socket accepted the connection.
     /// Test: this test.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn probe_reports_non_success_status() {
+        // #12082: see `probe_accepts_a_live_endpoint`.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let addr = stub_server("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
         let err = probe_local(&format!("http://{addr}"))
             .await
@@ -460,7 +465,12 @@ mod tests {
     /// disable local inference entirely.
     /// Test: this test.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn probe_accepts_a_live_endpoint() {
+        // #12082: `build_probe_client` honours HTTP_PROXY, which `http_client` tests export.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let addr = stub_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
         probe_local(&format!("http://{addr}"))
             .await
@@ -517,7 +527,12 @@ mod tests {
     /// otherwise the delegation silently empties the model picker.
     /// Test: this test.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn list_models_returns_the_served_ids() {
+        // #12082: see `probe_accepts_a_live_endpoint`.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let addr = stub_server(json_ok(
             r#"{"object":"list","data":[{"id":"qwen3:30b"},{"id":"llama3.1:8b"}]}"#,
         ))
@@ -533,7 +548,12 @@ mod tests {
     /// an empty model list that reads like "no models pulled".
     /// Test: this test.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn list_models_reports_an_unreadable_body() {
+        // #12082: see `probe_accepts_a_live_endpoint`.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let addr = stub_server(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\n\r\nnope!",
         )
@@ -552,7 +572,12 @@ mod tests {
     /// with one `ollama pull`.
     /// Test: this test.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn list_models_is_empty_when_the_server_serves_none() {
+        // #12082: see `probe_accepts_a_live_endpoint`.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let addr = stub_server(json_ok(r#"{"object":"list","data":[]}"#)).await;
         assert!(
             list_models(&format!("http://{addr}"))
@@ -570,6 +595,10 @@ mod tests {
     // #5937: OLLAMA_HOST writers share `dotenv_credential_env`.
     #[serial_test::serial(dotenv_credential_env)]
     fn local_host_reads_the_env_override() {
+        // #12082: this file now names ENV_LOCK, so its env writers take it too (env_lock_ratchet_tests).
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // SAFETY: guarded by `#[serial]`; no other thread reads the env here.
         unsafe { std::env::set_var(LOCAL_HOST_ENV, "http://192.168.1.50:11434/") };
         assert_eq!(local_host(), "http://192.168.1.50:11434");
@@ -583,6 +612,10 @@ mod tests {
     // #5937: OLLAMA_HOST writers share `dotenv_credential_env`.
     #[serial_test::serial(dotenv_credential_env)]
     fn local_host_defaults_when_unset() {
+        // #12082: see `local_host_reads_the_env_override`.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // SAFETY: guarded by `#[serial]`; no other thread reads the env here.
         unsafe { std::env::remove_var(LOCAL_HOST_ENV) };
         assert_eq!(local_host(), DEFAULT_LOCAL_HOST);

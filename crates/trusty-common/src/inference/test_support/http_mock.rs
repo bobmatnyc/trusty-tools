@@ -229,7 +229,12 @@ mod tests {
     /// Why: the mock must serve the exact status + body an adapter will parse.
     /// Test: itself.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn mock_serves_canned_body() {
+        // #12082: `reqwest::Client::new()` honours HTTP_PROXY, which `http_client` tests export.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let body = json!({
             "id": "gen-mock",
             "choices": [{"message": {"role": "assistant", "content": "mocked"},
@@ -255,7 +260,12 @@ mod tests {
     /// translation can be asserted.
     /// Test: itself.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn mock_captures_request_body() {
+        // #12082: `reqwest::Client::new()` honours HTTP_PROXY, which `http_client` tests export.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let server = MockInferenceServer::spawn(200, json!({"id": "x", "choices": []}))
             .await
             .expect("spawn");
