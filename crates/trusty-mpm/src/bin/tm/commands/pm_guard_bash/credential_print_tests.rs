@@ -1871,6 +1871,25 @@ fn denies_the_11959_fail_open_spellings() {
     );
 }
 
+/// 🔴 REGRESSION (#11959 review): an unmasked `op run` whose child names an
+/// `op` subcommand and an out-file flag (op's subcommand must be read by
+/// position, never after `--`), and an `op run` whose own word is known only
+/// at run time. Each row was allowed at 0613e1b0b9.
+#[test]
+fn denies_an_unmasked_op_run_read_by_position_11959() {
+    check(
+        true,
+        &[
+            "op run --no-masking -- cat read -o /tmp/fake-out",
+            "op run --no-masking -- fake-cli inject --out-file /tmp/fake-out",
+            "op run --no-masking -- fake-cli document get -o /tmp/fake-out",
+            "op run $F -- printenv FAKE_VAR",
+            "op run \"$F\" -- printenv FAKE_VAR",
+            "op run $(echo --no-masking) -- printenv FAKE_VAR",
+        ],
+    );
+}
+
 /// #11959: captured or file-bound reads, masked `op run`, other `op`
 /// subcommands, and prose mentions stay allowed.
 #[test]
@@ -1889,6 +1908,11 @@ fn allows_the_11959_neighbours() {
             "op run --env-file .env -- npm test",
             "op run -- printenv FAKE_VAR",
             "op run -- grep --no-masking notes.txt",
+            // #11959 review: a subcommand word in a flag value or the child.
+            "op run --env-file .env -- npm run inject",
+            "op item list --vault inject",
+            "op run -- printenv \"$FAKE_VAR\"",
+            "op run $F -- printenv FAKE_VAR > /dev/null 2>&1",
             "op whoami",
             "op vault list",
             "git commit -m 'docs: never run op item get or op inject bare'",

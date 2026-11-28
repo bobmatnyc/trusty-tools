@@ -20,6 +20,7 @@
 //! `credential_print_tests::allows_the_8677_neighbours`,
 //! `credential_print_tests::denies_the_1password_stdout_reads_11959`,
 //! `credential_print_tests::denies_the_11959_fail_open_spellings`,
+//! `credential_print_tests::denies_an_unmasked_op_run_read_by_position_11959`,
 //! `credential_print_tests::allows_the_11959_neighbours`.
 
 // #10734: a sibling credential call written as an argv list.
@@ -234,12 +235,10 @@ fn subcommand_is_dynamic(args: &[String], slots: usize) -> bool {
 
 /// The values a sibling credential CLI prints.
 ///
-/// What: `gcloud secrets … access`, `op read`, `op item get`, `op document
-/// get`, `op inject` and `aws configure get <key>` with a key naming a secret
-/// or token, or `export-credentials`, print on stdout; `gcloud`'s
-/// `--out-file` and `op`'s `--out-file`/`-o` (not on `item get`) write the
-/// named path instead. `op run --no-masking` passes its child's unmasked
-/// stdout and stderr through. `gh auth token` prints on stdout; `gh auth status` with
+/// What: `gcloud secrets … access` and `aws configure get <key>` with a key
+/// naming a secret or token, or `export-credentials`, print on stdout;
+/// `gcloud`'s `--out-file` writes the named path instead. `op` is read by
+/// [`op_echoes`]. `gh auth token` prints on stdout; `gh auth status` with
 /// `-t`/`--show-token` is read as both descriptors, as its stream changed
 /// between gh releases.
 fn cli_echoes<'a>(program: &str, args: &'a [String]) -> Vec<Echo<'a>> {
@@ -253,14 +252,9 @@ fn cli_echoes<'a>(program: &str, args: &'a [String]) -> Vec<Echo<'a>> {
     };
     match program {
         "gcloud" if follows("secrets", &["access"]) => out_or_file(args, &["--out-file"]),
-        "op" if after("read").is_some() => out_or_file(args, &["--out-file", "-o"]),
-        // #11959: `op item get` has no out-file flag; `op document get` and
-        // `op inject` write stdout unless `-o`/`--out-file` names a path.
-        "op" if subcommand_pair(args, "item", "get") => vec![Echo::Out],
-        "op" if subcommand_pair(args, "document", "get") || after("inject").is_some() => {
-            out_or_file(args, &["--out-file", "-o"])
-        }
-        "op" if after("run").is_some() && unmasked_run(args) => vec![Echo::Out, Echo::Err],
+        // #11959: `op`'s subcommand is read by position, never by a word
+        // anywhere in the command (`op run -- cat read -o F`).
+        "op" => op_echoes(args),
         "gh" if follows("auth", &["token"]) => vec![Echo::Out],
         "gh" if follows("auth", &["status"]) && follows("auth", &["-t", "--show-token"]) => {
             vec![Echo::Out, Echo::Err]
@@ -282,30 +276,59 @@ fn is_any(a: &str, words: &[&str]) -> bool {
     words.iter().any(|w| a.eq_ignore_ascii_case(w))
 }
 
-/// Whether `first` then `second` are adjacent subcommand words in `args`
-/// (#11959), so `op item list --vault get` is not `op item get`.
+/// The values an `op` call prints (#11959).
 ///
-/// What: true when either reading holds the pair: the non-dash words, or the
-/// non-dash words with the value after a dash word that has no `=` dropped
-/// (`op item --vault V get`). A pair found in either reading counts, so a
-/// boolean flag the second reading wrongly takes a value for
-/// (`op item --reveal get`) still matches.
+/// What: only `op`'s own words count, the ones before `--`; after it comes
+/// `op run`'s child. The subcommand is the leading positional words
+/// ([`op_leads`]). `op read`, `op document get` and `op inject` print on
+/// stdout unless `-o`/`--out-file` names a path; `op item get` has no
+/// out-file flag. `op run` with masking off ([`unmasked_run`]) passes its
+/// child's stdout and stderr through.
 /// Test: `credential_print_tests::denies_the_1password_stdout_reads_11959`,
+/// `credential_print_tests::denies_the_11959_fail_open_spellings`,
+/// `credential_print_tests::denies_an_unmasked_op_run_read_by_position_11959`,
 /// `credential_print_tests::allows_the_11959_neighbours`.
-fn subcommand_pair(args: &[String], first: &str, second: &str) -> bool {
-    let pair = |words: &[&str]| {
-        words
-            .windows(2)
-            .any(|w| w[0].eq_ignore_ascii_case(first) && w[1].eq_ignore_ascii_case(second))
+fn op_echoes(args: &[String]) -> Vec<Echo<'_>> {
+    // #11959: `op run -- cat read -o F` must not read the child as `op read`.
+    let own = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+    let out_file = &["--out-file", "-o"];
+    if op_leads(own, &["read"]) {
+        out_or_file(own, out_file)
+    } else if op_leads(own, &["item", "get"]) {
+        vec![Echo::Out]
+    } else if op_leads(own, &["document", "get"]) || op_leads(own, &["inject"]) {
+        out_or_file(own, out_file)
+    } else if op_leads(own, &["run"]) && unmasked_run(own) {
+        vec![Echo::Out, Echo::Err]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `verb` is the leading positional words of `op`'s own words `own`
+/// (#11959), so `op item list --vault inject` is not `op inject`.
+///
+/// What: true when either reading starts with `verb`: the non-dash words, or
+/// the non-dash words with the value after a dash word that has no `=`
+/// dropped (`op --account work read`, `op item --vault V get`). Either reading
+/// counts, so a boolean flag the second reading wrongly takes a value for
+/// (`op item --reveal get`) still matches.
+fn op_leads(own: &[String], verb: &[&str]) -> bool {
+    let leads = |words: &[&str]| {
+        words.len() >= verb.len()
+            && words
+                .iter()
+                .zip(verb)
+                .all(|(w, v)| w.eq_ignore_ascii_case(v))
     };
-    let raw: Vec<&str> = args
+    let raw: Vec<&str> = own
         .iter()
         .filter(|a| !a.starts_with('-'))
         .map(String::as_str)
         .collect();
     let mut valued = Vec::new();
     let mut skip = false;
-    for a in args {
+    for a in own {
         if std::mem::take(&mut skip) {
             continue;
         }
@@ -315,16 +338,22 @@ fn subcommand_pair(args: &[String], first: &str, second: &str) -> bool {
             valued.push(a.as_str());
         }
     }
-    pair(&raw) || pair(&valued)
+    leads(&raw) || leads(&valued)
 }
 
-/// Whether an `op run` turns masking off (#11959): a `--no-masking` word, or
-/// any `--no-masking=` spelling, among `op`'s own words before `--`. Read
-/// closed: `--no-masking=false` also counts.
-fn unmasked_run(args: &[String]) -> bool {
-    args.iter()
-        .take_while(|a| a.as_str() != "--")
-        .any(|a| a.to_ascii_lowercase().starts_with("--no-masking"))
+/// Whether an `op run` may turn masking off (#11959), given `op`'s own words.
+///
+/// What: a `--no-masking` word or any `--no-masking=` spelling, read closed so
+/// `--no-masking=false` counts; or a word holding a `$`, a backtick or a
+/// lifted substitution, which may expand to one (`op run $F -- cmd`). The
+/// child's words after `--` are not read.
+fn unmasked_run(own: &[String]) -> bool {
+    own.iter().any(|a| {
+        // #11959: a run-time word (`op run $F`, F=--no-masking) reads closed.
+        a.to_ascii_lowercase().starts_with("--no-masking")
+            || a.contains(['$', '`'])
+            || a.contains(MARK)
+    })
 }
 
 /// Stdout, or the path an out-file flag in `flags` names (`--flag=PATH`,
