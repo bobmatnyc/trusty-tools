@@ -461,24 +461,45 @@ async fn a_socket_caller_without_a_claude_owner_process_is_refused_8531() {
 const HELPER: &str = "daemon::services::delegation_repair_caller::delegation_repair_caller_tests::socket_client_helper_8531";
 const HELPER_DIR_ENV: &str = "TM_TEST_8531_HELPER_DIR";
 const HELPER_SESSION_ENV: &str = "TM_TEST_8531_SESSION";
+// #12085: the helper's wait for `go` ends when this test process does.
+const HELPER_PARENT_ENV: &str = "TM_TEST_8531_PARENT";
+// #12085: a delay before the helper's `SessionStart`, for the slow-start case.
+const HELPER_DELAY_ENV: &str = "TM_TEST_8531_DELAY_MS";
+/// The fixed wait for `bound` before #12085; the slow-start case outlasts it.
+const OLD_BOUND_WAIT: Duration = Duration::from_secs(30);
 
-/// Poll for `path` for up to 30 s.
-async fn appears(path: &Path) -> bool {
-    for _ in 0..1200 {
+/// Wait until `path` exists or `child` has exited (#12085).
+///
+/// Why: a fixed deadline for the helper's marker ran out under a loaded full
+/// workspace run, while the helper was still starting.
+/// What: `Ok` once `path` exists, also when the child wrote it and exited;
+/// `Err` with the exit status when the child exits without writing it. The
+/// child's own lifetime bounds the wait.
+/// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`,
+/// `a_slow_helper_start_still_binds_the_owner_12085`.
+async fn written_or_exited(path: &Path, child: &mut Child) -> Result<(), String> {
+    loop {
         if path.exists() {
-            return true;
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if !path.exists() => {
+                return Err(format!("the helper exited {status} before {path:?}"));
+            }
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(e) => return Err(format!("the helper's status is unreadable: {e}")),
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    false
 }
 
 /// The process [`the_bound_owner_ends_its_own_record_over_the_socket_8531`]
 /// runs under its fake `claude`. A no-op unless that test set its env.
 ///
-/// What: announces the session with a socket `SessionStart`, writes
-/// `bound`, waits for `go`, asks for the repair, and writes the answer to
-/// `outcome`.
+/// What: sleeps [`HELPER_DELAY_ENV`] ms, announces the session with a socket
+/// `SessionStart`, writes `bound`, waits for `go` while the parent test
+/// process lives, asks for the repair, and writes the answer to `outcome`.
 #[test]
 #[ignore = "a child-process helper; a no-op when run directly"]
 fn socket_client_helper_8531() {
@@ -488,6 +509,15 @@ fn socket_client_helper_8531() {
     ) else {
         return;
     };
+    let parent = std::env::var(HELPER_PARENT_ENV)
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok())
+        .expect("the parent test pid");
+    let delay = std::env::var(HELPER_DELAY_ENV)
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .map_or(Duration::ZERO, Duration::from_millis);
+    std::thread::sleep(delay);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -506,7 +536,14 @@ fn socket_client_helper_8531() {
             .await
             .expect("SessionStart over the socket");
         std::fs::write(dir.join("bound"), b"").expect("bound marker");
-        assert!(appears(&dir.join("go")).await, "the parent never said go");
+        // #12085: wait on the parent's liveness, not on a fixed deadline.
+        while !dir.join("go").exists() {
+            assert!(
+                crate::core::process::is_process_alive(parent),
+                "the parent test ended before it said go"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         let answer = client
             .post("/api/v1/delegations/a8531/repair")
             .json(&serde_json::json!({ "force": false }))
@@ -529,6 +566,19 @@ fn socket_client_helper_8531() {
 /// `/bin/bash` exec'd as `claude`, not Claude Code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_bound_owner_ends_its_own_record_over_the_socket_8531() {
+    the_bound_owner_ends_its_own_record(Duration::ZERO).await;
+}
+
+/// #12085: a helper that starts later than the old fixed wait for `bound`
+/// still binds the owner and ends its record. Red before #12085, whose
+/// 30 s wait reported "no SessionStart" while the helper slept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_helper_start_still_binds_the_owner_12085() {
+    the_bound_owner_ends_its_own_record(OLD_BOUND_WAIT + Duration::from_secs(2)).await;
+}
+
+/// The #8531 end-to-end flow, with the helper's start delayed by `delay`.
+async fn the_bound_owner_ends_its_own_record(delay: Duration) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(root.path())));
@@ -542,12 +592,16 @@ async fn the_bound_owner_ends_its_own_record_over_the_socket_8531() {
         .arg(HELPER)
         .env(HELPER_DIR_ENV, dir.path())
         .env(HELPER_SESSION_ENV, owner.0.to_string())
+        .env(HELPER_PARENT_ENV, std::process::id().to_string())
+        .env(HELPER_DELAY_ENV, delay.as_millis().to_string())
         .stdout(Stdio::null())
         .spawn()
         .expect("spawn the fake claude");
-    let claude = Reaped(claude);
+    let mut claude = Reaped(claude);
 
-    assert!(appears(&dir.path().join("bound")).await, "no SessionStart");
+    // #12085: wait for `bound` or the helper's exit, never a fixed deadline.
+    let bound = written_or_exited(&dir.path().join("bound"), &mut claude.0).await;
+    assert_eq!(bound, Ok(()), "no SessionStart");
     let bound = state
         .session_claudes()
         .get(owner)
@@ -561,10 +615,16 @@ async fn the_bound_owner_ends_its_own_record_over_the_socket_8531() {
     d.agent_id = Some("a8531".to_string());
     state.upsert_delegation(d);
     std::fs::write(dir.path().join("go"), b"").expect("go");
-    assert!(
-        appears(&dir.path().join("outcome")).await,
-        "no repair answer"
-    );
+    // #12085: the helper writes `outcome`, then exits; wait for the exit, so
+    // the answer is read whole and no clock decides.
+    let exited = loop {
+        match claude.0.try_wait() {
+            Ok(None) => tokio::time::sleep(Duration::from_millis(25)).await,
+            other => break other,
+        }
+    };
+    assert!(matches!(exited, Ok(Some(_))), "{exited:?}");
+    assert!(dir.path().join("outcome").exists(), "no repair answer");
     let _ = stop.send(());
     let _ = server.await;
     drop(claude);
