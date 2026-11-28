@@ -401,3 +401,53 @@ fn search_dial_socket_matches_and_creates_nothing() {
     assert_eq!(shared_dial.expect("dial"), shared_bind.expect("bind"));
     assert_eq!(isolated_dial.expect("dial"), isolated_bind.expect("bind"));
 }
+
+/// Why (#10535): `tm doctor` decodes `search.project.health` with this
+/// helper; the method name and the five counts must survive the round trip.
+/// Test: itself.
+#[tokio::test]
+async fn project_health_at_decodes_the_daemons_counts() {
+    let daemon = uds_mock::spawn(|method, _params| {
+        let answer = if method == METHOD_PROJECT_HEALTH {
+            serde_json::json!({
+                "registered": 5, "resident": 1, "parked": 2,
+                "orphaned": 1, "never_queried": 3,
+            })
+        } else {
+            serde_json::json!({ "wrong_method": method })
+        };
+        Box::pin(async move { Ok(answer) })
+    })
+    .await;
+    let counts = project_health_at(daemon.socket(), PROBE_TIMEOUT)
+        .await
+        .expect("the daemon answered the counts");
+    assert_eq!(
+        counts,
+        ProjectHealthCounts {
+            registered: 5,
+            resident: 1,
+            parked: 2,
+            orphaned: 1,
+            never_queried: 3,
+        }
+    );
+}
+
+/// Why (#10535): a body without the counts (an older daemon's answer to a
+/// different shape) must be an error, never zero counts that read as healthy.
+/// Test: itself.
+#[tokio::test]
+async fn project_health_at_refuses_a_body_without_the_counts() {
+    let daemon = uds_mock::spawn(|_method, _params| {
+        Box::pin(async move { Ok(serde_json::json!({ "registered": 5 })) })
+    })
+    .await;
+    let err = project_health_at(daemon.socket(), PROBE_TIMEOUT)
+        .await
+        .expect_err("a partial body must not decode");
+    assert!(
+        format!("{err:#}").contains(METHOD_PROJECT_HEALTH),
+        "the error names the method: {err:#}"
+    );
+}

@@ -1,0 +1,2 @@
+Added
+- `tm doctor` gains `search_index_orphan_parked`, beside the `search_project_*` rows (#10535). It warns when trusty-search holds parked indexes whose root was gone when they were parked (their corpus stays on disk) and names `trusty-search project map` to list them. A daemon that does not answer within the probe timeout, predates `search.project.health`, or answers without the counts is reported as "not checked", never as ok.

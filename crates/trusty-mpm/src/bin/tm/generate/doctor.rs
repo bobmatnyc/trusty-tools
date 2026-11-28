@@ -175,6 +175,11 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "search_project_map_unreadable",
         "Whether the trusty-search daemon can read its `project-map.toml` (issue #9169). Fail when `search.project.map` answers the fail-closed internal error — every resolve by project name, owner/repo or path fails until `trusty-search project rebuild-map --yes` moves the file aside and migrates again. Ok when the map is readable. Warn \"not checked\" when the daemon does not answer, predates the map (older than trusty-search 0.60.0), or answers without a map. Read-only; tm never writes the map.",
     ),
+    // #10535: fed by `search.project.health`; the other criterion-4 rows wait for #10534.
+    (
+        "search_index_orphan_parked",
+        "Reads trusty-search's `search.project.health` counts (issue #10535), one call bounded by `PROBE_TIMEOUT` that loads no index. Warn when any registered index is parked in `project-map.toml` with the stored reason `orphaned` (its root was gone when it was parked; the corpus stays on disk), naming the count and `trusty-search project map` to list them. Ok when none is. Warn \"not checked\" when the daemon does not answer, predates the method, refuses it, or answers without the counts. The root is not re-checked. Read-only.",
+    ),
     // #10975: the not-installed case is INFO; no remedy names `tctl upgrade` or an install.
     (
         "events",

@@ -1,0 +1,2 @@
+Added
+- `search.project.health`, a read-only socket method that answers `{registered, resident, parked, orphaned, never_queried}` from `indexes.toml`, the loaded indexes and `project-map.toml` (#10535). It loads no index and never writes a missing project map. `orphaned` counts parks whose stored reason is `orphaned`; `never_queried` counts rows with no query stamp, which also includes rows written before query stamps existed. An unreadable registry or map answers an internal error naming the file.
