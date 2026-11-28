@@ -279,7 +279,8 @@ fn move_title_urls(data: PyValue) -> PyValue {
 }
 
 /// `reader_path(rest)`: `doc/<p>` and `files/local/briefs/<f>` in the `#doc/` reader form.
-fn reader_path(rest: &str) -> String {
+/// Test: `reader_path_rewrites_the_legacy_brief_form`.
+pub(super) fn reader_path(rest: &str) -> String {
     if rest.starts_with("doc/") {
         format!("#{rest}")
     } else if let Some(f) = rest.strip_prefix("files/") {

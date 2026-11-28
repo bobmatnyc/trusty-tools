@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use super::cli::{Options, run};
+use super::cli::{Kick, Options, run};
 use crate::clock::{Clock, FakeClock};
 use crate::questions::cases::REPLAY_SOCKET;
 use crate::questions::{Socket, TmuxCli, rc};
@@ -23,22 +23,26 @@ pub fn replay(args: &[String], at: f64) -> Outcome {
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FakeClock::new(at));
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let env = |k: &str| std::env::var(k).ok();
-    let kick = || -> Result<(), String> {
-        let o = rc::Options {
-            root: cwd.clone(),
-            scripts: std::path::PathBuf::new(),
-            store_root: cwd.join("local/owner-queue"),
-            schema_dir: cwd.join("schemas/dashboard"),
-            cwd: cwd.clone(),
-            env: &env,
-            tmux: TmuxCli::on_path_with_socket(Socket::Name(REPLAY_SOCKET.into())),
-            clock: clock.clone(),
-        };
-        let done = rc::run(&[], &o);
-        match done.code {
-            0 => Ok(()),
-            _ => Err(done.stderr.trim_end().to_owned()),
-        }
+    let kick: Kick = {
+        let (cwd, clock) = (cwd.clone(), clock.clone());
+        Arc::new(move || -> Result<(), String> {
+            let env = |k: &str| std::env::var(k).ok();
+            let o = rc::Options {
+                root: cwd.clone(),
+                scripts: std::path::PathBuf::new(),
+                store_root: cwd.join("local/owner-queue"),
+                schema_dir: cwd.join("schemas/dashboard"),
+                cwd: cwd.clone(),
+                env: &env,
+                tmux: TmuxCli::on_path_with_socket(Socket::Name(REPLAY_SOCKET.into())),
+                clock: clock.clone(),
+            };
+            let done = rc::run(&[], &o);
+            match done.code {
+                0 => Ok(()),
+                _ => Err(done.stderr.trim_end().to_owned()),
+            }
+        })
     };
     let o = Options {
         checkout: cwd.clone(),
@@ -46,7 +50,8 @@ pub fn replay(args: &[String], at: f64) -> Outcome {
         env: &env,
         clock: clock.clone(),
         datg: "datg".into(),
-        kick: &kick,
+        kick,
+        kick_timeout: crate::TMUX_TIMEOUT,
     };
     run(args, &mut std::io::stdin(), &o)
 }

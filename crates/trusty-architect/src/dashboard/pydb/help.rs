@@ -3,7 +3,10 @@
 //! Why: a bad command line must print what the frozen script prints.
 //! What: generated from the frozen script's `-h` output; [`TOP_HELP`] and,
 //! per sub-command in `add_parser` order, its usage block and help.
-//! Test: the `usage-*` and `help-*` recordings in `tests/replay_dashboard_db.rs`.
+//! The `status-brief` example path in [`TOP_HELP`] is neutral by design
+//! (#12029 P2g): the frozen text names a private brief directory.
+//! Test: the `usage-*` and `help-*` recordings in `tests/replay_dashboard_db.rs`,
+//! `help_names_a_neutral_status_brief_example`.
 
 pub(super) const TOP_USAGE: &str = r#"usage: dashboard-db.py [-h] [--root ROOT] [--actor ACTOR]
                        {get,list,set,update,delete,pruned,next,create,log,status-brief,summary,requests,validate,fsck,tally,footer,batch} ...
@@ -16,7 +19,7 @@ Read and write Architect dashboard documents.
 positional arguments:
   {get,list,set,update,delete,pruned,next,create,log,status-brief,summary,requests,validate,fsck,tally,footer,batch}
     status-brief        prepend a status brief to a task: status-brief T1c
-                        MB0be9 cto/docs/briefs/x.md
+                        MB0be9 sample/notes/x.md
     requests            read-only: owner requests waiting for the Architect
                         (status update, briefing, steer, feedback...), oldest
                         first

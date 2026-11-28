@@ -7,7 +7,8 @@
 //! directory (callers run from the Architect checkout, where the script's
 //! store, schemas and instance config live). The footer's reminders read
 //! runs `datg` from `PATH`; the questions kick is one in-process
-//! `questions::rc` pass on the live tmux. An argument that is not UTF-8 is
+//! `questions::rc` pass on the live tmux, waited for at most
+//! [`trusty_architect::TMUX_TIMEOUT`]. An argument that is not UTF-8 is
 //! read lossily.
 //! Test: `shipped_dashboard_db_tally_and_usage`.
 
@@ -15,9 +16,9 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use trusty_architect::SystemClock;
-use trusty_architect::dashboard::pydb::{Options, run};
+use trusty_architect::dashboard::pydb::{Kick, Options, run};
 use trusty_architect::questions::rc;
+use trusty_architect::{SystemClock, TMUX_TIMEOUT};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args_os()
@@ -28,17 +29,21 @@ fn main() -> ExitCode {
     let env = |k: &str| std::env::var(k).ok();
     let clock = Arc::new(SystemClock);
     // The kick's own stdout (`questions_rc`'s one line) is not this command's output.
-    let kick = || -> Result<(), String> {
-        let o = rc::Options::live(&cwd, &env, clock.clone()).map_err(|e| e.to_string())?;
-        let done = rc::run(&[], &o);
-        match done.code {
-            0 => Ok(()),
-            _ => Err(done
-                .stderr
-                .trim_end()
-                .trim_start_matches("questions_rc: ")
-                .to_owned()),
-        }
+    let kick: Kick = {
+        let (cwd, clock) = (cwd.clone(), clock.clone());
+        Arc::new(move || -> Result<(), String> {
+            let env = |k: &str| std::env::var(k).ok();
+            let o = rc::Options::live(&cwd, &env, clock.clone()).map_err(|e| e.to_string())?;
+            let done = rc::run(&[], &o);
+            match done.code {
+                0 => Ok(()),
+                _ => Err(done
+                    .stderr
+                    .trim_end()
+                    .trim_start_matches("questions_rc: ")
+                    .to_owned()),
+            }
+        })
     };
     let opts = Options {
         checkout: cwd.clone(),
@@ -46,7 +51,8 @@ fn main() -> ExitCode {
         env: &env,
         clock: clock.clone(),
         datg: "datg".into(),
-        kick: &kick,
+        kick,
+        kick_timeout: TMUX_TIMEOUT,
     };
     let out = run(&args, &mut std::io::stdin(), &opts);
     // A closed pipe on the reader's side is not this program's failure.

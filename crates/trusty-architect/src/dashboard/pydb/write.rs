@@ -232,16 +232,41 @@ fn left_interactive(old: Option<&PyValue>, data: &PyValue) -> bool {
 /// Why: Remote Control on the questions session goes off once the last
 /// interactive question is answered (Bob 2026-11-17).
 /// What: `kick_questions_rc()`: nothing under `QUESTIONS_RC_KICK=off`; else the
-/// caller's in-process `questions::rc` pass, after the write's lock is gone.
-/// A failure is one `questions_rc kick failed: <e>` stderr line.
-/// Test: `kick_runs_after_the_write_and_never_changes_the_exit_code`.
+/// caller's in-process `questions::rc` pass on a worker thread, after the
+/// write's lock is gone, waited for at most `kick_timeout`. A failure or the
+/// timeout is one `questions_rc kick failed: <e>` stderr line; a kick still
+/// running at the timeout ends with the process.
+/// Test: `kick_runs_after_the_write_and_never_changes_the_exit_code`,
+/// `a_kick_slower_than_its_bound_is_one_warning_and_exit_0`.
 fn kick(ctx: &Ctx) {
-    // #12029 P2g: in process, never a detached python spawn (Architect ruling 17:10Z).
+    // #12029 P2g: in process and bounded, never a detached python spawn.
     if (ctx.o.env)("QUESTIONS_RC_KICK").as_deref() == Some("off") {
         return;
     }
-    if let Err(e) = (ctx.o.kick)() {
+    if let Err(e) = bounded_kick(&ctx.o.kick, ctx.o.kick_timeout) {
         ctx.warn(&format!("questions_rc kick failed: {e}"));
+    }
+}
+
+/// Runs `kick` on a worker thread and waits for it at most `bound`.
+fn bounded_kick(kick: &super::Kick, bound: std::time::Duration) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let k = std::sync::Arc::clone(kick);
+    std::thread::Builder::new()
+        .name("questions-rc-kick".into())
+        .spawn(move || {
+            // The receiver is gone after a timeout; the result is dropped then.
+            let _ = tx.send(k());
+        })
+        .map_err(|e| e.to_string())?;
+    match rx.recv_timeout(bound) {
+        Ok(done) => done,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("timed out after {} seconds", bound.as_secs_f64()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("the kick thread panicked".into())
+        }
     }
 }
 

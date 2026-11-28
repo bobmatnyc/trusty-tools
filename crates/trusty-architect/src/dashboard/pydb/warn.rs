@@ -78,7 +78,7 @@ fn stored_level(ctx: &Ctx) -> Result<&'static str, PyStoreError> {
     }
 }
 
-/// Why: the owner reads the page at their technical level (ar-T16).
+/// Why: the owner reads the page at their technical level.
 /// What: `warn_level(store, doc_id, data)`: one `warning: level_lint [...]`
 /// line per finding in `title`, `detail` and each dict option's `desc`.
 /// Test: `dashboard_db_recordings_replay_clean_against_the_port` (`warnings`).

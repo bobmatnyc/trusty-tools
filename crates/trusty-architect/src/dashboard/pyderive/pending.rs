@@ -7,7 +7,7 @@
 //! instructions, each source in id order (a missing collection yields
 //! nothing). [`request_queue`] keeps the kinds in [`REQUEST_LABELS`], adds
 //! `label` and sorts by `(at, id, kind)`. Every text is Python's `str()`.
-//! Intended divergence (#12029 P2g, Architect ruling 17:06Z): an `answered`
+//! Intended divergence (#12029 P2g): an `answered`
 //! event's text carries `: <trimmed answer_note>` as the Architect Do text
 //! does ([`with_note`], the bundled copy's `_with_note`, #10765); the frozen
 //! derive drops the note there.
@@ -64,7 +64,7 @@ fn ad_linked(d: &PyValue) -> bool {
 /// `_with_note(head, note)` (#10765): `head`, then `: <note>` when the owner
 /// typed a non-blank `answer_note` string.
 // #12029 P2g: the frozen derive appends the note to Architect Do only; the
-// bundled copy's rule covers the plain answer too (Architect ruling 17:06Z).
+// bundled copy's rule covers the plain answer too.
 pub(crate) fn with_note(mut head: String, note: Option<&PyValue>) -> String {
     if let Some(PyValue::Str(n)) = note
         && !strip(n).is_empty()

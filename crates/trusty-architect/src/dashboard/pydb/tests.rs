@@ -1,14 +1,14 @@
 //! The port's failure arms and in-process seams (#12029 P2g): refusals, the
 //! kick, the reminders read, the shared lock and the level-read warning.
 
-use std::cell::Cell;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use super::cli::{Options, run};
-use super::normalize::question_title;
+use super::cli::{Kick, Options, run};
+use super::normalize::{question_title, reader_path};
 use crate::clock::FakeClock;
 use crate::dashboard::store::writer::{WriterClass, claims};
 use crate::spec_drift::Outcome;
@@ -47,12 +47,18 @@ fn checkout() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
 }
 
 /// Runs the command line on the checkout at `root` with `env`, `datg` and `kick`.
-fn go(
+fn go(root: &Path, args: &[&str], env: &[(&str, &str)], datg: &Path, kick: Kick) -> Outcome {
+    go_bounded(root, args, env, datg, kick, crate::TMUX_TIMEOUT)
+}
+
+/// [`go`] with the kick waited for at most `bound`.
+fn go_bounded(
     root: &Path,
     args: &[&str],
     env: &[(&str, &str)],
     datg: &Path,
-    kick: &dyn Fn() -> Result<(), String>,
+    kick: Kick,
+    bound: Duration,
 ) -> Outcome {
     let vars: Vec<(String, String)> = env
         .iter()
@@ -66,13 +72,14 @@ fn go(
         clock: Arc::new(FakeClock::new(NOW)),
         datg: datg.to_path_buf(),
         kick,
+        kick_timeout: bound,
     };
     let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
     run(&args, &mut std::io::empty(), &o)
 }
 
-fn no_kick() -> Result<(), String> {
-    Err("the kick must not run here".into())
+fn no_kick() -> Kick {
+    Arc::new(|| Err("the kick must not run here".into()))
 }
 
 /// Every file under `root` with its bytes, the lock file left out.
@@ -200,7 +207,7 @@ fn every_write_refusal_leaves_the_store_unchanged() -> R {
     for (args, code, line) in cases {
         let before = snapshot(root);
         let argv: Vec<&str> = r.iter().chain(args).copied().collect();
-        let out = go(root, &argv, &[], &datg, &no_kick);
+        let out = go(root, &argv, &[], &datg, no_kick());
         assert_eq!(out.code, code, "{args:?}: {}", out.stderr);
         assert!(out.stderr.contains(line), "{args:?}: {}", out.stderr);
         assert!(out.stdout.is_empty(), "{args:?}: {}", out.stdout);
@@ -226,7 +233,7 @@ fn every_write_refusal_leaves_the_store_unchanged() -> R {
         ],
         &[],
         &datg,
-        &no_kick,
+        no_kick(),
     );
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("/status_briefs/0/id"), "{}", out.stderr);
@@ -246,7 +253,7 @@ fn a_delete_whose_prune_log_cannot_be_written_is_refused() -> R {
         &["--root", "local/owner-queue", "delete", "items", "D02"],
         &[],
         &root.join("x"),
-        &no_kick,
+        no_kick(),
     );
     assert_eq!(out.code, 2, "{}", out.stderr);
     assert!(out.stderr.contains("delete refused"), "{}", out.stderr);
@@ -276,7 +283,7 @@ fn a_create_whose_counter_cannot_be_written_exits_1_after_the_write() -> R {
         ],
         &[],
         &root.join("x"),
-        &no_kick,
+        no_kick(),
     );
     assert_eq!(out.code, 1, "{}", out.stderr);
     assert!(out.stderr.contains("Error"), "{}", out.stderr);
@@ -290,17 +297,18 @@ fn a_create_whose_counter_cannot_be_written_exits_1_after_the_write() -> R {
 fn kick_runs_after_the_write_and_never_changes_the_exit_code() -> R {
     let tmp = checkout()?;
     let root = tmp.path().to_path_buf();
-    let ran = Cell::new(0);
-    let kick = || -> Result<(), String> {
-        ran.set(ran.get() + 1);
-        let doc = std::fs::read_to_string(root.join("local/owner-queue/items/D04.json"))
+    let ran = Arc::new(AtomicUsize::new(0));
+    let (count, dir) = (Arc::clone(&ran), root.clone());
+    let kick: Kick = Arc::new(move || -> Result<(), String> {
+        count.fetch_add(1, Ordering::SeqCst);
+        let doc = std::fs::read_to_string(dir.join("local/owner-queue/items/D04.json"))
             .map_err(|e| e.to_string())?;
         if !doc.contains("\"answered\"") {
             return Err("the write is not on disk yet".into());
         }
         let lock = std::fs::OpenOptions::new()
             .write(true)
-            .open(root.join("local/owner-queue/.lock"))
+            .open(dir.join("local/owner-queue/.lock"))
             .map_err(|e| e.to_string())?;
         // SAFETY: the fd stays open for `lock`'s life; flock touches nothing else.
         let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -308,7 +316,7 @@ fn kick_runs_after_the_write_and_never_changes_the_exit_code() -> R {
             return Err("the store lock is still held".into());
         }
         Err("tmux is not running".into())
-    };
+    });
     let args = [
         "--root",
         "local/owner-queue",
@@ -318,8 +326,8 @@ fn kick_runs_after_the_write_and_never_changes_the_exit_code() -> R {
         "--json",
         r#"{"status": "answered"}"#,
     ];
-    let out = go(&root, &args, &[], &root.join("x"), &kick);
-    assert_eq!(ran.get(), 1);
+    let out = go(&root, &args, &[], &root.join("x"), kick.clone());
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(
         out.stderr,
@@ -336,9 +344,12 @@ fn kick_runs_after_the_write_and_never_changes_the_exit_code() -> R {
         &args,
         &[("QUESTIONS_RC_KICK", "off")],
         &root.join("x"),
-        &kick,
+        kick.clone(),
     );
-    assert_eq!((ran.get(), out.code, out.stderr.as_str()), (1, 0, ""));
+    assert_eq!(
+        (ran.load(Ordering::SeqCst), out.code, out.stderr.as_str()),
+        (1, 0, "")
+    );
     let stay = [
         "--root",
         "local/owner-queue",
@@ -348,8 +359,53 @@ fn kick_runs_after_the_write_and_never_changes_the_exit_code() -> R {
         "--json",
         r#"{"status": "answered"}"#,
     ];
-    assert_eq!(go(&root, &stay, &[], &root.join("x"), &kick).code, 0);
-    assert_eq!(ran.get(), 1);
+    assert_eq!(go(&root, &stay, &[], &root.join("x"), kick).code, 0);
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+/// #12029 P2g: a kick that outlasts its bound costs one warning, never the
+/// command: `update` returns at the bound with exit 0 and the write on disk.
+#[test]
+fn a_kick_slower_than_its_bound_is_one_warning_and_exit_0() -> R {
+    let tmp = checkout()?;
+    let root = tmp.path();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let rx = std::sync::Mutex::new(rx);
+    // Blocks until the test ends (the sender drops), far past the bound.
+    let kick: Kick = Arc::new(move || {
+        let _ = rx.lock().map(|r| r.recv_timeout(Duration::from_secs(5)));
+        Ok(())
+    });
+    let args = [
+        "--root",
+        "local/owner-queue",
+        "update",
+        "items",
+        "D04",
+        "--json",
+        r#"{"status": "answered"}"#,
+    ];
+    let start = Instant::now();
+    let out = go_bounded(
+        root,
+        &args,
+        &[],
+        &root.join("x"),
+        kick,
+        Duration::from_millis(50),
+    );
+    let took = start.elapsed();
+    drop(tx);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        out.stderr,
+        "questions_rc kick failed: timed out after 0.05 seconds\n"
+    );
+    assert!(out.stdout.contains("\"version\": 2"), "{}", out.stdout);
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    let doc = std::fs::read_to_string(root.join("local/owner-queue/items/D04.json"))?;
+    assert!(doc.contains("\"answered\""), "{doc}");
     Ok(())
 }
 
@@ -387,7 +443,7 @@ fn footer(root: &Path, datg: &Path, env: &[(&str, &str)]) -> Outcome {
         &["--root", "local/owner-queue", "footer"],
         env,
         datg,
-        &no_kick,
+        no_kick(),
     )
 }
 
@@ -520,6 +576,52 @@ fn reminders_line_names_each_failure() -> R {
     Ok(())
 }
 
+/// #12029 P2g: with per-PM state directories and `$TMUX_PANE` set, tmux
+/// names the directory; when `datg` answers that its `state.json` is
+/// missing, the footer has no reminders line, as the script's `isfile` is
+/// false. Any other failure there is still the `check failed` line.
+#[test]
+fn reminders_line_is_absent_when_the_tmux_pm_has_no_ledger() -> R {
+    let tmp = checkout()?;
+    let root = tmp.path();
+    let sub = root.join("local/il/.trusty-mpm/datg/pm-alpha");
+    std::fs::create_dir_all(&sub)?;
+    std::fs::write(sub.join("state.json"), "{}")?;
+    let bin = tempfile::tempdir()?;
+    let missing = fake_datg(bin.path(), "", "datg: state.json missing; run init\n", 2)?;
+    let pane = [("TMUX_PANE", "%9")];
+    let out = footer(root, &missing, &pane);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 1, "{}", out.stdout);
+    assert!(!out.stdout.contains("Reminders"), "{}", out.stdout);
+    assert!(bin.path().join("argv.txt").exists(), "datg did not run");
+    // Without the tmux pane the base directory decides: no file, no datg run.
+    std::fs::remove_file(bin.path().join("argv.txt"))?;
+    let out = footer(root, &missing, &[]);
+    assert_eq!(out.stdout.lines().count(), 1, "{}", out.stdout);
+    assert!(!bin.path().join("argv.txt").exists());
+    // Another failure under the tmux pane still names itself.
+    let other = fake_datg(bin.path(), "", "datg: state.json malformed (x)\n", 2)?;
+    let out = footer(root, &other, &pane);
+    assert_eq!(
+        out.stdout.lines().nth(1),
+        Some("Reminders: check failed (DatgError: state.json malformed (x))"),
+        "{}",
+        out.stdout
+    );
+    // A known ledger keeps the line even for a `state.json missing` answer.
+    let base = root.join("local/il/.trusty-mpm/datg");
+    std::fs::write(base.join("state.json"), "{}")?;
+    let out = footer(root, &missing, &[]);
+    assert_eq!(
+        out.stdout.lines().nth(1),
+        Some("Reminders: check failed (DatgError: state.json missing; run init)"),
+        "{}",
+        out.stdout
+    );
+    Ok(())
+}
+
 /// #12029 AC2: `dashboard-db` writes under the store's shared `flock` (the
 /// frozen script's lock) and claims its collections for the Python writer
 /// class, so a Rust-class store is refused them.
@@ -550,7 +652,7 @@ fn dashboard_db_writes_take_the_shared_store_lock() -> R {
                 "--json",
                 r#"{"title": "b", "task": "T01"}"#,
             ];
-            go(&root, &args, &[], &root.join("x"), &no_kick)
+            go(&root, &args, &[], &root.join("x"), no_kick())
         })
     };
     std::thread::sleep(Duration::from_millis(400));
@@ -598,7 +700,7 @@ fn a_level_read_failure_is_a_warning_and_the_write_lands() -> R {
         ],
         &[],
         &root.join("x"),
-        &no_kick,
+        no_kick(),
     );
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(
@@ -609,4 +711,19 @@ fn a_level_read_failure_is_a_warning_and_the_write_lands() -> R {
     );
     assert!(root.join("local/owner-queue/items/D07.json").exists());
     Ok(())
+}
+
+/// The legacy `files/local/briefs/<f>` specs form becomes the Architect's own
+/// `#doc/` reader path; another `files/` path stays, `doc/` gains `#`. The
+/// recordings use neutral paths, so this branch is pinned here (#12029 P2g).
+#[test]
+fn reader_path_rewrites_the_legacy_brief_form() {
+    let legacy = reader_path("files/local/briefs/c.md");
+    assert_eq!(
+        legacy.strip_prefix("#doc/architect/"),
+        Some("local/briefs/c.md")
+    );
+    assert_eq!(reader_path("files/sample/c.md"), "files/sample/c.md");
+    assert_eq!(reader_path("doc/sample/plan.md"), "#doc/sample/plan.md");
+    assert_eq!(reader_path("other/x.md"), "other/x.md");
 }

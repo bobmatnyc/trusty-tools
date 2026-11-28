@@ -102,7 +102,7 @@ fn an_unreadable_store_after_a_read_raises_one_error_and_keeps_the_answer_key() 
 /// items (relayed answers, `relayed_at`, a "Relayed" note, interactive,
 /// decision, canary, parked and ILIO items), in the same order. #12029 P2g:
 /// an answered item's text carries its trimmed `answer_note` (`D02`, `D0r`),
-/// the intended divergence from the frozen derive (Architect ruling 17:06Z).
+/// the intended divergence from the frozen derive.
 #[test]
 fn poller_owner_answers_follow_the_python_pending_rule() -> TestResult {
     use trusty_architect::dashboard::Format;

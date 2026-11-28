@@ -14,6 +14,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::help::{SUB_TEXT, TOP_HELP, TOP_USAGE};
 use super::{Ctx, Fail, R, s, summary, write};
@@ -25,6 +26,10 @@ use crate::dashboard::store::py::{Options as StoreOptions, PyStore};
 use crate::pyjson_load::{PyInt, PyValue};
 use crate::pyval::{dumps, get};
 use crate::spec_drift::Outcome;
+
+/// The questions kick: one in-process `questions::rc` pass. It runs on a
+/// worker thread, so it owns what it reads.
+pub type Kick = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// What the caller supplies besides argv and stdin.
 pub struct Options<'a> {
@@ -40,7 +45,10 @@ pub struct Options<'a> {
     /// The `datg` program the footer's reminders read runs (`datg`: found on `PATH`).
     pub datg: PathBuf,
     /// The questions kick: one in-process `questions::rc` pass.
-    pub kick: &'a dyn Fn() -> Result<(), String>,
+    pub kick: Kick,
+    /// How long `update` waits for the kick ([`crate::TMUX_TIMEOUT`] in the
+    /// binary and the replay).
+    pub kick_timeout: Duration,
 }
 
 impl Options<'_> {

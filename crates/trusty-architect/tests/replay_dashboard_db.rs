@@ -7,11 +7,13 @@
 //! the footer with the questions link and the reminders line present,
 //! absent and failed, the argparse errors and help.
 //! `examples/replay_port.rs dashboard-db` runs the port's command line.
-//! The one recorded difference is [`DATG_CALL`]: the port reads the
-//! reminders with one `datg` call where the script imports `datg`, so the
-//! recordings that have a ledger expect that call on the `datg` fake
-//! (intended divergence, Architect ruling 17:10Z). Every write lands under
-//! the sandbox root.
+//! Two recorded differences (intended divergences, #12029 P2g): the port
+//! reads the reminders with one `datg` call where the script imports
+//! `datg`, so the recordings that have a ledger expect [`DATG_CALL`] on the
+//! `datg` fake; and `help-top` holds the port's neutral `status-brief`
+//! example ([`HELP_EXAMPLE`]). The frozen `schemas/dashboard` the
+//! recordings seeded lives once in [`SCHEMAS`] and is laid back into each
+//! recording it lists. Every write lands under the sandbox root.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -33,6 +35,13 @@ const DATG_CALL: [&str; 6] = [
     "--json",
 ];
 
+/// The frozen `schemas/dashboard`, one copy: `{"recordings": [...], "files": {...}}`.
+const SCHEMAS: &str = "tests/fixtures/dashboard-db/frozen-schemas.json";
+
+/// The port's `status-brief` example in the top help; the frozen help names
+/// a path under the Architect's private brief directory there instead.
+const HELP_EXAMPLE: &str = "MB0be9 sample/notes/x.md";
+
 /// The recordings whose sandbox holds a ledger, so the port calls `datg` once.
 const WITH_LEDGER: [&str; 4] = [
     "footer-reminders-failed.json",
@@ -41,7 +50,38 @@ const WITH_LEDGER: [&str; 4] = [
     "footer-reminders.json",
 ];
 
+/// The shared schema files and the recordings that seed them.
+fn schemas() -> (Vec<String>, BTreeMap<String, String>) {
+    #[derive(serde::Deserialize)]
+    struct Shared {
+        recordings: Vec<String>,
+        files: BTreeMap<String, String>,
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SCHEMAS);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let s: Shared = serde_json::from_str(&text).unwrap();
+    (s.recordings, s.files)
+}
+
+/// Every recording, with the shared schema files laid into those that seed them.
 fn fixtures() -> Vec<(String, Recording)> {
+    let (users, files) = schemas();
+    let mut out = raw_fixtures();
+    for (name, rec) in &mut out {
+        if users.contains(name) {
+            for (k, v) in &files {
+                assert!(
+                    rec.files.insert(k.clone(), v.clone()).is_none(),
+                    "{name}: {k}"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Every recording as committed.
+fn raw_fixtures() -> Vec<(String, Recording)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/replay")
         .join(DIR);
@@ -164,5 +204,38 @@ fn dashboard_db_recordings_write_only_under_the_root() {
                 "{name}"
             );
         }
+    }
+}
+
+/// The shared schema file lists only recordings that exist, and a committed
+/// recording carries no schema file of its own.
+#[test]
+fn dashboard_db_recordings_share_one_frozen_schema_copy() {
+    let (users, files) = schemas();
+    assert_eq!(files.len(), 18);
+    assert!(files.keys().all(|k| k.starts_with("schemas/dashboard/")));
+    let recs = raw_fixtures();
+    for u in &users {
+        assert!(recs.iter().any(|(n, _)| n == u), "{u} is not a recording");
+    }
+    for (name, rec) in &recs {
+        assert!(
+            !rec.files.keys().any(|k| k.starts_with("schemas/")),
+            "{name} seeds its own schema copy"
+        );
+    }
+}
+
+/// Intended divergence (e), #12029 P2g: the top help's `status-brief`
+/// example is a neutral path; `help-top` records it in place of the frozen
+/// one, once, and the replay holds the port to it.
+#[test]
+fn help_names_a_neutral_status_brief_example() {
+    let recs = raw_fixtures();
+    let (_, top) = recs.iter().find(|(n, _)| n == "help-top.json").unwrap();
+    assert_eq!(top.stdout.matches(HELP_EXAMPLE).count(), 1);
+    assert!(top.stdout.contains("prepend a status brief to a task"));
+    for (name, rec) in recs.iter().filter(|(n, _)| n.starts_with("help-")) {
+        assert!(!rec.stdout.contains("cto/"), "{name}");
     }
 }

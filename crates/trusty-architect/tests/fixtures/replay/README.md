@@ -854,8 +854,15 @@ sandbox root (the working directory): `dashboard_store.DEFAULT_ROOT` at
 `architect_config`'s default file at `local/architect.json`, `il_remind`'s
 ledger at `local/il` and the questions state at `inbox/questions-rc.json`;
 it sets argparse's program name to `dashboard-db.py` and changes none of the
-script's text. Recordings that touch a schema seed the frozen
-`schemas/dashboard`.
+script's text. The 24 recordings that touch a schema seeded the frozen
+`schemas/dashboard`; that seed is kept once, verbatim, in
+`../dashboard-db/frozen-schemas.json` (with the list of recordings that use
+it), and `tests/replay_dashboard_db.rs` lays it back into each before the
+replay (`dashboard_db_recordings_share_one_frozen_schema_copy`). Seeded
+paths and hosts are neutral: status briefs under `sample/notes/`, tailnet
+origins under `example.com`, and `set-specs` uses plain `/files/` URLs; the
+legacy `/files/local/briefs/` specs form is pinned by
+`reader_path_rewrites_the_legacy_brief_form` instead of a recording.
 
 | Recordings | Case |
 |---|---|
@@ -871,7 +878,7 @@ script's text. Recordings that touch a schema seed the frozen
 | `usage-*`, `help-*`, `env-*` | argparse errors (no command, missing required arguments, an unknown command or flag, `--root` after the command), help, `$DASHBOARD_ROOT` and `$DASHBOARD_ACTOR`, a bad `$DASHBOARD_FORMAT` |
 | `jsonl-*` | AC1 in the jsonl format: get, set, update with schema warnings, create, delete, batch, fsck, tally, summary, and a jsonl read of a dir store |
 
-Intended divergences (Architect rulings 2026-11-28 17:06Z and 17:10Z):
+Intended divergences (#12029 P2g):
 
 - (a) answer note: the port's `pending` appends `: <trimmed answer_note>` to a
   plain answered event as the bundled copy's `_with_note` does; the frozen
@@ -879,12 +886,16 @@ Intended divergences (Architect rulings 2026-11-28 17:06Z and 17:10Z):
   `answered_text_carries_the_trimmed_answer_note`; the `owner_answers`
   replay applies it as `ANSWER_NOTE_DIVERGENCE`, and no `dashboard-db`
   recording holds an answer note.
-- (b) in-process kick: leaving `interactive` runs one `questions::rc` pass in
-  process after the store write released its lock, where the script spawns
-  `questions_rc.py` detached; off under `QUESTIONS_RC_KICK=off`, and an error
-  is a stderr line with the exit unchanged. Pinned by
-  `kick_runs_after_the_write_and_never_changes_the_exit_code`; every
-  recording that leaves `interactive` sets `QUESTIONS_RC_KICK=off`.
+- (b) in-process kick: leaving `interactive` runs one `questions::rc` pass on
+  a worker thread after the store write released its lock, where the script
+  spawns `questions_rc.py` detached. `update` waits for it at most
+  `TMUX_TIMEOUT` (10 s); past that it prints `questions_rc kick failed: timed
+  out after 10 seconds` and returns with the exit unchanged, and the pass
+  ends with the process. Off under `QUESTIONS_RC_KICK=off`; an error is a
+  stderr line with the exit unchanged. Pinned by
+  `kick_runs_after_the_write_and_never_changes_the_exit_code` and
+  `a_kick_slower_than_its_bound_is_one_warning_and_exit_0`; every recording
+  that leaves `interactive` sets `QUESTIONS_RC_KICK=off`.
 - (c) reminders through `datg`: the footer runs one bounded `datg --project
   <ledger> reminders --due --json` on `PATH` and formats the rows as
   `il_remind.footer_line`, where the script imports `datg` and `il_remind`.
@@ -893,12 +904,22 @@ Intended divergences (Architect rulings 2026-11-28 17:06Z and 17:10Z):
   the one call (`DATG_CALL`) to the four recordings with a ledger. Pinned by
   `reminders_line_formats_the_datg_rows_as_il_remind_does` and
   `reminders_line_names_each_failure` (a spawn failure, a non-zero exit, a
-  traceback, a bad row and a missing key each name their class).
+  traceback, a bad row and a missing key each name their class). With
+  per-PM state directories and `$TMUX_PANE` set, tmux names the directory,
+  so the port runs `datg` and reads its `state.json missing` answer as no
+  line, as the script's `isfile` is false; any other failure there is the
+  `check failed` line
+  (`reminders_line_is_absent_when_the_tmux_pm_has_no_ledger`).
 - (d) uncaught exceptions: a schema that cannot load, an `OSError` outside
   the store, a bad counter digit, a lock wait past 10 s and the writer-class
   refusal print one `<Class>: <msg>` line and exit 1, where the script prints
   a traceback. `a_create_whose_counter_cannot_be_written_exits_1_after_the_write`
   pins the counter case: the document is written first, as in the script.
+- (e) help example: the top help's `status-brief` example is `MB0be9
+  sample/notes/x.md`, where the frozen help names a path under the
+  Architect's private brief directory. `help-top` was recorded from the
+  frozen script and holds the port's example in that one place; pinned by
+  `help_names_a_neutral_status_brief_example`.
 
 The schema subset gained `\d \D \s \S \w \W` (also in a class) and the `\n
 \t \r \f \v` escapes for this slice: the frozen `items.schema.json` uses
@@ -909,7 +930,9 @@ traceback (the probe refuses the script's own frames outside the sandbox,
 e.g. a bad `$DASHBOARD_SCHEMA`), the kick itself (it reaches tmux), a lock
 wait. Regenerate with the frozen `scripts/` and `schemas/` exported to a
 sandbox directory `P` whose path has no symlink, the driver copied in as
-`P/scripts/ddb_driver.py`, and each recording's `files` laid into `S`:
+`P/scripts/ddb_driver.py`, and each recording's `files` laid into `S`. After
+recording, move the `schemas/` seed into `frozen-schemas.json` and write the
+(e) example into `help-top`:
 
 ```sh
 R=trusty-architect-replay; D=tests/fixtures/replay/dashboard-db

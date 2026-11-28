@@ -33,7 +33,7 @@ so `cases.json` and the `pending`, `stale_tasks` and `last_activity`
 goldens are no longer read; the `dashboard_derive` and `owner_answers`
 replay recordings cover the port.
 
-#12029 P2g (Architect ruling 17:06Z): the port's `pending` follows the
+#12029 P2g: the port's `pending` follows the
 bundled copy's `_with_note` (#10765) on purpose: an `answered` event's text
 is the answer, then `: <trimmed answer_note>` when the note is a non-blank
 string, as the Architect Do text already was. The frozen

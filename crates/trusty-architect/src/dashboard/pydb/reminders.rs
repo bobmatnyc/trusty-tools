@@ -1,6 +1,6 @@
 //! The footer's `Reminders (ack): ...` line (#12029 P2g).
 //!
-//! Why: the owner acks IL reminders from the reply footer (ar-T8d); a
+//! Why: the owner acks IL reminders from the reply footer; a
 //! reminder fired and not acked must show in every reply until it is acked,
 //! and a ledger that cannot be read must be named, never hidden.
 //! What: [`reminders_line`]: no `state.json` where `datg.paths(project)` puts
@@ -10,14 +10,16 @@
 //! stdin closed) lists the rows, and `il_remind.footer_line` formats them:
 //! at most five `<task>#<n> <note[:60]>` joined by ` · `, then `+N more`. A
 //! failure is `Reminders: check failed (<Type>: <msg[:80]>)`.
-//! Intended divergence (Architect ruling 17:10Z): the frozen script imports
-//! `datg` and `il_remind` and reads the state in process; the port reads the
-//! same rows through the one subprocess. Known gap: with per-PM state
-//! directories and `$TMUX_PANE` set, `datg.py` picks the directory by tmux;
-//! the port lets `datg` pick and runs it when any session has a state file.
+//! Intended divergence (#12029 P2g): the frozen script imports `datg` and
+//! `il_remind` and reads the state in process; the port reads the same rows
+//! through the one subprocess. With per-PM state directories and
+//! `$TMUX_PANE` set, tmux names the directory, so the port cannot tell
+//! whether it holds a `state.json`: it runs `datg`, and `datg`'s
+//! `state.json missing` answer is no line, as the script's `isfile` is.
 //! Test: `reminders_line_formats_the_datg_rows_as_il_remind_does`,
-//! `reminders_line_names_each_failure`, and the `footer-reminders*`
-//! recordings.
+//! `reminders_line_names_each_failure`,
+//! `reminders_line_is_absent_when_the_tmux_pm_has_no_ledger`, and the
+//! `footer-reminders*` recordings.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,17 +48,35 @@ fn session_name(s: &str) -> bool {
         && c.all(|x| x.is_ascii_alphanumeric() || "._-".contains(x))
 }
 
-/// Whether `datg.paths(project)[1]` is a file, as far as it resolves without tmux.
-fn state_exists(ctx: &Ctx, project: &Path) -> bool {
+/// Whether `datg.paths(project)[1]` is a file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ledger {
+    /// It is not.
+    No,
+    /// It is.
+    Yes,
+    /// tmux names the per-PM directory, so only `datg` can tell.
+    Maybe,
+}
+
+/// `os.path.isfile(datg.paths(project)[1])`, as far as it resolves without tmux.
+fn state_exists(ctx: &Ctx, project: &Path) -> Ledger {
     let set = |k: &str| (ctx.o.env)(k).filter(|v| !v.is_empty());
+    let file = |p: PathBuf| {
+        if p.join("state.json").is_file() {
+            Ledger::Yes
+        } else {
+            Ledger::No
+        }
+    };
     if let Some(forced) = set("DATG_STATE_DIR") {
-        return ctx.o.cwd.join(forced).join("state.json").is_file();
+        return file(ctx.o.cwd.join(forced));
     }
     let base = project.join(".trusty-mpm").join("datg");
     if let Some(s) = set("DATG_SESSION").filter(|s| session_name(s))
         && base.join(s).join("state.json").is_file()
     {
-        return true;
+        return Ledger::Yes;
     }
     let subs = std::fs::read_dir(&base)
         .map(|rd| {
@@ -64,11 +84,11 @@ fn state_exists(ctx: &Ctx, project: &Path) -> bool {
                 .any(|e| e.path().is_dir() && e.path().join("state.json").is_file())
         })
         .unwrap_or(false);
-    // Known gap: tmux names the per-PM directory; `datg` resolves it itself.
+    // #12029 P2g: tmux names the per-PM directory; `datg` resolves it itself.
     if subs && set("TMUX_PANE").is_some() {
-        return true;
+        return Ledger::Maybe;
     }
-    base.join("state.json").is_file()
+    file(base)
 }
 
 /// `type(e).__name__` and `str(e)` of a failed read.
@@ -184,11 +204,20 @@ fn il_dir(ctx: &Ctx) -> PathBuf {
 /// Test: `reminders_line_formats_the_datg_rows_as_il_remind_does`.
 pub(crate) fn reminders_line(ctx: &Ctx) -> String {
     let project = il_dir(ctx);
-    if !state_exists(ctx, &project) {
+    let ledger = state_exists(ctx, &project);
+    if ledger == Ledger::No {
         return String::new();
     }
     match datg_rows(ctx, &project).and_then(|rows| footer_line(&rows)) {
         Ok(line) => line,
+        // The tmux-named directory has no ledger: the script's `isfile` is false.
+        Err((class, msg))
+            if ledger == Ledger::Maybe
+                && class == "DatgError"
+                && msg.starts_with("state.json missing") =>
+        {
+            String::new()
+        }
         Err((class, msg)) => {
             let msg: String = msg.chars().take(80).collect();
             format!("Reminders: check failed ({class}: {msg})")

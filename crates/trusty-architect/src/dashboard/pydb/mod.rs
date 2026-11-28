@@ -46,7 +46,8 @@ use crate::pyjson_load::{PyInt, PyValue};
 use crate::pyval::get;
 use crate::tasks::store_read::PyDoc;
 
-pub use cli::{Options, run};
+pub use cli::{Kick, Options, run};
+#[doc(hidden)]
 pub use replay::replay;
 
 /// How a command failed, as the frozen script ends.

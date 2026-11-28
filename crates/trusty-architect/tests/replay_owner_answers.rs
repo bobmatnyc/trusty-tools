@@ -38,7 +38,7 @@ fn fixtures(dir: &str) -> Vec<(String, Recording)> {
     out
 }
 
-/// #12029 P2g: the intended answer-note divergence (Architect ruling 17:06Z).
+/// #12029 P2g: the intended answer-note divergence.
 /// The frozen derive drops a plain answer's `answer_note`; the port appends
 /// `: <note>` as the bundled copy's `_with_note` does (#10765). Each entry is
 /// a recorded stdout line, the port's line, and how often the line appears.

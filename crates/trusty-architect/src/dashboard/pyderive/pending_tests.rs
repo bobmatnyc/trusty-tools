@@ -1,4 +1,4 @@
-//! The answer-note rule of `pending` (#12029 P2g, Architect ruling 17:06Z).
+//! The answer-note rule of `pending` (#12029 P2g).
 
 use super::PySnap;
 use super::pending::{pending, with_note};
