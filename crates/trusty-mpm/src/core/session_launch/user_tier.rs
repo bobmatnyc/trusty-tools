@@ -82,8 +82,25 @@ pub fn user_tier_config_dir(
 /// Test: `a_cli_home_reads_the_config_dir_only_as_the_process_home_10025`.
 pub(super) fn config_dir_for_home(home: Option<&Path>) -> Option<PathBuf> {
     let process_home = dirs::home_dir();
-    let pinned = home.filter(|home| process_home.as_deref() != Some(*home));
-    user_tier_config_dir(pinned, None)
+    let ambient = crate::core::session_record::claude_config_dir_override();
+    config_dir_for_home_in(home, process_home.as_deref(), ambient)
+}
+
+/// [`config_dir_for_home`] with the process home and `CLAUDE_CONFIG_DIR` passed in.
+///
+/// Why (#10025): `tm session start` resolves a sandbox home in the binary, and
+/// a test must name the "real" config dir without a process-global env write.
+/// What: `None` when `home` is `Some` and not `process_home`; otherwise `ambient`.
+/// Test: `a_sandboxed_session_start_writes_nothing_to_the_real_config_dir_10025`.
+pub fn config_dir_for_home_in(
+    home: Option<&Path>,
+    process_home: Option<&Path>,
+    ambient: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match home {
+        Some(home) if process_home != Some(home) => None,
+        _ => ambient,
+    }
 }
 
 /// [`resolve`], declined unless the location is absolute.
@@ -158,6 +175,7 @@ mod tests {
     /// #10025: a sandbox or test home never reads the ambient
     /// `CLAUDE_CONFIG_DIR`; the process home reads it, as the daemon does.
     #[test]
+    #[serial_test::serial]
     fn a_cli_home_reads_the_config_dir_only_as_the_process_home_10025() {
         let temp = tempfile::tempdir().expect("tempdir");
         assert_eq!(config_dir_for_home(Some(temp.path())), None);

@@ -1358,6 +1358,56 @@ fn sandboxed_session_start_paths_stay_under_the_sandbox_home() {
     assert!(fw.root.starts_with(sandbox_home), "{fw:?}");
 }
 
+/// #10025: a sandboxed `tm session start` writes no trust seed, statusLine
+/// seed or legacy-hook strip into the caller's `CLAUDE_CONFIG_DIR`.
+///
+/// What: the sandbox home `resolve_launch_home` gives, the config dir
+/// [`super::start_config_dir`] picks with a temp "real" `CLAUDE_CONFIG_DIR`
+/// as the ambient value, then the in-place start under both. The real dir is
+/// seeded with a `trusty-memory` hook so the strip path runs. No env is written.
+/// Test: itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_sandboxed_session_start_writes_nothing_to_the_real_config_dir_10025() {
+    use std::ffi::OsStr;
+    let process_home = tempfile::TempDir::new().expect("process home");
+    let sandbox = tempfile::TempDir::new().expect("sandbox");
+    let real_config = tempfile::TempDir::new().expect("real config dir");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let seeded = r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"trusty-memory hooks fire claude.stop"}]}]}}"#;
+    let real_settings = real_config.path().join("settings.json");
+    std::fs::write(&real_settings, seeded).expect("seed the real settings.json");
+    let data = sandbox.path().join("data");
+    let home = crate::commands::launch_home::resolve_launch_home(
+        Some(OsStr::new("1")),
+        Some(data.as_os_str()),
+        Some(process_home.path().to_path_buf()),
+    )
+    .expect("a sandbox with a data override resolves")
+    .expect("a sandbox home");
+    let ambient = Some(real_config.path().to_path_buf());
+    let config_dir = super::start_config_dir(Some(&home), Some(process_home.path()), ambient);
+
+    let (bin, _log) = scripted_fake_tmux(target.path(), "has-session");
+    let (_seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    run_inplace_in(&url, target.path(), &home, config_dir.as_deref(), bin)
+        .await
+        .expect("the fake tmux accepts the launch");
+
+    assert_eq!(
+        std::fs::read_to_string(&real_settings).expect("real settings.json"),
+        seeded,
+        "no statusLine seed or hook strip may reach the real config dir"
+    );
+    assert!(
+        !real_config.path().join(".claude.json").exists(),
+        "no trust seed may reach the real config dir"
+    );
+    let sandboxed = std::fs::read_to_string(home.join(".claude").join("settings.json"))
+        .expect("the user tier stays under the sandbox home");
+    assert!(sandboxed.contains("statusLine"), "{sandboxed}");
+}
+
 /// #12048: with `install.toml` moving `config_dir`, `tm session start` deploys
 /// the framework source under the root `tm launch` reads, never `$HOME`.
 #[test]

@@ -97,8 +97,26 @@ pub(crate) async fn start_session(
     let fw = start_framework_paths(home.as_deref())
         .map_err(|err| anyhow::anyhow!("refusing to deploy the framework: {err}"))?;
     // #9999: the user tier `CLAUDE_CONFIG_DIR` names, as `tm validate --repair` uses.
-    let config_dir = trusty_mpm::core::session_record::claude_config_dir_override();
+    let ambient = trusty_mpm::core::session_record::claude_config_dir_override();
+    let config_dir = start_config_dir(home.as_deref(), dirs::home_dir().as_deref(), ambient);
     start_session_in_place(daemon, &path, &fw, home.as_deref(), config_dir.as_deref()).await
+}
+
+/// The user-tier config dir `tm session start` prepares under (#10025).
+///
+/// Why: under `TRUSTY_SANDBOX=1` the home is `<sandbox>/home`, but the client
+/// inherits the caller's `CLAUDE_CONFIG_DIR`. Passing that on sent the trust
+/// seed, statusLine seed and legacy-hook strip into the real config dir.
+/// What: `ambient` only when `home` is `process_home`; a sandbox home keeps
+/// the user tier under `<sandbox>/home/.claude`.
+/// Test: `a_sandboxed_session_start_writes_nothing_to_the_real_config_dir_10025`.
+pub(crate) fn start_config_dir(
+    home: Option<&std::path::Path>,
+    process_home: Option<&std::path::Path>,
+    ambient: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    // #10025: a sandbox home never takes the caller's raw `CLAUDE_CONFIG_DIR`.
+    trusty_mpm::core::session_launch::config_dir_for_home_in(home, process_home, ambient)
 }
 
 /// The framework layout `tm session start` writes under, for a resolved home.

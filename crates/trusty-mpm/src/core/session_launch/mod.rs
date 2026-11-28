@@ -95,7 +95,7 @@ pub use statusline::{ensure_status_line, ensure_status_line_in, user_settings_pa
 mod sync_assets;
 // #9846: the user-tier paths, relocated by `CLAUDE_CONFIG_DIR`.
 mod user_tier;
-pub use user_tier::user_tier_config_dir;
+pub use user_tier::{config_dir_for_home_in, user_tier_config_dir};
 // #7688: the four `--append-system-prompt` composers, split out of this module
 // when the addendum pushed it over the 500-SLOC production cap. Re-exported so
 // every existing `session_launch::build_system_prompt_for*` call site is
