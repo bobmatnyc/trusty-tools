@@ -15,7 +15,9 @@ use aws_sdk_bedrockruntime::config::retry::RetryConfig;
 use aws_sdk_bedrockruntime::config::{BehaviorVersion, Region};
 use aws_sdk_bedrockruntime::error::{ConnectorError, ErrorMetadata, SdkError};
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
-use aws_sdk_bedrockruntime::types::error::ConverseStreamOutputError;
+use aws_sdk_bedrockruntime::types::error::{
+    ConverseStreamOutputError, ModelStreamErrorException, ThrottlingException,
+};
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::event_stream::RawMessage;
 
@@ -199,13 +201,38 @@ fn frame() -> RawMessage {
     RawMessage::invalid(None)
 }
 
+/// AWS error metadata carrying `code`, as the SDK's deserializer sets it.
+fn meta(code: &str) -> ErrorMetadata {
+    ErrorMetadata::builder().code(code).message("m").build()
+}
+
+/// A modeled `ThrottlingException`, as the SDK deserializes one.
+fn throttling() -> ThrottlingException {
+    ThrottlingException::builder()
+        .message("m")
+        .meta(meta("ThrottlingException"))
+        .build()
+}
+
 /// A modeled exception frame keeps its AWS error code. The HTTP response
 /// already answered 200 before the stream began, so `status` is 200.
 #[test]
 fn stream_error_service_error_maps_to_api_with_code() {
-    for code in ["ThrottlingException", "ModelStreamErrorException"] {
-        let meta = ErrorMetadata::builder().code(code).message("m").build();
-        let err = SdkError::service_error(ConverseStreamOutputError::generic(meta), frame());
+    let stream_error = ModelStreamErrorException::builder()
+        .message("m")
+        .meta(meta("ModelStreamErrorException"))
+        .build();
+    for (code, modeled) in [
+        (
+            "ThrottlingException",
+            ConverseStreamOutputError::ThrottlingException(throttling()),
+        ),
+        (
+            "ModelStreamErrorException",
+            ConverseStreamOutputError::ModelStreamErrorException(stream_error),
+        ),
+    ] {
+        let err = SdkError::service_error(modeled, frame());
         match classify_stream(&err) {
             BedrockError::Api {
                 status: 200,
@@ -214,6 +241,33 @@ fn stream_error_service_error_maps_to_api_with_code() {
             } => assert_eq!(got, code),
             other => panic!("{code}: want Api, got {other:?}"),
         }
+    }
+}
+
+/// df-D37: a mid-stream throttle classifies like a send throttle under every
+/// predicate a caller reads: `is_retryable`, `is_alarm`, the AWS error code,
+/// and the display text trusty-mpm's `map_sdk_error` substring-matches.
+#[test]
+fn stream_throttle_classifies_like_a_send_throttle() {
+    let send = InferenceError::Bedrock(classify(&SdkError::service_error(
+        ConverseError::ThrottlingException(throttling()),
+        response(429),
+    )));
+    let stream = InferenceError::Bedrock(classify_stream(&SdkError::service_error(
+        ConverseStreamOutputError::ThrottlingException(throttling()),
+        frame(),
+    )));
+    assert_eq!(send.is_retryable(), stream.is_retryable());
+    assert_eq!(send.is_alarm(), stream.is_alarm());
+    for err in [&send, &stream] {
+        match err {
+            InferenceError::Bedrock(BedrockError::Api { code, .. }) => {
+                assert_eq!(code.as_deref(), Some("ThrottlingException"), "{err:?}");
+            }
+            other => panic!("want Bedrock Api, got {other:?}"),
+        }
+        let text = err.to_string().to_lowercase();
+        assert!(text.contains("throttlingexception"), "{text}");
     }
 }
 
