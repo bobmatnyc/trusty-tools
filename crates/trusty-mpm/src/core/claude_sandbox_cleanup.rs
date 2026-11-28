@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use super::TmSandboxKey;
 use super::cleanup_user::{clean_tm_user_sandbox_keys_once, log_user_outcome};
 use super::detect::{project_keys_in, read_object, recorded_project_policy};
-use crate::core::session_launch::SandboxSettingsError;
+use crate::core::session_launch::{SandboxRole, SandboxSettingsError};
 
 /// The done marker's file name under `<ws>/.trusty-mpm/`.
 pub const CLEANUP_MARKER_FILE: &str = "sandbox-cleanup.json";
@@ -223,7 +223,8 @@ pub(super) fn write_marker(marker: &Path, body: &Value) -> Result<(), SandboxCle
 /// 2. tm's user tier `<config_dir>/settings.json` when the launch has a
 ///    config dir, [`clean_tm_user_sandbox_keys_once`];
 /// 3. when `opted_in` is false and the project tier's marker exists, so
-///    step 1 has read the record, the role record is deleted.
+///    step 1 has read the record, the role record is deleted, but only when
+///    `role` could have shared it ([`delete_role_record`]).
 ///
 /// Each tier writes its own marker, and only when it finished, so a partial
 /// success re-runs only the tier that did not finish. Removed keys log at
@@ -232,12 +233,14 @@ pub(super) fn write_marker(marker: &Path, body: &Value) -> Result<(), SandboxCle
 ///
 /// Test: `the_shared_launch_step_runs_the_cleanup_and_never_refuses_12077`,
 /// `the_role_record_is_deleted_only_when_the_flag_is_off_12077`,
+/// `a_launch_keeps_a_record_of_a_role_it_never_shared_12077`,
 /// `a_user_tier_write_failure_marks_only_the_project_tier_then_retries_12077`,
 /// `a_file_with_no_tm_key_is_byte_identical_in_both_tiers_12077`.
 pub fn clean_tm_sandbox_keys_on_launch(
     workspace: &Path,
     config_dir: Option<&Path>,
     home: &Path,
+    role: SandboxRole,
     opted_in: bool,
 ) {
     log_project_outcome(workspace, clean_tm_sandbox_keys_once(workspace));
@@ -249,20 +252,77 @@ pub fn clean_tm_sandbox_keys_on_launch(
     // has read it and finished; an opted-in launch keeps it.
     let tm_dir = workspace.join(".trusty-mpm");
     if !opted_in && tm_dir.join(CLEANUP_MARKER_FILE).exists() {
-        let record = tm_dir.join(super::ROLE_RECORD_FILE);
-        match std::fs::remove_file(&record) {
-            Ok(()) => tracing::info!(
+        delete_role_record(&tm_dir, role);
+    }
+}
+
+/// Delete `<ws>/.trusty-mpm/sandbox-roles.json` when every role it names is
+/// one `role` could have shared it with under 1.14.14/1.14.15.
+///
+/// Why: #12077 (PR #12133) — `tm fleet init` is an Architect launch, and it
+/// deleted a PM's record. 1.14.14/1.14.15 refused an Architect launch over a
+/// PM or agent entry (`sandbox_roles::conflicting_role`), so that record is
+/// never one the Architect's launch wrote.
+/// What: a PM or agent launch deletes a record naming only `pm`/`agent`; an
+/// Architect launch one naming only `architect`. A record naming another
+/// role, an empty record, or one that cannot be read is kept and logged.
+fn delete_role_record(tm_dir: &Path, role: SandboxRole) {
+    let record = tm_dir.join(super::ROLE_RECORD_FILE);
+    match read_object(&record) {
+        Ok(None) => return,
+        Ok(Some(roles)) if shares_record(&roles, role) => {}
+        // #12077: another role's record, so not this launch's to delete.
+        Ok(Some(roles)) => {
+            let named: Vec<&str> = roles
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::info!(
                 path = %record.display(),
-                "#12077: deleted the sandbox role record tm 1.14.14/1.14.15 wrote"
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(
+                ?role,
+                ?named,
+                "#12077: kept the sandbox role record; it names a role this launch never shared it with"
+            );
+            return;
+        }
+        // #12077: an unreadable record names no owner, so it is kept.
+        Err(err) => {
+            tracing::warn!(
                 path = %record.display(),
-                error = %e,
-                "#12077: deleting the sandbox role record failed; a later launch retries"
-            ),
+                error = %err,
+                "#12077: the sandbox role record cannot be read, so it is kept; a later launch retries"
+            );
+            return;
         }
     }
+    match std::fs::remove_file(&record) {
+        Ok(()) => tracing::info!(
+            path = %record.display(),
+            "#12077: deleted the sandbox role record tm 1.14.14/1.14.15 wrote"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            path = %record.display(),
+            error = %e,
+            "#12077: deleting the sandbox role record failed; a later launch retries"
+        ),
+    }
+}
+
+/// Whether `role` could have shared the role record `roles` (#12077): a
+/// non-empty object whose every key is a role of `role`'s sandbox class.
+///
+/// What: the keys are `sandbox_roles::role_key`'s, frozen with the 1.14.15
+/// record format; `pm` and `agent` shared one record, `architect` none.
+fn shares_record(roles: &Value, role: SandboxRole) -> bool {
+    let class: &[&str] = if role == SandboxRole::Architect {
+        &["architect"]
+    } else {
+        &["pm", "agent"]
+    };
+    roles
+        .as_object()
+        .is_some_and(|m| !m.is_empty() && m.keys().all(|k| class.contains(&k.as_str())))
 }
 
 /// Log one project-tier run (#12077).

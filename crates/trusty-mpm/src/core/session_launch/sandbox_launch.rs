@@ -121,6 +121,8 @@ pub fn apply_launch_sandbox(
         &inputs.workspace,
         config_dir,
         &inputs.home,
+        // #12077 (PR #12133): the role decides which record is this launch's.
+        role,
         // #12077: the caller's opt-in, not this process's env.
         opted_in,
     );

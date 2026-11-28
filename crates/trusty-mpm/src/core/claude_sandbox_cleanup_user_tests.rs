@@ -613,7 +613,7 @@ fn a_user_tier_marker_write_failure_is_an_error_and_retries_12077() {
 /// read-only). The launch warns, the record and the project marker stay, and
 /// the next flag-off launch deletes the record.
 ///
-/// Mutants: the `Err(e)` arm in `clean_tm_sandbox_keys_on_launch` made
+/// Mutants: the `Err(e)` arm of `remove_file` in `delete_role_record` made
 /// silent (`Err(_) => {}`) fails the warn assertion; the same arm also
 /// removing the project marker (the retry's guard) fails the retry.
 #[cfg(unix)]
@@ -624,7 +624,7 @@ fn a_role_record_delete_failure_warns_and_retries_12077() {
     let fx = Fx::new();
     fx.plant_project(PROJECT);
     // An opted-in pass finishes the project tier and keeps the record.
-    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, true);
+    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, SandboxRole::Pm, true);
     assert!(fx.project_marker().exists() && fx.record().exists());
     let tm_dir = fx.ws.join(".trusty-mpm");
     if !read_only(&tm_dir) {
@@ -636,7 +636,7 @@ fn a_role_record_delete_failure_warns_and_retries_12077() {
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
     tracing::subscriber::with_default(subscriber, || {
-        clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, false);
+        clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, SandboxRole::Pm, false);
     });
     let (record, marker) = (fx.record().exists(), fx.project_marker().exists());
     writable(&tm_dir);
@@ -647,6 +647,91 @@ fn a_role_record_delete_failure_warns_and_retries_12077() {
     );
     assert!(record, "a failed delete leaves the record");
     assert!(marker, "a failed delete advances nothing");
-    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, false);
+    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, SandboxRole::Pm, false);
     assert!(!fx.record().exists(), "the next flag-off launch retries");
+}
+
+/// #12077 (PR #12133): a flag-off launch deletes the role record only when
+/// every role it names is one the launching role shared it with under
+/// 1.14.14/1.14.15. `tm fleet init` is an Architect launch, and a PM's record
+/// in its directory stays byte-identical.
+///
+/// Mutants: `shares_record` returning `true` fails the Architect-over-PM row;
+/// returning `false` fails the PM-and-agent row.
+#[test]
+fn a_launch_keeps_a_record_of_a_role_it_never_shared_12077() {
+    let policy = json!({"sandbox": {"enabled": true}});
+    let rows = [
+        (SandboxRole::Architect, json!({"pm": policy}), false),
+        (
+            SandboxRole::Architect,
+            json!({"architect": {"sandbox": {"enabled": false}}}),
+            true,
+        ),
+        (
+            SandboxRole::Pm,
+            json!({"architect": {"sandbox": {"enabled": false}}}),
+            false,
+        ),
+        (
+            SandboxRole::Agent,
+            json!({"pm": policy, "agent": policy}),
+            true,
+        ),
+        (
+            SandboxRole::Pm,
+            json!({"pm": policy, "other": policy}),
+            false,
+        ),
+        (SandboxRole::Pm, json!({}), false),
+    ];
+    for (role, record, deleted) in rows {
+        let fx = Fx::new();
+        let text = record.to_string();
+        write_text(&fx.record(), &text);
+        clean_tm_sandbox_keys_on_launch(&fx.ws, Some(&fx.config), &fx.home, role, false);
+        assert!(fx.project_marker().exists(), "{role:?} {record}");
+        if deleted {
+            assert!(!fx.record().exists(), "{role:?} deletes {record}");
+        } else {
+            let after = std::fs::read_to_string(fx.record()).expect("kept");
+            assert_eq!(after, text, "{role:?} keeps {record} as it was");
+        }
+    }
+}
+
+/// #12077 (PR #12133) Fail-Open Check: a role record that cannot be read
+/// names no owner. A flag-off launch keeps it, warns naming it, and goes
+/// ahead.
+///
+/// Mutants: the `Err` arm of `read_object` in `delete_role_record` falling
+/// through to the delete fails the kept assertion; made silent, it fails the
+/// warn assertion.
+#[test]
+#[serial_test::serial]
+fn an_unreadable_role_record_is_kept_and_warns_12077() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let fx = Fx::new();
+    fx.plant_project(PROJECT);
+    // An opted-in pass finishes the project tier and keeps the record.
+    clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, SandboxRole::Pm, true);
+    assert!(fx.project_marker().exists());
+    write_text(&fx.record(), "{ not json");
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        clean_tm_sandbox_keys_on_launch(&fx.ws, None, &fx.home, SandboxRole::Pm, false);
+    });
+    let logged = buffer.tail(256).join("\n");
+    assert!(
+        logged.contains("the sandbox role record cannot be read, so it is kept"),
+        "the failure must warn: {logged}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.record()).expect("kept"),
+        "{ not json"
+    );
 }
