@@ -1212,6 +1212,10 @@ async fn run() -> Result<()> {
         } => match action {
             Some(action) => action.run(cli.index, index_source, cli.json).await?,
             None => {
+                // #12161: a typed `-i <id>` names the registration like
+                // `--name` does; env-only `TRUSTY_INDEX` never does.
+                let index_flag = cli.index.clone().filter(|_| index_from_cli_flag);
+                let name = commands::index::merge_index_flag_and_name(index_flag, name)?;
                 commands::index::handle_index(
                     path,
                     name,

@@ -195,6 +195,32 @@ pub async fn handle_index(
     }
 }
 
+/// Fold the global `-i`/`--index` flag into the `--name` of `index`.
+///
+/// Why: #12161 — `trusty-search index <path> -i <id>` ignored `-i` and
+/// registered the index under the path basename, because only `--name` fed
+/// the name resolution. An explicit flag must never fall back silently.
+/// What: `index_flag` is `Some` only when the operator typed `-i` on the
+/// command line (an env-only `TRUSTY_INDEX` is passed as `None`, so a stray
+/// export cannot rename a registration). One of the two given, or both equal,
+/// yields that name; both given and different is an error naming both.
+/// Test: `an_explicit_index_flag_names_the_registered_index_12161`,
+/// `index_flag_and_name_that_differ_are_refused_12161`,
+/// `index_flag_and_name_that_agree_are_accepted_12161`.
+pub fn merge_index_flag_and_name(
+    index_flag: Option<String>,
+    name: Option<String>,
+) -> Result<Option<String>> {
+    match (index_flag, name) {
+        (Some(i), Some(n)) if i != n => anyhow::bail!(
+            "-i/--index '{i}' and --name '{n}' name different indexes (#12161); \
+             pass only one of them, or make them equal"
+        ),
+        (Some(i), _) => Ok(Some(i)),
+        (None, n) => Ok(n),
+    }
+}
+
 /// Choose which manifest-declared indexes one `trusty-search index` run touches.
 ///
 /// Why: #6920 — a `-n` that named no declared index used to be dropped, so
@@ -664,6 +690,36 @@ mod tests {
     fn merge_name_default_is_basename() {
         let got = resolve_index_name(None, None, Path::new("/repo/myproj"));
         assert_eq!(got, "myproj");
+    }
+
+    // ── merge_index_flag_and_name (#12161) ─────────────────────────────────
+
+    #[test]
+    fn an_explicit_index_flag_names_the_registered_index_12161() {
+        let merged = merge_index_flag_and_name(Some("ac3sbx".into()), None).unwrap();
+        let got = resolve_index_name(merged, None, Path::new("/repo/corpus"));
+        assert_eq!(got, "ac3sbx", "-i must not fall back to the basename");
+    }
+
+    #[test]
+    fn index_flag_and_name_that_differ_are_refused_12161() {
+        let err = merge_index_flag_and_name(Some("a".into()), Some("b".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'a'") && err.contains("'b'"), "got: {err}");
+    }
+
+    #[test]
+    fn index_flag_and_name_that_agree_are_accepted_12161() {
+        let got = merge_index_flag_and_name(Some("a".into()), Some("a".into())).unwrap();
+        assert_eq!(got.as_deref(), Some("a"));
+        assert_eq!(
+            merge_index_flag_and_name(None, Some("n".into()))
+                .unwrap()
+                .as_deref(),
+            Some("n")
+        );
+        assert_eq!(merge_index_flag_and_name(None, None).unwrap(), None);
     }
 
     // ── resolve_excludes ───────────────────────────────────────────────────
