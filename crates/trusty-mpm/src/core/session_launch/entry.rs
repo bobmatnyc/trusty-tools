@@ -209,7 +209,17 @@ pub fn prepare_session_for_managed(
     repo_url: Option<&str>,
     session_id: &str,
 ) -> Result<PrepReport, PrepError> {
-    prepare_session_for_managed_from(fw, project_dir, project_dir, repo_url, session_id)
+    // #10025: no production caller; its tests pin `$HOME`, never the config dir.
+    let home = dirs::home_dir();
+    prepare_session_for_managed_from(
+        fw,
+        project_dir,
+        project_dir,
+        repo_url,
+        session_id,
+        home.as_deref(),
+        None,
+    )
 }
 
 /// [`prepare_session_for_managed`] composing from `session_dir`, the
@@ -218,15 +228,21 @@ pub fn prepare_session_for_managed(
 /// Why: a launch redirected to the managed checkout (ADR-0037) runs there,
 /// but that checkout can be stale; its content must come from the session's
 /// own checkout or the installed release, never the managed tree.
+/// #10025: the daemon names `home` and `claude_config_dir` from its state, so
+/// the user tier lands where `CLAUDE_CONFIG_DIR` points, as its repair does.
 /// What: content from the checkout enclosing `session_dir`, else the pinned
-/// release; every other step is [`prepare_session_for_managed`]'s.
-/// Test: `a_redirected_launch_composes_from_the_session_worktree`.
+/// release; every other step is [`prepare_session_for_managed`]'s, with the
+/// user tier under `claude_config_dir` when `Some`, else `<home>/.claude`.
+/// Test: `a_redirected_launch_composes_from_the_session_worktree`,
+/// `prepare_inproject_session_writes_the_user_tier_under_the_config_dir_10025`.
 pub fn prepare_session_for_managed_from(
     fw: &FrameworkPaths,
     project_dir: &Path,
     session_dir: &Path,
     repo_url: Option<&str>,
     session_id: &str,
+    home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
@@ -238,7 +254,9 @@ pub fn prepare_session_for_managed_from(
         Some(session_id),
         HostInputs {
             content_dir: Some(session_dir),
-            ..HostInputs::with_home(dirs::home_dir().as_deref())
+            // #10025: the caller's config dir, never only `<home>/.claude`.
+            claude_config_dir,
+            ..HostInputs::with_home(home)
         },
     )
 }
@@ -297,12 +315,33 @@ pub fn prepare_isolated_session(
 /// What: resolves [`isolated_framework_paths`] for `project_dir` (the cwd the
 /// harness is spawned in) — under `home` when one is given — and runs the
 /// same pipeline [`prepare_session_with_repo_url`] does.
+/// #10025: the user tier is `CLAUDE_CONFIG_DIR` under the process home only;
+/// see [`super::user_tier::config_dir_for_home`].
 /// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// drives it under a temp home.
 pub fn prepare_isolated_session_under(
     project_dir: &Path,
     repo_url: Option<&str>,
     home: Option<&Path>,
+) -> Result<PrepReport, PrepError> {
+    // #10025: `tm launch`, `tm connect`, `tm fleet init` and meta launch.
+    let config_dir = super::user_tier::config_dir_for_home(home);
+    prepare_isolated_session_in(project_dir, repo_url, home, config_dir.as_deref())
+}
+
+/// [`prepare_isolated_session_under`] with the user tier's config dir named (#10025).
+///
+/// Why: the isolated launch paths wrote the statusLine seed, trust seed and
+/// legacy-hook strip under `<home>/.claude` with `CLAUDE_CONFIG_DIR` set
+/// elsewhere. An argument lets a test name the dir without an env write.
+/// What: the same preparation, with `claude_config_dir` relocating the user
+/// tier off `home`; `None` keeps `<home>/.claude` and `<home>/.claude.json`.
+/// Test: `isolated_prep_writes_the_user_tier_under_the_config_dir_10025`.
+pub(super) fn prepare_isolated_session_in(
+    project_dir: &Path,
+    repo_url: Option<&str>,
+    home: Option<&Path>,
+    claude_config_dir: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     let fw = match home {
         // #11821 P3: the framework source under `home`'s configured config dir.
@@ -320,7 +359,11 @@ pub fn prepare_isolated_session_under(
         native,
         repo_url,
         None,
-        HostInputs::with_home(home),
+        HostInputs {
+            // #10025: the named config dir, never only `<home>/.claude`.
+            claude_config_dir,
+            ..HostInputs::with_home(home)
+        },
     )
 }
 

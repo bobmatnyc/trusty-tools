@@ -304,6 +304,7 @@ fn prepare_inproject_session_writes_statusline() {
         worktree.path(),
         worktree.path(),
         Some("https://github.com/owner/repo"),
+        &home_host(tmp_home.path()),
     )
     .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
 
@@ -319,6 +320,55 @@ fn prepare_inproject_session_writes_statusline() {
         "prepared worktree settings.json must carry the statusLine key \
          (the #1913 symptom); got: {content}"
     );
+}
+
+/// #10025: a host naming only `home`, the pre-#10025 prep layout.
+fn home_host(home: &std::path::Path) -> RepairHost {
+    RepairHost {
+        home: Some(home.to_path_buf()),
+        claude_config_dir: None,
+    }
+}
+
+/// #10025: the in-project prep writes the user tier under the host's config
+/// dir and leaves `<home>/.claude` and `<home>/.claude.json` untouched.
+///
+/// What: [`prepare_inproject_session`] with a [`RepairHost`] naming a temp
+/// home and a temp config dir, as `RepairHost::for_state` resolves them.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn prepare_inproject_session_writes_the_user_tier_under_the_config_dir_10025() {
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(tmp_home.path());
+    let config_dir = tempfile::TempDir::new().expect("config dir");
+    let worktree = tempfile::TempDir::new().expect("tmp worktree");
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    let host = RepairHost {
+        home: Some(tmp_home.path().to_path_buf()),
+        claude_config_dir: Some(config_dir.path().to_path_buf()),
+    };
+
+    let id = ManagedSessionId::new();
+    prepare_inproject_session(&fw, &id, worktree.path(), worktree.path(), None, &host)
+        .expect("prep succeeds");
+
+    let user = std::fs::read_to_string(config_dir.path().join("settings.json"))
+        .expect("the user-tier settings.json lands in the config dir");
+    assert!(user.contains("statusLine"), "{user}");
+    let claude_json = std::fs::read_to_string(config_dir.path().join(".claude.json"))
+        .expect("the trust seed lands in <config_dir>/.claude.json");
+    assert!(
+        claude_json.contains("hasTrustDialogAccepted"),
+        "{claude_json}"
+    );
+    for stray in [".claude/settings.json", ".claude.json"] {
+        assert!(
+            !tmp_home.path().join(stray).exists(),
+            "{stray} must not be written under the home when a config dir is named"
+        );
+    }
 }
 
 /// #1919 regression guard: [`spawn_managed_inproject`]'s call tree —
@@ -370,6 +420,7 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
             worktree.path(),
             worktree.path(),
             Some("https://github.com/owner/repo"),
+            &home_host(tmp_home.path()),
         )
         .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
     })
