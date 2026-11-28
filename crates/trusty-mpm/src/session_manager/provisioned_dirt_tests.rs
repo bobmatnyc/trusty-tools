@@ -464,3 +464,33 @@ fn user_work_beside_the_snapshot_still_keeps_the_clone_11221() {
         "unpushed commit"
     );
 }
+
+/// #12077: the launch-key record and the cleanup marker a spawn writes under
+/// `.trusty-mpm/` never show in a plain `git status` of the checkout, and the
+/// dirt check treats them as tm's regenerated bookkeeping, ledger or not.
+#[test]
+fn the_launch_key_files_are_not_dirt_12077() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "launch-keys", "target/\n");
+    let _home = spawn(&ws);
+    let record = crate::core::session_launch::launch_keys_record_path(&ws);
+    let marker = ws
+        .join(".trusty-mpm")
+        .join(crate::core::claude_sandbox::LAUNCH_KEYS_CLEANUP_MARKER_FILE);
+    assert!(
+        record.is_file() && marker.is_file(),
+        "premise: the spawn wrote both"
+    );
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&ws)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .expect("git status runs");
+    let status = String::from_utf8_lossy(&out.stdout);
+    assert!(!status.contains(".trusty-mpm/"), "{status}");
+    // With no ledger, only the compiled prompt is counted.
+    std::fs::remove_file(ws.join(".git").join(LEDGER_NAME)).expect("remove the ledger");
+    let dirt = trusty_mpm_dirt_only(&ws).expect("the compiled prompt is counted");
+    assert_eq!(dirt.dirty_files, 1, "{}", dirt.reason);
+}
