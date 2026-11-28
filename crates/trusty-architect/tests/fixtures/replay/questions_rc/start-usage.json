@@ -1,0 +1,42 @@
+{
+  "version": 3,
+  "argv": [
+    "start"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_INPUT_STATE": "input-state.py",
+    "ARCH_Q_RC": "questions_rc.py",
+    "ARCH_Q_RC_SLEEP": "0",
+    "ARCH_Q_RC_TRIES": "2",
+    "ARCH_Q_RELAY": "relay.sh",
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: {ROOT}/scripts/start-architect-questions.sh [--dry-run] <item-id>...\n",
+  "exit": 2,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": []
+  },
+  "clock": 1795784400
+}

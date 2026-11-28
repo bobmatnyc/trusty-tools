@@ -736,3 +736,105 @@ $R record --clock 1795784400 --out $D/pending-answers/env-root.json --seed $S/st
 $R replay $D/owner_answers/*.json -- <target>/debug/examples/replay_port owner_answers
 $R replay $D/pending-answers/*.json -- <target>/debug/examples/replay_port pending-answers
 ```
+
+## questions_rc and start-architect-questions (#12029 P2f)
+
+Twenty-four runs of the frozen Python reference (architect commit
+`0fbbc81eed`), recorded on 2026-11-28 with `--clock 1795784400` and
+replayed in `tests/replay_questions_rc.rs` against `examples/replay_port.rs
+questions_rc`, which hands every mode to the library's driver mirror
+(`questions::cases::replay`). Every store, queue and pane is synthetic; the
+session is `qna-alpha`.
+
+`questions_rc/driver.py` is copied beside `questions_rc.py`,
+`start-architect-questions.sh`, `dashboard_store.py`, `dashboard_jsonl.py`
+and `dashboard_schema.py` as `qrc_driver.py`. It points both scripts at the
+sandbox root, which stands for the checkout, and changes none of their text:
+
+- `rc ARGS...` runs `questions_rc.main` with `ROOT` the sandbox root, the
+  store at `local/owner-queue`, `HERE` empty (so `rc-restore.sh`,
+  `rc-disconnect.sh` and `start-architect-questions.sh` run by bare name and
+  the recording's fakes answer), `settle`'s 2 s sleeps as no-ops, and
+  `-L trusty-replay-p2f` added to every tmux call.
+- `start ARGS...` sources the launcher in `bash -c` with `$0` =
+  `<root>/scripts/start-architect-questions.sh`, after two shell functions:
+  `tmux` (adds `-L trusty-replay-p2f`) and `date` (the frozen instant for
+  `-u +%H:%MZ` and `-u +%H:%M:%SZ`). `python3` (for `input-state.py` and
+  `ARCH_Q_RC`) and `relay.sh` are fakes.
+- `cases CASES.json` runs the pure functions: `open_ids`, `decide`,
+  `rc_from_capture` and `url_from_capture` (on lines, and on pane text
+  through `splitlines`), `settle` on scripted reads, `step`, `write_state`
+  and `read_queue`.
+
+The Architect ruling of 2026-11-28 (C1 to C4) holds as follows. The only
+tmux the recordings reach is the recorder's `PATH` fake, and every recorded
+call and canned answer names `-L trusty-replay-p2f`
+(`questions_replay_tmux_calls_use_the_private_socket`). Every write is
+under the sandbox root (`questions_replay_writes_stay_in_the_sandbox`). No
+recorded path differs from another only by letter case
+(`questions_fixture_paths_never_differ_only_by_case`). The port reaches a
+`PATH` tmux only through `TmuxCli::on_path_with_socket`, which always
+carries the socket; its live runner takes tmux from a fixed directory list
+(`live_options_never_resolve_tmux_through_path`).
+
+| Recording | Case |
+|---|---|
+| `rc-start`, `rc-on`, `rc-off` | Each action: its script and arguments, then `settle` re-reading the pane (a fake pane never changes, so `rc-on` and `rc-off` read it five times) |
+| `rc-none-on`, `rc-none-down` | No action: the URL from the live pane (newest of two), and a stopped session |
+| `rc-dry-run`, `rc-dry-run-off` | `--dry-run` (with an extra argument): no action, nothing written |
+| `rc-env-paths` | `ARCH_Q_QUEUE` and `QUESTIONS_RC_STATE` (relative), a CRLF, CR and blank-line queue, a non-string status, an interactive `decision`, `/rc failed`, an action script that exits 1 |
+| `rc-no-store` | No store directory, `QUESTIONS_RC_STATE` empty |
+| `start-usage`, `start-bad-id`, `start-bad-flag`, `start-empty-arg` | Argument errors, exit 2 |
+| `start-dry-down`, `start-dry-up` | `--dry-run` with the session stopped and running (the input-state read still runs) |
+| `start-up-typed`, `start-up-relay`, `start-up-relay-fails`, `start-up-unknown`, `start-custom-queue` | A running session: duplicate ids, a queue without a final newline, every input state (typed, empty, suggestion, none, two lines), the relay prompt and its failure, a nested `ARCH_Q_QUEUE` |
+| `start-no-config`, `start-config-file` | A stopped session with no Claude config dir, or a file in its place: exit 1 |
+| `cases`, `driver-usage` | The pure functions, and the driver's usage |
+
+Not recorded: the launch itself (`tmux new-session` and the `relaunch.log`
+line), because its prompt names the default questions session, which the
+recorder refuses; `start_launch_runs_only_on_the_private_socket_and_logs_the_url`
+pins its argv and log line against the frozen script on a private `-S`
+socket. A store error, a missing script and a tmux that cannot start end the
+Python in a traceback; the port prints one line and exits 1. Where the frozen
+scripts carry on after a failed tmux call or write (`capture-pane` exiting
+non-zero, a failed queue append or `mkdir`, `new-session` failing, a failed
+`relaunch.log` append), the port stops with exit 1 and writes nothing after
+it. Each has its own test: `capture-pane` in
+`rc_exits_1_and_keeps_the_state_file_on_a_failed_capture_pane` and
+`start_exits_1_with_no_rc_line_on_a_failed_capture_pane`, the queue in
+`start_exits_1_with_no_tmux_call_when_the_queue_dir_cannot_be_made` and
+`start_exits_1_with_no_tmux_call_when_the_queue_append_fails`, `new-session`
+in `start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session`
+and the log in
+`start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails`. With
+several ids, a failed append keeps the ids appended before it. A queue that is not
+UTF-8 cannot be a recorded file.
+
+D5, the default Claude config dir: with no `CLAUDE_CONFIG_DIR`, Python always
+uses `$HOME/.trusty-tools/trusty-mpm/claude-config` and ignores `install.toml`
+and `TRUSTY_MPM_CONFIG_DIR`. The port resolves the base through `install_paths`,
+so `TRUSTY_MPM_CONFIG_DIR` or `install.toml` moves the dir (test:
+`start_uses_trusty_mpm_config_dir_for_the_claude_config_default`). A malformed
+`install.toml`, or a relative or empty config value, exits 1 with no
+`new-session` and no `relaunch.log`, while ids already appended stay queued
+(test: `start_exits_1_with_no_new_session_when_install_toml_is_malformed`). An
+empty `HOME` resolves relative to the cwd; that edge is known and left as is,
+because `tm` always sets `HOME`.
+
+Regenerate with the scripts and the driver
+copied to a sandbox directory `P` whose path has no symlink (the probe
+compares canonical paths), each recording's `files` laid into `S/<name>` and
+its `fakes.stubs` into `S/<name>.fakes.json`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay/questions_rc
+$R record --clock 1795784400 --out $D/rc-on.json --seed $S/rc-on/local=local \
+  --fakes $S/rc-on.fakes.json --env ARCH_Q_SESSION=qna-alpha -- $P/qrc_driver.py rc
+$R record --clock 1795784400 --out $D/start-up-relay.json --fakes $S/start-up-relay.fakes.json \
+  --env ARCH_Q_SESSION=qna-alpha --env ARCH_Q_INPUT_STATE=input-state.py --env ARCH_Q_RELAY=relay.sh \
+  --env ARCH_Q_RC=questions_rc.py --env ARCH_Q_RC_SLEEP=0 --env ARCH_Q_RC_TRIES=2 \
+  -- $P/qrc_driver.py start D01
+$R record --clock 1795784400 --out $D/cases.json --seed $S/cases.json=cases.json \
+  -- $P/qrc_driver.py cases cases.json
+$R replay $D/*.json -- <target>/debug/examples/replay_port questions_rc
+```

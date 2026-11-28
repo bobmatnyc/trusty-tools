@@ -1,0 +1,77 @@
+{
+  "version": 3,
+  "argv": [
+    "start",
+    "D01",
+    "--dry-run"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_INPUT_STATE": "input-state.py",
+    "ARCH_Q_RC": "questions_rc.py",
+    "ARCH_Q_RC_SLEEP": "0",
+    "ARCH_Q_RC_TRIES": "2",
+    "ARCH_Q_RELAY": "relay.sh",
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "would queue: D01 -> {ROOT}/inbox/interactive-queue.txt\nrunning: qna-alpha input=empty; would prompt it to re-read the queue\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "python3": [
+        {
+          "argv": [
+            "input-state.py",
+            "=qna-alpha:"
+          ],
+          "stdout": "=qna-alpha: empty | \n",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "questions_rc.py"
+          ],
+          "stdout": "questions_rc: count=1 action=rc_on session=up rc=off\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "python3",
+        "input-state.py",
+        "=qna-alpha:"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}
