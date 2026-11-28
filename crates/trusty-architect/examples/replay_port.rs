@@ -13,7 +13,8 @@
 //! `stalled_tasks`, `task_wait_check` and `il_timeline` (#12028 P1d),
 //! `brief-id` (#12028 P1e), `il_agent` (#12028 P1f) and `verify_claim`
 //! (#12028 P1g) and `ruling_pack` (#12028 P1i), `ids36` and
-//! `dashboard_schema` (#12029 P2a). `gh-session-track` (#12087)
+//! `dashboard_schema` (#12029 P2a), `dashboard_jsonl` and `dashboard_derive`
+//! (#12029 P2b, mirrored in the library). `gh-session-track` (#12087)
 //! runs the script's own command line.
 //! Test: `spec_drift_recordings_replay_clean_against_the_port`,
 //! `level_lint_recordings_replay_clean_against_the_port`,
@@ -25,14 +26,17 @@
 //! `verify_claim_recordings_replay_clean_against_the_port`,
 //! `gh_session_track_recordings_replay_clean_against_the_port`,
 //! `ruling_pack_recordings_replay_clean_against_the_port`,
-//! `ids36_recordings_replay_clean_against_the_port` and
-//! `dashboard_schema_recordings_replay_clean_against_the_port`.
+//! `ids36_recordings_replay_clean_against_the_port`,
+//! `dashboard_schema_recordings_replay_clean_against_the_port`,
+//! `dashboard_jsonl_recordings_replay_clean_against_the_port` and
+//! `dashboard_derive_recordings_replay_clean_against_the_port`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use trusty_architect::dashboard::{pyderive, pyjsonl};
 use trusty_architect::gh_session_track;
 use trusty_architect::ids36;
 use trusty_architect::il_agent;
@@ -475,6 +479,9 @@ fn main() -> ExitCode {
         // directories relative to the sandbox root.
         "ids36" => ids36_driver(&rest),
         "dashboard_schema" => dashboard_schema(&rest),
+        // See #12029 P2b: the library holds each `driver.py` mirror.
+        "dashboard_jsonl" => pyjsonl::replay_cases(&rest),
+        "dashboard_derive" => pyderive::replay_cases(&rest, clock.as_ref()),
         "technical_level" => technical_level(&rest),
         "architect_config" => architect_config(&rest),
         other => {
@@ -482,7 +489,8 @@ fn main() -> ExitCode {
                 "replay_port: no port named {other:?}; known: spec_drift_check, level_lint, \
                  technical_level, architect_config, stale-tasks, stalled_tasks, task_wait_check, \
                  il_timeline, state-archive, aliases, brief-id, il_agent, verify_claim, \
-                 gh-session-track, ruling_pack, ids36, dashboard_schema"
+                 gh-session-track, ruling_pack, ids36, dashboard_schema, dashboard_jsonl, \
+                 dashboard_derive"
             );
             return ExitCode::from(2);
         }

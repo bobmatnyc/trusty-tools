@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "argv": [
+    "read/cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "read/c2/changes.jsonl": "{\"coll\":\"a\",\"seq\":1,\"ts\":\"t\"}\n\n  \n{\"seq\":true}\n{\"seq\":2,\"ts\":\"t\"}\n",
+    "read/c3/changes.jsonl": "{\"seq\":1,\"ts\":\"t\"}\n{\"seq\":2,\"ts\":\"t\"}\n",
+    "read/cases.json": "[\n {\n  \"op\": \"read_coll\",\n  \"root\": \"read/r\",\n  \"coll\": \"items\"\n },\n {\n  \"op\": \"read_coll\",\n  \"root\": \"read/r\",\n  \"coll\": \"absent\"\n },\n {\n  \"op\": \"read_coll\",\n  \"root\": \"read/nowhere\",\n  \"coll\": \"items\"\n },\n {\n  \"op\": \"read_coll\",\n  \"root\": \"read/r\",\n  \"coll\": \"bad\"\n },\n {\n  \"op\": \"collections\",\n  \"root\": \"read/r\"\n },\n {\n  \"op\": \"collections\",\n  \"root\": \"read/nowhere\"\n },\n {\n  \"op\": \"read_changes\",\n  \"root\": \"read/r\"\n },\n {\n  \"op\": \"read_changes\",\n  \"root\": \"read/nowhere\"\n },\n {\n  \"op\": \"read_changes\",\n  \"root\": \"read/c2\"\n },\n {\n  \"op\": \"read_changes\",\n  \"root\": \"read/c3\"\n }\n]\n",
+    "read/r/.hidden.jsonl": "",
+    "read/r/.jsonl": "",
+    "read/r/bad.jsonl": "{\"data\":{\"t\":\"one\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n{\"data\":{\"t\":\"two\"},\"id\":\"A02\",\"sv\":1,\"version\":2}\n{\"data\":{},\"id\":\"A01\",\"sv\":1,\"version\":1}\n",
+    "read/r/changes-2026-10.jsonl": "",
+    "read/r/changes-2026.jsonl": "",
+    "read/r/changes.jsonl": "{\"coll\":\"items\",\"id\":\"A01\",\"op\":\"set\",\"seq\":1,\"ts\":\"2026-11-01T00:00:00Z\"}\n",
+    "read/r/items.jsonl": "{\"data\":{\"t\":\"one\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n{\"data\":{\"t\":\"two\"},\"id\":\"A02\",\"sv\":1,\"version\":2}\n",
+    "read/r/notes.txt": "x",
+    "read/r/x.jsonl.bak": ""
+  },
+  "reads": [
+    "read/c2/changes.jsonl",
+    "read/c3/changes.jsonl",
+    "read/cases.json",
+    "read/r/.hidden.jsonl",
+    "read/r/.jsonl",
+    "read/r/bad.jsonl",
+    "read/r/changes-2026-10.jsonl",
+    "read/r/changes-2026.jsonl",
+    "read/r/changes.jsonl",
+    "read/r/items.jsonl",
+    "read/r/notes.txt",
+    "read/r/x.jsonl.bak"
+  ],
+  "stdout": "case 0 read_coll\n  'A01' 1 {\"t\": \"one\"}\n  'A02' 2 {\"t\": \"two\"}\ncase 1 read_coll\n  empty\ncase 2 read_coll\n  empty\ncase 3 read_coll\n  JsonlError: read/r/bad.jsonl:3: duplicate id A01\ncase 4 collections\n  ['bad', 'changes-2026', 'items']\ncase 5 collections\n  []\ncase 6 read_changes\n  {\"coll\": \"items\", \"id\": \"A01\", \"op\": \"set\", \"seq\": 1, \"ts\": \"2026-11-01T00:00:00Z\"}\ncase 7 read_changes\n  empty\ncase 8 read_changes\n  JsonlError: read/c2/changes.jsonl:4: invalid change line (torn, not JSON, or no integer seq)\ncase 9 read_changes\n  {\"seq\": 1, \"ts\": \"t\"}\n  {\"seq\": 2, \"ts\": \"t\"}\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

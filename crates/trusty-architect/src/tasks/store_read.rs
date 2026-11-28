@@ -16,10 +16,9 @@
 use std::path::Path;
 
 use crate::dashboard::store::Format;
-use crate::pyjson_load::{PyInt, PyValue, loads};
+use crate::pyjson_load::{PyInt, PyValue};
 use crate::pystr::py_repr;
-use crate::pyval::{cmp_int, get, int_text, repr};
-use crate::spec_drift::py::{decode_error, os_error};
+use crate::spec_drift::py::os_error;
 
 use super::{JsonFail, read_json};
 
@@ -180,63 +179,23 @@ fn dir_docs(cdir: &str) -> Result<Vec<PyDoc>, String> {
     Ok(out)
 }
 
-/// A positive integer that is not a bool (`sv`, `version`).
-fn positive(v: Option<&PyValue>) -> Option<&PyInt> {
-    match v {
-        Some(PyValue::Int(i)) if cmp_int(i, &PyInt::Small(1)).is_ge() => Some(i),
-        _ => None,
-    }
-}
-
-fn shown(v: Option<&PyValue>) -> String {
-    v.map_or_else(|| "None".to_owned(), repr)
-}
-
-/// `dashboard_jsonl.read_coll`.
+/// `dashboard_jsonl.read_coll`, sorted by id as `list_docs` returns it.
+// #12029 P2b: the line parser is the `dashboard_jsonl` port's, defined once.
 fn read_coll(path: &str) -> Result<Vec<PyDoc>, String> {
     let blob = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(os_error(Path::new(path), &e).msg),
     };
-    let text = std::str::from_utf8(&blob)
-        .map_err(|e| format!("{path}: not UTF-8: {}", decode_error(&blob, &e).msg))?;
-    let mut out: Vec<PyDoc> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (n, raw) in text.split('\n').enumerate() {
-        if raw.is_empty() {
-            continue;
-        }
-        let at = format!("{path}:{}", n + 1);
-        let line = loads(raw).map_err(|e| format!("{at}: invalid JSON: {}", e.py_str()))?;
-        let (Some(PyValue::Str(id)), Some(data @ PyValue::Dict(_))) =
-            (get(&line, "id"), get(&line, "data"))
-        else {
-            return Err(format!("{at}: a line is {{data, id, sv, version}}"));
-        };
-        let sv = get(&line, "sv");
-        let Some(svi) = positive(sv) else {
-            return Err(format!("{at}: bad sv {}", shown(sv)));
-        };
-        if cmp_int(svi, &PyInt::Small(1)).is_gt() {
-            return Err(format!(
-                "{at}: sv {} is newer than this reader (1)",
-                int_text(svi)
-            ));
-        }
-        let version = get(&line, "version");
-        if positive(version).is_none() {
-            return Err(format!("{at}: bad version {}", shown(version)));
-        }
-        if !seen.insert(id.clone()) {
-            return Err(format!("{at}: duplicate id {id}"));
-        }
-        out.push(PyDoc {
-            id: id.clone(),
-            data: data.clone(),
-            version: doc_version(version),
-        });
-    }
+    let lines = crate::dashboard::pyjsonl::parse_file(&blob, path).map_err(|e| e.to_string())?;
+    let mut out: Vec<PyDoc> = lines
+        .into_iter()
+        .map(|(id, version, data)| PyDoc {
+            id,
+            version: doc_version(Some(&PyValue::Int(version))),
+            data,
+        })
+        .collect();
     out.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
     Ok(out)
 }

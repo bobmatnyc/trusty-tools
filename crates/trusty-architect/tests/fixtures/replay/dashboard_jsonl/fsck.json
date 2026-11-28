@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "argv": [
+    "fsck/cases.json"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "fsck/bad/broken.jsonl": "{\"data\":{},\"id\":\"B01\",\"sv\":1,\"version\":1}\n{\n",
+    "fsck/bad/changes.jsonl": "{\"coll\":\"items\",\"id\":\"A01\",\"op\":\"set\",\"seq\":1,\"sha256\":\"2f925080dc2f2af829f81ec21aec85b7d26627018e072879cbd806be1c0b1002\",\"ts\":\"t\"}\n{\"coll\":\"items\",\"id\":\"A02\",\"op\":\"set\",\"seq\":2,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"ts\":\"t\"}\n{\"coll\":\"goals\",\"id\":\"G01\",\"op\":\"delete\",\"seq\":3,\"ts\":\"t\"}\n{\"coll\":\"goals\",\"id\":\"G09\",\"op\":\"delete\",\"seq\":4,\"ts\":\"t\"}\n{\"coll\":\"goals\",\"id\":\"G08\",\"op\":\"set\",\"seq\":5,\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"ts\":\"t\"}\n{\"coll\":\"goals\",\"id\":\"G07\",\"op\":\"set\",\"seq\":6,\"ts\":\"t\"}\n{\"id\":\"Z01\",\"op\":\"set\",\"seq\":7,\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"ts\":\"t\"}\n{\"coll\":\"items\",\"id\":5,\"op\":\"set\",\"seq\":8,\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"ts\":\"t\"}\ntorn line\n{\"coll\":\"items\",\"id\":\"A01\",\"op\":\"set\",\"seq\":9,\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"ts\":\"t\"}\n{\"coll\":\"Items\",\"id\":\"A01\",\"op\":\"set\",\"seq\":10,\"sha256\":null,\"ts\":\"t\"}\n{\"seq\": 1.5}\n{\"coll\":\"items\",\"id\":\"5\",\"op\":\"set\",\"seq\":11,\"sha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"ts\":\"t\"}\n",
+    "fsck/bad/goals.jsonl": "{\"data\":{\"n\":1},\"id\":\"G01\",\"sv\":1,\"version\":1}\n",
+    "fsck/bad/items.jsonl": "{\"id\":\"A02\",\"data\":{\"t\":\"two\"},\"sv\":1,\"version\":3}\n{\"data\":{\"t\":\"one\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n",
+    "fsck/bad/media.jsonl": "",
+    "fsck/cases.json": "[\n {\n  \"op\": \"fsck\",\n  \"root\": \"fsck/clean\"\n },\n {\n  \"op\": \"fsck\",\n  \"root\": \"fsck/bad\"\n },\n {\n  \"op\": \"fsck\",\n  \"root\": \"fsck/nowhere\"\n }\n]\n",
+    "fsck/clean/changes-2026-10.jsonl": "not even json\n",
+    "fsck/clean/changes.jsonl": "{\"coll\":\"items\",\"id\":\"A02\",\"op\":\"set\",\"seq\":1,\"sha256\":\"3d0892259b504a1feabdbc1a7099a4a3fef7f114272e62dab77eb265c4106028\",\"ts\":\"2026-11-01T00:00:00Z\"}\n{\"coll\":\"items\",\"id\":\"A01\",\"op\":\"set\",\"seq\":2,\"sha256\":\"2f925080dc2f2af829f81ec21aec85b7d26627018e072879cbd806be1c0b1002\",\"ts\":\"2026-11-01T00:00:00Z\"}\n",
+    "fsck/clean/items.jsonl": "{\"data\":{\"t\":\"one\"},\"id\":\"A01\",\"sv\":1,\"version\":1}\n{\"data\":{\"t\":\"two\"},\"id\":\"A02\",\"sv\":1,\"version\":3}\n"
+  },
+  "reads": [
+    "fsck/bad/broken.jsonl",
+    "fsck/bad/changes.jsonl",
+    "fsck/bad/goals.jsonl",
+    "fsck/bad/items.jsonl",
+    "fsck/bad/media.jsonl",
+    "fsck/cases.json",
+    "fsck/clean/changes-2026-10.jsonl",
+    "fsck/clean/changes.jsonl",
+    "fsck/clean/items.jsonl"
+  ],
+  "stdout": "case 0 fsck\n  ok\ncase 1 fsck\n  fsck/bad/broken.jsonl:2: invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n  fsck/bad/items.jsonl: bytes are not canonical (re-render differs)\n  fsck/bad/changes.jsonl:9: invalid change line (torn, not JSON, or no integer seq)\n  fsck/bad/changes.jsonl:12: invalid change line (torn, not JSON, or no integer seq)\n  None/Z01: file line hash differs from last logged hash (seq 7)\n  goals/G01: logged deleted (seq 3) but present in the file\n  goals/G08: file line hash differs from last logged hash (seq 5)\n  items/5: file line hash differs from last logged hash (seq 8)\n  items/5: file line hash differs from last logged hash (seq 11)\n  items/A01: file line hash differs from last logged hash (seq 9)\n  items/A02: file line hash differs from last logged hash (seq 2)\ncase 2 fsck\n  ok\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

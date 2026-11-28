@@ -28,6 +28,8 @@ mod error;
 pub mod ids;
 // #10063 PR 3: the method types and the verb bodies.
 pub mod pending;
+pub mod pyderive; // See #12029 P2b
+pub mod pyjsonl; // See #12029 P2b
 pub mod rpc;
 pub mod schema_check;
 pub mod store;
