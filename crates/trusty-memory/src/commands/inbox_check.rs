@@ -87,13 +87,33 @@ struct ServerMessage {
 ///
 /// `palace` overrides the cwd-derived slug; useful for test rigs and for
 /// projects whose repo basename does not match their preferred palace.
-/// Test: `inbox_check_returns_ok_without_daemon`.
+/// Test: the body is covered through [`handle_inbox_check_with_payload`];
+/// this wrapper reads the real stdin, which a test must not (#11949).
 pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
     let start = Instant::now();
     // SessionStart hooks deliver session metadata (JSON) on stdin. Capture
-    // it best-effort for the log; never block on stdin reads.
+    // it best-effort for the log.
     let trigger_prompt = read_stdin_best_effort();
+    // #11949: the body takes the payload, so tests never read the real stdin.
+    handle_inbox_check_with_payload(palace, trigger_prompt, start).await
+}
 
+/// Body of [`handle_inbox_check`], given the stdin payload it already read.
+///
+/// Why: #11949 — the handler tests called [`handle_inbox_check`], whose stdin
+/// read blocks until EOF. A test binary whose stdin is a held-open pipe never
+/// got EOF, so the test hung holding `env_test_lock` and every later
+/// env-locked test queued behind it. Same split as prompt-context's #2079.
+/// What: resolves the recipient, runs the fetch and the hook event exactly as
+/// [`handle_inbox_check`] did; `start` is when the invocation began.
+/// Test: `inbox_check_returns_ok_without_daemon`,
+/// `inbox_check_logs_attempt_without_daemon`,
+/// `handler_tests_finish_while_the_binary_stdin_stays_open`.
+pub(crate) async fn handle_inbox_check_with_payload(
+    palace: Option<String>,
+    trigger_prompt: String,
+    start: Instant,
+) -> Result<()> {
     // Resolve recipient palace eagerly so the log entry can carry it on
     // every failure path. `palace` (the explicit override) takes precedence;
     // then a stdin-provided `cwd` (issue #125 — the JSON Claude Code pipes
@@ -398,7 +418,13 @@ mod tests {
         unsafe {
             std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
         }
-        let res = handle_inbox_check(Some("test-palace".to_string())).await;
+        // #11949: never the real stdin, which a gate can hold open forever.
+        let res = handle_inbox_check_with_payload(
+            Some("test-palace".to_string()),
+            String::new(),
+            Instant::now(),
+        )
+        .await;
         unsafe {
             std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
         }
@@ -427,7 +453,13 @@ mod tests {
             std::env::remove_var(crate::prompt_log::ENV_DIR);
             std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
         }
-        let res = handle_inbox_check(Some("explicit-palace".to_string())).await;
+        // #11949: never the real stdin, which a gate can hold open forever.
+        let res = handle_inbox_check_with_payload(
+            Some("explicit-palace".to_string()),
+            String::new(),
+            Instant::now(),
+        )
+        .await;
         let logs_dir = trusty_common::resolve_data_dir("trusty-memory")
             .expect("resolve data dir")
             .join("logs");
@@ -459,5 +491,55 @@ mod tests {
         assert_eq!(parsed.hook_type, "SessionStart");
         assert_eq!(parsed.injection_kind, "inbox-check-messages");
         assert_eq!(parsed.palace, "explicit-palace");
+    }
+
+    /// Why: #11949 — the two handler tests above read the test binary's own
+    /// stdin to EOF while holding `env_test_lock`. Under a gate whose stdin is
+    /// a pipe that never closes (the EVO `ssh` gate) the read never returned,
+    /// and every later env-locked test queued behind it for 6506 s.
+    /// What: runs those two tests in a child copy of this binary whose stdin is
+    /// a pipe held open for the whole run, and fails if the child has not
+    /// passed within `BOUND`.
+    /// Test: itself.
+    #[test]
+    fn handler_tests_finish_while_the_binary_stdin_stays_open() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        const BOUND: Duration = Duration::from_secs(60);
+        let exe = std::env::current_exe().expect("current exe");
+        let mut child = Command::new(exe)
+            .args([
+                "commands::inbox_check::tests::inbox_check_returns_ok_without_daemon",
+                "commands::inbox_check::tests::inbox_check_logs_attempt_without_daemon",
+                "--exact",
+                "--test-threads=1",
+            ])
+            // The write end stays in `child.stdin` until the wait ends.
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the handler tests");
+        let deadline = Instant::now() + BOUND;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        drop(child.stdin.take());
+        let status = status.unwrap_or_else(|| {
+            panic!(
+                "the inbox-check handler tests were still running after {BOUND:?} with stdin open"
+            )
+        });
+        assert!(status.success(), "the handler tests failed: {status}");
     }
 }
