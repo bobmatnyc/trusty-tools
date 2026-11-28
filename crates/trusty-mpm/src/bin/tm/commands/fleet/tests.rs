@@ -1631,6 +1631,95 @@ fn every_schema_asset_is_seeded() {
     assert_eq!(checked, rows, "schema assets {checked}, seeded rows {rows}");
 }
 
+/// #12029: the seeded dashboard schemas take the prototype's base-34 ids
+/// (`0-9a-z` without `l` and `o`, the form live ids like `Bqw` and `D0f`
+/// use), still take every hex-era id, and still refuse a malformed one.
+#[test]
+fn seeded_schemas_accept_base34_ids() {
+    use serde_json::{Value, json};
+    use trusty_architect::dashboard::{SchemaDir, SchemaSet};
+
+    let tmp = tempfile::tempdir().expect("scratch dir");
+    let dir = tmp.path().join("schemas/dashboard");
+    std::fs::create_dir_all(&dir).expect("schema dir");
+    for f in seeded_files() {
+        if let Some(name) = f.dest.strip_prefix("schemas/dashboard/") {
+            std::fs::write(dir.join(name), f.contents).expect("write schema");
+        }
+    }
+    let set = SchemaDir::load(&dir).expect("seeded schemas load");
+    let errors = |coll: &str, id: &str, doc: Value| -> Vec<String> {
+        let Value::Object(map) = doc else {
+            panic!("{coll}/{id}: not an object")
+        };
+        set.validate(coll, id, &map).expect("validate")
+    };
+    let at = "2026-11-28T14:00:00Z";
+    let item = |id_goal: &str, task: &str| {
+        json!({"kind": "task", "status": "open", "title": "t", "session": "s",
+               "goal": id_goal, "task": task, "rank": 1, "created": at, "updated": at})
+    };
+    let docs = |goal: &str,
+                task: &str,
+                session: &str|
+     -> Vec<(&'static str, &'static str, Value)> {
+        vec![
+            ("items", "Bqw", item(goal, task)),
+            ("items", "D0f", item(goal, task)),
+            (
+                "goal_reorders",
+                "doc-001",
+                json!({"at": at, "kind": "standing", "order": [goal], "status": "new"}),
+            ),
+            (
+                "goal_removals",
+                "doc-001",
+                json!({"goal": goal, "title": "t", "by": "owner", "created": at, "status": "new"}),
+            ),
+            (
+                "briefs",
+                "doc-001",
+                json!({"question": "q", "answer": "a", "project": "p", "status": "open",
+                    "created": at, "updated": at, "goal": goal}),
+            ),
+            (
+                "questions",
+                "doc-001",
+                json!({"asked": at, "answer": "a", "status": "open", "updated": at, "task": task}),
+            ),
+            (
+                "meta",
+                "state",
+                json!({"owner_name": "o", "updated": at, "session_id": session}),
+            ),
+        ]
+    };
+    // Live base-34 ids and hex-era ids are accepted.
+    for (goal, task, session) in [("G1g", "Tqw", "Szz"), ("G0a", "T1f", "S0f")] {
+        for (coll, id, doc) in docs(goal, task, session) {
+            let got = errors(coll, id, doc);
+            assert!(
+                got.is_empty(),
+                "{coll}/{id} with {goal} {task} {session}: {got:?}"
+            );
+        }
+    }
+    // `l`, `o`, uppercase and the wrong length stay refused.
+    for (goal, task, session) in [
+        ("Glo", "Tl", "So0"),
+        ("G0", "TA", "S0"),
+        ("G000", "T", "S000"),
+    ] {
+        for (coll, id, doc) in docs(goal, task, session) {
+            let got = errors(coll, id, doc);
+            assert!(
+                !got.is_empty(),
+                "{coll}/{id} with {goal} {task} {session}: accepted"
+            );
+        }
+    }
+}
+
 /// #10161: every dashboard page asset (the page, the Live view and the reader
 /// libraries) is seeded byte-equal at `templates/dashboard/<rel>`, where
 /// `dashboard-serve.py` reads it, and every seeded page row has an asset.
