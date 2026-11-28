@@ -1,6 +1,6 @@
 //! The opt-in Claude Code sandbox for tm launches (#12077 slice 2).
 //!
-//! Why: owner ruling 2026-11-28 — the sandbox is off by default and opt-in
+//! Why (#12077): the sandbox is off by default and opt-in
 //! through one switch, and tm never writes a sandbox key into a generic Claude
 //! settings file (`<ws>/.claude/settings.json`, `<ws>/.claude/settings.local.json`,
 //! `~/.claude/settings.json`) or into tm's user-tier `claude-config/settings.json`.
