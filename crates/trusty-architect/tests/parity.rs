@@ -85,8 +85,7 @@ struct EvalRow<'a> {
     ps: GoldenPs<'a>,
 }
 
-/// The `ps` keys the Python goldens carry. See parity window 5: C, D
-/// add episode bookkeeping that the goldens predate.
+/// The `ps` keys the Python goldens carry.
 #[derive(Serialize)]
 struct GoldenPs<'a> {
     idle_since: Option<f64>,
