@@ -109,3 +109,67 @@ fn an_unreadable_settings_file_is_an_error_12077() {
 
     assert!(clean_global_trusty_memory_hooks(&settings).is_err());
 }
+
+/// #12077 row 11 with #12144: the isolated launch prep (`tm launch`, `tm
+/// connect`, `tm fleet init`) under a named config dir.
+///
+/// What: a priming launch seeds what tm owns in `<config_dir>/settings.json`
+/// (the statusLine). (a) With no legacy hook, two more launches leave the file
+/// byte-identical. (b) With tm's exact old `Stop` group and a user group that
+/// differs from it in one field (`timeout`), a launch removes only the exact
+/// group: the file equals, byte for byte, the primed file plus the user group.
+/// Test: itself.
+#[test]
+fn the_isolated_launch_strips_only_the_exact_legacy_group_in_the_config_dir_12077() {
+    use super::entry::prepare_isolated_session_in;
+    let home = crate::test_support::hermetic_temp_dir();
+    let config_dir = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    let settings = config_dir.path().join("settings.json");
+    let launch = || {
+        prepare_isolated_session_in(
+            project.path(),
+            None,
+            Some(home.path()),
+            Some(config_dir.path()),
+        )
+        .expect("prep succeeds")
+    };
+
+    // Priming launch: the file then holds only what tm itself keeps there.
+    launch();
+    let primed = std::fs::read(&settings).expect("the prep seeds the config dir");
+    assert!(
+        !String::from_utf8_lossy(&primed).contains("trusty-memory"),
+        "the primed file holds no legacy hook"
+    );
+
+    // (a) No legacy hook: byte-identical after each of two launches.
+    for round in 1..=2 {
+        launch();
+        assert_eq!(
+            std::fs::read(&settings).expect("read"),
+            primed,
+            "launch {round} rewrote a settings.json with no legacy hook"
+        );
+    }
+
+    // (b) tm's exact old group plus a user group one field away from it.
+    let user_group = json!({"matcher": "", "hooks": [
+        {"type": "command", "command": "trusty-memory hooks fire claude.stop", "timeout": 30}
+    ]});
+    let mut planted = read_json(&settings);
+    planted["hooks"]["Stop"] = json!([tm_legacy_stop_group(), user_group.clone()]);
+    write_json(&settings, &planted);
+    let mut expected = planted.clone();
+    expected["hooks"]["Stop"] = json!([user_group]);
+    let expected = serde_json::to_string_pretty(&expected).expect("json");
+
+    launch();
+
+    assert_eq!(
+        String::from_utf8(std::fs::read(&settings).expect("read")).expect("utf-8"),
+        expected,
+        "only tm's exact group goes; the user group stays byte for byte"
+    );
+}
