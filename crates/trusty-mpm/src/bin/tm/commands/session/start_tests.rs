@@ -911,8 +911,8 @@ async fn run_inplace(
     home: &std::path::Path,
     tmux_bin: std::path::PathBuf,
 ) -> anyhow::Result<()> {
-    // #10102: a start with no tm-owned config dir is refused by the sandbox
-    // step, so these starts name one under the test home.
+    // #10102: these starts name a tm-owned config dir under the test home
+    // (#12077: the sandbox step no longer refuses one without it).
     let config = trusty_mpm::core::paths::FrameworkPaths::under(home).managed_claude_config_dir();
     run_inplace_in(url, target, home, Some(&config), tmux_bin).await
 }
@@ -1401,25 +1401,34 @@ fn session_start_refuses_a_malformed_install_toml_12048() {
     );
 }
 
-/// #10102 Fail-Open Check: a `tm connect` whose sandbox does not verify — a
-/// `settings.local.json` turning it off — is refused after registering, rolls
-/// the registration back, and types nothing into the pane.
+/// #12077: the sandbox step never fails a launch, so an error in `result`
+/// comes from a later step and is never the old sandbox refusal.
+fn assert_not_a_sandbox_refusal(result: &anyhow::Result<()>) {
+    if let Err(err) = result {
+        let text = format!("{err:#}");
+        assert!(
+            !text.contains("#8928") && !text.contains("settings.local.json"),
+            "{text}"
+        );
+    }
+}
+
+/// #12077: a `tm connect` over a local override that turns the sandbox off is
+/// not refused by the sandbox step, and the override is left as it was.
 #[serial_test::serial]
 #[tokio::test]
-async fn a_connect_whose_sandbox_does_not_verify_is_refused_10102() {
+async fn a_connect_is_not_refused_over_a_local_override_12077() {
     let home = tempfile::TempDir::new().expect("tmp home");
     let target = tempfile::TempDir::new().expect("tmp target dir");
     std::fs::create_dir_all(target.path().join(".claude")).expect("mkdir");
-    std::fs::write(
-        target.path().join(".claude/settings.local.json"),
-        r#"{"sandbox":{"enabled":false}}"#,
-    )
-    .expect("plant the override");
+    let local = target.path().join(".claude/settings.local.json");
+    let planted = r#"{"sandbox":{"enabled":false}}"#;
+    std::fs::write(&local, planted).expect("plant the override");
     let tmux_dir = tempfile::TempDir::new().expect("tmux dir");
-    let (bin, log) = scripted_fake_tmux(tmux_dir.path(), "has-session");
-    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let (bin, _log) = scripted_fake_tmux(tmux_dir.path(), "has-session");
+    let (_seen, url) = spawn_inplace_daemon(Vec::new()).await;
     let client = reqwest::Client::new();
-    let err = trusty_mpm::core::tmux::with_tmux_binary(
+    let result = trusty_mpm::core::tmux::with_tmux_binary(
         bin,
         crate::commands::launch::connect(
             &client,
@@ -1429,52 +1438,40 @@ async fn a_connect_whose_sandbox_does_not_verify_is_refused_10102() {
             crate::commands::launch_handoff::Handoff::Detach,
         ),
     )
-    .await
-    .expect_err("an unverified sandbox refuses the connect");
+    .await;
+    assert_not_a_sandbox_refusal(&result);
+    assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
     assert!(
-        format!("{err:#}").contains("settings.local.json"),
-        "{err:#}"
+        !target
+            .path()
+            .join(".trusty-mpm/sandbox-roles.json")
+            .exists()
     );
-    let seen = seen.lock().expect("seen");
-    assert_eq!(seen.posts.len(), 1, "the connect registered first: {err:#}");
-    assert_eq!(
-        seen.deletes,
-        [crate::test_support::launch_stub::STUB_ID],
-        "the registration must be removed: {err:#}"
-    );
-    let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(!calls.contains("send-keys"), "typed into the pane: {calls}");
 }
 
-/// #10102 Fail-Open Check: an in-place `tm session start` whose sandbox does
-/// not verify is refused before `POST /sessions`, so nothing is registered and
-/// nothing is typed; with no config dir at all it is refused the same way.
+/// #12077: an in-place `tm session start` is not refused by the sandbox step,
+/// over a local override or with no config dir at all.
 #[serial_test::serial]
 #[tokio::test]
-async fn an_in_place_start_whose_sandbox_does_not_verify_registers_nothing_10102() {
+async fn an_in_place_start_is_not_refused_by_the_sandbox_12077() {
     let home = tempfile::TempDir::new().expect("tmp home");
     let target = tempfile::TempDir::new().expect("tmp target dir");
     std::fs::create_dir_all(target.path().join(".claude")).expect("mkdir");
-    std::fs::write(
-        target.path().join(".claude/settings.local.json"),
-        r#"{"sandbox":{"enabled":false}}"#,
-    )
-    .expect("plant the override");
+    let local = target.path().join(".claude/settings.local.json");
+    let planted = r#"{"sandbox":{"enabled":false}}"#;
+    std::fs::write(&local, planted).expect("plant the override");
     let tmux_dir = tempfile::TempDir::new().expect("tmux dir");
-    let (bin, log) = scripted_fake_tmux(tmux_dir.path(), "has-session");
-    let (seen, url) = spawn_inplace_daemon(Vec::new()).await;
-    let err = run_inplace(&url, target.path(), home.path(), bin.clone())
-        .await
-        .expect_err("an unverified sandbox refuses the start");
+    let (bin, _log) = scripted_fake_tmux(tmux_dir.path(), "has-session");
+    let (_seen, url) = spawn_inplace_daemon(Vec::new()).await;
+    let result = run_inplace(&url, target.path(), home.path(), bin.clone()).await;
+    assert_not_a_sandbox_refusal(&result);
+    let result = run_inplace_in(&url, target.path(), home.path(), None, bin).await;
+    assert_not_a_sandbox_refusal(&result);
+    assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
     assert!(
-        format!("{err:#}").contains("settings.local.json"),
-        "{err:#}"
+        !target
+            .path()
+            .join(".trusty-mpm/sandbox-roles.json")
+            .exists()
     );
-    let err = run_inplace_in(&url, target.path(), home.path(), None, bin)
-        .await
-        .expect_err("no config dir refuses the start");
-    assert!(format!("{err:#}").contains("tm connect"), "{err:#}");
-    assert!(seen.lock().expect("seen").posts.is_empty(), "registered");
-    let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(!calls.contains("send-keys"), "typed into the pane: {calls}");
 }

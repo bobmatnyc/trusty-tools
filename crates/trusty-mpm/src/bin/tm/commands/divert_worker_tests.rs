@@ -249,49 +249,39 @@ fn sandbox_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     (tmp, ws, root.join("home"), config)
 }
 
-/// #10102 Fail-Open Check: with no config dir, or a workspace whose sandbox
-/// does not verify, the worker never starts.
+/// #12077: with no config dir, or a local override that turns the sandbox
+/// off, the worker still starts and answers; the override is left as it was.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_sandboxed_worker_refuses_before_it_starts() {
+async fn a_worker_starts_without_a_config_dir_or_over_a_local_override_12077() {
     let (tmp, ws, home, config) = sandbox_fixture();
-    let marker = tmp.path().join("started");
     let fake = tmp.path().join("claude");
     trusty_common::exec_stub::write_executable(
         &fake,
-        format!("#!/bin/sh\n/usr/bin/touch {}\n", marker.display()),
+        "#!/bin/sh\ncat >/dev/null\necho '{\"result\":\"ok\"}'\n",
     )
     .expect("install the stand-in worker");
-    let unset = WorkerSandbox {
-        workspace: &ws,
-        home: Some(&home),
-        config_dir: None,
-    };
-    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(5), &unset)
-        .await
-        .expect_err("no config dir refuses");
-    assert!(err.contains("CLAUDE_CONFIG_DIR"), "{err}");
-    std::fs::write(
-        ws.join(".claude/settings.local.json"),
-        r#"{"sandbox":{"enabled":false}}"#,
-    )
-    .unwrap();
-    let set = WorkerSandbox {
-        workspace: &ws,
-        home: Some(&home),
-        config_dir: Some(&config),
-    };
-    let err = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(5), &set)
-        .await
-        .expect_err("an unverified sandbox refuses");
-    assert!(err.contains("settings.local.json"), "{err}");
-    assert!(!marker.exists(), "the worker must not start");
+    let local = ws.join(".claude/settings.local.json");
+    let planted = r#"{"sandbox":{"enabled":false}}"#;
+    std::fs::write(&local, planted).unwrap();
+    for config_dir in [None, Some(config.as_path())] {
+        let sandbox = WorkerSandbox {
+            workspace: &ws,
+            home: Some(&home),
+            config_dir,
+        };
+        let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+            .await
+            .expect("the worker is not refused");
+        assert_eq!(reply.text, "ok");
+    }
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), planted);
 }
 
-/// #10102: the agent sandbox is written and verified, then the worker runs.
+/// #12077: the worker runs and no agent sandbox is written.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_sandboxed_worker_runs_after_the_sandbox_verifies() {
+async fn a_worker_runs_with_no_sandbox_written_12077() {
     let (tmp, ws, home, config) = sandbox_fixture();
     let fake = tmp.path().join("claude");
     trusty_common::exec_stub::write_executable(
@@ -308,13 +298,39 @@ async fn a_sandboxed_worker_runs_after_the_sandbox_verifies() {
         .await
         .expect("the worker answers");
     assert_eq!(reply.text, "ok");
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(ws.join(".claude/settings.json")).unwrap())
-            .unwrap();
-    assert_eq!(settings["sandbox"]["enabled"], true, "{settings}");
     assert!(
-        std::fs::read_to_string(ws.join(".trusty-mpm/sandbox-roles.json"))
-            .unwrap()
-            .contains("\"agent\"")
+        !ws.join(".claude/settings.json").exists(),
+        "no project write"
     );
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+    assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
+}
+
+/// #12077: with no home resolved the worker still runs, and no agent sandbox
+/// is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_runs_with_no_home_12077() {
+    let (tmp, ws, _home, config) = sandbox_fixture();
+    let fake = tmp.path().join("claude");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        "#!/bin/sh\ncat >/dev/null\necho '{\"result\":\"ok\"}'\n",
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: None,
+        config_dir: Some(&config),
+    };
+    let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect("no home is not refused");
+    assert_eq!(reply.text, "ok");
+    assert!(
+        !ws.join(".claude/settings.json").exists(),
+        "no project write"
+    );
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+    assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
 }

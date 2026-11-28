@@ -6,12 +6,13 @@
 //! the refusal rules identical on every path.
 //! What: [`sandbox_role_for`] maps a launch profile to its role,
 //! [`launch_sandbox_inputs`] resolves the paths a policy names, and
-//! [`apply_launch_sandbox`] writes and verifies the policy, refusing when the
-//! launch has no tm-owned user-tier config dir.
-//! Test: `a_launch_with_no_config_dir_is_refused`,
-//! `a_launch_into_the_operators_claude_dir_is_refused`,
-//! `a_launch_applies_and_verifies_the_policy`,
-//! `a_verify_failure_refuses_the_launch`.
+//! [`apply_launch_sandbox`] is the launch entry. #12077: enforcement is off on
+//! every launch path, so it writes nothing; the policy writer stays in
+//! `enforce_launch_sandbox` for the slice-2 opt-in.
+//! Test: `a_default_launch_writes_no_sandbox_key_12077`,
+//! `a_launch_with_no_config_dir_is_not_refused_12077`,
+//! `a_launch_with_no_config_dir_is_refused`,
+//! `a_launch_applies_and_verifies_the_policy`.
 
 use std::path::Path;
 
@@ -52,15 +53,43 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
     inputs
 }
 
-/// Write and verify `role`'s sandbox policy before a launch starts.
+/// The launch-time sandbox step: a no-op while enforcement is off (#12077).
 ///
-/// Why: acceptance criteria 1 and 2 of #10102 — a launch whose policy does not
-/// verify must not start, and the user tier must never be the operator's own
+/// Why: #12077 slice 1 — the Claude Code sandbox enforcement is off on every
+/// launch path until an opt-in exists.
+/// What: returns `Ok` before any write or refusal. It writes no project tier,
+/// no user tier and no role record, and refuses no config dir. Every launch
+/// path (`tm launch`/`tm connect`, `tm run`, the managed spawn, resume and
+/// relaunch, the divert worker) reaches the sandbox only through here.
+///
+/// # Errors
+///
+/// None while enforcement is off; the `Result` keeps the callers unchanged.
+///
+/// Test: `a_default_launch_writes_no_sandbox_key_12077`,
+/// `a_launch_with_no_config_dir_is_not_refused_12077`.
+pub fn apply_launch_sandbox(
+    role: SandboxRole,
+    inputs: &SandboxInputs,
+    _config_dir: Option<&Path>,
+) -> Result<(), SandboxSettingsError> {
+    tracing::debug!(
+        ?role,
+        workspace = %inputs.workspace.display(),
+        "#12077: Claude Code sandbox enforcement is off; no sandbox settings written"
+    );
+    Ok(())
+}
+
+/// Write and verify `role`'s sandbox policy: the pre-#12077 launch step.
+///
+/// Why: #10102 criteria 1 and 2 — a policy that does not verify must refuse
+/// the launch, and the user tier must never be the operator's own
 /// `~/.claude`, which every other Claude Code on the host reads.
 /// What: refuses when `config_dir` is `None` (the spawn sets no
 /// `CLAUDE_CONFIG_DIR`, so Claude Code would read `~/.claude`), relative, or
 /// `<home>/.claude`; otherwise [`write_sandbox_settings`], which verifies.
-/// FAIL-CLOSED: every caller refuses its launch on `Err`.
+/// #12077: unreachable from launch until the slice-2 opt-in calls it.
 ///
 /// # Errors
 ///
@@ -71,7 +100,8 @@ pub fn launch_sandbox_inputs(workspace: &Path, home: &Path) -> SandboxInputs {
 /// `a_launch_into_the_operators_claude_dir_is_refused`,
 /// `a_launch_applies_and_verifies_the_policy`,
 /// `a_verify_failure_refuses_the_launch`.
-pub fn apply_launch_sandbox(
+#[allow(dead_code)] // #12077: slice 2 calls this behind the opt-in.
+pub(super) fn enforce_launch_sandbox(
     role: SandboxRole,
     inputs: &SandboxInputs,
     config_dir: Option<&Path>,

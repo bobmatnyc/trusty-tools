@@ -286,17 +286,17 @@ pub(crate) struct WorkerSandbox<'a> {
     pub(crate) config_dir: Option<&'a Path>,
 }
 
-/// Write and verify the agent sandbox, then run the worker.
+/// Run the agent sandbox step, then the worker.
 ///
-/// Why: #8928 step 6 — the divert worker is a `claude` launch too, so it
-/// starts only inside the agent role's verified sandbox.
+/// Why: #8928 step 6 — the divert worker is a `claude` launch too, so it goes
+/// through the same sandbox step as every other launch path.
 /// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
 /// [`trusty_mpm::core::session_launch::SandboxRole::Agent`]; on success
-/// [`spawn_worker_at`]. FAIL-CLOSED: no home, no config dir or a refused
-/// read-back returns `Err` before the worker starts, which the caller turns
-/// into a fall-through.
-/// Test: `a_sandboxed_worker_refuses_before_it_starts`,
-/// `a_sandboxed_worker_runs_after_the_sandbox_verifies`.
+/// [`spawn_worker_at`]. #12077: enforcement is off, so that step writes and
+/// refuses nothing; with no home resolved it is skipped.
+/// Test: `a_worker_starts_without_a_config_dir_or_over_a_local_override_12077`,
+/// `a_worker_runs_with_no_sandbox_written_12077`,
+/// `a_worker_runs_with_no_home_12077`.
 pub(crate) async fn spawn_sandboxed_worker_at(
     program: &Path,
     model: &str,
@@ -305,12 +305,12 @@ pub(crate) async fn spawn_sandboxed_worker_at(
     sandbox: &WorkerSandbox<'_>,
 ) -> Result<WorkerReply, String> {
     use trusty_mpm::core::session_launch as sl;
-    let home = sandbox.home.ok_or_else(|| {
-        "no home directory resolved; the worker sandbox cannot be applied".to_owned()
-    })?;
-    let inputs = sl::launch_sandbox_inputs(sandbox.workspace, home);
-    sl::apply_launch_sandbox(sl::SandboxRole::Agent, &inputs, sandbox.config_dir)
-        .map_err(|e| e.to_string())?;
+    // #12077: no home is no sandbox refusal; the step is skipped.
+    if let Some(home) = sandbox.home {
+        let inputs = sl::launch_sandbox_inputs(sandbox.workspace, home);
+        sl::apply_launch_sandbox(sl::SandboxRole::Agent, &inputs, sandbox.config_dir)
+            .map_err(|e| e.to_string())?;
+    }
     spawn_worker_at(program, model, payload, timeout).await
 }
 
