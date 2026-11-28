@@ -81,7 +81,8 @@ pub(crate) fn py_map(m: &serde_json::Map<String, Value>) -> PyValue {
     PyValue::Dict(m.iter().map(|(k, v)| (k.clone(), py_value(v))).collect())
 }
 
-fn py_doc(d: &Doc) -> PyDoc {
+/// A serde [`Doc`] as a [`PyDoc`]; #12029 P2e: the tally and the poller read through it.
+pub(crate) fn py_doc(d: &Doc) -> PyDoc {
     PyDoc {
         id: d.id.clone(),
         data: py_map(&d.data),

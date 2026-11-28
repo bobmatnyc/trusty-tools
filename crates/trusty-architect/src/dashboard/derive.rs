@@ -146,7 +146,7 @@ pub struct RunProgress {
 /// before the start; otherwise the [`RunProgress`] at `now` (Unix seconds).
 /// `next_run` is the earliest `run_schedule` entry whose first ten
 /// characters are on or after `now`'s UTC date and not a `run_log` date.
-/// Test: `pending_parity_goldens`.
+/// Test: `derive_parity_goldens`.
 pub fn run_progress(item: &Map<String, Value>, now: f64) -> Option<RunProgress> {
     let time = |key: &str, end: bool| {
         item.get(key)
@@ -198,7 +198,7 @@ pub fn run_progress(item: &Map<String, Value>, now: f64) -> Option<RunProgress> 
 /// Why: every list the server returns is in one order (#10403, `ordered`).
 /// What: documents by integer `rank` (booleans, non-integers and a missing
 /// rank sort last), then by id. Stable.
-/// Test: `pending_parity_goldens`.
+/// Test: `derive_parity_goldens`.
 pub fn ordered(docs: &[Doc]) -> Vec<&Doc> {
     let rank = |d: &Doc| -> Option<i128> {
         let n = d.data.get("rank")?.as_number()?;
@@ -232,7 +232,7 @@ pub struct GoalSessions {
 /// `sessions` entries that name an existing session doc, sorted, and the
 /// inverse map. Only string names link (Python would also link equal
 /// non-string values; the page writes strings).
-/// Test: `pending_parity_goldens`.
+/// Test: `derive_parity_goldens`.
 pub fn goal_sessions(goals: &[Doc], sessions: &[Doc]) -> GoalSessions {
     let names: Vec<&str> = sessions
         .iter()

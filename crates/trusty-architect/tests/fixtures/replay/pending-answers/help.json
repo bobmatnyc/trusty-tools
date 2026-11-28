@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "--help"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "usage: pending-answers.py [-h] [--root ROOT]\n\npending-answers.py: list dashboard items Bob answered, cancelled or marked\nWon't do (kind \"wont_do\",\n\noptions:\n  -h, --help   show this help message and exit\n  --root ROOT\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

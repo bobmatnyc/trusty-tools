@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "notdir"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "notdir/items": "not a directory"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "pending-answers: cannot read store: [Errno 20] Not a directory: '{ROOT}/notdir/items'\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

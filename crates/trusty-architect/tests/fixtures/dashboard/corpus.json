@@ -837,6 +837,8 @@
     "tally": {
      "actions": 1,
      "answered_unrelayed": 1,
+     "blockers": 0,
+     "decisions": 1,
      "open": 3,
      "parked": 2,
      "questions": 1,
@@ -6084,7 +6086,9 @@
     },
     "tally": {
      "actions": 1,
-     "answered_unrelayed": 31,
+     "answered_unrelayed": 24,
+     "blockers": 0,
+     "decisions": 0,
      "open": 2,
      "parked": 0,
      "questions": 0,
@@ -7355,6 +7359,8 @@
     "tally": {
      "actions": 0,
      "answered_unrelayed": 0,
+     "blockers": 0,
+     "decisions": 0,
      "open": 0,
      "parked": 0,
      "questions": 0,

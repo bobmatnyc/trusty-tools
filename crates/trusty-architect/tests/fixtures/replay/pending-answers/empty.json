@@ -1,0 +1,22 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "empty"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "empty/items/D01.json": "{\"kind\": \"question\", \"status\": \"done\", \"version\": 1}"
+  },
+  "reads": [
+    "empty/items/D01.json"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

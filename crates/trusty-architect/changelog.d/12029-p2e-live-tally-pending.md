@@ -1,0 +1,3 @@
+Fixed
+- The dashboard `tally` and `footer` verbs count as the Architect's `dashboard_derive.tally` does: self-test canaries are skipped, an `interactive` item counts as open, a `decision` counts as a question, a relayed answer leaves `answered_unrelayed`, and the JSON gains `decisions`, `blockers` and (when non-zero) `interactive` (#12029).
+- `tm architect poll`'s `owner_answer` and `owner_wont_do` alerts follow the Python pending rule: no alert for a self-test canary, an answer's text without its note, and "(needs target resolution)" on an Architect Do with no task and session. The serde `pending`, `stale_tasks` and `last_activity` copies are removed (#12029).

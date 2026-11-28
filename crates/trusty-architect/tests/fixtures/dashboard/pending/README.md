@@ -28,3 +28,7 @@ python3 -I capture.py <architect-checkout>/scripts
 ```
 
 Read by `tests/dashboard_pending.rs` and the `isotime` unit test.
+#12029 P2e deleted the serde `pending`, `stale_tasks` and `last_activity`,
+so `cases.json` and the `pending`, `stale_tasks` and `last_activity`
+goldens are no longer read; the `dashboard_derive` and `owner_answers`
+replay recordings cover the port.

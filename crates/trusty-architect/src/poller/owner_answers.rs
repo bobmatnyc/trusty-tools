@@ -6,7 +6,8 @@
 //! do, must wake the Architect. The port raised neither until #11474, and
 //! no `owner_wont_do` until window 7, so those owner turns woke nobody.
 //! What: [`owner_answer_alerts`] reads only the `items` collection of the
-//! owner-queue store and takes the pending events, without the items the
+//! owner-queue store and takes the pending events of the `owner_answers`
+//! port (`dashboard_derive.pending`, #12029 P2e), without the items the
 //! ILIO trial owns ([`ILIO_REF`]; under [`ILIO_ACTOR`] only those, as
 //! `owner_answers.pending` does). It makes one `owner_answer` alert per
 //! event whose kind is in [`ANSWER_KINDS`], then one `owner_wont_do` alert per
@@ -14,26 +15,25 @@
 //! again). A read that fails is `Err` with the error class; a store with no
 //! items collection is that error too, except on a store never read before,
 //! which is not an install yet (logged only).
-//! Test: `tests/owner_answers.rs`, `tests/parity_window7.rs`.
+//! Test: `tests/owner_answers.rs` (`poller_owner_answers_follow_the_python_pending_rule`),
+//! `tests/parity_window7.rs`.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-
 use crate::classify::{Alert, alert, clean};
-use crate::dashboard::{Format, Store, pending};
+use crate::dashboard::pyanswers::{field, pending_of};
+use crate::dashboard::{Format, Store};
 
-/// The pending kinds that are owner answers.
+// #12029 P2e: one ILIO split, the `owner_answers` port's.
+pub use crate::dashboard::pyanswers::{ILIO_ACTOR, ILIO_REF};
+
+/// The pending kinds that are owner answers: every kind `fleet-poll.py`'s
+/// skip list leaves out of the derive rule's.
 pub const ANSWER_KINDS: [&str; 3] = ["answered", "cancelled", "architect_do"];
 /// Dedup's key prefix for these alerts (session and pane are empty).
 pub const ANSWER_KEY: &str = "||owner_answer|";
 /// Dedup's key prefix for `owner_wont_do` alerts (#11826).
 pub const WONT_DO_KEY: &str = "||owner_wont_do|";
-/// The `refs` entry of an item the ILIO trial Architect owns.
-pub const ILIO_REF: &str = "arch:ilio";
-/// The `DASHBOARD_ACTOR` of the ILIO trial session.
-pub const ILIO_ACTOR: &str = "architect-ilio";
 
 /// Where the answers live: `DASHBOARD_ROOT`, else `<root>/local/owner-queue`,
 /// in `DASHBOARD_FORMAT` (`jsonl`, else the directory layout).
@@ -116,15 +116,12 @@ fn short(text: &str) -> String {
     }
 }
 
-/// Ids of the items whose `refs` list holds [`ILIO_REF`] (`_ilio_ids`).
-fn ilio_ids(items: &[crate::dashboard::Doc]) -> BTreeSet<&str> {
-    let tagged = |d: &&crate::dashboard::Doc| {
-        d.data
-            .get("refs")
-            .and_then(Value::as_array)
-            .is_some_and(|r| r.iter().any(|v| v.as_str() == Some(ILIO_REF)))
-    };
-    items.iter().filter(tagged).map(|d| d.id.as_str()).collect()
+/// The fields of a pending event the alerts read.
+struct Event {
+    id: String,
+    kind: String,
+    at: String,
+    text: String,
 }
 
 /// One `owner_answer` alert per answer still pending, then one
@@ -139,14 +136,24 @@ pub fn owner_answer_alerts(store: &AnswerStore, now: f64, ever_read: bool) -> An
         .snapshot(&["items"])
         // The fingerprint is the error class, as Python's `type(e).__name__`.
         .map_err(|_| Some("StoreError".to_owned()))?;
-    let ilio = ilio_ids(snap.get("items").map_or(&[][..], Vec::as_slice));
-    let pend = pending(&snap, now);
-    // #11826: owner_answers.pending drops the ILIO trial's items for the
-    // live Architect and keeps only them for the trial.
-    let events: Vec<_> = pend
-        .events()
+    // #12029 P2e: the derive rule (self-test canaries skipped, an `answered`
+    // text without its note, "(needs target resolution)" on an unlinked
+    // Architect Do) replaces the serde copy; the ILIO split is the port's.
+    let items = snap.get("items").map_or(&[][..], Vec::as_slice);
+    let py = std::iter::once((
+        "items".to_owned(),
+        items.iter().map(crate::dashboard::ids::py_doc).collect(),
+    ))
+    .collect();
+    let text = |e: &crate::pyjson_load::PyValue, k: &str| field(e, k).unwrap_or_default();
+    let events: Vec<Event> = pending_of(&py, now, store.ilio_trial)
         .iter()
-        .filter(|e| ilio.contains(e.id.as_str()) == store.ilio_trial)
+        .map(|e| Event {
+            id: text(e, "id"),
+            kind: text(e, "kind"),
+            at: text(e, "at"),
+            text: text(e, "text"),
+        })
         .collect();
     let mut out = Vec::new();
     for it in events
