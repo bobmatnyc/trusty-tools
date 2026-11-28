@@ -67,6 +67,7 @@ mod pyjson_load;
 mod pystr;
 mod pystrptime; // See #12028
 mod pyval; // See #12028
+pub mod questions; // See #12029 P2f
 pub mod quiet;
 // #12026: record-then-replay parity tool for the script ports.
 pub mod replay;

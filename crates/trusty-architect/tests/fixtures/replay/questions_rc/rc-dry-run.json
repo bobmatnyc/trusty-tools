@@ -1,0 +1,121 @@
+{
+  "version": 3,
+  "argv": [
+    "rc",
+    "--dry-run",
+    "extra"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCH_Q_SESSION": "qna-alpha",
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/owner-queue/items/B2z.json": "{\"kind\": \"question\", \"status\": \"open\", \"title\": \"sample\", \"version\": 1}",
+    "local/owner-queue/items/D01.json": "{\"kind\": \"question\", \"status\": \"interactive\", \"title\": \"sample\", \"version\": 1}",
+    "local/owner-queue/items/D02.json": "{\"kind\": \"question\", \"status\": \"open\", \"title\": \"sample\", \"version\": 1}",
+    "local/owner-queue/items/D03.json": "{\"kind\": \"question\", \"status\": \"answered\", \"title\": \"sample\", \"version\": 1}",
+    "local/owner-queue/items/Dz4.json": "{\"kind\": \"question\", \"status\": \"done\", \"title\": \"sample\", \"version\": 1}"
+  },
+  "reads": [
+    "local/owner-queue/items/B2z.json",
+    "local/owner-queue/items/D01.json",
+    "local/owner-queue/items/D02.json",
+    "local/owner-queue/items/D03.json",
+    "local/owner-queue/items/Dz4.json"
+  ],
+  "stdout": "questions_rc: count=1 action=none session=up rc=on\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "rc-disconnect.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "rc-restore.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "start-architect-questions.sh": [
+        {
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        }
+      ],
+      "tmux": [
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "has-session",
+            "-t",
+            "=qna-alpha"
+          ],
+          "stdout": "",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "-L",
+            "trusty-replay-p2f",
+            "capture-pane",
+            "-t",
+            "=qna-alpha:",
+            "-p",
+            "-J",
+            "-S",
+            "-200"
+          ],
+          "stdout": "Remote Control: https://claude.ai/code/session_OLD01\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nx\nsee https://claude.ai/code/session_NEW02 now\n  ⏵⏵ bypass permissions on · /rc\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "has-session",
+        "-t",
+        "=qna-alpha"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ],
+      [
+        "tmux",
+        "-L",
+        "trusty-replay-p2f",
+        "capture-pane",
+        "-t",
+        "=qna-alpha:",
+        "-p",
+        "-J",
+        "-S",
+        "-200"
+      ]
+    ]
+  },
+  "clock": 1795784400
+}
