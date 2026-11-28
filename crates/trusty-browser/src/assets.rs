@@ -10,7 +10,7 @@
 //! publish (one-time migration of the old symlinked layout, files written by
 //! temp file and rename, `manifest.json` last, stale files pruned, every
 //! `assets/<hash>` turned into a `../extension` symlink).
-//! Test: `embedded_stamp_matches_python`, `fresh_publish_matches_python_tree`,
+//! Test: `embedded_stamp_is_the_pinned_rust_tree`, `fresh_publish_matches_python_tree`,
 //! `republish_migrates_the_symlinked_layout_like_python` in `tests/install.rs`.
 
 use std::collections::BTreeMap;

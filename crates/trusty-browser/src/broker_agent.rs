@@ -78,6 +78,8 @@ pub async fn agent(core: Arc<Core>, stream: UnixStream) {
                     owner,
                     grant,
                     journal,
+                    captures: Vec::new(),
+                    opened: Vec::new(),
                 },
                 kill,
                 ack,
@@ -219,7 +221,8 @@ async fn dispatch(core: &Arc<Core>, session: &mut Session, request: &Json) -> Re
     let name = op
         .filter(|o| pages::op_entry(o).is_some())
         .unwrap_or("invalid");
-    let target = if name == "page_navigate" {
+    // #11208: an opened tab's target host is audited like a navigation's.
+    let target = if matches!(name, "page_navigate" | "open_tab") {
         floor_host(request.get("url")).map(Json::from)
     } else {
         None

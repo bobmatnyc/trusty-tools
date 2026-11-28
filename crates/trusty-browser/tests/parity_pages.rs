@@ -603,3 +603,345 @@ async fn a_refused_frame_action_is_audited_with_the_frame_origin() {
     assert_eq!(line.get("frames"), hosts.as_ref());
     broker.close().await;
 }
+
+/// #11211 AC2: `page_screenshot` on a tab this session does not lease (another
+/// session's live lease, or no lease) is refused `StaleLease` by `leased` and
+/// sends the worker no capture; the holder's own lease does reach the worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_screenshot_refuses_a_tab_this_session_does_not_lease() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut b = conns.remove("b").expect("b");
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let shoot = |lease: &str| format!(r#"{{"op":"page_screenshot","lease":"{lease}"}}"#);
+    for lease in [A_EARLY_LEASE, "not-a-lease-of-this-session"] {
+        send_json(&mut b, &shoot(lease)).await;
+        assert_eq!(
+            wire(&recv_json(&mut b).await),
+            r#"{"ok":false,"error":"StaleLease"}"#,
+            "{lease}"
+        );
+    }
+    let quiet = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(quiet.is_err(), "a refused screenshot reached the worker");
+    send_json(&mut a, &shoot(A_EARLY_LEASE)).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_screenshot")));
+    assert_eq!(cmd.get("tab"), Some(&Json::Int(7)));
+    broker.close().await;
+}
+
+/// #11208: `close_tab` on a tab this session does not lease answers
+/// `TabNotLeased` and reaches no worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_tab_refuses_a_tab_this_session_does_not_lease() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut b = conns.remove("b").expect("b");
+    let mut worker = conns.remove("worker").expect("worker");
+    for tab in [7, 99] {
+        let close = format!(r#"{{"op":"close_tab","request_id":"c{tab}","tab":{tab}}}"#);
+        send_json(&mut b, &close).await;
+        assert_eq!(
+            wire(&recv_json(&mut b).await),
+            format!(r#"{{"ok":false,"error":"TabNotLeased","tab":{tab}}}"#)
+        );
+    }
+    let quiet = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(quiet.is_err(), "a refused close reached the worker");
+    broker.close().await;
+}
+
+/// #11208 AC3: a user tab this session leased with `browser_select` but did not
+/// open is refused `TabNotOpened`, stays open and keeps its lease; a tab the
+/// session opened with `open_tab` closes, and its lease ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_tab_refuses_a_selected_user_tab_and_closes_an_opened_one() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    send_json(&mut a, r#"{"op":"close_tab","request_id":"c7","tab":7}"#).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"TabNotOpened","tab":7}"#
+    );
+    let quiet = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(quiet.is_err(), "the user tab's close reached the worker");
+    let read = format!(r#"{{"op":"page_read","lease":"{A_EARLY_LEASE}"}}"#);
+    send_json(&mut a, &read).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_read")), "lease kept");
+    refuse_next_cmd(&mut worker, &cmd, "OutcomeUnknown").await;
+    recv_json(&mut a).await;
+    let open = r#"{"op":"open_tab","request_id":"o1","url":"https://example.test/"}"#;
+    send_json(&mut a, open).await;
+    let opened = r#"{"tab":12,"window":1,"access":true,"document":"d12","origin":"https://example.test","title":"New"}"#;
+    answer(&mut worker, opened).await;
+    let reply = recv_json(&mut a).await;
+    assert_eq!(reply.get("tab"), Some(&Json::Int(12)), "{}", wire(&reply));
+    let lease = reply.get("lease").and_then(Json::as_str).expect("lease");
+    let lease = lease.to_owned();
+    send_json(&mut a, r#"{"op":"close_tab","request_id":"c12","tab":12}"#).await;
+    let cmd = answer(&mut worker, r#"{"closed":true}"#).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_close_tab")));
+    assert_eq!(cmd.get("tab"), Some(&Json::Int(12)));
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":true,"tab":12,"closed":true}"#
+    );
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_read","lease":"{lease}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"StaleLease"}"#
+    );
+    broker.close().await;
+}
+
+/// Refuse the already-received worker command `cmd` with `error`.
+async fn refuse_next_cmd(worker: &mut UnixStream, cmd: &Json, error: &str) {
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    let reply = format!(r#"{{"id":"{id}","ok":false,"error":"{error}"}}"#);
+    send_json(worker, &reply).await;
+}
+
+/// #11211: a screenshot hands out a `capture_id`; a coordinate action maps its
+/// image pixels to CSS pixels and is refused `StaleCapture` after 5 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capture_maps_clicks_and_goes_stale() {
+    use base64::Engine as _;
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let broker =
+        Broker::start(options(state, Arc::clone(&clock) as Arc<dyn Monotonic>)).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let lease = "YtbbXmIbar4-E6OcqOQZedqh522fyHj2";
+    let read = format!(r#"{{"op":"page_read","lease":"{lease}"}}"#);
+    send_json(&mut a, &read).await;
+    answer(
+        &mut worker,
+        r#"{"document":"d1","origin":"https://example.test","url":"https://example.test/","title":"t","text":"","elements":[],"truncated":false}"#,
+    )
+    .await;
+    recv_json(&mut a).await;
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(1600u32.to_be_bytes());
+    png.extend(1200u32.to_be_bytes());
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    let metrics = r#"{"css_width":800,"css_height":600,"device_pixel_ratio":2,"zoom":1,"scroll_x":0,"scroll_y":0}"#;
+    let shoot = format!(r#"{{"op":"page_screenshot","lease":"{lease}"}}"#);
+    send_json(&mut a, &shoot).await;
+    let shot = format!(
+        r#"{{"document":"d1","data":"{data}","region":{{"x":0,"y":0,"width":800,"height":600}},"metrics":{metrics}}}"#
+    );
+    let cmd = answer(&mut worker, &shot).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_screenshot")));
+    let reply = recv_json(&mut a).await;
+    assert_eq!(
+        reply.get("width"),
+        Some(&Json::Int(1600)),
+        "{}",
+        wire(&reply)
+    );
+    assert_eq!(reply.get("height"), Some(&Json::Int(1200)));
+    let id = reply
+        .get("capture_id")
+        .and_then(Json::as_str)
+        .expect("capture_id")
+        .to_owned();
+    let click = |rid: &str, capture: &str, x: i64| {
+        format!(
+            r#"{{"op":"page_click_at","lease":"{lease}","request_id":"{rid}","capture_id":"{capture}","x":{x},"y":100}}"#
+        )
+    };
+    send_json(&mut a, &click("k1", &id, 1600)).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"OutOfViewport","tab":7}"#
+    );
+    send_json(&mut a, &click("k2", &id, 200)).await;
+    let cmd = answer(&mut worker, r#"{"document":"d1"}"#).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_click_at")));
+    assert_eq!(cmd.get("x"), Some(&Json::Float(100.25)));
+    assert_eq!(cmd.get("y"), Some(&Json::Float(50.25)));
+    assert_eq!(cmd.get("document"), Some(&Json::from("d1")));
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":true,"tab":7,"document":"d1"}"#
+    );
+    clock.set(5000.0 + 5.5);
+    for (rid, capture) in [("k3", id.as_str()), ("k4", "unknown")] {
+        send_json(&mut a, &click(rid, capture, 200)).await;
+        assert_eq!(
+            wire(&recv_json(&mut a).await),
+            r#"{"ok":false,"error":"StaleCapture","tab":7}"#,
+            "{capture}"
+        );
+    }
+    broker.close().await;
+}
+
+/// #11211 review: a PNG whose aspect ratio is not its region's (the viewport
+/// resized between the metrics read and the shot) is refused `StaleCapture`
+/// and hands out no `capture_id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capture_whose_aspect_disagrees_with_its_region_is_stale() {
+    use base64::Engine as _;
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let lease = "YtbbXmIbar4-E6OcqOQZedqh522fyHj2";
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_read","lease":"{lease}"}}"#),
+    )
+    .await;
+    answer(
+        &mut worker,
+        r#"{"document":"d1","origin":"https://example.test","url":"https://example.test/","title":"t","text":"","elements":[],"truncated":false}"#,
+    )
+    .await;
+    recv_json(&mut a).await;
+    // An 800x600 region at 2x, but the picture is 1600x1000: 100 CSS px shorter.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(1600u32.to_be_bytes());
+    png.extend(1000u32.to_be_bytes());
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    let metrics = r#"{"css_width":800,"css_height":600,"device_pixel_ratio":2,"zoom":1,"scroll_x":0,"scroll_y":0}"#;
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_screenshot","lease":"{lease}"}}"#),
+    )
+    .await;
+    let shot = format!(
+        r#"{{"document":"d1","data":"{data}","region":{{"x":0,"y":0,"width":800,"height":600}},"metrics":{metrics}}}"#
+    );
+    answer(&mut worker, &shot).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"StaleCapture","tab":7}"#
+    );
+    broker.close().await;
+}
+
+/// #11211 review: an `open_tab` whose outcome is unknown is journaled, so a
+/// retry with the same `request_id` answers the same refusal and sends the
+/// worker no second `page_open_tab`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_open_tab_is_journaled_and_never_opens_a_second_tab() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let open = r#"{"op":"open_tab","request_id":"o1","url":"https://example.test/"}"#;
+    send_json(&mut a, open).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_open_tab")));
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    let email = cmd.get("email").and_then(Json::as_str).expect("email");
+    let failed =
+        format!(r#"{{"id":"{id}","ok":false,"email":"{email}","error":"OutcomeUnknown"}}"#);
+    send_json(&mut worker, &failed).await;
+    let unknown = r#"{"ok":false,"error":"OutcomeUnknown"}"#;
+    assert_eq!(wire(&recv_json(&mut a).await), unknown);
+    send_json(&mut a, open).await;
+    let second = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(
+        second.is_err(),
+        "a second page_open_tab reached the worker: {}",
+        second.map(|c| wire(&c)).unwrap_or_default()
+    );
+    assert_eq!(wire(&recv_json(&mut a).await), unknown);
+    broker.close().await;
+}
+
+/// Assert the worker hears no `page_open_tab` before it goes quiet for 300 ms.
+async fn no_tab_opened(worker: &mut UnixStream) {
+    while let Ok(cmd) = tokio::time::timeout(Duration::from_millis(300), recv_json(worker)).await {
+        let op = cmd.get("op").and_then(Json::as_str);
+        assert_ne!(op, Some("page_open_tab"), "a tab opened: {}", wire(&cmd));
+    }
+}
+
+/// #11208 AC2: `open_tab` opens no tab without a live grant held by an
+/// attached session. A connection that never attached, a request that carries
+/// any tab lease (its own or another session's), and a session whose grant was
+/// revoked are each refused, and the worker hears no `page_open_tab`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_tab_opens_no_tab_without_a_held_grant() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut b = conns.remove("b").expect("b");
+    let mut worker = conns.remove("worker").expect("worker");
+    let open = r#"{"op":"open_tab","request_id":"o1","url":"https://example.test/"}"#;
+    let mut bare = UnixStream::connect(state.join("agent.sock"))
+        .await
+        .expect("connect");
+    send_json(&mut bare, open).await;
+    assert_eq!(
+        wire(&recv_json(&mut bare).await),
+        r#"{"ok":false,"error":"InvalidRequest"}"#
+    );
+    for (own, lease) in [
+        (true, A_EARLY_LEASE),
+        (false, A_EARLY_LEASE),
+        (false, "stale"),
+    ] {
+        let sock = if own { &mut a } else { &mut b };
+        let leased = format!(
+            r#"{{"op":"open_tab","request_id":"o2","url":"https://example.test/","lease":"{lease}"}}"#
+        );
+        send_json(sock, &leased).await;
+        assert_eq!(
+            wire(&recv_json(sock).await),
+            r#"{"ok":false,"error":"InvalidRequest"}"#,
+            "{lease}"
+        );
+    }
+    no_tab_opened(&mut worker).await;
+    let mut operator = UnixStream::connect(state.join("operator.sock"))
+        .await
+        .expect("connect");
+    send_json(
+        &mut operator,
+        r#"{"op":"revoke_grant","grant":"g-27f66c0d132f"}"#,
+    )
+    .await;
+    let revoked = recv_json(&mut operator).await;
+    assert_eq!(
+        revoked.get("ok"),
+        Some(&Json::Bool(true)),
+        "{}",
+        wire(&revoked)
+    );
+    send_json(&mut b, open).await;
+    assert_eq!(
+        wire(&recv_json(&mut b).await),
+        r#"{"ok":false,"error":"GrantEnded","reason":"revoked"}"#
+    );
+    no_tab_opened(&mut worker).await;
+    broker.close().await;
+}
