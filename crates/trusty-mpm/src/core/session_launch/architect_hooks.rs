@@ -53,6 +53,8 @@ impl ArchitectHooks {
     /// the Architect profile under `config`; `direct_commands` comes from the
     /// same config's [`crate::core::config::MpmConfig::architect_grant`].
     /// Test: `a_pm_project_resolves_no_architect_hooks`.
+    // #12077 part 4c: production resolves by profile at carrier time.
+    #[cfg(test)]
     pub(crate) fn for_project(
         project_dir: &Path,
         config: &crate::core::config::MpmConfig,
@@ -66,7 +68,7 @@ impl ArchitectHooks {
     /// The Architect switch for an already-resolved `profile`: `Some` only for
     /// the Architect, with `direct_commands` from `config`'s grant.
     ///
-    /// Test: `the_launch_writes_the_architect_hooks_by_profile`.
+    /// Test: `the_launch_carries_the_architect_hooks_by_profile_on_the_body_12077`.
     pub(crate) fn for_profile(
         profile: crate::core::session_profile::SessionProfile,
         config: &crate::core::config::MpmConfig,
@@ -174,32 +176,8 @@ pub(super) fn is_standing_rules_hook_command(cmd: &str) -> bool {
     cmd.ends_with(STANDING_RULES_SUFFIX)
 }
 
-/// Fail closed when an Architect's project hooks could not be written.
-///
-/// Why (#10612): a failed hook write only logged a warning, so an Architect
-/// launched without the exec-form `tm hook --pm-guard` entry.
-/// What: `Ok(true)` on a write. For an Architect, a write failure becomes
-/// [`super::PrepError::ArchitectHooks`] naming the settings path; for any other
-/// profile it is logged and the result is `Ok(false)`, as before.
-/// Test: `an_architect_launch_whose_hook_write_fails_is_refused_10612`,
-/// `a_pm_launch_whose_hook_write_fails_still_starts_10612`.
-pub(super) fn require_hooks_written(
-    profile: crate::core::session_profile::SessionProfile,
-    project_dir: &Path,
-    written: Result<(), super::PrepError>,
-) -> Result<bool, super::PrepError> {
-    match written {
-        Ok(()) => Ok(true),
-        Err(source) if profile.is_architect() => Err(super::PrepError::ArchitectHooks {
-            path: project_dir.join(".claude").join("settings.json"),
-            source: Box::new(source),
-        }),
-        Err(err) => {
-            tracing::warn!("failed to write trusty-mpm project hooks: {err}");
-            Ok(false)
-        }
-    }
-}
+// #12077 part 4c: `require_hooks_written` is gone; a body carrying hooks that
+// cannot be written refuses every launch (`launch_policy::carrier`).
 
 #[cfg(test)]
 #[path = "architect_hooks_tests.rs"]

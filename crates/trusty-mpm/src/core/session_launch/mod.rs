@@ -42,17 +42,12 @@ mod host_inputs;
 use host_inputs::HostInputs;
 // #6887: the bulk-read diversion `PreToolUse` groups.
 mod divert_hooks;
-// #7849: the read-only diff between a project's settings file and the hook
-// groups its CURRENT config asks for, shared by `deploy_validate` and
-// `tm doctor`.
-mod hook_group_diff;
 /// The ONE way a non-terminal launch path surfaces a `PrepReport`'s findings.
 ///
 /// Why: five spawn paths wrote the same two loops by hand, and a sixth would
 /// have surfaced only half of them. See [`asset_notices::log_prep_findings`].
 /// Test: covered by `asset_notices`' own tests (this is a plain re-export).
 pub use asset_notices::{PrepScope, log_prep_findings};
-pub(crate) use hook_group_diff::{ProjectHookGroupGaps, project_hook_group_gaps};
 mod palace_alias;
 // #11823: the alias then the palace create, shared by both launch paths.
 pub(crate) mod palace_create;
@@ -69,14 +64,9 @@ mod prompt_feedback_hooks;
 #[path = "prompt_feedback_hooks_tests.rs"]
 mod prompt_feedback_hooks_tests;
 mod quarantine_shadows;
-// #7490: the project-tier hook merge every resume and relaunch path was
-// missing, plus the read-only gap predicate `tm doctor` reports from.
-mod resume_hooks;
-pub use resume_hooks::{ensure_project_hooks, missing_lifecycle_hook_events};
-// #7849: `deploy_validate` repairs a toggle-driven hook gap through this exact
-// writer, and drives it from a hermetic `FrameworkPaths` so the repair never
-// reads the operator's `$HOME`.
-pub(crate) use resume_hooks::ensure_project_hooks_with;
+// #12077 part 4c: `resume_hooks` (the per-resume project-file merge) and
+// `hook_group_diff` (the project-file gap probe) are gone; tm's hooks ride each
+// launch's `--settings` body (`launch_hooks`).
 // #8928 step 5: the per-role sandbox settings generator; #10102 wires it
 // into every launch path through `sandbox_launch`.
 mod sandbox_settings;
@@ -110,6 +100,8 @@ pub use system_prompt::{
 mod architect_model;
 // #12127: the four launch keys, recorded for the `--settings` flag tier.
 pub mod launch_keys;
+// #12077 part 4c: tm's hooks on the `--settings` body, and the project strip.
+pub mod launch_hooks;
 // #12077: the legacy global `trusty-memory` hook strip (row 11).
 mod legacy_memory_hooks;
 #[cfg(test)]
@@ -214,7 +206,6 @@ use settings::{
     // shared writer.
     // write_enabled_plugins is not imported here: it is already brought into
     // scope by the pub(crate) re-export below (#7678).
-    write_project_hooks_with,
 };
 
 /// Re-export of the project-tier `enabledPlugins` writer (#7678).
@@ -356,12 +347,6 @@ pub struct PrepReport {
     /// `None` when the deploy write failed; the session still launches in
     /// that case, just with the operator's default style.
     pub output_style: Option<PathBuf>,
-    /// Whether the `trusty-memory` hook block was written to the project's
-    /// `.claude/settings.json`.
-    ///
-    /// `false` when writing the project hooks failed; a PM session still
-    /// launches without them, an Architect's is refused (#10612).
-    pub hooks_written: bool,
     /// Incremental catch-up context to inject as seed context for this session.
     ///
     /// Populated when `config.catchup.auto` is true; `None` otherwise or when
@@ -547,16 +532,8 @@ pub enum PrepError {
     /// whose version cannot be read. Fatal: refused before any write.
     #[error("{0}")]
     ClaudeVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
-    /// #10612: an Architect's project hooks could not be written, so it would
-    /// run without the exec-form pm-guard. Fatal: the launch is refused.
-    /// Test: `an_architect_launch_whose_hook_write_fails_is_refused_10612`.
-    #[error("refusing the Architect launch: pm-guard hooks not written to {path}: {source}")]
-    ArchitectHooks {
-        /// The project settings file the hooks belong in.
-        path: PathBuf,
-        /// The write failure.
-        source: Box<PrepError>,
-    },
+    // #12077 part 4c: `ArchitectHooks` (#10612) is gone; the carrier refuses a
+    // launch whose hook body cannot be written (`ProvisionError::Write`).
     /// #12127: the launch-settings record could not be written, so the launch
     /// would run without its four keys. Fatal: the launch is refused.
     /// Test: `an_unwritable_record_refuses_the_prepared_launch_12127`.
@@ -582,7 +559,6 @@ impl PrepError {
             Self::Instructions { .. }
                 | Self::Content { .. }
                 | Self::ClaudeVersion(_)
-                | Self::ArchitectHooks { .. }
                 | Self::LaunchKeys(_)
         )
     }
@@ -996,38 +972,10 @@ pub(super) fn prepare_session_inner(
         tracing::warn!("failed to write statusLine config: {err}");
     }
 
-    // Write the project-tier trusty-mpm-owned hooks: the `trusty-memory`
-    // block, the PM-enforcement guard, and (issue #2003) the lifecycle triad
-    // (circuit breaker / audit log / dashboard) — folded in here because the
-    // daemon's managed launch excludes the user tier where that triad would
-    // otherwise be provisioned. Non-fatal: the session still launches, it
-    // just won't record memory or lifecycle events via the hooks.
-    //
-    // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
-    // `trusty-memory prompt-context` injection (and strips one a prior launch
-    // wrote). Default `true` — every other hook is written either way.
-    //
-    // #9018: `[pm_guard] enabled = false` leaves the `hook --pm-guard` entry
-    // out and strips one a prior launch wrote; every other hook is unchanged.
-    let additions = project_hooks::project_managed_hook_additions_for_profile(
-        // #7244: `None` resolves the running installed binary. When nothing
-        // stable resolves this now returns an error and writes NOTHING, rather
-        // than wiring every hook to a build artifact. A test pins a stable path
-        // through `HostInputs::hook_exe` so it asserts the write, not the host.
-        host.hook_exe,
-        config.hooks.prompt_context,
-        plan.divert_enabled,
-        // #7688: register the `Stop`/`SubagentStop` capture only where the flag
-        // is on, so a project with the feature off spawns no process per turn.
-        crate::core::prompt_self_improvement::enabled_for(project_dir),
-        config.pm_guard.enabled,
-        // #10459: exec form + `onFailure: "block"` for the Architect only.
-        architect_hooks::ArchitectHooks::for_profile(profile, &config),
-    );
-    // #10612: an Architect whose hook write fails is refused, never launched
-    // without its exec-form guard.
-    let written = write_project_hooks_with(project_dir, additions);
-    let hooks_written = architect_hooks::require_hooks_written(profile, project_dir, written)?;
+    // #12077 part 4c: tm's hooks are no longer written into the project's
+    // `.claude/settings.json`; every launch builds them into its `--settings`
+    // body (`launch_policy::carrier_hooks`), and the carrier strips the copies
+    // an older launch left here. An Architect's body write refuses the launch.
 
     // #4181 (ADR-0042): tm no longer writes MCP config into the workspace. The
     // four framework builtins and every `tm mcp add` server are declared once in
@@ -1239,7 +1187,6 @@ pub(super) fn prepare_session_inner(
         stash,
         compiled_prompt: compiled,
         output_style,
-        hooks_written,
         catchup_context,
         roster_errors,
         asset_notices,

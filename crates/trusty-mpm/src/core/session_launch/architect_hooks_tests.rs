@@ -14,8 +14,6 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
-use super::super::PrepError;
-use super::super::hook_group_diff::project_hook_group_gaps_with;
 use super::super::project_hooks::{
     project_managed_hook_additions_for_profile, project_managed_hook_additions_with_pm_guard,
 };
@@ -460,24 +458,6 @@ fn the_guard_off_switch_strips_an_exec_form_guard() {
     }
 }
 
-/// `tm doctor`'s gap probe reads exec-form entries: an Architect file
-/// matches its own expected block, and a missing prompt group is reported.
-#[test]
-fn the_gap_probe_reads_exec_form_entries() {
-    let dir = tempdir().unwrap();
-    let settings = write(dir.path(), architect(true));
-    let gaps = project_hook_group_gaps_with(&settings, || Ok(architect(true))).expect("gaps");
-    assert!(gaps.is_empty(), "{gaps:?}");
-    let settings = write(dir.path(), architect(false));
-    let gaps = project_hook_group_gaps_with(&settings, || Ok(architect(true))).expect("gaps");
-    assert!(
-        gaps.missing
-            .iter()
-            .any(|(event, _)| event == "UserPromptExpansion"),
-        "{gaps:?}"
-    );
-}
-
 #[test]
 fn a_pm_project_resolves_no_architect_hooks() {
     let dir = tempdir().unwrap();
@@ -485,7 +465,7 @@ fn a_pm_project_resolves_no_architect_hooks() {
     assert_eq!(ArchitectHooks::for_project(dir.path(), &config), None);
 }
 
-/// Launch `project` under `home` through the real writer; return its settings.
+/// Launch `project` under `home` through the real prep; return its settings.
 fn launch(project: &Path, home: &Path) -> Value {
     let _home = EnvVarGuard::set("HOME", home);
     let fw = crate::core::paths::FrameworkPaths::under(home);
@@ -497,12 +477,13 @@ fn launch(project: &Path, home: &Path) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
-/// The launch writer: an allow-listed Architect project gets the exec-form
-/// guard and, per `[architect] direct_commands`, the prompt hooks; the same
-/// project as a PM gets the shell form back.
+/// #12077 part 4c: the launch writes no hooks into the project file for either
+/// profile; the body carries the Architect's exec-form guard and, per
+/// `[architect] direct_commands`, the prompt hooks, and a PM's shell form.
 #[test]
 #[serial_test::serial]
-fn the_launch_writes_the_architect_hooks_by_profile() {
+fn the_launch_carries_the_architect_hooks_by_profile_on_the_body_12077() {
+    use crate::core::session_profile::SessionProfile;
     for direct_commands in [false, true] {
         let project = tempdir().unwrap();
         let home = tempdir().unwrap();
@@ -519,193 +500,60 @@ fn the_launch_writes_the_architect_hooks_by_profile() {
         let profile = project.path().join(".trusty-mpm.toml");
         std::fs::write(&profile, "profile = \"supervisor\"\n").unwrap();
         let settings = launch(project.path(), home.path());
+        assert!(settings.get("hooks").is_none(), "{settings}");
+        let fw = crate::core::paths::FrameworkPaths::under(home.path());
+        let body = super::super::launch_hooks::launch_hook_additions(
+            &fw,
+            project.path(),
+            SessionProfile::Architect,
+            Path::new(EXE),
+        )
+        .expect("body");
         assert_eq!(
-            settings["hooks"]["PreToolUse"][0]["hooks"][0],
+            body["hooks"]["PreToolUse"][0]["hooks"][0],
             guard_entry(true)
         );
         assert_eq!(
-            guards_on(&settings, "UserPromptExpansion"),
+            guards_on(&body, "UserPromptExpansion"),
             usize::from(direct_commands)
         );
 
         std::fs::write(&profile, "profile = \"pm\"\n").unwrap();
         let settings = launch(project.path(), home.path());
-        let guard = &settings["hooks"]["PreToolUse"][0]["hooks"][0];
-        assert!(guard.get("args").is_none(), "{settings}");
+        assert!(settings.get("hooks").is_none(), "{settings}");
+        let body = super::super::launch_hooks::launch_hook_additions(
+            &fw,
+            project.path(),
+            SessionProfile::Pm,
+            Path::new(EXE),
+        )
+        .expect("body");
+        let guard = &body["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert!(guard.get("args").is_none(), "{body}");
         // #10600: the PM guard fails closed too, in shell form.
-        assert_eq!(guard["onFailure"], "block", "{settings}");
-        assert!(
-            settings["hooks"].get("UserPromptExpansion").is_none(),
-            "{settings}"
-        );
+        assert_eq!(guard["onFailure"], "block", "{body}");
+        assert!(body["hooks"].get("UserPromptExpansion").is_none(), "{body}");
     }
 }
 
-/// An allow-listed Architect project under `base`: its framework layout, with
-/// `[architect] projects` naming `project` and the `supervisor` profile set.
-fn architect_fw(base: &Path, project: &Path) -> crate::core::paths::FrameworkPaths {
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base, project);
-    std::fs::create_dir_all(&fw.root).unwrap();
-    std::fs::write(
-        fw.config_toml(),
-        format!(
-            "[hooks]\nprompt_context = true\n[architect]\nprojects = [{:?}]\ndirect_commands = true\n",
-            project.display().to_string()
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        project.join(".trusty-mpm.toml"),
-        "profile = \"supervisor\"\n",
-    )
-    .unwrap();
-    fw
-}
-
-/// #10565: `tm doctor --fix`'s `hooks_contamination` repair leaves the hooks
-/// an Architect launch wrote in place, in the dry run and when applied. On
-/// 1.9.1 it stripped the lifecycle entry from all seven events.
+/// #12077 part 4c: `tm doctor --fix`'s `hooks_contamination` repair removes
+/// the hooks an older Architect launch wrote into the project file — the
+/// #10565 exemption is gone, because the body carries them now.
 #[test]
-fn doctor_fix_keeps_the_architect_hooks() {
+fn doctor_fix_strips_an_architect_projects_old_hooks_12077() {
     use crate::core::doctor_repair::{RepairMode, repair_hooks_contamination};
     let dir = tempdir().unwrap();
     write(dir.path(), architect(true));
     let path = dir.path().join(".claude/settings.json");
     let before = std::fs::read_to_string(&path).unwrap();
-    for mode in [RepairMode::DryRun, RepairMode::Apply] {
-        let steps = repair_hooks_contamination(dir.path(), mode);
-        assert!(
-            steps.is_empty(),
-            "{mode:?} planned a strip of the Architect's own hooks: {steps:?}"
-        );
-        assert_eq!(before, std::fs::read_to_string(&path).unwrap(), "{mode:?}");
-    }
+    let planned = repair_hooks_contamination(dir.path(), RepairMode::DryRun);
+    assert_eq!(planned.len(), 1, "{planned:?}");
+    assert_eq!(before, std::fs::read_to_string(&path).unwrap(), "dry run");
+    let applied = repair_hooks_contamination(dir.path(), RepairMode::Apply);
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(after.get("hooks").is_none(), "{after}");
 }
 
-/// #10565 error arm: when the re-merge that follows the strip cannot run (an
-/// Architect on a Claude Code below v2.1.295), the `--fix --yes` sequence
-/// still leaves the Architect's hooks in place rather than reporting a
-/// failure over a file it already stripped.
-#[test]
-fn a_refused_re_merge_never_leaves_the_architect_hooks_stripped() {
-    use crate::core::doctor_repair::{
-        RepairMode, StepStatus, repair_hooks_contamination, repair_missing_hook_group_with,
-    };
-    let project = tempdir().unwrap();
-    let base = tempdir().unwrap();
-    let fw = architect_fw(base.path(), project.path());
-    write(project.path(), architect(true));
-    let path = project.path().join(".claude/settings.json");
-    let before = std::fs::read_to_string(&path).unwrap();
-
-    let probe = &crate::core::architect_claude_version::TEST_PROBE;
-    probe.with(|p| *p.borrow_mut() = Ok("2.1.294 (Claude Code)".to_owned()));
-    let strip = repair_hooks_contamination(project.path(), RepairMode::Apply);
-    let merge = repair_missing_hook_group_with(
-        &fw,
-        project.path(),
-        Some(Path::new(EXE)),
-        RepairMode::Apply,
-    );
-    probe.with(|p| *p.borrow_mut() = Ok("2.1.312 (Claude Code)".to_owned()));
-
-    assert!(
-        !merge
-            .iter()
-            .any(|s| matches!(s.status, StepStatus::Failed(_) | StepStatus::Refused(_))),
-        "the strip {strip:?} left a gap the refused merge could not close: {merge:?}"
-    );
-    assert_eq!(before, std::fs::read_to_string(&path).unwrap());
-}
-
-/// A project under `home` with `profile` set and allow-listed as an Architect
-/// project, whose `.claude/settings.json` is a DIRECTORY so the hook write
-/// fails (#10612).
-fn unwritable_hooks_project(home: &Path, project: &Path, profile: &str) {
-    let root = home.join(MPM_DIR_NAME);
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("config.toml"),
-        format!(
-            "[architect]\nprojects = [{:?}]\n",
-            project.display().to_string()
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        project.join(".trusty-mpm.toml"),
-        format!("profile = \"{profile}\"\n"),
-    )
-    .unwrap();
-    std::fs::create_dir_all(project.join(".claude/settings.json")).unwrap();
-}
-
-/// Runs the launch writer for `project` under `home` and returns its result.
-fn try_launch(project: &Path, home: &Path) -> Result<super::super::PrepReport, PrepError> {
-    let _home = EnvVarGuard::set("HOME", home);
-    let fw = crate::core::paths::FrameworkPaths::under(home);
-    let mut host = super::super::HostInputs::with_home(Some(home));
-    host.hook_exe = Some(Path::new(EXE));
-    super::super::prepare_session_inner(&fw, project, None, true, None, None, host)
-}
-
-/// #10612 (Fail-Open Check): an Architect launch whose hook write fails is a
-/// fatal error naming the settings path; on main it returned `Ok` with
-/// `hooks_written: false` and the session started without its guard.
-#[test]
-#[serial_test::serial]
-fn an_architect_launch_whose_hook_write_fails_is_refused_10612() {
-    let project = tempdir().unwrap();
-    let home = tempdir().unwrap();
-    unwritable_hooks_project(home.path(), project.path(), "supervisor");
-    let err = try_launch(project.path(), home.path())
-        .expect_err("an Architect without its pm-guard hooks must not launch");
-    assert!(err.is_fatal(), "{err:?}");
-    let settings = project.path().join(".claude/settings.json");
-    match &err {
-        PrepError::ArchitectHooks { path, .. } => assert_eq!(*path, settings),
-        other => panic!("expected PrepError::ArchitectHooks, got {other:?}"),
-    }
-    assert!(err.to_string().contains(&settings.display().to_string()));
-}
-
-/// #10612 error arm: the same failure for a PM session keeps the #2149
-/// best-effort rule — the launch prepares, reporting `hooks_written: false`.
-#[test]
-#[serial_test::serial]
-fn a_pm_launch_whose_hook_write_fails_still_starts_10612() {
-    let project = tempdir().unwrap();
-    let home = tempdir().unwrap();
-    unwritable_hooks_project(home.path(), project.path(), "pm");
-    let report = try_launch(project.path(), home.path()).expect("a PM launch still prepares");
-    assert!(!report.hooks_written);
-}
-
-/// #10612: an Architect resume whose settings file cannot be merged fails
-/// closed with the path-naming error; a PM resume still returns `Ok`. On
-/// main both returned `Ok` and the Architect resumed unguarded.
-#[test]
-fn an_architect_resume_with_unmergeable_settings_is_refused_10612() {
-    for (profile, refused) in [("supervisor", true), ("pm", false)] {
-        let project = tempdir().unwrap();
-        let base = tempdir().unwrap();
-        let fw = architect_fw(base.path(), project.path());
-        std::fs::write(
-            project.path().join(".trusty-mpm.toml"),
-            format!("profile = \"{profile}\"\n"),
-        )
-        .unwrap();
-        std::fs::create_dir_all(project.path().join(".claude")).unwrap();
-        std::fs::write(project.path().join(".claude/settings.json"), "{ not json").unwrap();
-        let result =
-            super::super::ensure_project_hooks_with(&fw, project.path(), Some(Path::new(EXE)));
-        if refused {
-            assert!(
-                matches!(result, Err(PrepError::ArchitectHooks { .. })),
-                "{result:?}"
-            );
-        } else {
-            assert!(result.is_ok(), "{profile}: {result:?}");
-        }
-    }
-}
+// #12077 part 4c: the #10612 project-file write refusals moved to the carrier
+// (`carrier_hooks_tests::an_unwritable_hook_body_refuses_the_launch_12077`).

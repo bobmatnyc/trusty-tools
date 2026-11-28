@@ -1105,22 +1105,16 @@ fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
     }
 }
 
-/// THE #7490 REGRESSION TEST at the seam every resume path shares — fails on
-/// the pre-fix code.
-///
-/// Why: `prepare_managed_config_with_exe` is what `spawn`, `spawn_resume` and
-/// the bare-`tm` in-place relaunch all reach, and before #7490 it provisioned
-/// the tm-owned config dir and left the PROJECT's `.claude/settings.json`
-/// exactly as it found it. A project whose `SessionStart` array predated the
-/// `tm hook` group therefore never gained it, however many times it was
-/// resumed — no savings row under the live Claude session id, no 💸 segment.
-/// What: seeds the incident file (memory hook only under `SessionStart`),
-/// runs the real function against a NAMED framework root (#8233) with a pinned
-/// installed-looking hook binary, and asserts the lifecycle entry arrived and
-/// the project's own entry stayed.
+/// #12077 part 4c: `prepare_managed_config_with_exe` — reached by `spawn`,
+/// `spawn_resume` and the bare-`tm` in-place relaunch — no longer merges tm's
+/// hook groups into the PROJECT's `.claude/settings.json` (the #7490 merge);
+/// each launch carries them on its `--settings` body instead.
+/// What: seeds a provisioned file, runs the real function against a NAMED
+/// framework root (#8233) with a pinned hook binary, and asserts the file is
+/// byte-identical.
 /// Test: itself.
 #[test]
-fn prepare_managed_config_merges_the_project_hook_group() {
+fn prepare_managed_config_writes_no_project_hooks_12077() {
     let root_dir = tempfile::tempdir().expect("root tempdir");
     let fw = crate::core::paths::FrameworkPaths::under(root_dir.path());
     let cwd_root = tempfile::tempdir().expect("tempdir");
@@ -1143,6 +1137,7 @@ fn prepare_managed_config_merges_the_project_hook_group() {
         .to_string(),
     )
     .expect("seed settings");
+    let before = std::fs::read(&settings).expect("read seed");
 
     prepare_managed_config_with_exe(
         &fw,
@@ -1152,17 +1147,10 @@ fn prepare_managed_config_merges_the_project_hook_group() {
     )
     .expect("a PM spawn prepares");
 
-    let after: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&settings).expect("read settings"))
-            .expect("settings is valid JSON");
-    let session_start = after["hooks"]["SessionStart"].to_string();
-    assert!(
-        session_start.contains(&format!("{} hook\"", crate::test_support::STABLE_HOOK_EXE)),
-        "every session-composition path must merge the SessionStart tm-hook group: {session_start}"
-    );
-    assert!(
-        session_start.contains("trusty-memory inbox-check"),
-        "the project's own SessionStart entry must survive: {session_start}"
+    assert_eq!(
+        std::fs::read(&settings).expect("read settings"),
+        before,
+        "#12077 part 4c: spawn, resume and relaunch write no project hooks"
     );
 }
 
@@ -2739,53 +2727,4 @@ fn a_cli_adapter_honours_the_process_switch_12077() {
         assert_eq!(enabled, on.then_some(serde_json::json!(true)), "on = {on}");
     }
     assert_no_sandbox_in(home.home());
-}
-
-/// #12077 part 4c: `prepare_managed_config_with_exe` — reached by `spawn`,
-/// `spawn_resume` and the bare-`tm` in-place relaunch — no longer merges tm's
-/// hook groups into the PROJECT's `.claude/settings.json` (the #7490 merge);
-/// each launch carries them on its `--settings` body instead.
-/// What: seeds a provisioned file, runs the real function against a NAMED
-/// framework root (#8233) with a pinned hook binary, and asserts the file is
-/// byte-identical.
-/// Test: itself.
-#[test]
-fn prepare_managed_config_writes_no_project_hooks_12077() {
-    let root_dir = tempfile::tempdir().expect("root tempdir");
-    let fw = crate::core::paths::FrameworkPaths::under(root_dir.path());
-    let cwd_root = tempfile::tempdir().expect("tempdir");
-    let cwd = cwd_root.path();
-    let claude = cwd.join(".claude");
-    std::fs::create_dir_all(&claude).expect("create .claude");
-    let settings = claude.join("settings.json");
-    std::fs::write(
-        &settings,
-        serde_json::json!({
-            "hooks": {
-                "PreToolUse": [
-                    { "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard" }] }
-                ],
-                "SessionStart": [
-                    { "hooks": [{ "type": "command", "command": "trusty-memory inbox-check" }] }
-                ]
-            }
-        })
-        .to_string(),
-    )
-    .expect("seed settings");
-    let before = std::fs::read(&settings).expect("read seed");
-
-    prepare_managed_config_with_exe(
-        &fw,
-        "test-session",
-        cwd,
-        Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
-    )
-    .expect("a PM spawn prepares");
-
-    assert_eq!(
-        std::fs::read(&settings).expect("read settings"),
-        before,
-        "#12077 part 4c: spawn, resume and relaunch write no project hooks"
-    );
 }

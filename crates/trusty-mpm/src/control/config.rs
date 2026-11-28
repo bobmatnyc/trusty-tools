@@ -74,19 +74,25 @@ pub struct ControlPlaneConfig {
     /// `[control_plane.observability]` — optional LLM-classifier gate (§8.3).
     pub observability: ObservabilityConfig,
 
-    /// The `tm` binary baked into the worker's project hooks (#9704).
+    /// The `tm` binary baked into the worker's hooks (#9704).
     ///
-    /// Why: `run_session` writes the project hooks before it spawns a worker,
-    /// and under `cargo test` the running exe is a test harness that
+    /// Why: under `cargo test` the running exe is a test harness that
     /// `resolve_stable_hook_exe` refuses, falling back to whatever `tm` is on
     /// `PATH`. A pinned exe makes the hook tests independent of the host.
     /// What: `None` (production, and the only value config can produce — the
     /// field is `#[serde(skip)]`) resolves the installed binary; `Some(p)` is
-    /// passed to `ensure_project_hooks` as its `exe_override`.
-    /// Test: `run_session_writes_hooks_before_any_stream_json_backend`,
-    /// `run_session_writes_hooks_before_any_tmux_backend`.
+    /// the carrier's `exe_override` (#12077 part 4c: the hooks ride the
+    /// worker's `--settings` body, not its project file).
+    /// Test: `run_session_writes_the_carrier_before_any_stream_json_backend_12077`,
+    /// `run_session_writes_the_carrier_before_any_tmux_backend_12077`.
     #[serde(skip)]
     pub hook_exe: Option<std::path::PathBuf>,
+
+    /// #12077 part 4c: the state root the worker's `--settings` body is
+    /// written under; `None` (production) is
+    /// [`crate::core::launch_policy::state_root`]. A test names a temp dir.
+    #[serde(skip)]
+    pub state_root: Option<std::path::PathBuf>,
 }
 
 impl Default for ControlPlaneConfig {
@@ -103,6 +109,7 @@ impl Default for ControlPlaneConfig {
             auth_timeout_secs: DEFAULT_AUTH_TIMEOUT_SECS,
             observability: ObservabilityConfig::default(),
             hook_exe: None,
+            state_root: None,
         }
     }
 }

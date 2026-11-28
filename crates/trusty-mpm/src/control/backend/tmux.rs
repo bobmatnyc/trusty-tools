@@ -70,23 +70,32 @@ pub fn tmux_session_name(session_id: &ControlSessionId) -> String {
 /// What: quotes `claude_cmd` via `shlex::try_quote`; when `prompt_file` is
 /// present, quotes it too and appends `--append-system-prompt-file <quoted>`.
 /// Returns `Err` only when a value is not shell-quotable (interior NUL).
+/// #12077 part 4c (Q3): `settings` appends `--settings <quoted file>`, the
+/// worker's carrier body.
 /// Test: `build_claude_command_quotes_metacharacters`,
-/// `build_claude_command_quotes_claude_cmd`, `build_claude_command_plain`.
-fn build_claude_command(claude_cmd: &str, prompt_file: Option<&std::path::Path>) -> Result<String> {
-    let quoted_cmd = shlex::try_quote(claude_cmd)
+/// `build_claude_command_quotes_claude_cmd`, `build_claude_command_plain`,
+/// `build_claude_command_carries_the_settings_body_12077`.
+fn build_claude_command(
+    claude_cmd: &str,
+    prompt_file: Option<&std::path::Path>,
+    settings: Option<&std::path::Path>,
+) -> Result<String> {
+    let mut line = shlex::try_quote(claude_cmd)
         .context("claude_cmd is not shell-quotable")?
         .into_owned();
-    match prompt_file {
-        Some(pf) => {
-            let quoted_pf = shlex::try_quote(&pf.to_string_lossy())
-                .context("prompt_file path is not shell-quotable")?
-                .into_owned();
-            Ok(format!(
-                "{quoted_cmd} --append-system-prompt-file {quoted_pf}"
-            ))
-        }
-        None => Ok(quoted_cmd),
+    if let Some(pf) = prompt_file {
+        let quoted_pf = shlex::try_quote(&pf.to_string_lossy())
+            .context("prompt_file path is not shell-quotable")?
+            .into_owned();
+        line.push_str(&format!(" --append-system-prompt-file {quoted_pf}"));
     }
+    if let Some(file) = settings {
+        let quoted = shlex::try_quote(&file.to_string_lossy())
+            .context("settings path is not shell-quotable")?
+            .into_owned();
+        line.push_str(&format!(" --settings {quoted}"));
+    }
+    Ok(line)
 }
 
 /// The line typed into the control-plane backend's pane: [`build_claude_command`]
@@ -106,6 +115,7 @@ pub(crate) fn pane_claude_line(
     config_root: Option<&std::path::Path>,
     claude_cmd: &str,
     prompt_file: Option<&std::path::Path>,
+    settings: Option<&std::path::Path>,
 ) -> Result<String> {
     let assignments = crate::core::alt_screen::configured_shell_assignments(
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
@@ -116,7 +126,7 @@ pub(crate) fn pane_claude_line(
     Ok(format!(
         "env{} {assignments} {}",
         crate::core::claude_env_scrub::env_unset_flags(),
-        build_claude_command(claude_cmd, prompt_file)?
+        build_claude_command(claude_cmd, prompt_file, settings)?
     ))
 }
 
@@ -163,6 +173,7 @@ impl TmuxBackend {
         session_id: ControlSessionId,
         workdir: impl Into<std::path::PathBuf>,
         prompt_file: Option<std::path::PathBuf>,
+        settings: Option<std::path::PathBuf>,
         claude_cmd: String,
         capture_lines: u32,
     ) -> Result<Self> {
@@ -187,6 +198,7 @@ impl TmuxBackend {
             crate::core::alt_screen::operator_config_root().as_deref(),
             &claude_cmd,
             prompt_file.as_deref(),
+            settings.as_deref(),
         )
         .with_context(|| format!("building claude command for session {session_id}"))?;
         let target = TmuxTarget::session(&tmux_name);
@@ -383,6 +395,7 @@ mod tests {
                 ControlSessionId::new("proj", 0),
                 "/tmp",
                 None,
+                None,
                 "true".into(),
                 100,
             )
@@ -419,7 +432,7 @@ mod tests {
     #[test]
     fn build_claude_command_quotes_metacharacters() {
         let injection = std::path::Path::new("/tmp/x; touch /tmp/PWNED; #");
-        let cmd = build_claude_command("claude", Some(injection)).expect("quotable");
+        let cmd = build_claude_command("claude", Some(injection), None).expect("quotable");
         // Exact match: the whole malicious path is inside a single-quoted span,
         // so the `;` and `#` cannot terminate the command or start a new one.
         // Expected is assembled from parts so this test file carries no literal
@@ -437,7 +450,7 @@ mod tests {
     /// even though the HTTP validator restricts it (#6197 MEDIUM).
     #[test]
     fn build_claude_command_quotes_claude_cmd() {
-        let cmd = build_claude_command("claude; rm -rf /", None).expect("quotable");
+        let cmd = build_claude_command("claude; rm -rf /", None, None).expect("quotable");
         assert!(
             cmd.contains("'claude; rm -rf /'"),
             "claude_cmd metacharacters must be single-quoted, got: {cmd}"
@@ -447,11 +460,25 @@ mod tests {
     /// The plain path (no metacharacters) round-trips to a runnable command line.
     #[test]
     fn build_claude_command_plain() {
-        assert_eq!(build_claude_command("claude", None).unwrap(), "claude");
+        assert_eq!(
+            build_claude_command("claude", None, None).unwrap(),
+            "claude"
+        );
         let pf = "/tmp/p.txt";
-        let cmd = build_claude_command("claude", Some(std::path::Path::new(pf))).unwrap();
+        let cmd = build_claude_command("claude", Some(std::path::Path::new(pf)), None).unwrap();
         // Expected assembled from parts so no literal launch line lives here.
         let expected = ["claude", "--append-system-prompt-file", pf].join(" ");
+        assert_eq!(cmd, expected);
+    }
+
+    /// #12077 part 4c (Q3): the worker's body rides as one quoted
+    /// `--settings` operand, after the prompt file.
+    #[test]
+    fn build_claude_command_carries_the_settings_body_12077() {
+        let body = std::path::Path::new("/tmp/session settings/abc.json");
+        let cmd = build_claude_command("claude", None, Some(body)).unwrap();
+        // Expected assembled from parts so no literal launch line lives here.
+        let expected = ["claude", "--settings", "'/tmp/session settings/abc.json'"].join(" ");
         assert_eq!(cmd, expected);
     }
 
@@ -469,8 +496,8 @@ mod tests {
                 format!("tmux:\n  alternate_screen: {alternate_screen}\n"),
             )
             .expect("write config");
-            let line =
-                pane_claude_line(Some(root.path()), "claude; rm -rf /", None).expect("quotable");
+            let line = pane_claude_line(Some(root.path()), "claude; rm -rf /", None, None)
+                .expect("quotable");
             assert!(line.starts_with("env "), "an `env` prefix: {line}");
             assert!(line.contains(want), "want {want:?}: {line}");
             assert!(line.ends_with("'claude; rm -rf /'"), "still quoted: {line}");
@@ -484,7 +511,7 @@ mod tests {
     /// emptied scrub list cannot make this pass.
     #[test]
     fn pane_claude_line_never_passes_on_the_profile_stamp() {
-        let line = pane_claude_line(None, "claude", None).expect("quotable");
+        let line = pane_claude_line(None, "claude", None, None).expect("quotable");
         let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
         assert!(
             unset.contains(&"TRUSTY_MPM_SESSION_PROFILE"),

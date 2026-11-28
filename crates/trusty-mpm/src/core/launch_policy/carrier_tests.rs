@@ -73,6 +73,7 @@ impl Fx {
             state_root: &self.state,
             claude_json_dir,
             profile,
+            hooks: None,
         })
     }
     /// #12127: plant the launch-settings record `prepare_session` leaves.

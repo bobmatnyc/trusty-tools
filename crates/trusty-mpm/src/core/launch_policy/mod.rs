@@ -18,6 +18,8 @@
 //! `tests/owner_config_8988.rs` and `tests/owner_launch_config_8988.rs`.
 
 pub mod carrier;
+// #12077 part 4c: tm's hooks on the carrier body.
+pub mod carrier_hooks;
 pub mod compose;
 pub mod floor;
 pub mod last_good;
@@ -32,6 +34,7 @@ use last_good::{LastGood, read_last_good, record_last_good, retire_last_good};
 
 pub use carrier::{
     LaunchFiles, LaunchSettings, ProvisionError, provision_settings, provision_settings_default,
+    provision_settings_with_exe,
 };
 use schema::OwnerPolicyError;
 

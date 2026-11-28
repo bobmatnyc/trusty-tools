@@ -706,17 +706,11 @@ pub(crate) async fn run_doctor_with_claims(
     checks.push(crate::daemon::doctor_credential_reach::check_credential_reach_async().await);
     // #7262: the third check names each hook/statusLine command whose binary
     // lives in a Cargo build tree, which the file-counting check above cannot.
-    // #7490: the fourth is the inverse of the first — a lifecycle event a
-    // tm-provisioned file has NO tm hook group for, which no file-counting
-    // check can see because the evidence is what is absent.
-    let (contamination, foreign_conflict, build_tree_binary, missing_tm_group) =
+    // #12077 part 4c: the #7490 `hooks_missing_tm_group` row is retired — a
+    // project file owes tm no hook group.
+    let (contamination, foreign_conflict, build_tree_binary) =
         check_hooks_hygiene(project_dir, active_workspace_paths);
-    checks.extend([
-        contamination,
-        foreign_conflict,
-        build_tree_binary,
-        missing_tm_group,
-    ]);
+    checks.extend([contamination, foreign_conflict, build_tree_binary]);
     // #8454: and whether those files still register the egress guard.
     checks.push(check_egress_guard(
         project_dir,

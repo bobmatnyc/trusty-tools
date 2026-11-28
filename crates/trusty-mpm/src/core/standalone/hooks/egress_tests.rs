@@ -176,9 +176,10 @@ fn egress_user_tier_writer_is_idempotent_across_an_exe_path_change() {
     assert!(!changed, "an identical write must not rewrite the file");
 }
 
-/// 🔴 #8454 S2 (plan §6): removing the pm-guard, `tm hooks clean`,
-/// `strip_mpm_hook_entries` and the event-scoped strip all leave an installed
-/// egress entry in place.
+/// 🔴 #8454 S2 (plan §6): removing the pm-guard, `strip_mpm_hook_entries` and
+/// the event-scoped strip all leave an installed egress entry in place.
+/// #12077 part 4c: `tm hooks clean` removes it from a project file — every
+/// tm entry there is stale, and the launch body carries the guard.
 #[test]
 fn egress_entry_survives_pm_guard_removal_clean_and_strip() {
     let want = vec!["/usr/local/bin/tm hook --egress-guard".to_string()];
@@ -196,7 +197,7 @@ fn egress_entry_survives_pm_guard_removal_clean_and_strip() {
     let (_dir, path) = scratch();
     std::fs::write(&path, installed_entries().to_string()).expect("seed");
     clean_settings_file(&path, true).expect("clean");
-    assert_eq!(egress_commands(&read(&path)), want, "tm hooks clean");
+    assert!(egress_commands(&read(&path)).is_empty(), "tm hooks clean");
 
     let mut all = installed_entries();
     strip_mpm_hook_entries(&mut all);

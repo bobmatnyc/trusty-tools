@@ -50,7 +50,7 @@ fn check_hooks_hygiene_ok_when_clean() {
         &serde_json::json!({ "outputStyle": "trusty-mpm" }),
     );
 
-    let (contamination, foreign, _build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(contamination.status, CheckStatus::Ok);
     assert_eq!(foreign.status, CheckStatus::Ok);
 }
@@ -61,17 +61,18 @@ fn check_hooks_hygiene_warns_on_tm_contamination() {
     let project = dir.path().join("contaminated-project");
     write_settings(&project, &tm_hooks_value());
 
-    let (contamination, foreign, _build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(contamination.status, CheckStatus::Warn);
     assert!(contamination.message.contains("tm hooks clean"));
     assert_eq!(foreign.status, CheckStatus::Ok);
 }
 
-/// #10565: a file a managed launch provisioned — the PM guard (here exec form,
-/// as the Architect writes it) beside the lifecycle triad — is not reported as
-/// contamination, so `tm doctor` never steers an operator at a strip.
+/// #12077 part 4c: a file an older managed launch provisioned — the PM guard
+/// (here exec form, as the Architect wrote it) beside the lifecycle triad — is
+/// stale now that the body carries tm's hooks, so it IS contamination (the
+/// #10565 exemption is gone).
 #[test]
-fn check_hooks_hygiene_is_ok_for_a_provisioned_file() {
+fn check_hooks_hygiene_warns_on_a_provisioned_file_12077() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("architect");
     let mut val = tm_hooks_value();
@@ -87,7 +88,7 @@ fn check_hooks_hygiene_is_ok_for_a_provisioned_file() {
     let (contamination, ..) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(
         contamination.status,
-        CheckStatus::Ok,
+        CheckStatus::Warn,
         "{}",
         contamination.message
     );
@@ -99,7 +100,7 @@ fn check_hooks_hygiene_warns_on_foreign_conflict() {
     let project = dir.path().join("foreign-project");
     write_settings(&project, &claude_mpm_hooks_value());
 
-    let (contamination, foreign, _build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(contamination.status, CheckStatus::Ok);
     assert_eq!(foreign.status, CheckStatus::Warn);
     assert!(foreign.message.contains("informational"));
@@ -127,7 +128,7 @@ fn check_hooks_hygiene_warns_on_mixed_group_both_checks() {
         }),
     );
 
-    let (contamination, foreign, _build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, foreign, _build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(
         contamination.status,
         CheckStatus::Warn,
@@ -148,7 +149,7 @@ fn check_hooks_hygiene_never_double_counts_active_workspace_dupes() {
 
     // The SAME project is passed as BOTH `project_dir` and an active
     // workspace path — it must be counted once, not twice.
-    let (contamination, _foreign, _build_tree, _missing) =
+    let (contamination, _foreign, _build_tree) =
         check_hooks_hygiene(Some(&project), std::slice::from_ref(&project));
     assert_eq!(contamination.status, CheckStatus::Warn);
     assert_eq!(
@@ -170,7 +171,7 @@ fn check_hooks_hygiene_covers_active_workspace_paths_beyond_project_dir() {
     std::fs::create_dir_all(&project).unwrap();
     write_settings(&other_workspace, &tm_hooks_value());
 
-    let (contamination, _foreign, _build_tree, _missing) =
+    let (contamination, _foreign, _build_tree) =
         check_hooks_hygiene(Some(&project), std::slice::from_ref(&other_workspace));
     assert_eq!(
         contamination.status,
@@ -192,7 +193,7 @@ fn check_hooks_hygiene_reports_the_build_tree_incident_shape() {
     let project = dir.path().join("corrupted-project");
     let settings = write_settings(&project, &incident_settings());
 
-    let (contamination, _foreign, build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, _foreign, build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(build_tree.status, CheckStatus::Warn);
     assert!(
         build_tree.message.contains(&*settings.to_string_lossy()),
@@ -228,7 +229,7 @@ fn check_hooks_hygiene_reports_a_build_tree_statusline() {
         }),
     );
 
-    let (contamination, _foreign, build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (contamination, _foreign, build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(build_tree.status, CheckStatus::Warn);
     assert!(
         build_tree
@@ -250,7 +251,7 @@ fn check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary() {
     let project = dir.path().join("installed-binary-project");
     write_settings(&project, &tm_hooks_value());
 
-    let (_contamination, _foreign, build_tree, _missing) = check_hooks_hygiene(Some(&project), &[]);
+    let (_contamination, _foreign, build_tree) = check_hooks_hygiene(Some(&project), &[]);
     assert_eq!(
         build_tree.status,
         CheckStatus::Ok,
@@ -258,292 +259,4 @@ fn check_hooks_hygiene_build_tree_check_is_ok_for_an_installed_binary() {
     );
 }
 
-/// The #7490 incident file: `SessionStart` wired to the memory hook only, with
-/// the PM guard present so the file reads as tm-provisioned.
-fn missing_sessionstart_value() -> serde_json::Value {
-    serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": "/usr/local/bin/tm hook --pm-guard",
-                    "timeout": 5
-                }]
-            }],
-            "SessionStart": [{
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": "trusty-memory inbox-check",
-                    "timeout": 60
-                }]
-            }]
-        }
-    })
-}
-
-/// The gap check names the missing event, not just the file (#7490).
-#[test]
-fn check_hooks_hygiene_reports_a_missing_sessionstart_group() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("stale-project");
-    write_settings(&project, &missing_sessionstart_value());
-
-    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
-    assert_eq!(missing.status, CheckStatus::Warn);
-    assert!(
-        missing.message.contains("SessionStart"),
-        "the report must name the unwired event: {}",
-        missing.message
-    );
-    // #12077: `--fix` reports only; the next managed launch is the repair.
-    assert!(
-        missing.message.contains("next tm launch"),
-        "the report must name the repair: {}",
-        missing.message
-    );
-}
-
-/// A toggle-driven group the project asks for is reported too (#7849).
-///
-/// Why: `missing_lifecycle_hook_events` tests the base triad only, so a project
-/// whose `prompt_self_improvement` flipped on after its settings file was
-/// written looked complete to `tm doctor` — the same blind spot `tm validate`
-/// had.
-/// What: merges with the committed flag OFF, flips it ON, and asserts the check
-/// names the `Stop` capture and the `tm validate --repair` remedy.
-///
-/// #7849 (round 2): the probe's binary is PINNED, like the merge's. Left
-/// unpinned it resolved whatever `tm` the host happened to have installed, so
-/// this test asserted against `~/.cargo/bin/tm` on a developer machine and hit
-/// a resolution error on CI, which installs none — a green that proved nothing
-/// about the code. The assertion names the pinned path for that reason.
-/// Test: itself.
-#[test]
-fn check_hooks_hygiene_reports_a_missing_toggle_driven_group() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("flag-flipped-project");
-    let exe = Path::new("/usr/local/bin/tm");
-    write_settings(&project, &missing_sessionstart_value());
-    let flag = project.join(crate::core::project_config::PROJECT_CONFIG_FILE);
-    std::fs::write(&flag, "prompt_self_improvement = false\n").unwrap();
-    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
-        .expect("the merge must succeed against a pinned installed binary");
-
-    std::fs::write(&flag, "prompt_self_improvement = true\n").unwrap();
-
-    let (_contamination, _foreign, _build_tree, missing) =
-        check_hooks_hygiene_with_exe(Some(&project), &[], Some(exe));
-    assert_eq!(missing.status, CheckStatus::Warn);
-    assert!(
-        missing
-            .message
-            .contains("Stop (asks for `/usr/local/bin/tm hook --prompt-feedback`)"),
-        "the report must name the unwired capture, resolved from the PINNED binary \
-         rather than from whatever the host has installed: {}",
-        missing.message
-    );
-    assert!(
-        missing.message.contains("tm validate --repair"),
-        "the report must name the in-place remedy: {}",
-        missing.message
-    );
-}
-
-/// A file carrying every lifecycle group reports Ok (#7490).
-#[test]
-fn check_hooks_hygiene_missing_group_check_is_ok_for_a_complete_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("complete-project");
-    write_settings(&project, &missing_sessionstart_value());
-    crate::core::session_launch::ensure_project_hooks(
-        &project,
-        Some(Path::new("/usr/local/bin/tm")),
-    )
-    .expect("the merge must succeed against a pinned installed binary");
-
-    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
-    assert_eq!(
-        missing.status,
-        CheckStatus::Ok,
-        "a merged file has no gap: {}",
-        missing.message
-    );
-}
-
-/// Drop the `PostToolUseFailure` key from a settings file: the pre-1.9 shape.
-fn strip_post_tool_use_failure(path: &Path) {
-    let mut val: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let removed = val["hooks"]
-        .as_object_mut()
-        .and_then(|hooks| hooks.remove("PostToolUseFailure"));
-    assert!(
-        removed.is_some(),
-        "the merge must have written a PostToolUseFailure group to strip"
-    );
-    std::fs::write(path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
-}
-
-/// `hooks_missing_tm_group` warns on a missing `PostToolUseFailure` group and
-/// the launch merge restores it (#10095, #12077).
-///
-/// Why: a project provisioned before 1.9 lacks the group, and doctor is how the
-/// operator learns of it. #12077: `--fix --yes` reports it and writes nothing;
-/// the launch's merge closes the finding.
-/// What: merges a complete file (Ok), strips the one group (Warn naming it),
-/// applies the repair (refused, still Warn), runs the launch merge, and asserts
-/// Ok again.
-/// Test: itself.
-#[test]
-fn doctor_flags_missing_post_tool_use_failure_group_10095() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("pre-1-9-project");
-    let exe = Path::new("/usr/local/bin/tm");
-    let path = write_settings(&project, &missing_sessionstart_value());
-    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
-        .expect("the merge must succeed against a pinned installed binary");
-    let check = || check_hooks_hygiene_with_exe(Some(&project), &[], Some(exe)).3;
-    assert_eq!(check().status, CheckStatus::Ok, "{}", check().message);
-
-    strip_post_tool_use_failure(&path);
-    let missing = check();
-    assert_eq!(missing.status, CheckStatus::Warn);
-    assert!(
-        missing.message.contains("PostToolUseFailure"),
-        "the report must name the unwired event: {}",
-        missing.message
-    );
-
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&project);
-    let steps = crate::core::doctor_repair::repair_missing_hook_group_with(
-        &fw,
-        &project,
-        Some(exe),
-        crate::core::doctor_repair::RepairMode::Apply,
-    );
-    assert!(
-        steps.len() == 1
-            && matches!(
-                steps[0].status,
-                crate::core::doctor_repair::StepStatus::Refused(_)
-            ),
-        "#12077: the repair refuses: {steps:?}"
-    );
-    assert_eq!(check().status, CheckStatus::Warn, "{}", check().message);
-    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
-        .expect("the launch merge restores the group");
-    assert_eq!(check().status, CheckStatus::Ok, "{}", check().message);
-}
-
-/// A `--fix` that cannot write leaves the finding at Warn (#10095).
-///
-/// Why: Fail-Open Check — a doctor that reported Ok after a refused repair would
-/// hide a project whose failed tool calls never close.
-/// What: strips the group, makes `.claude/` read-only so the atomic write
-/// fails, runs the repair, and asserts the step did not apply and the check is
-/// still Warn.
-/// Test: itself.
-#[cfg(unix)]
-#[test]
-fn doctor_stays_warn_when_the_post_tool_use_failure_fix_fails_10095() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("failed-fix-project");
-    let exe = Path::new("/usr/local/bin/tm");
-    let path = write_settings(&project, &missing_sessionstart_value());
-    crate::core::session_launch::ensure_project_hooks(&project, Some(exe))
-        .expect("the merge must succeed against a pinned installed binary");
-    strip_post_tool_use_failure(&path);
-
-    let claude = project.join(".claude");
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&project);
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let steps = crate::core::doctor_repair::repair_missing_hook_group_with(
-        &fw,
-        &project,
-        Some(exe),
-        crate::core::doctor_repair::RepairMode::Apply,
-    );
-    // Restore before asserting, so a failed assertion still leaves a removable
-    // temp dir behind.
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(steps.len(), 1, "the gap must produce a step: {steps:?}");
-    // #12077: the repair never writes, so it is refused, never applied.
-    assert!(
-        !steps[0].changed(),
-        "a repair that wrote nothing must not count as applied: {steps:?}"
-    );
-
-    let missing = check_hooks_hygiene_with_exe(Some(&project), &[], Some(exe)).3;
-    assert_eq!(
-        missing.status,
-        CheckStatus::Warn,
-        "a failed fix must leave the finding at Warn: {}",
-        missing.message
-    );
-    assert!(missing.message.contains("PostToolUseFailure"));
-}
-
-/// A project tm never provisioned is never told to adopt tm's hooks (#7490).
-#[test]
-fn check_hooks_hygiene_missing_group_check_ignores_a_foreign_project() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("foreign-project");
-    write_settings(&project, &claude_mpm_hooks_value());
-
-    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
-    assert_eq!(
-        missing.status,
-        CheckStatus::Ok,
-        "a foreign project owes no tm hook group: {}",
-        missing.message
-    );
-}
-
-/// #12077 row 9a: the row says the next `tm launch` restores the guard and
-/// names the command, since `--fix` no longer writes the group.
-#[test]
-fn missing_group_row_names_the_launch_that_restores_the_guard_12077() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("stale-project");
-    write_settings(&project, &missing_sessionstart_value());
-
-    let (_contamination, _foreign, _build_tree, missing) = check_hooks_hygiene(Some(&project), &[]);
-    assert_eq!(missing.status, CheckStatus::Warn);
-    let launch = format!("`tm launch {}`", project.display());
-    assert!(
-        missing.message.contains(&launch),
-        "{launch} missing: {}",
-        missing.message
-    );
-    assert!(missing.message.contains("guard"), "{}", missing.message);
-}
-
-/// #12077 part 4c: a file an older managed launch provisioned — the PM guard
-/// (here exec form, as the Architect wrote it) beside the lifecycle triad — is
-/// stale now that the body carries tm's hooks, so it IS contamination (the
-/// #10565 exemption is gone).
-#[test]
-fn check_hooks_hygiene_warns_on_a_provisioned_file_12077() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("architect");
-    let mut val = tm_hooks_value();
-    val["hooks"]["PreToolUse"].as_array_mut().unwrap().insert(
-        0,
-        serde_json::json!({ "matcher": "", "hooks": [{
-            "type": "command", "command": "/usr/local/bin/tm",
-            "args": ["hook", "--pm-guard"], "onFailure": "block"
-        }] }),
-    );
-    write_settings(&project, &val);
-
-    let (contamination, ..) = check_hooks_hygiene(Some(&project), &[]);
-    assert_eq!(
-        contamination.status,
-        CheckStatus::Warn,
-        "{}",
-        contamination.message
-    );
-}
+// #12077 part 4c: the `hooks_missing_tm_group` tests are retired with the row.

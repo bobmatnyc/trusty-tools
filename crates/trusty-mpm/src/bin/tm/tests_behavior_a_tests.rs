@@ -6,8 +6,7 @@
 //! What: `project_init_*`, `install_*`, `hook_guard_*`, `mpm_hook_*`,
 //! `cli_parses_optimizer_*`, `cli_parses_session_{events,breakers,pause,
 //! resume,run,output,*}`, `compression_stats_*`, `cli_{parses_overseer,
-//! event_summary_*}`, `hook_disable_env_short_circuits`,
-//! `test_write_project_hooks_for_dir_targets_project_dir`.
+//! event_summary_*}`, `hook_disable_env_short_circuits`.
 //! Test: `cargo test -p trusty-mpm` runs the full suite.
 
 use clap::Parser;
@@ -15,9 +14,7 @@ use clap::Parser;
 use crate::cli::{
     Cli, CliCompressionLevel, Command, OptimizerAction, OverseerAction, SessionAction,
 };
-use crate::commands::install::{
-    deploy_report_lines, install_to_with, test_content, test_roster, write_project_hooks_for_dir,
-};
+use crate::commands::install::{deploy_report_lines, install_to_with, test_content, test_roster};
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, hook};
 use crate::commands::project::scaffold_project_dir;
 use crate::formatters::session::{event_summary, print_compression_stats};
@@ -275,50 +272,6 @@ async fn hook_disable_env_short_circuits() {
     assert!(
         elapsed < std::time::Duration::from_millis(500),
         "DISABLE_HOOKS_ENV must short-circuit without network I/O; took {elapsed:?}"
-    );
-}
-
-/// Why: `write_project_hooks_for_dir` must write hooks into the project's
-/// `.claude/settings.json` — NOT into any global file. This verifies that
-/// the function targets the correct path.
-/// What: creates a tempdir acting as the project root, calls the function,
-/// asserts the file is created at `<project>/.claude/settings.json` with
-/// MPM hook entries present and the command using an absolute path.
-#[test]
-fn test_write_project_hooks_for_dir_targets_project_dir() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project_dir = tmp.path();
-    let settings = project_dir.join(".claude").join("settings.json");
-
-    // The file must not exist before the call.
-    assert!(!settings.exists());
-
-    // #7244: pin the binary. Unpinned, this resolves `current_exe()` — under
-    // `cargo test` a build artifact the resolver refuses — and on a host with
-    // no installed `tm` the call would report that refusal instead of the path
-    // targeting this test is about.
-    let wrote =
-        write_project_hooks_for_dir(project_dir, Some(std::path::Path::new("/usr/local/bin/tm")))
-            .unwrap();
-    assert!(wrote, "must report file was written");
-    assert!(settings.exists(), "project settings must be created");
-
-    let text = std::fs::read_to_string(&settings).unwrap();
-    let val: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let hooks = val.get("hooks").expect("hooks key must be present");
-    assert!(
-        hooks.get("PreToolUse").is_some(),
-        "PreToolUse hook must be written"
-    );
-
-    // The command must end with " hook" (and start with '/' if current_exe
-    // is resolvable in test, which it always is under cargo test).
-    let cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
-        .as_str()
-        .unwrap();
-    assert!(
-        cmd.ends_with(" hook"),
-        "hook command must end with ' hook', got: {cmd:?}"
     );
 }
 

@@ -23,6 +23,9 @@ use std::path::Path;
 #[derive(Clone, Copy, Default)]
 pub(crate) struct HostInputs<'a> {
     pub(super) home: Option<&'a Path>,
+    // #12077 part 4c: no prep step writes hooks now, so nothing reads this;
+    // kept so the repair entry points keep their signatures.
+    #[allow(dead_code)]
     pub(super) hook_exe: Option<&'a Path>,
     pub(super) palace_registry: Option<&'a Path>,
     pub(super) claude_config_dir: Option<&'a Path>,

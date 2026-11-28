@@ -481,6 +481,7 @@ fn a_managed_clone_launch_carries_the_exclude_fixed_in_another_checkout_12077() 
             state_root: &state,
             claude_json_dir: None,
             profile: crate::core::session_profile::SessionProfile::Pm,
+            hooks: None,
         },
     )
     .expect("the clone's launch provisions");

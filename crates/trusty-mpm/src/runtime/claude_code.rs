@@ -330,7 +330,8 @@ fn prepare_managed_config(
 /// #8988: the owner `--settings` file for a managed launch under `fw`, whose
 /// `claude` reads `config_dir/.claude.json`. #8992: `profile` decides whether
 /// the skill and tool parts apply. #11821: a broken `install.toml` is a
-/// spawn error (df-D1w).
+/// spawn error (df-D1w). #12077 part 4c: the body also carries tm's hooks, so
+/// spawn, resume and in-place relaunch all get them here.
 /// Test: `a_managed_spawn_under_an_owner_file_denies_the_unallowed_user_scope_servers`,
 /// `an_inplace_relaunch_under_an_owner_file_carries_the_settings`,
 /// `an_architect_spawn_gets_the_mcp_part_but_no_tools_or_skills`.
@@ -385,26 +386,8 @@ fn prepare_managed_config_with_exe(
         );
     }
 
-    // #7490: re-merge the project-tier hook groups into the project's OWN
-    // `.claude/settings.json`. Only `prepare_session` wrote them, and no resume
-    // or in-place relaunch reaches it, so a project provisioned before an event
-    // group existed never gained it — the `SessionStart` gap that kept the
-    // savings row and the 💸 statusline segment from ever appearing. Idempotent
-    // (a file that already carries every group is left byte-identical) and
-    // non-fatal, like every other step here.
-    // The message is terse and the "non-fatal" framing lives in the comment
-    // above: this file sits one line under the 500-SLOC cap, and a wrapped
-    // `tracing::warn!` costs four more.
-    // #10612: an Architect's failed merge refuses the spawn; any other is logged.
-    match crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
-        Err(e @ crate::core::session_launch::PrepError::ArchitectHooks { .. }) => {
-            return Err(RuntimeError::Spawn(e.to_string()));
-        }
-        Err(e) => {
-            tracing::warn!(session = %tmux_name, cwd = %cwd.display(), "hook merge failed: {e}")
-        }
-        Ok(()) => {}
-    }
+    // #12077 part 4c: no project-file hook merge on spawn, resume or relaunch;
+    // `owner_settings` builds tm's hooks into this launch's `--settings` body.
 
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
     // NEVER ~/.claude.json) so the session starts without the trust dialog.

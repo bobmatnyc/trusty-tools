@@ -444,45 +444,19 @@ fn clean_settings_file_force_removes_the_build_tree_incident() {
         build_tree_hook_commands(&cleaned).is_empty(),
         "no build-tree hook command may survive: {cleaned}"
     );
-    // The project's own entry, and every unrelated key, survive untouched.
-    assert_eq!(
-        cleaned["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
-        json!("trusty-memory prompt-context")
+    // #12077 part 4c: tm's `trusty-memory prompt-context` entry goes too —
+    // the file carries a tm entry, so tm's project writer put it there.
+    assert!(
+        cleaned["hooks"].get("UserPromptSubmit").is_none(),
+        "{cleaned}"
     );
+    // Every unrelated key survives untouched.
     assert_eq!(cleaned["outputStyle"], json!("trusty-mpm"));
     // statusLine is detection-only: `clean_settings_file` does not own that key
     // and must not strip what it cannot put back.
     assert_eq!(
         build_tree_statusline_command(&cleaned),
         Some(format!("{INCIDENT_EXE} statusline"))
-    );
-}
-
-/// #10565: a file tm's project tier provisioned (PM guard present) keeps its
-/// installed lifecycle entries — neither reported nor stripped by `--force`.
-#[test]
-fn clean_settings_file_spares_a_provisioned_files_own_hooks() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("settings.json");
-    let guard = json!({
-        "matcher": "",
-        "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard" }]
-    });
-    let mut val = tm_settings();
-    val["hooks"]["PreToolUse"]
-        .as_array_mut()
-        .unwrap()
-        .insert(0, guard);
-    let original = serde_json::to_string_pretty(&val).unwrap();
-    std::fs::write(&path, &original).unwrap();
-
-    assert!(contamination_event_names(&val).is_empty(), "{val}");
-    assert_eq!(clean_settings_file(&path, true).unwrap(), None);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    // The unprovisioned shape is still contamination.
-    assert_eq!(
-        contamination_event_names(&tm_settings()),
-        vec!["PreToolUse".to_string()]
     );
 }
 

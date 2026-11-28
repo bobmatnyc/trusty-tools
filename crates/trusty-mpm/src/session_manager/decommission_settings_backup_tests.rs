@@ -88,8 +88,8 @@ pub(super) fn seed_an_earlier_launchs_settings(ws: &Path) {
 
 /// Run the launch preparation a spawn runs on `ws`, under a hermetic home
 /// that must outlive the test, and assert both backups are present and
-/// gitignored. The hook exe is pinned so the hooks writer runs and snapshots
-/// `settings.json` on a runner with no installed `tm`.
+/// gitignored. #12077 part 4c: the snapshot an older launch's hooks writer
+/// took is made here, since no launch takes one now.
 fn spawn(ws: &Path) -> tempfile::TempDir {
     // #12077: the backups need prior tm bytes in `settings.json`.
     seed_an_earlier_launchs_settings(ws);
@@ -104,6 +104,20 @@ fn spawn(ws: &Path) -> tempfile::TempDir {
         None,
     )
     .expect("the spawn preparation succeeds");
+    // #12077 part 4c: no launch writes the timestamped snapshot any more (it
+    // was the project hook writer's). Replay an older tm launch that took one:
+    // the snapshot inside a ledger window, as that launch recorded it.
+    {
+        use crate::core::standalone::hooks::backup;
+        use crate::session_manager::provisioning_ledger::{record, snapshot};
+        let before = snapshot(ws);
+        backup::snapshot_then_prune(
+            &ws.join(".claude/settings.json"),
+            backup::HOOK_SETTINGS_SNAPSHOTS_KEPT,
+        )
+        .expect("legacy snapshot");
+        record(ws, &before).expect("record the legacy launch");
+    }
     assert!(ws.join(BAK).is_file(), "premise: the spawn wrote {BAK}");
     assert!(
         !snapshots(ws).is_empty(),

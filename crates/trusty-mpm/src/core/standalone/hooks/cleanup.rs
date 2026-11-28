@@ -137,30 +137,10 @@ pub fn tm_hook_event_names(val: &Value) -> Vec<String> {
 /// hook form) or a `trusty-memory ` command.
 /// Test: `the_tier_marker_ignores_a_user_tier_lifecycle_command`,
 /// `the_tier_marker_recognises_the_pm_guard`.
+// #12077 part 4c: no production reader once the provisioned-file exemption went.
+#[cfg(test)]
 pub(crate) fn is_project_tier_marker_command(cmd: &str) -> bool {
     cmd.ends_with(PM_GUARD_SUFFIX) || cmd.starts_with("trusty-memory ")
-}
-
-/// The predicate that decides which tm hook entries in `val` are contamination.
-///
-/// Why (#10565): since #2969 every managed launch writes the lifecycle triad
-/// into the project's own `.claude/settings.json`, so in a file the project
-/// tier provisioned those `<tm> hook` entries are the session's own hooks, not
-/// pre-#2940 residue. Stripping them and relying on the later
-/// `hooks_missing_tm_group` re-merge dropped the Architect's hooks whenever
-/// that re-merge was skipped (`--only`), absent from the plan (dry run), or
-/// refused (old Claude Code, unresolvable binary).
-/// What: [`is_build_tree_hook_command`] for a file carrying a
-/// [`is_project_tier_marker_command`] entry — a build-tree executable is
-/// damage in any file (#7262) — and [`is_mpm_hook_command`] for every other.
-/// Test: `doctor_fix_keeps_the_architect_hooks`,
-/// `clean_settings_file_spares_a_provisioned_files_own_hooks`.
-fn contamination_predicate(val: &Value) -> fn(&str) -> bool {
-    if event_names_matching(val, is_project_tier_marker_command).is_empty() {
-        is_mpm_hook_command
-    } else {
-        is_build_tree_hook_command
-    }
 }
 
 /// The `hooks` event keys carrying a tm hook entry that is contamination.
@@ -168,11 +148,14 @@ fn contamination_predicate(val: &Value) -> fn(&str) -> bool {
 /// Why (#10565): `tm doctor`'s `hooks_contamination` check and
 /// [`clean_settings_file`] must agree on what a strip would remove, or the
 /// check reports a finding the repair does not act on.
-/// What: [`event_names_matching`] under [`contamination_predicate`]; equal to
-/// [`tm_hook_event_names`] for a file the project tier never provisioned.
-/// Test: `check_hooks_hygiene_is_ok_for_a_provisioned_file`.
+/// What: #12077 part 4c — every tm entry in a project file is stale, because
+/// tm's hooks ride each launch's `--settings` body; the provisioned-file
+/// exemption (#10565) is gone. The same predicate the launch-time strip uses
+/// ([`crate::core::session_launch::launch_hooks::stale_tm_hook_event_names`]).
+/// Test: `check_hooks_hygiene_warns_on_a_provisioned_file_12077`,
+/// `clean_settings_file_strips_a_provisioned_files_hooks_12077`.
 pub fn contamination_event_names(val: &Value) -> Vec<String> {
-    event_names_matching(val, contamination_predicate(val))
+    crate::core::session_launch::launch_hooks::stale_tm_hook_event_names(val)
 }
 
 /// The `hooks` event keys that carry at least one FOREIGN (claude-mpm) group.
@@ -341,8 +324,7 @@ pub fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> 
 /// writes to a temp file and renames over `path`.
 /// What: reads `path` (missing file → `Ok(None)`, malformed/non-object JSON →
 /// `Ok(None)` — never touched), returns `Ok(None)` when
-/// [`contamination_event_names`] is empty (#10565: a file the project tier
-/// provisioned keeps its own hooks). Otherwise computes the contaminated
+/// [`contamination_event_names`] is empty. Otherwise computes the contaminated
 /// event list and the [`CleanOutcome::removed_pm_guard`] flag (both BEFORE any
 /// mutation), and when `force` is `true`: writes a byte-identical backup of
 /// the pre-clean text to `<path>.bak-<unix-epoch-seconds>` (this crate's own
@@ -397,9 +379,8 @@ fn clean_settings_file_inner(path: &Path, force: bool) -> anyhow::Result<Option<
         return Ok(None);
     }
 
-    // #10565: a provisioned file's own hooks are not contamination.
-    let is_contamination = contamination_predicate(&val);
-    let removed_events = event_names_matching(&val, is_contamination);
+    // #12077 part 4c: every tm entry in a project file is stale.
+    let removed_events = contamination_event_names(&val);
     if removed_events.is_empty() {
         return Ok(None);
     }
@@ -416,8 +397,7 @@ fn clean_settings_file_inner(path: &Path, force: bool) -> anyhow::Result<Option<
         std::fs::write(&bak, &text)
             .map_err(|e| anyhow::anyhow!("write backup {}: {e}", bak.display()))?;
 
-        let changed =
-            super::strip_hook_entries_matching_for_events(&mut val, None, is_contamination);
+        let changed = crate::core::session_launch::launch_hooks::strip_tm_entries(&mut val);
         debug_assert!(changed, "removed_events was non-empty but nothing stripped");
         // #7762: `settings_lock::publish` rather than `write_json_atomic` — the
         // `<path>.bak-<epoch>` copy taken just above is the one this function

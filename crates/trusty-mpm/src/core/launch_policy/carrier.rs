@@ -127,6 +127,9 @@ pub struct CarrierInputs<'a> {
     /// The profile this launch runs (#8992): an Architect gets the `[mcp]`
     /// part only.
     pub profile: SessionProfile,
+    /// #12077 part 4c: tm's hooks for this launch; `None` adds none. Every
+    /// production launch names them ([`provision_settings_with_exe`]).
+    pub hooks: Option<super::carrier_hooks::LaunchHooks<'a>>,
 }
 
 /// The subtractive parts one launch's settings file can carry (#8992).
@@ -300,7 +303,9 @@ pub fn provision_settings_at(inputs: &CarrierInputs<'_>) -> Result<LaunchSetting
     });
     let mut notices: Vec<String> = resolution_notice(&resolution).into_iter().collect();
     notices.extend(project.warning);
-    let settings = write_settings(inputs, resolution.effective(), &launch, &mut notices);
+    // #12077 part 4c: built at carrier time on every launch, never recorded.
+    let hooks = super::carrier_hooks::hooks_for_launch(inputs)?;
+    let settings = write_settings(inputs, resolution.effective(), &launch, hooks, &mut notices);
     let notice = (!notices.is_empty()).then(|| notices.join("; "));
     if let Some(text) = &notice {
         eprintln!("tm: warning: {text}");
@@ -319,12 +324,20 @@ fn write_settings(
     inputs: &CarrierInputs<'_>,
     policy: Option<&OwnerPolicy>,
     launch: &serde_json::Map<String, Value>,
+    hooks: Option<Value>,
     notices: &mut Vec<String>,
 ) -> Result<Option<PathBuf>, ProvisionError> {
-    let mut body = Value::Object(match policy {
+    let mut map = match policy {
         Some(policy) => owner_map(inputs, policy, notices),
         None => serde_json::Map::new(),
-    });
+    };
+    let carries_hooks = hooks.is_some();
+    if let Some(hooks) = hooks {
+        // #12077: Q4 is pending with the owner; a `disableAllHooks: false`
+        // hardening would be one `map.insert` on the line after this one.
+        map.insert("hooks".to_owned(), hooks);
+    }
+    let mut body = Value::Object(map);
     // #12127: one payload; a `skillOverrides` map unions with the owner's.
     crate::core::claude_sandbox::merge_settings_payload(&mut body, &Value::Object(launch.clone()));
     if body.as_object().is_none_or(serde_json::Map::is_empty) {
@@ -335,7 +348,10 @@ fn write_settings(
     match write_owner_only(&path, body.as_bytes()) {
         Ok(()) => Ok(Some(path)),
         // #12127: the launch keys must reach the launch; refuse, never run without them.
-        Err(source) if !launch.is_empty() => Err(ProvisionError::Write { path, source }),
+        // #12077 part 4c: so must the hooks (Q1), the Architect's guard included.
+        Err(source) if !launch.is_empty() || carries_hooks => {
+            Err(ProvisionError::Write { path, source })
+        }
         // #8988 Fail-Open Check: launch without the flag, and say so.
         Err(err) => {
             // #8992: the notice names the whole launch policy, not only MCP.
@@ -458,7 +474,8 @@ pub enum ProvisionError {
     /// #12127: the launch-settings record could not be read.
     #[error(transparent)]
     LaunchKeys(#[from] crate::core::session_launch::LaunchKeysError),
-    /// #12127: the settings file carrying the launch keys could not be written.
+    /// #12127: the settings file carrying the launch keys (#12077: or tm's
+    /// hooks) could not be written.
     #[error(
         "#12127 launch settings NOT applied: could not write {path}: {source}; refusing the launch"
     )]
@@ -468,6 +485,16 @@ pub enum ProvisionError {
         /// The write error.
         source: std::io::Error,
     },
+    /// #12077 part 4c (Q2): no stable hook binary resolves, so the launch
+    /// would run without its guard.
+    #[error("#12077 refusing the launch: tm's hooks cannot be built: {0}")]
+    HookExe(#[from] crate::core::standalone::hooks::StableHookExeError),
+    /// #12077 part 4c: tm's old hooks could not be removed from a project file.
+    #[error(transparent)]
+    Strip(#[from] crate::core::session_launch::launch_hooks::StripError),
+    /// #12077 part 4c: an Architect's Claude Code is below the hook floor (#10459).
+    #[error(transparent)]
+    ArchitectVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
 }
 
 /// [`provision_settings_at`] for a production launch under `state_root`.
@@ -488,16 +515,35 @@ pub fn provision_settings(
     config_dir: Option<&Path>,
     profile: SessionProfile,
 ) -> Result<LaunchSettings, ProvisionError> {
+    provision_settings_with_exe(state_root, cwd, config_dir, profile, None)
+}
+
+/// [`provision_settings`] with the hook binary pinned by the caller.
+///
+/// Why (#12077 part 4c): the control plane's `hook_exe` and the managed
+/// runtime's test seam pin the binary; production passes `None`.
+/// What: resolves [`super::carrier_hooks::resolve_launch_hooks`] (a refusal
+/// refuses the launch, Q2) and provisions with those hooks.
+/// Test: `an_unresolvable_hook_binary_refuses_the_launch_12077`.
+pub fn provision_settings_with_exe(
+    state_root: &Path,
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    profile: SessionProfile,
+    exe_override: Option<&Path>,
+) -> Result<LaunchSettings, ProvisionError> {
     // #11821: df-D1w — an unresolved root refuses before the owner lookup, so
     // the defaulted root can never retire the owner's last-good record.
     let repos_root = crate::core::repo_paths::try_repos_root()?;
     let claude_json_dir = claude_json_dir(config_dir);
+    let (fw, exe) = super::carrier_hooks::resolve_launch_hooks(cwd, exe_override)?;
     provision_settings_at(&CarrierInputs {
         cwd,
         repos_root: &repos_root,
         state_root,
         claude_json_dir: claude_json_dir.as_deref(),
         profile,
+        hooks: Some(super::carrier_hooks::LaunchHooks { fw: &fw, exe: &exe }),
     })
 }
 
