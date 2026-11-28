@@ -326,7 +326,9 @@ fn launch(o: &Options<'_>, v: &Vars, out: &mut Outcome) -> Result<(), QuestionsE
 /// `start_exits_1_with_no_tmux_call_when_the_queue_append_fails`,
 /// `start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session`,
 /// `start_exits_1_with_no_rc_line_on_a_failed_capture_pane`,
-/// `start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails`.
+/// `start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails`,
+/// `start_exits_1_with_no_new_session_when_install_toml_is_malformed`,
+/// `start_uses_trusty_mpm_config_dir_for_the_claude_config_default`.
 pub fn run(args: &[String], o: &Options<'_>) -> Outcome {
     let mut out = Outcome {
         stdout: String::new(),

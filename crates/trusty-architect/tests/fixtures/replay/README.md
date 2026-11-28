@@ -808,7 +808,20 @@ in `start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session`
 and the log in
 `start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails`. With
 several ids, a failed append keeps the ids appended before it. A queue that is not
-UTF-8 cannot be a recorded file. Regenerate with the scripts and the driver
+UTF-8 cannot be a recorded file.
+
+D5, the default Claude config dir: with no `CLAUDE_CONFIG_DIR`, Python always
+uses `$HOME/.trusty-tools/trusty-mpm/claude-config` and ignores `install.toml`
+and `TRUSTY_MPM_CONFIG_DIR`. The port resolves the base through `install_paths`,
+so `TRUSTY_MPM_CONFIG_DIR` or `install.toml` moves the dir (test:
+`start_uses_trusty_mpm_config_dir_for_the_claude_config_default`). A malformed
+`install.toml`, or a relative or empty config value, exits 1 with no
+`new-session` and no `relaunch.log`, while ids already appended stay queued
+(test: `start_exits_1_with_no_new_session_when_install_toml_is_malformed`). An
+empty `HOME` resolves relative to the cwd; that edge is known and left as is,
+because `tm` always sets `HOME`.
+
+Regenerate with the scripts and the driver
 copied to a sandbox directory `P` whose path has no symlink (the probe
 compares canonical paths), each recording's `files` laid into `S/<name>` and
 its `fakes.stubs` into `S/<name>.fakes.json`:

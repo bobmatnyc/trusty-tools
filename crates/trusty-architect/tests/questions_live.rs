@@ -506,6 +506,86 @@ fn start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails() {
     }
 }
 
+/// Runs the launcher for `D01` with zero pauses, two tries, no
+/// `CLAUDE_CONFIG_DIR` (the default config dir resolves) and `extra` vars.
+fn run_start_default_cfg(r: &Path, server: &Server, extra: Vec<(&'static str, String)>) -> Outcome {
+    let mut pairs = vec![
+        ("ARCH_Q_SESSION", "qna-alpha".into()),
+        ("ARCH_Q_RC_SLEEP", "0".into()),
+        ("ARCH_Q_RC_TRIES", "2".into()),
+    ];
+    pairs.extend(extra);
+    let env = env_of(pairs);
+    start::run(
+        &["D01".into()],
+        &start_options(r, server.tmux(), &env, &no_rc),
+    )
+}
+
+/// Why: divergence D5 — the frozen script always reads
+/// `$HOME/.trusty-tools/trusty-mpm/claude-config` and ignores `install.toml`;
+/// the port resolves the default through `install_paths`, which fails closed
+/// on a broken file.
+/// What: with no `CLAUDE_CONFIG_DIR` and a malformed `install.toml` under
+/// `HOME`, the launch is exit 1 after `queued:` only: the parse error on
+/// stderr, no `new-session` and no `relaunch.log`.
+/// Test: this test.
+#[test]
+fn start_exits_1_with_no_new_session_when_install_toml_is_malformed() {
+    let root = start_root();
+    let r = root.path();
+    let home = tempfile::tempdir().expect("home");
+    let dir = home.path().join(".trusty-tools"); // path-literal: allow — fixture of the resolver's file
+    std::fs::create_dir(&dir).expect("install dir");
+    std::fs::write(dir.join("install.toml"), "config_dir = 5\n").expect("install.toml");
+    let server = Server::new();
+    server.answer("has-session", "", 1);
+    let h = home.path().display().to_string();
+    let o = run_start_default_cfg(r, &server, vec![("HOME", h)]);
+    assert_eq!(
+        (o.code, o.stdout.as_str()),
+        (1, "queued: D01\n"),
+        "{}",
+        o.stderr
+    );
+    assert!(o.stderr.contains("cannot parse"), "{}", o.stderr);
+    assert!(
+        !server.calls().iter().any(|c| c.contains("new-session")),
+        "{:?}",
+        server.calls()
+    );
+    assert!(!r.join("inbox/relaunch.log").exists());
+}
+
+/// Why: divergence D5 — the frozen script ignores `TRUSTY_MPM_CONFIG_DIR`;
+/// the port's default config dir moves with it, as tm's does.
+/// What: with no `CLAUDE_CONFIG_DIR` and `TRUSTY_MPM_CONFIG_DIR` set, the
+/// session starts with `CLAUDE_CONFIG_DIR` under that path, not under `HOME`.
+/// Test: this test.
+#[test]
+fn start_uses_trusty_mpm_config_dir_for_the_claude_config_default() {
+    let root = start_root();
+    let r = root.path();
+    let home = tempfile::tempdir().expect("home");
+    let base = r.join("mpm-config");
+    let cfg = base.join(".trusty-tools/trusty-mpm/claude-config");
+    std::fs::create_dir_all(&cfg).expect("config dir");
+    let server = Server::new();
+    server.answer("has-session", "", 1);
+    server.answer("new-session", "", 0);
+    server.answer("capture-pane", "https://claude.ai/code/session_Z9\n", 0);
+    let vars = vec![
+        ("HOME", home.path().display().to_string()),
+        ("TRUSTY_MPM_CONFIG_DIR", base.display().to_string()),
+    ];
+    let o = run_start_default_cfg(r, &server, vars);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    let want = format!("-e CLAUDE_CONFIG_DIR={} ", cfg.display());
+    let calls = server.calls();
+    let new = calls.iter().find(|c| c.contains("new-session"));
+    assert!(new.is_some_and(|c| c.contains(&want)), "{calls:?}");
+}
+
 /// Why: `Duration::from_secs_f64` panics on NaN, and `ARCH_Q_RC_SLEEP=nan`
 /// parses as NaN (#12029); the frozen script's `sleep nan` fails and its loop
 /// runs on with no pause.
