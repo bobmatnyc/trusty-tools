@@ -4,7 +4,7 @@
 //! must resolve the same, sandbox-aware home, independent of the config base
 //! that `TRUSTY_MPM_CONFIG_DIR` or `install.toml` can move off `$HOME`.
 //! What: [`resolve_launch_home`] is the pure core; [`sandbox_launch_home`]
-//! reads the process env and refuses when no home resolves.
+//! reads the process env.
 //! Test: `a_split_config_base_launch_writes_no_sandbox_12077`,
 //! `sandboxed_launch_home_is_the_sandbox_home_not_the_process_home`.
 
@@ -16,19 +16,15 @@ use std::path::{Path, PathBuf};
 /// `TRUSTY_MPM_CONFIG_DIR` or `install.toml` can move off `$HOME`; a home
 /// derived from that root left the real `~/.ssh` and `~/.aws` readable.
 /// What: [`resolve_launch_home`] over the process env and `dirs::home_dir()`.
-/// FAIL-CLOSED: no resolvable home is an error, never a fallback.
+/// #12077: `None` when no home resolves; enforcement is off, so a missing home
+/// is no longer a refusal.
 /// Test: `a_split_config_base_launch_writes_no_sandbox_12077`.
-pub fn sandbox_launch_home() -> Result<PathBuf, String> {
+pub fn sandbox_launch_home() -> Result<Option<PathBuf>, String> {
     resolve_launch_home(
         std::env::var_os("TRUSTY_SANDBOX").as_deref(),
         std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).as_deref(),
         dirs::home_dir(),
-    )?
-    .ok_or_else(|| {
-        "#10102 sandbox settings: no home directory resolves, so the sandbox cannot name \
-         `~/.ssh` or `~/.aws`; refusing the launch"
-            .to_owned()
-    })
+    )
 }
 
 /// The home every launch-time write goes under, with the env passed in.

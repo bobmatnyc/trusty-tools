@@ -305,3 +305,32 @@ async fn a_worker_runs_with_no_sandbox_written_12077() {
     assert!(!config.join("settings.json").exists(), "no user-tier write");
     assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
 }
+
+/// #12077: with no home resolved the worker still runs, and no agent sandbox
+/// is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_runs_with_no_home_12077() {
+    let (tmp, ws, _home, config) = sandbox_fixture();
+    let fake = tmp.path().join("claude");
+    trusty_common::exec_stub::write_executable(
+        &fake,
+        "#!/bin/sh\ncat >/dev/null\necho '{\"result\":\"ok\"}'\n",
+    )
+    .expect("install the stand-in worker");
+    let sandbox = WorkerSandbox {
+        workspace: &ws,
+        home: None,
+        config_dir: Some(&config),
+    };
+    let reply = spawn_sandboxed_worker_at(&fake, "m", "p", Duration::from_secs(10), &sandbox)
+        .await
+        .expect("no home is not refused");
+    assert_eq!(reply.text, "ok");
+    assert!(
+        !ws.join(".claude/settings.json").exists(),
+        "no project write"
+    );
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+    assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
+}

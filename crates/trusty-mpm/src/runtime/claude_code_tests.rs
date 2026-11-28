@@ -2383,3 +2383,17 @@ fn a_split_config_base_launch_writes_no_sandbox_12077() {
         }
     }
 }
+
+/// #12077: with no home resolved the managed sandbox step goes ahead and
+/// writes no sandbox into the workspace or the config dir.
+#[test]
+fn managed_sandbox_goes_ahead_with_no_home_12077() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("mkdir ws");
+    let config = tmp.path().join("claude-config");
+    let pm = crate::core::session_profile::SessionProfile::Pm;
+    super::managed_sandbox_at(&ws, None, &config, pm).expect("no home is not refused");
+    assert_no_sandbox_in(&ws);
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+}

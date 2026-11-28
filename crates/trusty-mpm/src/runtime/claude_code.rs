@@ -345,8 +345,8 @@ fn owner_settings(
 /// What: [`crate::core::session_launch::apply_launch_sandbox`] for
 /// `profile`'s role, with `config_dir` as the user tier and the home from
 /// [`crate::core::launch_home::sandbox_launch_home`]. #12077: enforcement is
-/// off, so it writes nothing and refuses nothing; no resolvable home is still
-/// an error.
+/// off, so it writes nothing and refuses nothing; with no home resolved the
+/// step is skipped ([`managed_sandbox_at`]).
 /// Test: `spawn_writes_no_sandbox_settings_12077`,
 /// `spawn_and_resume_go_ahead_over_a_local_override_12077`,
 /// `a_split_config_base_launch_writes_no_sandbox_12077`.
@@ -355,11 +355,24 @@ fn managed_sandbox(
     config_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
 ) -> Result<(), RuntimeError> {
-    use crate::core::session_launch as sl;
     // #10102: the real (sandbox-aware) home, never `fw.root`'s parent — that is
-    // the config base, which can sit off `$HOME`. No home refuses the launch.
+    // the config base, which can sit off `$HOME`.
     let home = crate::core::launch_home::sandbox_launch_home().map_err(RuntimeError::Spawn)?;
-    let inputs = sl::launch_sandbox_inputs(cwd, &home);
+    managed_sandbox_at(cwd, home.as_deref(), config_dir, profile)
+}
+
+/// [`managed_sandbox`] with the home passed in; `None` skips the step (#12077).
+/// Test: `managed_sandbox_goes_ahead_with_no_home_12077`.
+fn managed_sandbox_at(
+    cwd: &Path,
+    home: Option<&Path>,
+    config_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+) -> Result<(), RuntimeError> {
+    use crate::core::session_launch as sl;
+    // #12077: no home is no sandbox refusal; there is nothing to apply.
+    let Some(home) = home else { return Ok(()) };
+    let inputs = sl::launch_sandbox_inputs(cwd, home);
     sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, Some(config_dir))
         .map_err(|err| RuntimeError::Spawn(err.to_string()))
 }

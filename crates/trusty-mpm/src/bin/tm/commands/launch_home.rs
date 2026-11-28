@@ -64,10 +64,11 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
 /// start `claude` only inside the sandbox their role asked for.
 /// What: [`trusty_mpm::core::session_launch::apply_launch_sandbox`] for
 /// `profile`'s role, with `config_dir` (the relocated `CLAUDE_CONFIG_DIR`) as
-/// the user tier. #12077: enforcement is off, so that call writes nothing and
-/// refuses nothing; only an unresolved home is still an error.
+/// the user tier. #12077: enforcement is off, so the step writes nothing and
+/// refuses nothing; with no home resolved it is skipped.
 /// Test: `apply_sandbox_writes_nothing_with_or_without_a_config_dir_12077`,
-/// `apply_sandbox_leaves_a_local_override_untouched_12077`.
+/// `apply_sandbox_leaves_a_local_override_untouched_12077`,
+/// `apply_sandbox_goes_ahead_with_no_home_12077`.
 pub(crate) fn apply_sandbox(
     workspace: &Path,
     home: Option<&Path>,
@@ -75,9 +76,8 @@ pub(crate) fn apply_sandbox(
     profile: trusty_mpm::core::session_profile::SessionProfile,
 ) -> anyhow::Result<()> {
     use trusty_mpm::core::session_launch as sl;
-    let home = home.ok_or_else(|| {
-        anyhow::anyhow!("no home directory resolved; the sandbox cannot be applied")
-    })?;
+    // #12077: no home is no sandbox refusal; there is nothing to apply.
+    let Some(home) = home else { return Ok(()) };
     let inputs = sl::launch_sandbox_inputs(workspace, home);
     sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, config_dir)
         .map_err(|err| anyhow::anyhow!("{err}"))
@@ -242,5 +242,24 @@ mod tests {
         let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
         apply_sandbox(&ws, Some(&home), Some(&config), pm).expect("not refused");
         assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
+    }
+
+    /// #12077: with no home resolved the launch goes ahead and no sandbox
+    /// file is written.
+    #[test]
+    fn apply_sandbox_goes_ahead_with_no_home_12077() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        let config = root.join("claude-config");
+        let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
+        apply_sandbox(&ws, None, Some(&config), pm).expect("no home is not refused");
+        assert!(!config.join("settings.json").exists(), "no user-tier write");
+        assert!(
+            !ws.join(".claude/settings.json").exists(),
+            "no project write"
+        );
+        assert!(!ws.join(".trusty-mpm/sandbox-roles.json").exists());
     }
 }
