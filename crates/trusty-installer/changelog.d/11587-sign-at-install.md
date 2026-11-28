@@ -1,4 +1,5 @@
 Fixed
 
 - `tctl install` signs every installed trusty binary through one step: each member's binaries as they land, before their service starts, then any other signable binary in the install directory, such as trusty-secrets and trusty-browser. Each signature is read back, and the install prints one line per binary. A binary already Developer-ID signed with its identifier is left alone. A failed signature with an identity configured makes the run exit 2. With no identity configured, each binary gets a `NOT signed` warning and the exit code is unchanged. The `--json` report carries a `signing` array (Refs #11587).
+- A member whose binary fails to sign is not started: `tctl install` skips its service or supervisor bootstrap, and `tctl upgrade` signs each upgraded binary before it restarts the daemon and restarts nothing when the sign fails. Either run then exits non-zero (Refs #11587).
 - `tctl sign` accepts `trusty-browser` (both binaries, identifier `com.trusty.browser`), `trusty-console`, `trusty-review` and `trusty-installer` (Refs #11587).

@@ -338,74 +338,132 @@ pub(crate) fn report_lines(outcomes: &[Outcome]) -> Vec<String> {
 
 /// `tm install` / `tm fleet init` step: run [`ensure`] and print its lines.
 ///
-/// Why: G0b; a failure is printed, never returned, so it aborts nothing.
-/// Test: covered through [`ensure`] and [`report_lines`].
-pub(crate) fn run_and_print() {
+/// Why: G0b; a server failure is printed, never returned, so it aborts
+/// nothing. #11587: a failed trusty-browser sign is returned, so the command
+/// exits non-zero (code-critic on PR #12137: it exited 0).
+/// Test: [`run_with`].
+pub(crate) fn run_and_print() -> anyhow::Result<()> {
     if std::env::var_os(SKIP_ENV).is_some() {
-        return;
+        return Ok(());
     }
     println!("Setting up trusty-browser and trusty-computer MCP servers");
     let Some(env) = Env::live() else {
         println!("  skipped: no home directory");
-        return;
+        return Ok(());
     };
-    let outcomes = ensure(&env);
+    // #11587: codesign and the Keychain are macOS-only.
+    run_with(&env, cfg!(target_os = "macos"))
+}
+
+/// Run [`ensure`], print its lines, then, with `sign`, [`sign_browser`].
+///
+/// What: `Err` only when [`sign_browser`] reports a failure; every line is
+/// printed first.
+/// Test: `a_failed_browser_sign_fails_the_run`,
+/// `a_present_browser_is_not_signed_again`.
+pub(crate) fn run_with(env: &Env, sign: bool) -> anyhow::Result<()> {
+    let outcomes = ensure(env);
     for line in report_lines(&outcomes) {
         println!("  {line}");
     }
-    // #11587: codesign and the Keychain are macOS-only.
-    if cfg!(target_os = "macos") {
-        for line in sign_browser(&env, &outcomes) {
-            println!("  {line}");
-        }
+    if !sign {
+        return Ok(());
     }
+    let signing = sign_browser(env, &outcomes);
+    for line in &signing.lines {
+        println!("  {line}");
+    }
+    anyhow::ensure!(
+        !signing.failed,
+        "trusty-browser was installed but not signed; run `tctl sign trusty-browser`"
+    );
+    Ok(())
 }
 
 /// The binaries `cargo install trusty-browser` places, both Keychain readers.
 pub(crate) const BROWSER_BINS: [&str; 2] = ["trusty-browser", "trusty-browser-mcp"];
 
-/// Sign the installed trusty-browser binaries with `tctl sign trusty-browser`.
+/// What [`sign_browser`] did: one line per present binary, and whether the
+/// run must exit non-zero over it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BrowserSigning {
+    /// One report line per present browser binary.
+    pub lines: Vec<String>,
+    /// The binaries are not signed for a reason other than "no identity".
+    pub failed: bool,
+}
+
+/// Why the browser binaries are not signed, and whether that fails the run.
+struct NotSigned {
+    why: String,
+    /// `false` only for "no identity configured", which tctl itself treats as
+    /// a warning (its exit 3).
+    fails_run: bool,
+}
+
+impl NotSigned {
+    fn failure(why: String) -> Self {
+        Self {
+            why,
+            fails_run: true,
+        }
+    }
+}
+
+/// Sign the trusty-browser binaries this run installed, with `tctl sign
+/// trusty-browser`.
 ///
 /// Why (#11587, owner ruling Dsf "sign at install only"): `tm install` is the
 /// path that installs trusty-browser, and before this the binaries stayed
 /// ad-hoc until `install-service` / `install-host` signed them. tctl owns
 /// every codesign flag and identifier and attests the result fail-closed, so
 /// tm duplicates none of it.
-/// What: nothing when the browser install is `Missing` or no browser binary
-/// is in `cargo_bin`. Otherwise runs `<tctl> sign trusty-browser --dir
-/// <cargo_bin>` (stdin null, bounded by `install_timeout`) and returns one line
-/// per present binary. Only exit 0 reads as signed; exit 3 is "no identity",
-/// exit 2 "this tctl predates the target", any other end is a failure.
+/// What: nothing unless this run's `cargo install` put the browser in place
+/// (`Install::Installed`): a `Present` binary did not change, so it is not
+/// signed again and the identity is not looked up (code-critic on PR
+/// #12137). Otherwise runs `<tctl> sign trusty-browser --dir <cargo_bin>`
+/// (stdin null, bounded by `install_timeout`), one line per present binary.
+/// Only exit 0 reads as signed. Exit 3 ("no identity") is a warning; no
+/// tctl, exit 2 (this tctl predates the target), a timeout and any other end
+/// set `failed`.
 /// Test: `browser_signing_reports_each_binary_by_tctl_exit_code`,
-/// `browser_signing_never_claims_signed_without_tctl_or_a_binary`.
-pub(crate) fn sign_browser(env: &Env, outcomes: &[Outcome]) -> Vec<String> {
+/// `browser_signing_never_claims_signed_without_tctl_or_a_binary`,
+/// `a_present_browser_is_not_signed_again`.
+pub(crate) fn sign_browser(env: &Env, outcomes: &[Outcome]) -> BrowserSigning {
     let installed = outcomes
         .iter()
-        .any(|o| o.bin == "trusty-browser-mcp" && !matches!(o.install, Install::Missing(_)));
+        .any(|o| o.bin == "trusty-browser-mcp" && o.install == Install::Installed);
     let present: Vec<&str> = BROWSER_BINS
         .into_iter()
         .filter(|b| env.cargo_bin.join(b).is_file())
         .collect();
     if !installed || present.is_empty() {
-        return Vec::new();
+        return BrowserSigning::default();
     }
     let verdict = match &env.tctl {
-        None => Err("no `tctl` found; install trusty-installer".to_string()),
+        None => Err(NotSigned::failure(
+            "no `tctl` found; install trusty-installer".to_string(),
+        )),
         Some(tctl) => run_tctl_sign(env, tctl),
     };
-    present
+    let lines = present
         .into_iter()
         .map(|b| match &verdict {
             Ok(()) => format!("{b}: signed with Developer ID and attested (tctl sign)"),
-            Err(why) => {
-                format!("{b}: NOT signed: {why}; then run `tctl sign trusty-browser`")
-            }
+            Err(n) => format!(
+                "{b}: NOT signed: {}; then run `tctl sign trusty-browser`",
+                n.why
+            ),
         })
-        .collect()
+        .collect();
+    BrowserSigning {
+        lines,
+        failed: verdict.as_ref().is_err_and(|n| n.fails_run),
+    }
 }
 
 /// Run `tctl sign trusty-browser --dir <cargo_bin>`; `Err` says why it failed.
-fn run_tctl_sign(env: &Env, tctl: &Path) -> Result<(), String> {
+fn run_tctl_sign(env: &Env, tctl: &Path) -> Result<(), NotSigned> {
     let mut cmd = Command::new(tctl);
     cmd.args(["sign", "trusty-browser", "--dir"])
         .arg(&env.cargo_bin)
@@ -417,19 +475,23 @@ fn run_tctl_sign(env: &Env, tctl: &Path) -> Result<(), String> {
         .and_then(|c| wait_bounded(c, env.install_timeout));
     match status {
         Ok(st) if st.success() => Ok(()),
-        Ok(st) => Err(match st.code() {
-            Some(3) => "no Developer ID Application identity is configured (install the \
-                        certificate or set TRUSTY_SIGN_IDENTITY)"
+        Ok(st) if st.code() == Some(3) => Err(NotSigned {
+            why: "no Developer ID Application identity is configured (install the \
+                  certificate or set TRUSTY_SIGN_IDENTITY)"
                 .to_string(),
-            Some(2) => "this tctl has no `trusty-browser` sign target; upgrade trusty-installer"
-                .to_string(),
-            _ => format!("`tctl sign trusty-browser` failed ({st})"),
+            fails_run: false,
         }),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(format!(
+        Ok(st) if st.code() == Some(2) => Err(NotSigned::failure(
+            "this tctl has no `trusty-browser` sign target; upgrade trusty-installer".to_string(),
+        )),
+        Ok(st) => Err(NotSigned::failure(format!(
+            "`tctl sign trusty-browser` failed ({st})"
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(NotSigned::failure(format!(
             "`tctl sign trusty-browser` timed out after {} s",
             env.install_timeout.as_secs()
-        )),
-        Err(e) => Err(format!("cannot run tctl: {e}")),
+        ))),
+        Err(e) => Err(NotSigned::failure(format!("cannot run tctl: {e}"))),
     }
 }
 

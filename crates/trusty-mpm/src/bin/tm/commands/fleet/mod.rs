@@ -126,12 +126,13 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
                 report.steps.push(register::register(&reg).await);
             }
             print!("{}", report.render());
-            // See G0b auto-setup: reports its own failures, never fails init.
-            crate::commands::auto_setup::run_and_print();
+            // See G0b auto-setup: reports its own failures; #11587: only a
+            // failed trusty-browser sign fails init.
+            let signing = crate::commands::auto_setup::run_and_print();
             if report.failed() {
                 bail!("tm fleet init failed; see the FAILED step above");
             }
-            Ok(())
+            signing.context("tm fleet init failed")
         }
         FleetAction::Status { dir, json, session } => {
             let session = session.as_deref().map(SessionNames::new).transpose()?;

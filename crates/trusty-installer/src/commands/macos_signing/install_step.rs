@@ -188,12 +188,49 @@ impl InstallSigner {
     }
 
     /// Sign the signable binaries of `binaries` beside the `placed` binary.
-    pub fn sign_member(&mut self, placed: &Path, binaries: &[String]) {
+    ///
+    /// What: `Err` names every one of them whose outcome this run is `Failed`
+    /// (#11587), including one an earlier call already failed; `NoIdentity`
+    /// is `Ok`, as the install treats it (a warning only).
+    pub fn sign_member(&mut self, placed: &Path, binaries: &[String]) -> Result<(), String> {
         let Some(dir) = placed.parent() else {
-            return;
+            return Ok(());
         };
         let names: Vec<&str> = binaries.iter().map(String::as_str).collect();
         self.sign_in(dir, &names);
+        let failed: Vec<String> = self
+            .outcomes
+            .iter()
+            .filter(|o| o.status == SignStatus::Failed)
+            .filter(|o| names.iter().any(|n| o.path == dir.join(n)))
+            .map(|o| format!("{}: NOT signed: {}", o.binary, o.detail))
+            .collect();
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(failed.join("; "))
+        }
+    }
+
+    /// Sign a placed member, then run `start` only if no binary failed.
+    ///
+    /// Why (#11587, code-critic on PR #12137): a service started before its
+    /// binary is signed runs ad-hoc, and one started after a failed sign is
+    /// fail-open. `tctl install` and `tctl upgrade` both start or restart a
+    /// daemon through this one gate, so neither can reorder or skip it.
+    /// What: [`Self::sign_member`] first; `Err` (its failure list) means
+    /// `start` never ran. Otherwise `Ok(start())`.
+    /// Test: `tests::sign_then_start_signs_before_it_starts`,
+    /// `tests::a_failed_sign_never_starts_the_service`,
+    /// `tests::every_service_start_goes_through_the_sign_gate`.
+    pub fn sign_then_start<T>(
+        &mut self,
+        placed: &Path,
+        binaries: &[String],
+        start: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        self.sign_member(placed, binaries)?;
+        Ok(start())
     }
 
     /// Sign every signable binary in `dir` this run has not handled yet.

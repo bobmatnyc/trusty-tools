@@ -256,7 +256,7 @@ fn install_signer_sweep_skips_what_a_member_signed() {
     let bin = bin_dir(&["tm", "trusty-mpm", "trusty-secrets", "trusty-browser"]);
     let mut signer = InstallSigner::with_codesign(&f.codesign, Some(IDENTITY));
     let member: Vec<String> = vec!["tm".into(), "trusty-mpm".into()];
-    signer.sign_member(&bin.path().join("tm"), &member);
+    assert_eq!(signer.sign_member(&bin.path().join("tm"), &member), Ok(()));
     signer.sweep(bin.path());
     let out = signer.into_outcomes();
     let names: Vec<&str> = out.iter().map(|o| o.binary.as_str()).collect();
@@ -313,4 +313,116 @@ fn install_step_lines_never_call_an_unsigned_binary_signed() {
     }
     assert!(report_lines(&[at(SignStatus::NoIdentity)]).1);
     assert!(!report_lines(&[at(SignStatus::Failed), at(SignStatus::Signed)]).1);
+}
+
+/// Why (#11587, code-critic on PR #12137): a daemon started before its binary
+/// is signed runs ad-hoc; `tctl install` and `tctl upgrade` both start through
+/// `sign_then_start`, so the gate itself must sign first.
+/// What: the start closure appends `START` to the fake `codesign`'s own call
+/// log; asserts both sign calls and the read-back precede it, and it is last.
+/// Test: This is the test.
+#[cfg(unix)]
+#[test]
+fn sign_then_start_signs_before_it_starts() {
+    let f = fake("never-matches");
+    let bin = bin_dir(&["tm", "trusty-mpm"]);
+    let mut signer = InstallSigner::with_codesign(&f.codesign, Some(IDENTITY));
+    let member: Vec<String> = vec!["tm".into(), "trusty-mpm".into()];
+    let started = signer.sign_then_start(&bin.path().join("tm"), &member, || {
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&f.log)
+            .expect("open log");
+        std::io::Write::write_all(&mut log, b"START\n").expect("write log");
+        "restarted"
+    });
+    assert_eq!(started, Ok("restarted"));
+    let calls = f.calls();
+    let start_at = calls.iter().position(|c| c == "START").expect("started");
+    assert_eq!(start_at, calls.len() - 1, "{calls:?}");
+    assert_eq!(f.sign_calls().len(), 2, "{calls:?}");
+    assert!(
+        calls[..start_at]
+            .iter()
+            .filter(|c| c.starts_with("--force"))
+            .count()
+            == 2,
+        "every sign precedes the start: {calls:?}"
+    );
+}
+
+/// Why (#11587, code-critic on PR #12137): fail-open. A failed sign must stop
+/// the start, not warn and start an ad-hoc daemon anyway.
+/// What: the fake fails to sign `tm`; the start closure never runs, `Err`
+/// names `tm` and its cause and not the signed `trusty-mpm`. A second gate
+/// over the same, already-failed member is still refused.
+/// Test: This is the test.
+#[cfg(unix)]
+#[test]
+fn a_failed_sign_never_starts_the_service() {
+    let f = fake("tm");
+    let bin = bin_dir(&["tm", "trusty-mpm"]);
+    let mut signer = InstallSigner::with_codesign(&f.codesign, Some(IDENTITY));
+    let member: Vec<String> = vec!["tm".into(), "trusty-mpm".into()];
+    let placed = bin.path().join("tm");
+    let ran = std::cell::Cell::new(0);
+    for _ in 0..2 {
+        let why = signer
+            .sign_then_start(&placed, &member, || ran.set(ran.get() + 1))
+            .expect_err("a failed sign must refuse the start");
+        assert!(why.starts_with("tm: NOT signed: "), "{why}");
+        assert!(why.contains("errSecInternalComponent"), "{why}");
+        assert!(!why.contains("trusty-mpm"), "{why}");
+    }
+    assert_eq!(ran.get(), 0, "the service must not start");
+}
+
+/// Why (#11587, code-critic on PR #12137): the gate proves nothing if a call
+/// site starts a service around it. `tctl install` (`install_all`) and `tctl
+/// upgrade` (`finish_member`, both install branches) are the two that start
+/// or restart a daemon.
+/// What: in `install.rs` and `upgrade.rs`, every non-comment call of the
+/// start (`install_start::start_member`) or restart (`restart_daemon_member`)
+/// sits inside a `sign_then_start(` call opened on the same line or one of
+/// the two before it; each file has at least one such site, and `install.rs`
+/// calls neither bootstrap primitive directly.
+/// Test: This is the test.
+#[test]
+fn every_service_start_goes_through_the_sign_gate() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).expect("source must be readable");
+    // Assembled at runtime so these needles never match this file.
+    let gate = format!("{}(", "sign_then_start");
+    let starts = [
+        ("install.rs", format!("install_start::{}(", "start_member")),
+        ("upgrade.rs", format!("{}(c)", "restart_daemon_member")),
+    ];
+    for (file, start) in &starts {
+        let text = read(file);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut sites = 0;
+        for (n, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with("fn ") || !line.contains(start.as_str()) {
+                continue;
+            }
+            sites += 1;
+            let window = &lines[n.saturating_sub(2)..=n];
+            assert!(
+                window.iter().any(|l| l.contains(gate.as_str())),
+                "{file}:{}: `{start}` runs outside the sign gate",
+                n + 1
+            );
+        }
+        assert!(sites >= 1, "{file}: no `{start}` call site found");
+    }
+    let install = read("install.rs");
+    for primitive in ["bootstrap_member_service(", "supervisor_bootstrap_verdict("] {
+        assert!(
+            !install
+                .lines()
+                .any(|l| !l.trim_start().starts_with("//") && l.contains(primitive)),
+            "install.rs calls `{primitive}` directly, around the sign gate"
+        );
+    }
 }

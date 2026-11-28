@@ -362,31 +362,34 @@ fn fake_tctl(tmp: &Path, code: i32) -> PathBuf {
     path
 }
 
-/// The outcome list `ensure` gives for an installed browser.
-fn browser_present() -> Vec<Outcome> {
+/// The outcome list `ensure` gives when this run's `cargo install` placed the
+/// browser.
+fn browser_installed() -> Vec<Outcome> {
     vec![Outcome {
         bin: "trusty-browser-mcp",
-        install: Install::Present,
-        register: Register::Unchanged,
+        install: Install::Installed,
+        register: Register::Added,
     }]
 }
 
 /// Why (#11587): `tm install` signs the browser binaries through `tctl sign`,
-/// and each binary's line follows tctl's exit code; only exit 0 is "signed".
+/// and each binary's line follows tctl's exit code; only exit 0 is "signed",
+/// and only exit 3 (no identity) is not a failure of the run.
 /// What: with both binaries present, a fake tctl exiting 0, 3, 2 and 1 gives
 /// one line per binary each time; asserts the call is `sign trusty-browser
-/// --dir <cargo_bin>` and the wording per exit code.
+/// --dir <cargo_bin>`, the wording and the `failed` flag per exit code.
 /// Test: This is the test.
 #[test]
 fn browser_signing_reports_each_binary_by_tctl_exit_code() {
-    for (code, want) in [
-        (0, "signed with Developer ID"),
-        (3, "NOT signed: no Developer ID Application identity"),
+    for (code, want, failed) in [
+        (0, "signed with Developer ID", false),
+        (3, "NOT signed: no Developer ID Application identity", false),
         (
             2,
             "NOT signed: this tctl has no `trusty-browser` sign target",
+            true,
         ),
-        (1, "NOT signed: `tctl sign trusty-browser` failed"),
+        (1, "NOT signed: `tctl sign trusty-browser` failed", true),
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = env_in(tmp.path(), None);
@@ -394,11 +397,13 @@ fn browser_signing_reports_each_binary_by_tctl_exit_code() {
             std::fs::write(env.cargo_bin.join(b), "#!/bin/sh\n").unwrap();
         }
         env.tctl = Some(fake_tctl(tmp.path(), code));
-        let lines = sign_browser(&env, &browser_present());
+        let signing = sign_browser(&env, &browser_installed());
+        let lines = &signing.lines;
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[0].starts_with("trusty-browser: "), "{lines:?}");
         assert!(lines[1].starts_with("trusty-browser-mcp: "), "{lines:?}");
         assert!(lines.iter().all(|l| l.contains(want)), "{code}: {lines:?}");
+        assert_eq!(signing.failed, failed, "exit {code}");
         let log = std::fs::read_to_string(tmp.path().join("tctl.log")).unwrap();
         assert_eq!(
             log.trim(),
@@ -407,22 +412,25 @@ fn browser_signing_reports_each_binary_by_tctl_exit_code() {
     }
 }
 
-/// Why (#11587): Fail-Open Check. No tctl is a NOT-signed line, not silence
-/// and not success; a browser that did not install signs nothing.
-/// What: no tctl gives a `NOT signed` line naming tctl; a `Missing` browser
-/// install, or no binary on disk, gives no line and no tctl call.
+/// Why (#11587): Fail-Open Check. No tctl is a NOT-signed line and a failed
+/// run, not silence and not success; a browser that did not install signs
+/// nothing.
+/// What: no tctl gives a `NOT signed` line naming tctl and `failed`; a
+/// `Missing` browser install, or no binary on disk, gives nothing and no tctl
+/// call.
 /// Test: This is the test.
 #[test]
 fn browser_signing_never_claims_signed_without_tctl_or_a_binary() {
     let tmp = tempfile::tempdir().unwrap();
     let mut env = env_in(tmp.path(), None);
     std::fs::write(env.cargo_bin.join("trusty-browser-mcp"), "#!/bin/sh\n").unwrap();
-    let lines = sign_browser(&env, &browser_present());
-    assert_eq!(lines.len(), 1, "{lines:?}");
+    let signing = sign_browser(&env, &browser_installed());
+    assert_eq!(signing.lines.len(), 1, "{signing:?}");
     assert!(
-        lines[0].contains("NOT signed: no `tctl` found"),
-        "{lines:?}"
+        signing.lines[0].contains("NOT signed: no `tctl` found"),
+        "{signing:?}"
     );
+    assert!(signing.failed);
 
     env.tctl = Some(fake_tctl(tmp.path(), 0));
     let missing = vec![Outcome {
@@ -430,8 +438,52 @@ fn browser_signing_never_claims_signed_without_tctl_or_a_binary() {
         install: Install::Missing("no `cargo` on PATH".into()),
         register: Register::Skipped,
     }];
-    assert!(sign_browser(&env, &missing).is_empty());
+    assert_eq!(sign_browser(&env, &missing), BrowserSigning::default());
     std::fs::remove_file(env.cargo_bin.join("trusty-browser-mcp")).unwrap();
-    assert!(sign_browser(&env, &browser_present()).is_empty());
+    assert_eq!(
+        sign_browser(&env, &browser_installed()),
+        BrowserSigning::default()
+    );
     assert!(!tmp.path().join("tctl.log").exists(), "tctl must not run");
+}
+
+/// Why (#11587, code-critic on PR #12137): `tm install` re-signed the browser
+/// on every run, looking the identity up each time, though the binary had not
+/// changed.
+/// What: both browser binaries already in place (`ensure` reports `Present`);
+/// a full `run_with` with signing on succeeds, prints nothing for signing and
+/// never runs tctl.
+/// Test: This is the test.
+#[test]
+fn a_present_browser_is_not_signed_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = env_in(tmp.path(), None);
+    place_bins(&env);
+    std::fs::write(env.cargo_bin.join("trusty-browser"), "#!/bin/sh\n").unwrap();
+    env.tctl = Some(fake_tctl(tmp.path(), 1));
+    let out = ensure(&env);
+    assert_eq!(out[0].install, Install::Present);
+    assert_eq!(sign_browser(&env, &out), BrowserSigning::default());
+    assert!(run_with(&env, true).is_ok());
+    assert!(!tmp.path().join("tctl.log").exists(), "tctl must not run");
+}
+
+/// Why (#11587, code-critic on PR #12137): `tm install` exited 0 when the
+/// browser it had just installed failed to sign.
+/// What: a fake cargo installs the browser and a fake tctl exits 1: `run_with`
+/// is `Err`. The same run with tctl exiting 3 (no identity) is `Ok`, as is a
+/// run with signing off (not macOS).
+/// Test: This is the test.
+#[test]
+fn a_failed_browser_sign_fails_the_run() {
+    for (code, sign, fails) in [(1, true, true), (3, true, false), (1, false, false)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = env_in(tmp.path(), Some(fake_cargo(tmp.path())));
+        env.tctl = Some(fake_tctl(tmp.path(), code));
+        let run = run_with(&env, sign);
+        assert_eq!(run.is_err(), fails, "exit {code}, sign {sign}: {run:?}");
+        if let Err(e) = run {
+            assert!(e.to_string().contains("not signed"), "{e}");
+        }
+    }
 }
