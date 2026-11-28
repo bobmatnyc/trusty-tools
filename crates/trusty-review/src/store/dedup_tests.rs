@@ -16,6 +16,31 @@ use std::time::{Duration, Instant};
 /// open. Set only by `cross_process_holder_serialises_rather_than_locking_out`.
 const CHILD_HOLD_ENV: &str = "TRUSTY_REVIEW_TEST_HOLD_DEDUP";
 
+/// Temp dir for a test that races real holders against `LOCK_WAIT_BUDGET`.
+///
+/// Why: #12006 — every redb open, commit and close fsyncs. On a disk shared
+/// with a loaded host (EVO's ext4 root, where the gate runner points
+/// `TMPDIR`), fsync latency alone pushed eight serialised holders past the
+/// fixed 2 s budget: the concurrent test took p50 897 ms / p90 1907 ms there
+/// against a flat 163 ms on tmpfs. These tests assert lock semantics, not disk
+/// latency, so they run on tmpfs where the host has one.
+/// What: a fresh tempdir under `/dev/shm` when that directory exists and
+/// accepts one; otherwise the platform default temp dir (macOS has no
+/// `/dev/shm`). redb's advisory file lock behaves the same on tmpfs.
+/// Test: `concurrent_threads_claim_exactly_once`,
+/// `async_claim_runs_off_the_runtime_worker`.
+fn lock_race_tempdir() -> tempfile::TempDir {
+    let shm = std::path::Path::new("/dev/shm");
+    if shm.is_dir()
+        && let Ok(dir) = tempfile::Builder::new()
+            .prefix("trusty-review-dedup-")
+            .tempdir_in(shm)
+    {
+        return dir;
+    }
+    tempfile::tempdir().expect("tempdir")
+}
+
 fn temp_store() -> (DedupStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("dedup.redb");
@@ -268,7 +293,9 @@ fn concurrent_threads_claim_exactly_once() {
     use std::sync::{Arc, Barrier};
 
     const THREADS: usize = 8;
-    let dir = tempfile::tempdir().unwrap();
+    // #12006: tmpfs, so host fsync latency cannot push the last of eight
+    // serialised holders past the 2 s lock-wait budget.
+    let dir = lock_race_tempdir();
     let path = dir.path().join("dedup.redb");
     // Create the file up front so every thread races on `claim`, not on create.
     DedupStore::open(&path).expect("seed store");
@@ -510,7 +537,9 @@ fn concurrent_recovery_waits_and_adopts_the_winners_database() {
 async fn async_claim_runs_off_the_runtime_worker() {
     use std::sync::Arc;
 
-    let dir = tempfile::tempdir().unwrap();
+    // #12006: tmpfs, so the holder's close-time fsync cannot stretch its
+    // 300 ms hold past the 2 s lock-wait budget on a loaded host.
+    let dir = lock_race_tempdir();
     let path = dir.path().join("dedup.redb");
     let store = Arc::new(DedupStore::open(&path).expect("open"));
 
