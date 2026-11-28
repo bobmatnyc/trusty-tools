@@ -11,19 +11,15 @@
 //! real binary, lets it boot, and asserts the on-disk `palace.json` was
 //! migrated.
 //!
-//! What: spawn `trusty-memory serve --foreground --http 127.0.0.1:0` against
-//! a tempdir-rooted data directory that already contains a legacy `localLLM`
-//! palace (`name = "localLLM"`). Give the process enough time to run the
-//! migration and complete the initial `load_palaces_from_disk` step, then
-//! kill it and assert `palace.json` now reads `name = "User Memories"`.
-//! Re-running the test path is the idempotency guarantee — re-invoking the
-//! binary against an already-migrated palace must not corrupt or rewrite
-//! it. `--foreground` is required because plain `serve` self-spawns and
-//! exits 0 (see `commands::start`), which would race the kill below.
-//! `--http 127.0.0.1:0` picks an OS-assigned port so concurrent test runs
-//! cannot collide on the historic default 7070. (`serve --stdio`, added in
-//! PR1 #919, binds no HTTP port and would not expose the migration timing
-//! we need to verify here.)
+//! What: spawn `trusty-memory serve --foreground` against a tempdir-rooted
+//! data directory that already contains a legacy `localLLM` palace
+//! (`name = "localLLM"`). Wait until the daemon logs that startup palace
+//! hydration finished, kill it, and assert `palace.json` now reads
+//! `name = "User Memories"`. Re-running the boot is the idempotency
+//! guarantee — a second full boot must not rewrite `palace.json`.
+//! `--foreground` is required because plain `serve` self-spawns and exits 0
+//! (see `commands::start`), which would race the kill below. #11945: both
+//! boots poll that log line with a deadline instead of a fixed sleep.
 //!
 //! Test: `cargo test -p trusty-memory --test migration_boot`. Requires Cargo
 //! to have built the binary via `CARGO_BIN_EXE_trusty-memory`.
@@ -31,15 +27,17 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// How long to wait for the migration to flush before killing the daemon.
+/// Upper bound on how long one boot may take to reach its ready condition.
 ///
-/// Why: the migration runs synchronously inside `run_serve` before the
-/// palace registry hydrates, and `load_palaces_from_disk` does I/O per
-/// palace. 2 seconds is comfortably more than enough on developer hardware
-/// and well below the test-runner's per-test timeout.
-const BOOT_WAIT: Duration = Duration::from_millis(2000);
+/// Why: #11945 — a fixed 2 s sleep lost the race under `--workspace` gate
+/// load. The test now polls an observable condition; this is only the
+/// give-up bound, so it can be generous without slowing the normal run.
+const BOOT_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Interval between two checks of the ready condition.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Persist a legacy-name palace to disk in the shape `PalaceStore::save_palace`
 /// would produce.
@@ -81,21 +79,28 @@ fn locate_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trusty-memory"))
 }
 
-/// Spawn `trusty-memory serve --foreground` against `data_dir`, sleep just
-/// long enough for the migration to run, then kill the child. Returns once
-/// the child is reaped.
+/// The daemon's log line once startup palace hydration has finished.
+///
+/// Why: #11945 — hydration (a background task, `startup_tasks.rs`) opens the
+/// palace with writer intent and rewrites the `palace.json` format mirror, so
+/// `palace.json` is only settled after this line. A boot killed earlier leaves
+/// that rewrite to the next boot, which breaks the idempotency assertion.
+const HYDRATION_DONE: &str = "background palace hydration complete";
+
+/// Spawn `trusty-memory serve --foreground` against `data_dir`, poll its
+/// stderr until startup hydration has finished, then kill the child.
 ///
 /// Why: `serve --foreground` is the canonical "supervisor-friendly" mode —
 /// it does not self-spawn, so the child PID we kill is the actual daemon.
-/// We bind `--http 127.0.0.1:0` so the OS assigns a free port: concurrent
-/// test runs (and any locally running daemon on the historic 7070) never
-/// collide. (`serve --stdio`, added in PR1 #919, binds no HTTP port and
-/// would not expose the migration timing we need to verify here.)
-/// What: spawns the binary with `--foreground --http 127.0.0.1:0`, pipes
-/// every stdio to dev-null equivalents, waits BOOT_WAIT, then sends SIGKILL
-/// via `Child::kill`. Reaps via `wait`.
-fn boot_briefly(data_dir: &Path) {
+/// #11945: waiting on hydration replaces a fixed 2 s sleep that lost the
+/// race under load.
+/// What: sends stderr to `log` at `info` for this crate, polls it for
+/// `HYDRATION_DONE` every `POLL_INTERVAL`, then SIGKILLs and reaps the
+/// child. Panics with the log when the daemon exits first or
+/// `BOOT_DEADLINE` passes.
+fn boot_until_hydrated(data_dir: &Path, log: &Path) {
     let bin = locate_binary();
+    let stderr = std::fs::File::create(log).expect("create daemon stderr log");
     // #7085: the kill below is skipped entirely if this test binary is itself
     // SIGKILLed — the stamp makes the daemon watch us and self-exit instead.
     let mut child = trusty_common::parent_death::exit_with_parent(
@@ -103,17 +108,45 @@ fn boot_briefly(data_dir: &Path) {
             .arg("serve")
             .arg("--foreground")
             .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
-            // Quiet the daemon — we don't read its output here.
-            .env("RUST_LOG", "warn")
+            // #11945: `info` for this crate only, so the hydration line shows.
+            .env("RUST_LOG", "warn,trusty_memory=info")
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr)),
     )
     .spawn()
     .expect("spawn trusty-memory binary");
-    std::thread::sleep(BOOT_WAIT);
+    let hydrated = || {
+        std::fs::read_to_string(log)
+            .map(|s| s.contains(HYDRATION_DONE))
+            .unwrap_or(false)
+    };
+    // #11945: poll the condition the assertions need, bounded by a deadline.
+    let start = Instant::now();
+    let failure = loop {
+        if hydrated() {
+            break None;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            // The line may have landed between the check and the exit.
+            if hydrated() {
+                break None;
+            }
+            break Some(format!("daemon exited ({status}) before logging"));
+        }
+        if start.elapsed() >= BOOT_DEADLINE {
+            break Some(format!("timed out after {BOOT_DEADLINE:?} waiting for"));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
     let _ = child.kill();
     let _ = child.wait();
+    if let Some(msg) = failure {
+        panic!(
+            "{msg} {HYDRATION_DONE:?}; daemon stderr:\n{}",
+            std::fs::read_to_string(log).unwrap_or_default()
+        );
+    }
 }
 
 #[test]
@@ -134,7 +167,8 @@ fn boot_migrates_default_palace_name_and_is_idempotent() {
     assert_eq!(read_palace_name(&palace_json), "localLLM", "seed legacy");
 
     // First boot: the migration must rewrite `name`.
-    boot_briefly(override_base);
+    // The logs sit outside the data root so the daemon never sees them.
+    boot_until_hydrated(override_base, &override_base.join("boot-1.stderr"));
     assert_eq!(
         read_palace_name(&palace_json),
         "User Memories",
@@ -143,7 +177,7 @@ fn boot_migrates_default_palace_name_and_is_idempotent() {
 
     // Second boot: idempotency — no rewrite, no corruption.
     let before = std::fs::read_to_string(&palace_json).expect("read palace.json #2");
-    boot_briefly(override_base);
+    boot_until_hydrated(override_base, &override_base.join("boot-2.stderr"));
     let after = std::fs::read_to_string(&palace_json).expect("read palace.json #3");
     assert_eq!(read_palace_name(&palace_json), "User Memories");
     assert_eq!(
