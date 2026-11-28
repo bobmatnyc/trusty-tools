@@ -9,7 +9,7 @@
 //! `install.toml` names a sibling `cfg` dir, against the #10459 stub daemon,
 //! with a fake `claude` and a fake `tmux` (exit 1) first on `PATH`. The fake
 //! tmux ends the launch after prep, so the test reads where prep deployed. No
-//! real daemon, tmux server, Keychain or `.env.local` is reached.
+//! real daemon, tmux server, Keychain or local env file is reached.
 //! Test: this file IS the test (live binary spawns, so `#[ignore]`d; run with
 //! `--include-ignored`).
 
