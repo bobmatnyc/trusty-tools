@@ -877,7 +877,7 @@ pub(super) async fn spawn_managed_inproject(
     // #12077: the request's sandbox opt-in rides on the record, for every resume;
     // a failed write refuses the spawn (fail closed).
     let record = mgr
-        .set_claude_sandbox(record, params.claude_sandbox)
+        .set_claude_sandbox_noted(record, params.claude_sandbox)
         .await
         .map_err(|e| format!("TM_CLAUDE_SANDBOX=1 opt-in not stored, spawn refused: {e}"))?;
 

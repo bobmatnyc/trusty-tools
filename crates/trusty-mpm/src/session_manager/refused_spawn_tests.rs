@@ -22,6 +22,7 @@ use tempfile::TempDir;
 use super::decision_tests::{AnswerDriver, seed_answerable, set_mode};
 use super::manager::{ManagedError, ManagedTmuxDriver, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::setters::RefusedSpawn;
 use super::tests::FAKE_SESSION_ID;
 use super::worktree_git_fixture::GitWorktreeFixture;
 use super::worktree_ownership::sentinel_payload_bytes;
@@ -99,7 +100,7 @@ impl Spawn {
         &self,
         record: SessionRecord,
         heal: Heal,
-    ) -> Result<SessionRecord, ManagedError> {
+    ) -> Result<SessionRecord, RefusedSpawn> {
         let dir: PathBuf = self.data.path().to_path_buf();
         {
             let mut hooks = self.driver.hooks.lock().unwrap();
@@ -109,7 +110,7 @@ impl Spawn {
             }
         }
         set_mode(&dir, 0o555);
-        let out = self.mgr.set_claude_sandbox(record, true).await;
+        let out = self.mgr.set_claude_sandbox_noted(record, true).await;
         set_mode(&dir, 0o755);
         out
     }
@@ -137,7 +138,16 @@ async fn a_refused_opt_in_reaps_the_session_and_keeps_the_main_checkout_12077() 
 
     let out = s.refuse(record.clone(), Heal::OnKill).await;
 
-    assert!(matches!(out, Err(ManagedError::Store(_))), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            Err(RefusedSpawn {
+                source: ManagedError::Store(_),
+                ..
+            })
+        ),
+        "{out:?}"
+    );
     assert!(!s.live(&record.tmux_name), "a bare shell is still running");
     // #12077: a proven teardown kills by the `$N` id, never by name.
     assert!(
@@ -177,7 +187,16 @@ async fn a_refused_opt_in_removes_the_worktree_the_spawn_reserved_12077() {
 
     let out = s.refuse(record.clone(), Heal::OnKill).await;
 
-    assert!(matches!(out, Err(ManagedError::Store(_))), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            Err(RefusedSpawn {
+                source: ManagedError::Store(_),
+                ..
+            })
+        ),
+        "{out:?}"
+    );
     assert!(!s.live(&record.tmux_name), "a bare shell is still running");
     assert!(!wt.exists(), "the reserved worktree was kept");
 }
@@ -223,7 +242,16 @@ async fn a_failed_teardown_still_returns_the_original_refusal_12077() {
 
     let out = s.refuse(record.clone(), Heal::OnKill).await;
 
-    assert!(matches!(out, Err(ManagedError::Store(_))), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            Err(RefusedSpawn {
+                source: ManagedError::Store(_),
+                ..
+            })
+        ),
+        "{out:?}"
+    );
     // #12077: a killed pane is not "left running".
     let text = out.expect_err("refused").to_string();
     assert!(!text.contains("pane left running"), "{text}");
@@ -251,7 +279,16 @@ async fn an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077() {
 
     let out = s.refuse(record.clone(), Heal::OnList).await;
 
-    assert!(matches!(out, Err(ManagedError::Store(_))), "{out:?}");
+    assert!(
+        matches!(
+            out,
+            Err(RefusedSpawn {
+                source: ManagedError::Store(_),
+                ..
+            })
+        ),
+        "{out:?}"
+    );
     // #12077: the refusal names the pane it left up, and keeps the original text.
     let text = out.expect_err("refused").to_string();
     assert!(text.contains("pane left running"), "{text}");

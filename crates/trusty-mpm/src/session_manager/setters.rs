@@ -33,6 +33,39 @@ use super::decision::{DecisionId, locked_get};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState};
 
+/// A refused spawn: the original error plus a note about the pane (#12077).
+///
+/// Why: a pane tm could not prove its own stays up after the refusal. Folding
+/// that into the error would change the [`ManagedError`] variant callers
+/// match, so the note rides beside it.
+/// What: `source` is the untouched error; `note` is `Some("pane left
+/// running ...")` only when the pane was not killed. `Display` is the source
+/// text, then `; <note>` when there is one.
+/// Test: `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`.
+#[derive(Debug)]
+pub struct RefusedSpawn {
+    /// The original refusal, unchanged.
+    pub source: ManagedError,
+    /// Set when a pane was left running.
+    pub note: Option<String>,
+}
+
+impl std::fmt::Display for RefusedSpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)?;
+        if let Some(note) = &self.note {
+            write!(f, "; {note}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RefusedSpawn {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl SessionManager {
     /// Mark a session as errored with a message.
     ///
@@ -172,9 +205,29 @@ impl SessionManager {
     /// `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`.
     pub async fn set_claude_sandbox(
         &self,
-        mut record: super::record::SessionRecord,
+        record: super::record::SessionRecord,
         on: bool,
     ) -> Result<super::record::SessionRecord, ManagedError> {
+        self.set_claude_sandbox_noted(record, on)
+            .await
+            .map_err(|refused| refused.source)
+    }
+
+    /// [`Self::set_claude_sandbox`], with a `pane left running` note kept
+    /// beside the refusal rather than inside it (#12077).
+    ///
+    /// Why: a pane tm could not prove its own stays up after the refusal and
+    /// the operator must be told; rewrapping the error would change the
+    /// variant callers match.
+    /// What: the same write and teardown; the error is a [`RefusedSpawn`]
+    /// whose `source` is the original [`ManagedError`], untouched.
+    /// Test: `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`,
+    /// `a_failed_teardown_still_returns_the_original_refusal_12077`.
+    pub async fn set_claude_sandbox_noted(
+        &self,
+        mut record: super::record::SessionRecord,
+        on: bool,
+    ) -> Result<super::record::SessionRecord, RefusedSpawn> {
         if !on {
             return Ok(record);
         }
@@ -200,16 +253,9 @@ impl SessionManager {
             // otherwise stay up as a bare shell, and reconcile re-adopts a live
             // session as Active. A teardown failure is logged; the refusal is
             // still the original error.
-            let left = self.reap_refused_spawn(&record.id).await;
-            // #12077: a pane tm could not prove its own stays up; say so in
-            // the refusal. `Store` is kept (callers match it), so the note
-            // rides in an I/O error's text rather than a new variant.
-            return Err(match left {
-                Some(note) => ManagedError::Store(super::store::StoreError::Io(
-                    std::io::Error::other(format!("{e}; {note}")),
-                )),
-                None => e,
-            });
+            let note = self.reap_refused_spawn(&record.id).await;
+            // #12077: the note rides beside the original error, never in it.
+            return Err(RefusedSpawn { source: e, note });
         }
         Ok(record)
     }
