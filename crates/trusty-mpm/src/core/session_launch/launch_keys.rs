@@ -224,6 +224,27 @@ pub fn read_launch_keys(dir: &Path) -> Result<Option<Map<String, Value>>, Launch
     }
 }
 
+/// Set one of the four keys on the record for `dir`, keeping the others.
+///
+/// Why: #12077 — `tm doctor --fix` repairs `autoMemoryEnabled` on the record
+/// the launch delivers it through, never in the project settings file.
+/// What: reads the record (absent reads as empty), inserts `key`, and stores
+/// it through [`write_launch_keys`].
+///
+/// # Errors
+///
+/// Every [`read_launch_keys`] error, unchanged, so a broken record is never
+/// overwritten; [`LaunchKeysError::Write`] when the store fails.
+///
+/// Test: `auto_memory_repair_writes_the_launch_record_not_the_project_file_12077`,
+/// `a_malformed_launch_record_fails_the_check_and_the_repair_12077`,
+/// `an_unwritable_launch_record_fails_the_repair_12077`.
+pub fn set_launch_key(dir: &Path, key: &str, value: Value) -> Result<PathBuf, LaunchKeysError> {
+    let mut keys = read_launch_keys(dir)?.unwrap_or_default();
+    keys.insert(key.to_owned(), value);
+    write_launch_keys(dir, &keys)
+}
+
 /// The prep step for the four keys (#12127).
 ///
 /// Why: see the module doc.

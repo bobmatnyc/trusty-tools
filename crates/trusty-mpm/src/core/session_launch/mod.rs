@@ -112,7 +112,9 @@ mod architect_model;
 mod launch_keys;
 #[cfg(test)]
 pub(crate) use launch_keys::effective_settings;
-pub use launch_keys::{LaunchKeysError, read_launch_keys, record_path as launch_keys_record_path};
+pub use launch_keys::{
+    LaunchKeysError, read_launch_keys, record_path as launch_keys_record_path, set_launch_key,
+};
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -239,10 +241,13 @@ pub(crate) use settings::{write_enabled_plugins, write_enabled_plugins_with_trus
 /// logic of its own).
 pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
 
-/// Re-export of the auto-memory settings key and the one-key settings merge
-/// (#7685), so `tm doctor`'s `auto_memory` check and its `--fix` repair read and
-/// write exactly what this launch path writes.
-pub(crate) use settings::{AUTO_MEMORY_KEY, merge_settings_key};
+/// Re-export of the auto-memory settings key (#7685), so `tm doctor`'s
+/// `auto_memory` check reads the key this launch path delivers. #12077: the
+/// one-key project-file merge is test-only now; the repair writes the
+/// launch-settings record through [`set_launch_key`].
+pub(crate) use settings::AUTO_MEMORY_KEY;
+#[cfg(test)]
+pub(crate) use settings::merge_settings_key;
 
 /// Re-export of the trusty-search project-index registration entry point and
 /// the trusty-memory palace-slug derivation.

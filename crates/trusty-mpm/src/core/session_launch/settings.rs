@@ -264,12 +264,13 @@ where
 /// Set one key in the project's `.claude/settings.json`, preserving the rest.
 ///
 /// Why (#7685): the common case of [`merge_settings`] — one scalar key, every
-/// other key carried through untouched. `tm doctor --fix`'s `auto_memory` repair
-/// writes through this same function rather than re-implementing the merge, so
-/// the repair and the launch path cannot drift.
+/// other key carried through untouched; the settings-lock tests drive the merge
+/// through it.
 /// What: [`merge_settings`] with a closure that assigns `value` to `key`.
-/// Test: `write_auto_memory_off_disables_auto_memory`,
-/// `auto_memory_repair_applies_when_absent`.
+/// #12077: test-only — `tm doctor --fix` writes the launch-settings record
+/// instead, and no production path writes one key into the project file.
+/// Test: `write_auto_memory_off_disables_auto_memory`.
+#[cfg(test)]
 pub(crate) fn merge_settings_key(
     project_dir: &Path,
     key: &str,

@@ -3,7 +3,8 @@
 //! Why: Claude Code's own auto memory (`MEMORY.md`) is off for every tm session,
 //! with no fallback — `trusty-memory` is the memory (#8436, Bob Db0 Q5a
 //! 2026-10-14, which retired the 2026-09-12 fallback ruling). Two write sites
-//! make that true at launch (the project-tier `autoMemoryEnabled: false` key and
+//! make that true at launch (the `autoMemoryEnabled: false` key on the launch's
+//! `--settings` payload, #12127, and
 //! the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` managed-spawn assignment), and
 //! neither is observable afterwards: a project that has never been launched, or
 //! whose settings file an operator edited, silently carries auto memory back on
@@ -11,13 +12,14 @@
 //! probes in this project each read the auto-memory index and quoted its first
 //! entry, so the exposure is real rather than theoretical.
 //! What: [`check_auto_memory`] resolves the EFFECTIVE `autoMemoryEnabled` value
-//! across the same four settings layers Claude Code itself consults — project
-//! local > project > user local > user — reads whether the project's `MEMORY.md`
+//! across tm's launch-settings record (the `--settings` tier, #12077) and the
+//! four settings layers Claude Code itself consults — project local > project >
+//! user local > user — reads whether the project's `MEMORY.md`
 //! still holds facts, and names whether trusty-memory answered. Its doc carries
 //! the full table. [`repair_auto_memory`] is the `tm doctor --fix` half: it
-//! writes `false` into the PROJECT tier through the same
-//! [`crate::core::session_launch::merge_settings_key`] the launch path uses, so
-//! a repaired project and a launched one converge on one code path. It never
+//! writes `false` into that record through
+//! [`crate::core::session_launch::set_launch_key`] (#12077), never into the
+//! project's `.claude/settings.json`. It never
 //! writes `true` and does NOT migrate — `tm memory import-auto-memory` does, and
 //! both the check and the repair name it.
 //! Test: `auto_memory_fails_when_on_beside_a_healthy_trusty_memory`,
@@ -43,7 +45,9 @@ use crate::core::claude_config::ClaudeConfigReader;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 use crate::core::memory_reachable::MemoryReachability;
-use crate::core::session_launch::{AUTO_MEMORY_KEY, merge_settings_key};
+use crate::core::session_launch::{
+    AUTO_MEMORY_KEY, launch_keys_record_path, read_launch_keys, set_launch_key,
+};
 
 /// The `tm doctor` row this module produces.
 pub(crate) const CHECK_NAME: &str = "auto_memory";
@@ -137,6 +141,28 @@ fn resolution_layers(project_dir: Option<&Path>, home: &Path) -> Vec<(PathBuf, &
     layers
 }
 
+/// The scope label of tm's launch-settings record (#12077).
+const RECORD_SCOPE: &str = "launch-settings record";
+
+/// What tm's launch-settings record says about `autoMemoryEnabled` (#12077).
+///
+/// Why: 4a delivers the key on the launch's `--settings` payload from this
+/// record (`crate::core::session_launch::read_launch_keys`), and its one-time
+/// cleanup removes the project-file copy, so the check reads it here.
+/// What: `Silent` for an absent record or a missing or non-boolean key;
+/// `Broken` for a record that cannot be read or parsed, so it is reported.
+/// Test: `auto_memory_reads_a_delivered_key_from_the_launch_record_12077`,
+/// `a_malformed_launch_record_fails_the_check_and_the_repair_12077`.
+fn record_layer(project_dir: &Path) -> LayerValue {
+    match read_launch_keys(project_dir) {
+        Ok(keys) => match keys.and_then(|k| k.get(AUTO_MEMORY_KEY).and_then(|v| v.as_bool())) {
+            Some(enabled) => LayerValue::Set(enabled),
+            None => LayerValue::Silent,
+        },
+        Err(err) => LayerValue::Broken(err.to_string()),
+    }
+}
+
 /// The effective `autoMemoryEnabled` across every layer Claude Code consults.
 ///
 /// Why: three of the four verdicts depend on one fact — is auto memory ON right
@@ -149,6 +175,16 @@ fn resolution_layers(project_dir: Option<&Path>, home: &Path) -> Vec<(PathBuf, &
 type Effective = Result<Option<(bool, &'static str, PathBuf)>, String>;
 
 fn effective_setting(project_dir: Option<&Path>, home: &Path) -> Effective {
+    // #12077: the launch's `--settings` tier outranks every file below it.
+    if let Some(dir) = project_dir {
+        match record_layer(dir) {
+            LayerValue::Silent => {}
+            LayerValue::Broken(reason) => return Err(reason),
+            LayerValue::Set(value) => {
+                return Ok(Some((value, RECORD_SCOPE, launch_keys_record_path(dir))));
+            }
+        }
+    }
     for (path, scope) in resolution_layers(project_dir, home) {
         match read_layer(&path) {
             LayerValue::Silent => continue,
@@ -223,7 +259,7 @@ pub(crate) fn check_auto_memory(
             format!(
                 "Claude Code auto-memory is ON — {where_set} — but every tm session runs \
                  with it off ({memory_state}). Run `{REMEDY}` to write \
-                 `{AUTO_MEMORY_KEY}: false` into the project tier; a managed `tm` launch \
+                 `{AUTO_MEMORY_KEY}: false` into tm's launch-settings record; a managed `tm` launch \
                  also sets `{DISABLE_ENV_VAR}=1` on the spawned session"
             ),
         );
@@ -315,22 +351,23 @@ const REMEDY: &str = "tm doctor --fix --yes";
 /// `auto_memory_repair_writes_false_when_memory_is_down`.
 const MIGRATE: &str = "tm memory import-auto-memory";
 
-/// Write `autoMemoryEnabled: false` into the project tier under `--fix`.
+/// Write `autoMemoryEnabled: false` into tm's launch-settings record under
+/// `--fix`.
 ///
-/// Why: the launch path already writes this key, but only on a launch. A project
-/// whose settings file predates #7685, that an operator edited, or that the
-/// retired #7685 fallback left `true` has no other route back short of
-/// hand-editing JSON. The repair is purely additive — one boolean key, every
-/// other key preserved — which is why it is in the auto-repairable set at all.
-/// #8436: it writes `false` whatever trusty-memory's state; there is no fallback
-/// to restore.
-/// What: reads the PROJECT tier only (the tier tm owns; a higher-precedence
-/// `settings.local.json` is the operator's and is never rewritten, the same
-/// refusal `output_style_legacy_ids` makes). Produces no step when that tier
-/// already reads `false`. Otherwise plans the write in [`RepairMode::DryRun`],
-/// and in [`RepairMode::Apply`] performs it through [`merge_settings_key`]. A
-/// write that fails yields [`StepStatus::Failed`] carrying the error — never an
-/// `Applied` step, so a `--fix` run cannot report a repair it did not make.
+/// Why: the launch writes this key on every launch; a project that has not
+/// launched since its settings were edited has no other route back. #12077:
+/// the key is delivered from the launch-settings record and 4a's cleanup
+/// removes the project-file copy, so the repair writes the record and never the
+/// project `.claude/settings.json`. #8436: `false` whatever trusty-memory's
+/// state; there is no fallback to restore.
+/// What: no step when the record already reads `false`, or when
+/// `settings.local.json` (the operator's layer, which the launch leaves the key
+/// to) reads `false`. A local `true` is [`StepStatus::Refused`]: the launch drops
+/// the key from the record there, so a write would not last. A record or local
+/// file that cannot be read is [`StepStatus::Failed`] in both modes, and the
+/// record is not overwritten. Otherwise `Planned` in [`RepairMode::DryRun`];
+/// [`RepairMode::Apply`] writes through [`set_launch_key`], and a failed write is
+/// `Failed`, never `Applied`.
 ///
 /// It deliberately does NOT migrate the auto-memory store (#7685): that is
 /// [`MIGRATE`], an operator-run data move with its own failure modes; the step
@@ -340,38 +377,56 @@ const MIGRATE: &str = "tm memory import-auto-memory";
 /// `auto_memory_repair_dry_run_writes_nothing`,
 /// `auto_memory_repair_is_silent_when_already_false`,
 /// `auto_memory_repair_reports_a_write_failure`,
-/// `auto_memory_repair_never_migrates`.
+/// `auto_memory_repair_never_migrates`,
+/// `doctor_fix_never_re_adds_auto_memory_to_the_project_file_12077`,
+/// `a_malformed_launch_record_fails_the_check_and_the_repair_12077`,
+/// `auto_memory_repair_refuses_a_local_true_12077`.
 pub fn repair_auto_memory(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
-    let settings_path = project_dir.join(".claude").join("settings.json");
-    if matches!(read_layer(&settings_path), LayerValue::Set(false)) {
-        return Vec::new();
-    }
-
+    // #12077: the tm-owned target, never `<project>/.claude/settings.json`.
+    let record = launch_keys_record_path(project_dir);
+    let local = project_dir.join(".claude").join("settings.local.json");
     // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14)
     let what = format!(
         "set `{AUTO_MEMORY_KEY}: false` (auto memory is off for every tm session; facts \
          still in `MEMORY.md` move with `{MIGRATE}`)"
     );
-    if mode == RepairMode::DryRun {
-        return vec![RepairStep {
+    let step = |path: PathBuf, status: StepStatus| {
+        vec![RepairStep {
             check: CHECK_NAME,
-            path: settings_path,
-            what,
-            status: StepStatus::Planned,
-        }];
+            path,
+            what: what.clone(),
+            status,
+        }]
+    };
+    match read_layer(&local) {
+        LayerValue::Set(false) => return Vec::new(),
+        LayerValue::Set(true) => {
+            return step(
+                local,
+                StepStatus::Refused(
+                    "settings.local.json turns auto memory on; it is the operator's file and \
+                     the launch leaves the key to it — set it to false there"
+                        .to_string(),
+                ),
+            );
+        }
+        LayerValue::Broken(reason) => return step(local, StepStatus::Failed(reason)),
+        LayerValue::Silent => {}
     }
-
-    let status =
-        match merge_settings_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false)) {
-            Ok(()) => StepStatus::Applied { backup: None },
-            Err(err) => StepStatus::Failed(err.to_string()),
-        };
-    vec![RepairStep {
-        check: CHECK_NAME,
-        path: settings_path,
-        what,
-        status,
-    }]
+    match record_layer(project_dir) {
+        LayerValue::Set(false) => return Vec::new(),
+        LayerValue::Broken(reason) => return step(record, StepStatus::Failed(reason)),
+        LayerValue::Set(true) | LayerValue::Silent => {}
+    }
+    if mode == RepairMode::DryRun {
+        return step(record, StepStatus::Planned);
+    }
+    let status = match set_launch_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
+    {
+        Ok(_) => StepStatus::Applied { backup: None },
+        Err(err) => StepStatus::Failed(err.to_string()),
+    };
+    step(record, status)
 }
 
 #[cfg(test)]

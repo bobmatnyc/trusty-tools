@@ -340,19 +340,22 @@ fn auto_memory_repair_applies_when_absent() {
     let project = tmp.path();
     write_settings(project, ".claude/settings.json", r#"{"outputStyle": "x"}"#);
 
+    write_record(project, serde_json::json!({"outputStyle": "x"}));
+
     let steps = repair_auto_memory(project, RepairMode::Apply);
 
     assert_eq!(steps.len(), 1);
     assert!(steps[0].changed(), "{:?}", steps[0].status);
-    let written: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12077: the record carries the key; the project file is not written.
+    let written = crate::core::session_launch::read_launch_keys(project)
+        .unwrap()
+        .expect("a record");
     assert_eq!(written[AUTO_MEMORY_KEY], serde_json::Value::Bool(false));
     assert_eq!(
         written["outputStyle"], "x",
         "the repair must preserve every other key"
     );
+    assert!(project_file(project).get(AUTO_MEMORY_KEY).is_none());
 }
 
 #[serial_test::serial]
@@ -379,16 +382,16 @@ fn auto_memory_repair_writes_false_when_memory_is_down() {
         "the step must name the migration --fix does not run: {}",
         steps[0].what
     );
-    let written: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
-    )
-    .unwrap();
+    // #12077: the record carries the key, not the project file.
+    let written = crate::core::session_launch::read_launch_keys(project)
+        .unwrap()
+        .expect("a record");
     // The literal key name: the #9123 credential-test scan reads a `_KEY`
     // identifier beside an env mutation as a credential test.
     assert_eq!(
         written["autoMemoryEnabled"],
         serde_json::Value::Bool(false),
-        "auto memory must stay off with trusty-memory down: {written}"
+        "auto memory must stay off with trusty-memory down: {written:?}"
     );
 
     // An already-off project beside a dead daemon needs no repair at all.
@@ -437,13 +440,19 @@ fn auto_memory_repair_dry_run_writes_nothing() {
         body,
         "a dry run must leave the file byte-identical"
     );
+    assert_eq!(
+        crate::core::session_launch::read_launch_keys(project).unwrap(),
+        None,
+        "a dry run must write no record"
+    );
 }
 
 #[test]
 fn auto_memory_repair_is_silent_when_already_false() {
     let tmp = tempfile::TempDir::new().unwrap();
     let project = tmp.path();
-    write_settings(project, ".claude/settings.json", OFF);
+    // #12077: the record is the tm-owned target the repair reads.
+    write_record(project, serde_json::json!({"autoMemoryEnabled": false}));
 
     assert!(repair_auto_memory(project, RepairMode::Apply).is_empty());
 }
@@ -452,10 +461,14 @@ fn auto_memory_repair_is_silent_when_already_false() {
 fn auto_memory_repair_reports_a_write_failure() {
     // Fail-open guard: a repair that could not write must never come back as a
     // success. A DIRECTORY where `settings.json` belongs makes the write fail
-    // deterministically without depending on permission bits.
+    // deterministically without depending on permission bits. #12077: the
+    // record is what the repair writes.
     let tmp = tempfile::TempDir::new().unwrap();
     let project = tmp.path();
-    std::fs::create_dir_all(project.join(".claude").join("settings.json")).unwrap();
+    std::fs::create_dir_all(crate::core::session_launch::launch_keys_record_path(
+        project,
+    ))
+    .unwrap();
 
     let steps = repair_auto_memory(project, RepairMode::Apply);
 
