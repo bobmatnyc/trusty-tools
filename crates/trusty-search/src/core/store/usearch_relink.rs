@@ -98,6 +98,7 @@ pub(super) fn relink_stranded(
     dim: usize,
     threads: usize,
     label: &str,
+    path: &str,
     read: &ReadItem<'_>,
 ) -> Result<usize> {
     let started = Instant::now();
@@ -106,7 +107,7 @@ pub(super) fn relink_stranded(
     for _ in 0..MAX_PASSES {
         let stranded = find_stranded(index, n, dim, threads, read)?;
         if stranded.is_empty() {
-            return Ok(finish(relinked, 0, label, started));
+            return Ok(finish(relinked, 0, label, path, started));
         }
         for (i, key) in stranded {
             let Some(read_key) = read(i, &mut buffer)? else {
@@ -123,19 +124,24 @@ pub(super) fn relink_stranded(
         }
     }
     let left = find_stranded(index, n, dim, threads, read)?.len();
-    Ok(finish(relinked, left, label, started))
+    Ok(finish(relinked, left, label, path, started))
 }
 
 /// Log the sweep's outcome (silent when nothing was stranded) and pass the
-/// count through.
-fn finish(relinked: usize, left: usize, label: &str, started: Instant) -> usize {
+/// count through. `path` is the index's snapshot file, so a warning names the
+/// index it concerns.
+/// Test: `super::relink_warn_11891_tests::the_relink_warnings_name_the_index_path`.
+fn finish(relinked: usize, left: usize, label: &str, path: &str, started: Instant) -> usize {
+    // #11891: `path` names the index; `label` alone (`f16`) named none.
     if left > 0 {
         tracing::warn!(
+            path = %path,
             "usearch: {left} vectors still stranded after {MAX_PASSES} re-link passes at {label} (#9450)"
         );
     }
     if relinked > 0 {
         tracing::warn!(
+            path = %path,
             "usearch: re-linked {relinked} stranded vectors after rebuild at {label} \
              in {} ms (#9450)",
             started.elapsed().as_millis()

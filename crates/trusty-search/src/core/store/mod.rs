@@ -34,6 +34,9 @@ mod compact_9450_tests;
 // #9450: the post-rebuild reachability sweep, with forced strandings.
 #[cfg(test)]
 mod relink_9450_tests;
+// #11891: the re-link warnings name the index's snapshot path.
+#[cfg(test)]
+mod relink_warn_11891_tests;
 #[cfg(test)]
 mod tests_close_8232;
 // #8778: a rewrite that collapses ids leaves no orphan vector.

@@ -174,12 +174,13 @@ fn extract_vectors(
 pub(super) async fn build_from_snapshot(
     snapshot: VectorSnapshot,
     label: String,
+    path: String,
     fault: RebuildFault,
 ) -> Result<(Index, usize)> {
     tokio::task::spawn_blocking(move || -> Result<(Index, usize)> {
         let (n, dim) = (snapshot.keys.len(), snapshot.dim);
         let rebuilt = new_rebuild_index(dim, snapshot.kind, n, &label)?;
-        let missing = add_parallel(&rebuilt, n, dim, &label, &fault, &|i, buffer| {
+        let missing = add_parallel(&rebuilt, n, dim, &label, &path, &fault, &|i, buffer| {
             if !snapshot.present[i] {
                 return Ok(None);
             }
