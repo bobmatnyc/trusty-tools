@@ -745,6 +745,8 @@ pub(super) async fn run_reindex(
         quarantine,
         mem_limit,
         force,
+        // #10664: only a run that re-embedded every file may stamp the embedder.
+        full_rebuild: crate::core::embedder_identity::should_stamp(force, hashes_loaded),
         // #3979: a resumed run inherits chunks whose vectors only ever reached
         // the staged HNSW snapshot, so `finish` must run a vector catch-up.
         resumed,

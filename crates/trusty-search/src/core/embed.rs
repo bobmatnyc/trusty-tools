@@ -100,6 +100,17 @@ pub trait Embedder: Send + Sync {
         false
     }
 
+    /// The model, dimension and precision this embedder produces (#10664).
+    ///
+    /// Why: a build stamps it into the corpus and a load compares it, so a
+    /// store holding another embedder's vectors is reported.
+    /// What: default `None` (identity not exposed). `SwitchableEmbedder`, the
+    /// daemon's installed embedder, reports its live `ActiveBackend`.
+    /// Test: `switchable_reports_the_active_backend_identity`.
+    fn identity(&self) -> Option<crate::core::embedder_identity::EmbedderIdentity> {
+        None
+    }
+
     /// Longest input, in tokens including special tokens, this embedder
     /// encodes before it truncates (#9284).
     ///

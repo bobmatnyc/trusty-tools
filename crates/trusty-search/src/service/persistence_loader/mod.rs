@@ -295,6 +295,8 @@ pub async fn build_indexer_from_entry(
     // background. Not for a quarantined index, which writes nothing (#4226).
     if !indexer.corpus_open_failed {
         heal_target.spawn_heal_on_load(index_id.clone(), indexer.reindex_staging_probe());
+        // #10664: report-only — a mismatched or unreadable stamp WARNs and the load continues.
+        indexer.report_embedder_identity_at_load().await;
     }
     restore_corpus_for_entry(&mut indexer, entry).await;
     Ok(indexer)

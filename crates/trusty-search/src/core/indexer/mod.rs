@@ -40,7 +40,9 @@ mod batch_remove;
 pub(crate) mod corpus_fault;
 // #8167/#8232: closing an index's files when it is deleted.
 mod delete_close;
+// #10664: the embedder-identity stamp, compared at load and in status.
 pub(crate) mod docs_penalty;
+mod embedder_identity;
 // #6581: the migration-in-progress window and the error a query lands on there.
 mod files;
 // #8266: grep's file set, read without rehydrating an evicted corpus.

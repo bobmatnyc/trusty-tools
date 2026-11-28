@@ -24,6 +24,8 @@
 
 pub mod contrib;
 mod corpus_ops;
+// #10664: which embedder produced this corpus's vectors.
+mod embedder_stamp;
 // #10738: the identity stamp and pending-bump marker in `_meta`.
 mod identity_meta;
 // #10110: range reads and one-transaction deletes for a batch removal.

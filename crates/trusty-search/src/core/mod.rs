@@ -8,6 +8,8 @@ pub mod concept_cluster;
 pub mod corpus;
 pub mod corpus_recovery;
 pub mod embed;
+// #10664: embedder identity stamp and its load-time comparison.
+pub mod embedder_identity;
 // #6524: the embedding pause gate and the per-index file-change feed.
 pub mod embed_pause;
 pub mod entity;

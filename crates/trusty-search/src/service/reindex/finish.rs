@@ -131,6 +131,9 @@ pub(super) struct FinishCtx {
     pub(super) quarantine: Option<ReindexQuarantine>,
     pub(super) mem_limit: Option<u64>,
     pub(super) force: bool,
+    /// #10664: the run started with an empty hash cache or was forced, so
+    /// every walked file was re-embedded and the embedder identity may be stamped.
+    pub(super) full_rebuild: bool,
     /// Issue #3979: this run adopted an interrupted run's staging corpus.
     ///
     /// Why: the chunks it inherited were embedded into the previous run's
@@ -200,6 +203,7 @@ pub(super) async fn finish_reindex(
         quarantine,
         mem_limit,
         force,
+        full_rebuild,
         resumed,
         producer_failure,
     } = ctx;
@@ -492,6 +496,10 @@ pub(super) async fn finish_reindex(
         // next boot compares against what was actually indexed, not live HEAD.
         crate::service::boot_markers::persist_indexed_head_sha(&handle.id.0, new_sha.as_deref());
         *handle.indexed_head_sha.write().await = new_sha;
+        // #10664: a full rebuild records the embedder that produced its vectors.
+        if full_rebuild && !handle.skip_vector && !handle.lexical_only {
+            handle.indexer.read().await.stamp_embedder_identity().await;
+        }
         // Issue #878: stamp the authoritative last-indexed timestamp.
         *handle.last_indexed_at.write().await = Some(now_rfc3339());
         ReindexStatus::Complete
