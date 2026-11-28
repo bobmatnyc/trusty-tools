@@ -7,10 +7,13 @@
 //! What: each test owns a scratch HOME and its own tmux server directory
 //! (`TMUX_TMPDIR`, with `TMUX_SOCKET` removed), and puts a fake `claude` and
 //! a fake `launchctl` (#11961) first on `PATH`; the server is
-//! killed when the test ends. Nothing reaches the operator's home or tmux.
+//! killed when the test ends, or by a watchdog when the test process is
+//! hard-killed (#11631). Nothing reaches the operator's home or tmux.
 //! Test: `cargo test -p trusty-mpm --test integration tm_fleet::`.
 
 use std::ffi::OsStr;
+// #11631: `process_group` for the FleetEnv watchdog.
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use trusty_common::install_paths::MPM_DIR_NAME;
@@ -23,9 +26,60 @@ mod fake_claude;
 
 /// A scratch home, a private tmux server directory and a fake `claude`.
 struct FleetEnv {
+    // #11631: declared first, so the watchdog is reaped before the dirs go.
+    _watchdog: Watchdog,
     home: tempfile::TempDir,
     tmux_dir: tempfile::TempDir,
     bin: tempfile::TempDir,
+}
+
+/// Ends a [`FleetEnv`]'s tmux server and scratch dirs when the test process
+/// dies without running `Drop` (#11631).
+///
+/// Why: a SIGKILL of the test process skips `Drop`; the tmux server, reparented
+/// to init, kept the Architect poller running for hours.
+/// What: a `sh` in its own process group reads its stdin, a pipe whose only
+/// write end this process holds (std opens it close-on-exec). Any death of
+/// this process closes the pipe; the `sh` then runs `kill-server` on the
+/// environment's socket and removes the three dirs. `Drop` kills the `sh`
+/// first, so a normal test end leaves the cleanup to `FleetEnv`'s own `Drop`.
+/// Test: `a_killed_fleet_test_leaves_no_tmux_server_11631`.
+struct Watchdog {
+    sh: std::process::Child,
+    // Held, never written: dropping it on process death is the signal.
+    _pipe: std::process::ChildStdin,
+}
+
+impl Watchdog {
+    fn spawn(tmux_dir: &Path, dirs: [&Path; 3]) -> Self {
+        let mut sh = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                "read _ignored; tmux -S \"$TMUX_TMPDIR/tmux-$(id -u)/default\" kill-server \
+                 >/dev/null 2>&1; rm -rf \"$1\" \"$2\" \"$3\"",
+            )
+            .arg("fleet-watchdog")
+            .args(dirs)
+            .env("TMUX_TMPDIR", tmux_dir)
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // #11631: a process-group kill of the test must not take it too.
+            .process_group(0)
+            .spawn()
+            .expect("spawn the fleet watchdog");
+        let pipe = sh.stdin.take().expect("watchdog stdin");
+        Self { sh, _pipe: pipe }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        let _ = self.sh.kill();
+        let _ = self.sh.wait();
+    }
 }
 
 impl FleetEnv {
@@ -73,13 +127,18 @@ impl FleetEnv {
             ),
         )
         .expect("fake launchctl");
+        let home = tempfile::tempdir().expect("scratch home");
+        // Short path: tmux refuses a socket path over `sun_path` (104 bytes).
+        let tmux_dir = tempfile::Builder::new()
+            .prefix("tmf")
+            .tempdir_in("/tmp")
+            .expect("tmux dir");
+        // #11631: Drop alone left the server running after a hard kill.
+        let watchdog = Watchdog::spawn(tmux_dir.path(), [home.path(), tmux_dir.path(), bin.path()]);
         Self {
-            home: tempfile::tempdir().expect("scratch home"),
-            // Short path: tmux refuses a socket path over `sun_path` (104 bytes).
-            tmux_dir: tempfile::Builder::new()
-                .prefix("tmf")
-                .tempdir_in("/tmp")
-                .expect("tmux dir"),
+            _watchdog: watchdog,
+            home,
+            tmux_dir,
             bin,
         }
     }
@@ -420,6 +479,116 @@ impl Drop for FleetEnv {
             .env_remove("TMUX_SOCKET")
             .output();
     }
+}
+
+/// Where [`fleet_env_holder_helper_11631`] writes its tmux dir (#11631).
+const HOLDER_OUT_ENV: &str = "TM_TEST_11631_HOLDER_OUT";
+
+/// `tmux -S <dir's default socket> <args>`, with no inherited server.
+fn tmux_on_socket(tmux_dir: &Path, args: &[&str]) -> std::process::ExitStatus {
+    let uid = Command::new("id").arg("-u").output().expect("id -u");
+    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_owned();
+    let socket = tmux_dir.join(format!("tmux-{uid}")).join("default");
+    Command::new("tmux")
+        .arg("-S")
+        .arg(socket)
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_SOCKET")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run tmux")
+}
+
+/// The process [`a_killed_fleet_test_leaves_no_tmux_server_11631`] SIGKILLs:
+/// holds a [`FleetEnv`] with a live tmux server until it is killed. A no-op
+/// unless that test set [`HOLDER_OUT_ENV`].
+#[test]
+#[ignore = "a child-process helper; a no-op when run directly"]
+fn fleet_env_holder_helper_11631() {
+    let Some(out) = std::env::var_os(HOLDER_OUT_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let env = FleetEnv::new();
+    let started = Command::new("tmux")
+        .args(["new-session", "-d", "-s", "hold-11631", "sleep 600"])
+        .env("TMUX_TMPDIR", env.tmux_dir.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_SOCKET")
+        .status()
+        .expect("run tmux");
+    assert!(started.success(), "tmux new-session hold-11631");
+    let tmp = out.with_extension("tmp");
+    std::fs::write(&tmp, env.tmux_dir.path().as_os_str().as_encoded_bytes()).expect("out");
+    std::fs::rename(&tmp, &out).expect("publish out");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+/// Kills and reaps its child on drop, panic included (#11631).
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// #11631: a test process SIGKILLed while it holds a [`FleetEnv`] leaves no
+/// tmux server on that environment's socket and no tmux dir. Red before
+/// #11631, whose only cleanup was `Drop`, which a SIGKILL skips.
+#[test]
+fn a_killed_fleet_test_leaves_no_tmux_server_11631() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let out = scratch.path().join("holder-tmux-dir");
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    // #11631: a panic before the SIGKILL below must still end the holder, or
+    // its tmux server and watchdog outlive the test.
+    let mut holder = Reaped(
+        Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg(format!("{module}::fleet_env_holder_helper_11631"))
+            .args(["--ignored", "--test-threads=1", "-q"])
+            .env(HOLDER_OUT_ENV, &out)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the FleetEnv holder"),
+    );
+    // Wait on the holder's own state: its marker, or its exit.
+    while !out.exists() {
+        if let Some(status) = holder.0.try_wait().expect("holder status") {
+            panic!("the holder exited {status} before it held a FleetEnv");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let tmux_dir = PathBuf::from(std::fs::read_to_string(&out).expect("holder tmux dir"));
+    assert!(
+        tmux_on_socket(&tmux_dir, &["has-session"]).success(),
+        "the holder's server is not up"
+    );
+
+    holder.0.kill().expect("SIGKILL the holder");
+    let _ = holder.0.wait();
+
+    // The watchdog's cleanup is a fixed short script; 30 s bounds a hung one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut alive = true;
+    while std::time::Instant::now() < deadline {
+        alive = tmux_on_socket(&tmux_dir, &["has-session"]).success() || tmux_dir.exists();
+        if !alive {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if alive {
+        // Leave nothing behind on the red path either.
+        let _ = tmux_on_socket(&tmux_dir, &["kill-server"]);
+        let _ = std::fs::remove_dir_all(&tmux_dir);
+    }
+    assert!(!alive, "a tmux server or {tmux_dir:?} outlived the SIGKILL");
 }
 
 fn text(out: &Output) -> String {

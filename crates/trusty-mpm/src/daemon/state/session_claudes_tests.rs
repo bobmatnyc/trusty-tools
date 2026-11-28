@@ -1122,28 +1122,59 @@ fn a_malformed_resume_id_grants_nothing_8983() {
 
 /// Error arm (Fail-Open Check): a resume on a workspace tmux server reads the
 /// granted pane's `claude` on that server, and the default server is never
-/// asked. The pane's pid is this test process; its child `claude` (the test
-/// binary reached through a link named `claude`) is the one found. Red on
-/// 2df3760494, whose grant had no socket and read the default server.
+/// asked. The pane's pid is a `sh` this test starts; its one child `claude`
+/// (the test binary reached through a link named `claude`) is the one found.
+/// Red on 2df3760494, whose grant had no socket and read the default server.
+/// #12084: red too when the pane pid is this test process, because the decoy
+/// `claude` child of the test process has the lower pid and is found first.
 #[serial_test::serial]
 #[tokio::test]
 async fn a_resume_rebind_reads_the_claude_on_the_grants_own_server() {
+    use std::io::BufRead as _;
     let dir = crate::test_support::hermetic_temp_dir();
     // #11061: not a `/bin/sleep` link, which uutils `sleep` refuses.
     use crate::test_support::fake_claude;
     let link = fake_claude::sleeper_named(dir.path(), "claude");
-    let mut claude = std::process::Command::new(&link)
+    // #12084: a stray `claude` child of the test process, as a parallel test
+    // leaves one; the pane's own `claude` must be read, never this one.
+    let mut decoy = std::process::Command::new(&link)
         .args(fake_claude::argv())
         .env(fake_claude::SECS_ENV, "30")
+        .stdout(std::process::Stdio::null())
         .spawn()
-        .expect("spawn claude");
+        .expect("spawn decoy claude");
+    // #12084: the pane is a `sh` of this test's own, not the shared test
+    // process, so its only `claude` child is the one this test started.
+    let mut pane = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("\"$0\" \"$@\" >/dev/null & echo $!; wait")
+        .arg(&link)
+        .args(fake_claude::argv())
+        .env(fake_claude::SECS_ENV, "30")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn pane shell");
+    let mut first = String::new();
+    std::io::BufReader::new(pane.stdout.take().expect("pane stdout"))
+        .read_line(&mut first)
+        .expect("read the pane's claude pid");
+    let pid: u32 = first.trim().parse().expect("the pane's claude pid");
+    // #12084: `$!` is known at fork, before the exec names the child `claude`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !crate::core::process::process_name_is_claude(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pane's child {pid} never ran as claude"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let log = dir.path().join("calls.log");
     let script = format!(
         "#!/bin/sh\necho \"$*\" >> '{}'\n\
          if [ \"$1\" = -L ] && [ \"$2\" = tm-ws-resume ] && [ \"$3\" = display-message ]; then \
          echo {}; fi\nexit 0\n",
         log.display(),
-        std::process::id()
+        pane.id()
     );
     let bin = dir.path().join("fake-tmux");
     trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
@@ -1167,9 +1198,15 @@ async fn a_resume_rebind_reads_the_claude_on_the_grants_own_server() {
         })
     })
     .await;
-    let pid = claude.id();
-    let _ = claude.kill();
-    let _ = claude.wait();
+    // #12084: end the pane's `claude` first, so the `sh` waiting on it exits.
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let _ = pane.kill();
+    let _ = pane.wait();
+    let _ = decoy.kill();
+    let _ = decoy.wait();
 
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(got.map(|c| c.pid), Ok(pid), "{calls}");
