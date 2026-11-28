@@ -106,13 +106,19 @@ pub struct PathParams {
 /// #11253: `path` is canonicalized first, so a symlink, a trailing slash or a
 /// case variant of one checkout gives one name, one record and one map key.
 ///
+/// #11998: a kept record that is decommissioned or archived stays so, nothing
+/// unparks, and `inactive_reason` names a session start as the way back. The
+/// key is absent for an active project, and the status stays `200`.
+///
 /// # Errors
 ///
 /// [`DaemonError::InvalidRequest`] when `path` cannot be canonicalized or has
 /// no readable `origin` remote; [`DaemonError::Internal`], carrying the
 /// store's error text, when the registry-B write fails.
 ///
-/// Test: `parity_projects_register_agrees_across_transports`,
+/// Test: `post_projects_keeps_a_decommissioned_project_and_names_the_way_back_11998`,
+/// `post_projects_names_the_reason_only_while_the_project_is_inactive_11998`,
+/// `parity_projects_register_agrees_across_transports`,
 /// `register_project_op_disables_git_auto_maintenance`,
 /// `register_project_op_backfills_pre_existing_worktrees_7588`,
 /// `register_project_op_adopts_under_the_owning_projects_name_7588`,
@@ -143,7 +149,12 @@ pub async fn register_project_op(
     let name = crate::project::project_owning_checkout(&store_dir, &path)
         .unwrap_or_else(|| crate::core::project::name_from_path(&path));
     // #10586: persist first, so a failed write leaves no in-memory project behind.
-    let kept_existing = persist_registry_record(state, &name, &repo_url).await?;
+    let kept = persist_registry_record(state, &name, &repo_url).await?;
+    // #11998: a kept record keeps its flags (#10988); a write is always active.
+    let inactive_reason = kept
+        .as_ref()
+        .and_then(crate::daemon::project_adoption::inactive_reason);
+    let kept_existing = kept.map(|p| KeptRegistryRecord::redacted(&p.name, &p.repo_url));
     let info = state.register_project(path.clone());
     let report = crate::project::backfill_checkout(&store_dir, &name, &path, chrono::Utc::now());
     if report != crate::project::BackfillReport::default() {
@@ -161,6 +172,7 @@ pub async fn register_project_op(
     Ok(RegisterProjectResponse {
         info,
         kept_existing,
+        inactive_reason,
     })
 }
 
@@ -210,8 +222,8 @@ fn origin_url_for_init(path: &Path) -> Result<String, DaemonError> {
 /// elsewhere or duplicates a repo.
 /// What: one [`crate::project::ProjectRegistry::register_unless_present`] call,
 /// so the existence check and the insert share one lock. `Ok(None)` when the
-/// record was written; `Ok(Some(kept))` names the record kept instead, its
-/// `repo_url` without userinfo. Every store error, `DuplicateProjectKey`
+/// record was written; `Ok(Some(kept))` is the full record kept instead, its
+/// flags intact (#11998); the caller redacts it. Every store error, `DuplicateProjectKey`
 /// included, reaches the caller as a 500 that carries the store's own text.
 /// Test: `project_init_then_registry_list_shows_the_project_10586`,
 /// `project_init_keeps_an_existing_registry_record_10586`,
@@ -223,7 +235,7 @@ async fn persist_registry_record(
     state: &Arc<DaemonState>,
     name: &str,
     repo_url: &str,
-) -> Result<Option<KeptRegistryRecord>, DaemonError> {
+) -> Result<Option<Project>, DaemonError> {
     let registry = state.project_registry().await;
     let project = Project {
         name: name.to_string(),
@@ -246,7 +258,7 @@ async fn persist_registry_record(
     // #10586: a kept record is reported, never a silent success; the
     // `DuplicateProjectKey` arm is gone, so that error is a 500 like the rest.
     match registry.register_unless_present(project).await {
-        Ok(kept) => Ok(kept.map(|p| KeptRegistryRecord::redacted(&p.name, &p.repo_url))),
+        Ok(kept) => Ok(kept),
         Err(e) => {
             tracing::warn!(error = %e, project = %name, "#10586: project registry write failed");
             Err(DaemonError::Internal(format!(

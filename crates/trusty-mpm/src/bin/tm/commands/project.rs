@@ -92,11 +92,8 @@ pub(crate) async fn project(
             for line in &report {
                 println!("  {line}");
             }
-            let name = &body.info.name;
-            println!("registered project '{name}' at {}", path.display());
-            // #10586: a kept record is named, never reported as a silent write.
-            if let Some(kept) = &body.kept_existing {
-                println!("project registry: {}", kept.notice());
+            for line in init_report_lines(&body, &path) {
+                println!("{line}");
             }
         }
         ProjectAction::List => {
@@ -133,6 +130,35 @@ pub(crate) async fn project(
         ProjectAction::Unadopt { paths, dry_run } => unadopt_cmd(&paths, dry_run)?,
     }
     Ok(())
+}
+
+/// The lines `tm project init` prints after the daemon registered `path`.
+///
+/// Why: #11998 — init of a decommissioned or archived project leaves it
+/// inactive, so the operator must see the daemon's reason, which names how to
+/// reactivate it. #10586: a kept record is named, never a silent write.
+/// What: the `registered project '<name>' at <path>` line, then
+/// `project registry: <notice>` for a kept record, then `  note: <reason>`
+/// when the daemon sent `inactive_reason`.
+/// Test: `init_report_lines_print_the_inactive_reason_11998`,
+/// `init_report_lines_for_an_active_project_print_no_reason_11998`.
+fn init_report_lines(
+    body: &trusty_mpm::core::project::RegisterProjectResponse,
+    path: &std::path::Path,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "registered project '{}' at {}",
+        body.info.name,
+        path.display()
+    )];
+    if let Some(kept) = &body.kept_existing {
+        lines.push(format!("project registry: {}", kept.notice()));
+    }
+    // #11998: the daemon's reason names how to reactivate the project.
+    if let Some(reason) = &body.inactive_reason {
+        lines.push(format!("  note: {reason}"));
+    }
+    lines
 }
 
 /// `tm project unadopt` — ledger-only removal of adopted worktrees (#10592).
@@ -346,6 +372,50 @@ pub(crate) fn scaffold_project_dir(project: &std::path::Path) -> anyhow::Result<
         report.push(format!("\u{2713} {}", config.display()));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod init_report_tests {
+    use super::init_report_lines;
+    use trusty_mpm::core::project::{ProjectInfo, RegisterProjectResponse};
+
+    /// The `POST /projects` body the daemon sends, decoded the way init
+    /// decodes it, with `inactive_reason` set when given.
+    fn response(inactive_reason: Option<&str>) -> RegisterProjectResponse {
+        let mut wire = serde_json::to_value(ProjectInfo::new("/work/widget")).expect("encode");
+        if let Some(reason) = inactive_reason {
+            wire["inactive_reason"] = serde_json::Value::from(reason);
+        }
+        serde_json::from_value(wire).expect("decode the daemon's body")
+    }
+
+    /// #11998: init of a decommissioned project prints the success line AND
+    /// the daemon's reason, so the operator learns how to reactivate it.
+    #[test]
+    fn init_report_lines_print_the_inactive_reason_11998() {
+        let reason = "project widget is decommissioned; start a session for it";
+        let lines = init_report_lines(
+            &response(Some(reason)),
+            std::path::Path::new("/work/widget"),
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "registered project 'widget' at /work/widget".to_string(),
+                format!("  note: {reason}"),
+            ]
+        );
+    }
+
+    /// #11998: an active project's init prints the success line only.
+    #[test]
+    fn init_report_lines_for_an_active_project_print_no_reason_11998() {
+        let lines = init_report_lines(&response(None), std::path::Path::new("/work/widget"));
+        assert_eq!(
+            lines,
+            vec!["registered project 'widget' at /work/widget".to_string()]
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
