@@ -7,7 +7,8 @@
 //! What: spawns the hook with a scratch `$HOME` (its config is the Architect
 //! allowlist), `CLAUDE_PROJECT_DIR` naming a temp Architect project and an
 //! unreachable daemon, on `SessionStart` (resume) and `UserPromptSubmit`
-//! payloads. Every call must exit 0.
+//! payloads. Every call must exit 0. One test checks the three rule kinds the
+//! issue names (reply-footer, model-mandate, pacing) reach the block.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_standing_rules_10960::`.
 
 use crate::common;
@@ -131,6 +132,48 @@ fn an_architect_session_gets_the_rules_at_resume_and_per_turn() {
         );
         assert!(out.get("systemMessage").is_none(), "{out}");
         assert!(!stderr.contains("standing rules"), "{stderr}");
+    }
+}
+
+/// The three rule kinds #10960's acceptance criteria name, as (kind, line).
+const RULE_KINDS: [(&str, &str); 3] = [
+    (
+        "reply-footer",
+        "- Every reply to the owner ends with one line on Fable use.\n",
+    ),
+    (
+        "model-mandate",
+        "- Hard reviews, diagnosis and plans go to one Fable helper; an idle Fable slot with queued work is drift.\n",
+    ),
+    (
+        "pacing",
+        "- Ordinary cases first; no extra verification paperwork on fake-clock runs.\n",
+    ),
+];
+
+/// Why: #10960's second acceptance criterion names the reply-footer,
+/// model-mandate and pacing rules; the verbatim test above proves only a
+/// generic two-line file.
+/// What: writes one line per kind to `local/standing-rules.md`, then checks on
+/// resume (`SessionStart`) and per turn that each line is in the block.
+/// Test: `the_injected_block_carries_the_footer_mandate_and_pacing_rules`.
+#[test]
+fn the_injected_block_carries_the_footer_mandate_and_pacing_rules() {
+    let rules: String = RULE_KINDS.iter().map(|(_, line)| *line).collect();
+    let s = session(true, Some(rules.as_bytes()));
+    for event in ["SessionStart", "UserPromptSubmit"] {
+        let (stdout, _) = run(&s, event);
+        let out = response(&stdout);
+        let block = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .and_then(|c| c.strip_prefix(HEADER))
+            .unwrap_or_else(|| panic!("a standing-rules block on {event}: {out}"));
+        for (kind, line) in RULE_KINDS {
+            assert!(
+                block.contains(line),
+                "the {kind} rule is missing on {event}: {block:?}"
+            );
+        }
     }
 }
 
