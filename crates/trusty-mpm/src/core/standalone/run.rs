@@ -360,10 +360,10 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     let content = crate::core::content_source::framework_content_for(&repo_path)
         .context("cannot compose the PM instructions")?;
     let cli = crate::core::session_launch::cli_launch(&content, &repo_path, None);
-    // #10102: the PM sandbox is written and verified, or `tm run` refuses, before
-    // the prompt file is written so a refusal leaves none behind.
-    let home = dirs::home_dir().context("no home directory resolved")?;
-    run_sandbox(&repo_path, &home, claude_config_dir, cli.profile)?;
+    // #10102: the sandbox step runs before the prompt file is written.
+    // #12077: enforcement is off; no home skips the step rather than refusing.
+    let home = dirs::home_dir();
+    run_sandbox(&repo_path, home.as_deref(), claude_config_dir, cli.profile)?;
 
     let prompt_file = crate::core::model_inject::write_pm_prompt_file_in(
         &std::env::temp_dir(),
@@ -416,16 +416,20 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
 /// same sandbox step as every other launch path.
 /// What: [`crate::core::session_launch::apply_launch_sandbox`] for `profile`'s
 /// role in `repo_path`, with `claude_config_dir` as the user tier. #12077:
-/// enforcement is off, so it writes nothing and refuses nothing.
+/// enforcement is off, so it writes nothing and refuses nothing; with no home
+/// resolved the step is skipped.
 /// Test: `run_sandbox_writes_no_sandbox_settings_12077`,
-/// `run_sandbox_leaves_a_local_override_untouched_12077`.
+/// `run_sandbox_leaves_a_local_override_untouched_12077`,
+/// `run_sandbox_goes_ahead_with_no_home_12077`.
 pub fn run_sandbox(
     repo_path: &Path,
-    home: &Path,
+    home: Option<&Path>,
     claude_config_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
 ) -> anyhow::Result<()> {
     use crate::core::session_launch as sl;
+    // #12077: no home is no sandbox refusal; there is nothing to apply.
+    let Some(home) = home else { return Ok(()) };
     let inputs = sl::launch_sandbox_inputs(repo_path, home);
     sl::apply_launch_sandbox(
         sl::sandbox_role_for(profile),

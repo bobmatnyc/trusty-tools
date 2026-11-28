@@ -23,7 +23,7 @@ fn fixture() -> (
 #[test]
 fn run_sandbox_writes_no_sandbox_settings_12077() {
     let (_tmp, repo, home, config) = fixture();
-    run_sandbox(&repo, &home, &config, SessionProfile::Pm).expect("not refused");
+    run_sandbox(&repo, Some(&home), &config, SessionProfile::Pm).expect("not refused");
     assert!(
         !repo.join(".claude/settings.json").exists(),
         "no project write"
@@ -40,6 +40,20 @@ fn run_sandbox_leaves_a_local_override_untouched_12077() {
     let local = repo.join(".claude/settings.local.json");
     let planted = r#"{"sandbox":{"enabled":false}}"#;
     std::fs::write(&local, planted).expect("plant");
-    run_sandbox(&repo, &home, &config, SessionProfile::Pm).expect("not refused");
+    run_sandbox(&repo, Some(&home), &config, SessionProfile::Pm).expect("not refused");
     assert_eq!(std::fs::read_to_string(&local).expect("read"), planted);
+}
+
+/// #12077: with no home resolved `tm run` goes ahead and no sandbox file is
+/// written.
+#[test]
+fn run_sandbox_goes_ahead_with_no_home_12077() {
+    let (_tmp, repo, _home, config) = fixture();
+    run_sandbox(&repo, None, &config, SessionProfile::Pm).expect("no home is not refused");
+    assert!(
+        !repo.join(".claude/settings.json").exists(),
+        "no project write"
+    );
+    assert!(!config.join("settings.json").exists(), "no user-tier write");
+    assert!(!repo.join(".trusty-mpm/sandbox-roles.json").exists());
 }
