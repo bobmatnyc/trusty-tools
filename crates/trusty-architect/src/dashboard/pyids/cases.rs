@@ -242,7 +242,8 @@ impl Driver<'_> {
 }
 
 /// `env`: set and unset variables for the cases after it.
-fn env_op(c: &PyValue, env: &mut BTreeMap<String, String>) {
+/// The driver's `env` op; #12029 P2e: the `owner_answers` mirror shares it.
+pub(crate) fn env_op(c: &PyValue, env: &mut BTreeMap<String, String>) {
     if let Some(PyValue::Dict(set)) = get(c, "set") {
         for (k, v) in set {
             env.insert(k.clone(), py_str(v));

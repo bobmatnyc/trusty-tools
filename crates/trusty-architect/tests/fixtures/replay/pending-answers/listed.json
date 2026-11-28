@@ -1,0 +1,36 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "store"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "store/items/D01.json": "{\"kind\": \"question\", \"status\": \"answered\", \"answer\": \"Yes\", \"answered_at\": \"2026-11-20T09:15:00Z\", \"version\": 1}",
+    "store/items/D02.json": "{\"kind\": \"question\", \"status\": \"answered\", \"answer\": \"Architect Do\", \"answered_at\": \"2026-11-20T09:16:00Z\", \"title\": \"do it\", \"version\": 1}",
+    "store/items/D03.json": "{\"kind\": \"question\", \"status\": \"cancelled\", \"cancelled_at\": \"2026-11-20T09:17:00Z\", \"cancel_note\": \"no\", \"version\": 1}",
+    "store/items/T01.json": "{\"kind\": \"task\", \"status\": \"open\", \"title\": \"task one\", \"session\": \"proj-a\", \"task\": \"il-1\", \"nudge_requested_at\": \"2026-11-20T09:18:00Z\", \"status_requested_at\": \"2026-11-20T09:19:00Z\", \"owner_actions\": [{\"action\": \"park\", \"at\": \"2026-11-20T09:20:00Z\", \"until\": \"2026-12-01\"}], \"version\": 1}",
+    "store/items/T02.json": "{\"kind\": \"task\", \"status\": \"open\", \"title\": \"task two\", \"nudge_requested_at\": \"2026-11-20T09:21:00Z\", \"version\": 1}",
+    "store/items/T03.json": "{\"kind\": \"task\", \"status\": \"done\", \"title\": \"task three\", \"owner_complete\": {\"at\": \"2026-11-20T09:22:00Z\"}, \"version\": 1}",
+    "store/meta/state.json": "{\"session_id\": \"S0c\", \"version\": 1}",
+    "store/sessions/S01.json": "{\"name\": \"proj-a\", \"command\": {\"status\": \"new\", \"type\": \"restart\", \"note\": \"again\", \"at\": \"2026-11-20T09:23:00Z\"}, \"version\": 1}"
+  },
+  "reads": [
+    "store/items/D01.json",
+    "store/items/D02.json",
+    "store/items/D03.json",
+    "store/items/T01.json",
+    "store/items/T02.json",
+    "store/items/T03.json",
+    "store/meta/state.json",
+    "store/sessions/S01.json"
+  ],
+  "stdout": "S0c:D01\tanswered\t2026-11-20T09:15:00Z\tYes\nS0c:D02\tarchitect_do\t2026-11-20T09:16:00Z\tdo it | task MISSING | session MISSING\nS0c:D03\tcancelled\t2026-11-20T09:17:00Z\tno\nS0c:T01\towner_park\t2026-11-20T09:20:00Z\tuntil 2026-12-01 (ledger il-1)\nS0c:T01\tnudge\t2026-11-20T09:18:00Z\tNUDGE T01: task one (relay to proj-a: check in and move it; then write nudge_cleared_at)\nS0c:T01\tstatus_request\t2026-11-20T09:19:00Z\tSTATUS T01: task one (write a status update, then status_at)\nS0c:T02\tnudge\t2026-11-20T09:21:00Z\tNUDGE T02: task two (relay to the owning PM: check in and move it; then write nudge_cleared_at)\nS0c:T03\towner_complete\t2026-11-20T09:22:00Z\ttask three\nS01\towner_command\t2026-11-20T09:23:00Z\tagain\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

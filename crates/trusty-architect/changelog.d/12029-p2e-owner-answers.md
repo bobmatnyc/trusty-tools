@@ -1,0 +1,2 @@
+Added
+- `dashboard::pyanswers`, the port of the Architect's `owner_answers.py` (the pending owner events of the store, with the ILIO trial split, `resolve_id` and the `qid` qualifier) and `pending-answers.py` (`--root` or `$DASHBOARD_ROOT`, one `<qid>\t<kind>\t<at>\t<text>` line per event, exit 1 when any, 0 when none, 2 on an unreadable store). Eight recordings of the frozen scripts replay clean (#12029).

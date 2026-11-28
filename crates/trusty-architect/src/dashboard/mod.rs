@@ -15,7 +15,8 @@
 //! exit classes) and [`verbs`] (one body per verb and the CLI's stdout),
 //! which the daemon, the MCP tool and `tm architect dashboard` share.
 //! #12029 P2d adds [`pyids`] and [`pyqual`], the `dashboard_ids.py` and
-//! `dashboard_qual.py` ports on the [`store::py`] store.
+//! `dashboard_qual.py` ports on the [`store::py`] store. #12029 P2e adds
+//! [`pyanswers`] (`owner_answers.py`, `pending-answers.py`).
 //! Test: `tests/dashboard_golden.rs`, `tests/dashboard_store.rs`,
 //! `tests/dashboard_tally.rs`, `tests/dashboard_case.rs`, `tests/dashboard_log.rs`,
 //! `tests/dashboard_hardening.rs`, `tests/dashboard_verbs.rs`.
@@ -30,6 +31,7 @@ mod error;
 pub mod ids;
 // #10063 PR 3: the method types and the verb bodies.
 pub mod pending;
+pub mod pyanswers; // See #12029 P2e
 pub mod pyderive; // See #12029 P2b
 pub mod pyids; // See #12029 P2d
 pub mod pyjsonl; // See #12029 P2b

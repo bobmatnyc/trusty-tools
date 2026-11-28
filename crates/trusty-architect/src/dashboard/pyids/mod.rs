@@ -21,6 +21,7 @@
 //! `a_failed_archive_skips_the_item_and_keeps_it`.
 
 mod cases;
+pub(crate) use cases::env_op;
 pub(crate) mod cli;
 #[cfg(test)]
 mod tests;
@@ -128,8 +129,13 @@ impl Ctx<'_> {
 
 /// `derive.snapshot(store, COLLECTIONS)`.
 pub(crate) fn snapshot(store: &PyStore) -> Result<PySnap, PyStoreError> {
+    snapshot_of(store, &ID_COLLECTIONS)
+}
+
+/// `derive.snapshot(store, colls)`; #12029 P2e: `owner_answers` reads its own list.
+pub(crate) fn snapshot_of(store: &PyStore, colls: &[&str]) -> Result<PySnap, PyStoreError> {
     let mut snap = PySnap::new();
-    for c in ID_COLLECTIONS {
+    for &c in colls {
         let docs = store.list_docs(&PyValue::Str(c.into()), None, None, false, None)?;
         let docs = docs.into_iter().map(|d| PyDoc {
             id: d.id,

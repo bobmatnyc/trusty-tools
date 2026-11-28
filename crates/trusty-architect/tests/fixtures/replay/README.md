@@ -672,3 +672,67 @@ $R record --clock 1795784400 --out $D/dashboard_qual/cases.json --seed $S/qual-c
 $R replay $D/dashboard_ids/*.json -- <target>/debug/examples/replay_port dashboard_ids
 $R replay $D/dashboard_qual/*.json -- <target>/debug/examples/replay_port dashboard_qual
 ```
+
+## owner_answers and pending-answers (#12029 P2e)
+
+Eight runs of the frozen Python reference (architect commit `0fbbc81eed`),
+recorded on 2026-11-28 with `--clock 1795784400` and replayed in
+`tests/replay_owner_answers.rs` against `examples/replay_port.rs`, which
+hands `owner_answers` to the library's driver mirror
+(`dashboard::pyanswers`, `replay_cases`) and `pending-answers` to the
+port's command line (`dashboard::pyanswers::cli`). Every store is
+synthetic. No recording declares fakes, and the command writes nothing.
+
+- `owner_answers/`: `driver.py CASES.json`, copied beside
+  `owner_answers.py`, `pending-answers.py`, `dashboard_derive.py`,
+  `dashboard_qual.py`, `dashboard_store.py`, `dashboard_jsonl.py`,
+  `dashboard_schema.py` and `ids36.py` as `oa_driver.py`; the default store
+  is `local/owner-queue` under the sandbox root. `cases` covers `pending`
+  on the default root with every event kind and every relay rule
+  (`relayed` true, a string and a blank string, `relayed_at`, a note
+  starting "Relayed" after a space, "Acknowledged"), multi-decision `subs`,
+  linked and unlinked Architect Do, self-test canaries (flag and title),
+  due, future and unparseable parks, clarify chips, parked items, the
+  frozen clock (no `now`), and the ILIO split under
+  `DASHBOARD_ACTOR=architect-ilio`; `qualified` (`S14` on the default root,
+  `meta/state`'s S id, bare on an unknown store, `owner_command` bare, an
+  existing `qid` replaced, a `meta/state` that is not an object);
+  `resolve_id` (bare, own, another store's S id); a jsonl store, the
+  other-format guards, a bad jsonl line, a corrupt document, a collection
+  that is a file and an unreadable directory (mode `000`, restored at the
+  end); and `main`, the script's `__main__` block: the default root,
+  `--root`, `$DASHBOARD_ROOT` (set, empty), the ILIO trial, the three exit
+  codes, `--help`, a missing value, an unknown flag and an abbreviation.
+- `pending-answers/`: the script's own command line on seeded stores:
+  `listed` and `env-root` (every per-kind line: Architect Do with missing
+  task and session, nudge with and without a session, a
+  `status_requested_at` request, the ledger suffix, `owner_command`'s bare
+  id, a session store's `S0c:` ids), `empty` (exit 0), `not-a-dir` (exit 2,
+  the `OSError` line), `help` and `bad-arg`.
+
+Not recorded: an `interactive` line from the command, whose text names the
+questions session (`tm-architect`), which the recorder refuses
+(`interactive_line_matches_the_script` pins it; the `pending` cases cover
+the event); a `StoreError` from the command, which ends the script in a
+traceback (the port prints its last line and exits 1); the default root
+outside the sandbox. The two live folds have their own synthetic corpora,
+checked against the frozen Python outside the replay tool:
+`tests/fixtures/owner_answers/alert_corpus.json`
+(`poller_owner_answers_follow_the_python_pending_rule`, the frozen
+`fleet-poll.py` alerts) and `tests/fixtures/dashboard/tally_corpus.json`
+(`tally_follows_the_python_rule_for_canaries_interactive_decisions_and_relays`,
+the frozen `dashboard-db.py tally`). Regenerate with the modules and the
+driver copied to a sandbox directory `P` and the case list and seed stores
+in `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/owner_answers/cases.json --seed $S/cases.json=cases.json \
+  -- $P/oa_driver.py cases.json
+$R record --clock 1795784400 --out $D/pending-answers/listed.json --seed $S/store=store \
+  -- $P/pending-answers.py --root store
+$R record --clock 1795784400 --out $D/pending-answers/env-root.json --seed $S/store=store \
+  --env DASHBOARD_ROOT=store -- $P/pending-answers.py
+$R replay $D/owner_answers/*.json -- <target>/debug/examples/replay_port owner_answers
+$R replay $D/pending-answers/*.json -- <target>/debug/examples/replay_port pending-answers
+```

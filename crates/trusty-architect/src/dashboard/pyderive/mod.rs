@@ -24,7 +24,7 @@ mod cases;
 mod counts;
 pub(crate) mod ids; // #12029 P2d: the live `dashboard::ids` runs these rules
 mod order;
-mod pending;
+pub(crate) mod pending; // #12029 P2e: `pending-answers` runs these rules
 pub(crate) mod stale;
 
 use std::collections::BTreeMap;

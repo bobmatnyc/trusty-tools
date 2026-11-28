@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "store",
+    "extra"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: pending-answers.py [-h] [--root ROOT]\npending-answers.py: error: unrecognized arguments: extra\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}
