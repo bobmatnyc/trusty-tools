@@ -44,6 +44,9 @@ pub(crate) struct SendHooks {
     pub(crate) park_text: Option<String>,
     /// #9843: the pane stays a bare shell; `runtime_ready` never reports up.
     pub(crate) runtime_never_starts: bool,
+    /// #12077: make this directory writable again when a session is killed, so
+    /// a test can fail one store write and let the teardown's own write land.
+    pub(crate) restore_on_kill: Option<PathBuf>,
 }
 
 /// The longest a parked send waits for [`AnswerDriver::release`].
@@ -138,6 +141,10 @@ impl ManagedTmuxDriver for AnswerDriver {
     }
 
     fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        let restore = self.hooks.lock().unwrap().restore_on_kill.clone();
+        if let Some(dir) = restore {
+            set_mode(&dir, 0o755);
+        }
         self.inner.kill_session(name)
     }
 
