@@ -32,13 +32,15 @@ fn foreign_uid_connection_is_refused_and_audited() {
     let (mut client, server) = UnixStream::pair().expect("socketpair");
     let broker = std::sync::Arc::clone(&rig.broker);
     let other = private::uid().wrapping_add(1);
-    let worker = std::thread::spawn(move || serve_connection(&broker, server, other, false));
     let req = common::rig::call(&rig.grant.id, "list_apps", "x", serde_json::json!({}));
+    // #11445: send and half-close BEFORE the worker starts; a refusing worker
+    // replies and drops its end at once, so a later write raced it into EPIPE.
     writeln!(client, "{req}").expect("send");
     // EOF after one line, so an admitted (fail-open) worker also returns.
     client
         .shutdown(std::net::Shutdown::Write)
         .expect("shutdown");
+    let worker = std::thread::spawn(move || serve_connection(&broker, server, other, false));
     let mut line = String::new();
     BufReader::new(&client).read_line(&mut line).expect("read");
     worker.join().expect("worker");

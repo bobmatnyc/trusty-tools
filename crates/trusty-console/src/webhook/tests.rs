@@ -2001,23 +2001,54 @@ async fn metrics_route_surfaces_exhausted_separately_from_live() {
 // the two halves are proven against each other rather than against a fixture
 // that agrees with whichever half was edited last.
 
+/// #11445: per-connection budget for the real listener and the relay that
+/// talks to it. The 1 s production default wraps the durable inbox write, and
+/// a slow fsync on a loaded host dropped the connection without a frame.
+const REAL_LISTENER_BUDGET: Duration = Duration::from_secs(30);
+
 /// Bind the real listener under `dir`, backed by `sink`, and return its socket.
 async fn spawn_real_listener(
     dir: &StdPath,
     sink: std::sync::Arc<dyn trusty_common::webhook_relay::DeliverySink>,
 ) -> PathBuf {
+    // #11445: capture the listener's warnings so a failed ack names its branch.
+    crate::test_log_capture::capture_logs();
     let socket = dir.join("sockets").join("real-target.sock");
     let listener = bind_hardened(&socket).expect("bind real listener");
+    // #11445: an explicit, generous read timeout instead of the 1 s default.
+    let options = trusty_common::webhook_relay::ServeOptions {
+        read_timeout: REAL_LISTENER_BUDGET,
+        ..trusty_common::webhook_relay::ServeOptions::default()
+    };
     tokio::spawn(async move {
         trusty_common::webhook_relay::serve_until(
             &listener,
             sink,
-            trusty_common::webhook_relay::ServeOptions::default(),
+            options,
             std::future::pending::<()>(),
         )
         .await;
     });
     socket
+}
+
+/// #11445: an ingress for the real listener whose relay outlasts the
+/// listener's own budget, so the listener, not the relay, decides a timeout.
+fn ingress_for_real_listener(spool: Spool, socket: PathBuf) -> WebhookIngress {
+    ingress_with(spool, socket, REAL_LISTENER_BUDGET + Duration::from_secs(5))
+        .with_backoff(no_backoff())
+}
+
+/// #11445: the real listener's not-acknowledged warnings captured so far, so a
+/// failed ack shows whether the timeout branch or the error branch fired.
+fn listener_warnings() -> String {
+    crate::test_log_capture::logged()
+        .lines()
+        .filter(|line| {
+            line.contains("not acknowledged") || line.contains("could not take durable ownership")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A sink that always refuses, standing in for a receiver whose disk is gone.
@@ -2053,7 +2084,8 @@ async fn delivery_reaches_the_real_target_and_is_spooled_there_before_the_ack() 
         .expect("open receiver inbox");
     let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
-    let ingress = ingress_for(spool.clone(), socket);
+    // #11445: a relay budget past the listener's, so the listener decides.
+    let ingress = ingress_for_real_listener(spool.clone(), socket);
 
     let outcome = ingress
         .ingest("review", &signed_headers(BODY, "e2e-real-1"), BODY)
@@ -2062,10 +2094,12 @@ async fn delivery_reaches_the_real_target_and_is_spooled_there_before_the_ack() 
     let IngestOutcome::Accepted { relay, .. } = outcome else {
         panic!("expected Accepted, got {outcome:?}");
     };
+    // #11445: on failure, show which listener branch dropped the connection.
     assert_eq!(
         relay,
         RelayOutcome::Acked,
-        "the real listener must acknowledge a verified delivery"
+        "the real listener must acknowledge a verified delivery; listener warnings:\n{}",
+        listener_warnings()
     );
 
     let held = inbox.list().expect("list the receiver inbox");
@@ -2266,7 +2300,8 @@ async fn health_is_degraded_while_a_delivery_sits_undrained() {
     let inbox = trusty_common::webhook_relay::Inbox::open(&inbox_root).expect("open inbox");
     let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
-    let ingress = ingress_for(spool.clone(), socket)
+    // #11445: a relay budget past the listener's, so the listener decides.
+    let ingress = ingress_for_real_listener(spool.clone(), socket)
         .with_inbox_roots(vec![("review".to_string(), inbox_root.clone())]);
 
     assert_eq!(
@@ -2281,7 +2316,13 @@ async fn health_is_degraded_while_a_delivery_sits_undrained() {
     let IngestOutcome::Accepted { relay, .. } = outcome else {
         panic!("expected Accepted, got {outcome:?}");
     };
-    assert_eq!(relay, RelayOutcome::Acked);
+    // #11445: on failure, show which listener branch dropped the connection.
+    assert_eq!(
+        relay,
+        RelayOutcome::Acked,
+        "listener warnings:\n{}",
+        listener_warnings()
+    );
     assert!(
         listing_of(&spool).pending.is_empty(),
         "the ack is what makes this test meaningful — console's copy is gone"
@@ -2317,7 +2358,8 @@ async fn health_is_error_while_a_target_holds_a_quarantined_delivery() {
     let inbox = trusty_common::webhook_relay::Inbox::open(&inbox_root).expect("open inbox");
     let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
-    let ingress = ingress_for(spool, socket)
+    // #11445: a relay budget past the listener's, so the listener decides.
+    let ingress = ingress_for_real_listener(spool, socket)
         .with_inbox_roots(vec![("review".to_string(), inbox_root.clone())]);
 
     let outcome = ingress
@@ -2326,7 +2368,13 @@ async fn health_is_error_while_a_target_holds_a_quarantined_delivery() {
     let IngestOutcome::Accepted { relay, .. } = outcome else {
         panic!("expected Accepted, got {outcome:?}");
     };
-    assert_eq!(relay, RelayOutcome::Acked);
+    // #11445: on failure, show which listener branch dropped the connection.
+    assert_eq!(
+        relay,
+        RelayOutcome::Acked,
+        "listener warnings:\n{}",
+        listener_warnings()
+    );
 
     // The target's drain gives up on it.
     let held = inbox.list().expect("list");
