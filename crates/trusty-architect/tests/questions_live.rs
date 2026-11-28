@@ -221,21 +221,35 @@ fn start_runs_questions_rc_in_process_unless_arch_q_rc_names_a_script() {
     assert_eq!(o.code, 0);
 }
 
-/// Requirement 4: a tmux call that fails or a write that fails is exit 1
-/// and leaves the state file as it was.
-#[test]
-fn rc_fails_closed_on_a_failed_tmux_call_or_write() {
+/// A temp root for the `questions_rc` failure tests: an `old` state file, an
+/// empty queue, an empty store and no `scripts/` helpers.
+fn rc_root() -> (tempfile::TempDir, PathBuf) {
     let root = tempfile::tempdir().expect("temp dir");
     let r = root.path();
-    let state = r.join("inbox/questions-rc.json");
     std::fs::create_dir_all(r.join("inbox")).expect("inbox");
     std::fs::create_dir_all(r.join("scripts")).expect("scripts");
-    std::fs::write(&state, "old").expect("old state");
+    std::fs::create_dir_all(r.join("local/owner-queue/items")).expect("store");
+    std::fs::write(r.join("inbox/questions-rc.json"), "old").expect("old state");
     std::fs::write(r.join("inbox/interactive-queue.txt"), "").expect("queue");
-    let env = env_of(vec![("ARCH_Q_SESSION", "qna-alpha".into())]);
-    let state_is_old = || std::fs::read_to_string(&state).expect("state") == "old";
+    let state = r.join("inbox/questions-rc.json");
+    (root, state)
+}
 
-    // tmux cannot start.
+fn state_is_old(state: &Path) -> bool {
+    std::fs::read_to_string(state).expect("state") == "old"
+}
+
+fn rc_env() -> impl Fn(&str) -> Option<String> {
+    env_of(vec![("ARCH_Q_SESSION", "qna-alpha".into())])
+}
+
+/// Requirement 4: a tmux that cannot start is exit 1 and leaves the state
+/// file as it was.
+#[test]
+fn rc_exits_1_and_keeps_the_state_file_when_tmux_cannot_start() {
+    let (root, state) = rc_root();
+    let r = root.path();
+    let env = rc_env();
     let gone = TmuxCli::private(r.join("no-such-tmux"), Socket::Name("p".into()));
     let o = rc::run(&[], &rc_options(r, gone, &env));
     assert_eq!(o.code, 1, "{}", o.stderr);
@@ -244,20 +258,47 @@ fn rc_fails_closed_on_a_failed_tmux_call_or_write() {
         "{}",
         o.stderr
     );
-    assert!(state_is_old());
+    assert!(state_is_old(&state));
+}
 
-    // capture-pane exits non-zero (the script would read an empty pane).
+/// Why: divergence D1 — the frozen script reads a non-zero `capture-pane` as
+/// an empty pane and carries on; the port stops instead.
+/// What: `questions_rc` with a running session whose `capture-pane` exits 1
+/// prints nothing, exits 1 and leaves the state file as it was.
+/// Test: this test.
+#[test]
+fn rc_exits_1_and_keeps_the_state_file_on_a_failed_capture_pane() {
+    let (root, state) = rc_root();
+    let r = root.path();
+    let env = rc_env();
     let server = Server::new();
     server.answer("has-session", "", 0);
     server.answer("capture-pane", "", 1);
     let o = rc::run(&[], &rc_options(r, server.tmux(), &env));
     assert_eq!((o.code, o.stdout.as_str()), (1, ""), "{}", o.stderr);
-    assert!(state_is_old());
+    assert!(
+        o.stderr.contains("tmux capture-pane: exit 1"),
+        "{}",
+        o.stderr
+    );
+    assert!(state_is_old(&state));
+    assert!(
+        server.calls().iter().any(|c| c.contains("capture-pane")),
+        "{:?}",
+        server.calls()
+    );
+}
 
-    // The action script cannot start (none in scripts/).
-    std::fs::create_dir_all(r.join("local/owner-queue/items")).expect("store");
+/// Requirement 4: an action script that cannot start (none in `scripts/`)
+/// is exit 1 and leaves the state file as it was.
+#[test]
+fn rc_exits_1_and_keeps_the_state_file_when_the_action_script_cannot_start() {
+    let (root, state) = rc_root();
+    let r = root.path();
+    let env = rc_env();
     let item = r#"{"kind": "question", "status": "interactive", "version": 1}"#;
     std::fs::write(r.join("local/owner-queue/items/D01.json"), item).expect("item");
+    let server = Server::new();
     server.answer("has-session", "", 1);
     let o = rc::run(&[], &rc_options(r, server.tmux(), &env));
     assert_eq!(o.code, 1, "{}", o.stderr);
@@ -266,11 +307,19 @@ fn rc_fails_closed_on_a_failed_tmux_call_or_write() {
         "{}",
         o.stderr
     );
-    assert!(state_is_old());
+    assert!(state_is_old(&state));
+}
 
-    // The state write fails: `<state>.tmp` is a directory.
-    std::fs::remove_file(r.join("local/owner-queue/items/D01.json")).expect("rm item");
+/// Requirement 4: a failed state write (`<state>.tmp` is a directory) is
+/// exit 1 after the count line, and the state file stays as it was.
+#[test]
+fn rc_exits_1_and_keeps_the_state_file_when_the_state_write_fails() {
+    let (root, state) = rc_root();
+    let r = root.path();
+    let env = rc_env();
     std::fs::create_dir(r.join("inbox/questions-rc.json.tmp")).expect("tmp dir");
+    let server = Server::new();
+    server.answer("has-session", "", 1);
     let o = rc::run(&[], &rc_options(r, server.tmux(), &env));
     assert_eq!(o.code, 1, "{}", o.stderr);
     assert!(o.stderr.contains("cannot write"), "{}", o.stderr);
@@ -279,50 +328,103 @@ fn rc_fails_closed_on_a_failed_tmux_call_or_write() {
         "{}",
         o.stdout
     );
-    assert!(state_is_old());
-
-    // A queue that is not UTF-8 raises, as the script's read does.
-    std::fs::write(r.join("inbox/interactive-queue.txt"), b"D01\n\xff\n").expect("queue");
-    let o = rc::run(&[], &rc_options(r, server.tmux(), &env));
-    assert_eq!(o.code, 1, "{}", o.stderr);
-    assert!(state_is_old());
+    assert!(state_is_old(&state));
 }
 
-/// Requirement 4 for the launcher: a failed queue write runs no tmux call;
-/// a failed `new-session`, `capture-pane` or `relaunch.log` write is exit 1
-/// with nothing after it.
+/// Requirement 4: a queue that is not UTF-8 raises, as the script's read
+/// does: exit 1, the state file as it was.
 #[test]
-fn start_fails_closed_on_a_failed_tmux_call_or_write() {
-    let root = tempfile::tempdir().expect("temp dir");
+fn rc_exits_1_and_keeps_the_state_file_on_a_queue_that_is_not_utf8() {
+    let (root, state) = rc_root();
     let r = root.path();
-    std::fs::create_dir(r.join("cfg")).expect("cfg");
-    std::fs::write(r.join("blocker"), "a file").expect("blocker");
-    let ids = ["D01".to_owned()];
-    let cfg = r.join("cfg").display().to_string();
-    let run = |server: &Server, extra: Vec<(&'static str, String)>| {
-        let mut pairs = vec![
-            ("ARCH_Q_SESSION", "qna-alpha".into()),
-            ("CLAUDE_CONFIG_DIR", cfg.clone()),
-            ("ARCH_Q_RC_SLEEP", "0".into()),
-            ("ARCH_Q_RC_TRIES", "2".into()),
-        ];
-        pairs.extend(extra);
-        let env = env_of(pairs);
-        start::run(&ids, &start_options(r, server.tmux(), &env, &no_rc))
-    };
+    let env = rc_env();
+    std::fs::write(r.join("inbox/interactive-queue.txt"), b"D01\n\xff\n").expect("queue");
+    let server = Server::new();
+    server.answer("has-session", "", 1);
+    let o = rc::run(&[], &rc_options(r, server.tmux(), &env));
+    assert_eq!((o.code, o.stdout.as_str()), (1, ""), "{}", o.stderr);
+    assert!(o.stderr.starts_with("questions_rc: "), "{}", o.stderr);
+    assert!(state_is_old(&state));
+}
 
-    // The queue's directory cannot be made: no tmux call runs.
+/// A temp root for the launcher failure tests: a Claude config dir, and a
+/// plain file `blocker` that no directory can be made under.
+fn start_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir(root.path().join("cfg")).expect("cfg");
+    std::fs::write(root.path().join("blocker"), "a file").expect("blocker");
+    root
+}
+
+/// Runs the launcher for `D01` with zero pauses, two tries and `extra` vars.
+fn run_start(r: &Path, server: &Server, extra: Vec<(&'static str, String)>) -> Outcome {
+    let mut pairs = vec![
+        ("ARCH_Q_SESSION", "qna-alpha".into()),
+        ("CLAUDE_CONFIG_DIR", r.join("cfg").display().to_string()),
+        ("ARCH_Q_RC_SLEEP", "0".into()),
+        ("ARCH_Q_RC_TRIES", "2".into()),
+    ];
+    pairs.extend(extra);
+    let env = env_of(pairs);
+    start::run(
+        &["D01".into()],
+        &start_options(r, server.tmux(), &env, &no_rc),
+    )
+}
+
+/// Why: divergence D2 — the frozen script carries on after a failed
+/// `mkdir -p` of the queue's directory; the port stops instead.
+/// What: `ARCH_Q_QUEUE` under a plain file is a write error: exit 1, nothing
+/// on stdout, no tmux call.
+/// Test: this test.
+#[test]
+fn start_exits_1_with_no_tmux_call_when_the_queue_dir_cannot_be_made() {
+    let root = start_root();
+    let r = root.path();
     let server = Server::new();
     let blocked = r.join("blocker/q.txt").display().to_string();
-    let o = run(&server, vec![("ARCH_Q_QUEUE", blocked)]);
+    let o = run_start(r, &server, vec![("ARCH_Q_QUEUE", blocked)]);
     assert_eq!((o.code, o.stdout.as_str()), (1, ""), "{}", o.stderr);
+    assert!(o.stderr.contains("cannot write"), "{}", o.stderr);
     assert!(server.calls().is_empty(), "{:?}", server.calls());
+}
 
-    // new-session fails: no "started", no relaunch.log.
+/// Why: divergence D2 — the frozen script carries on after a failed
+/// `echo "$id" >> "$Q"`; the port stops instead.
+/// What: `ARCH_Q_QUEUE` naming a directory makes the append fail: exit 1,
+/// nothing on stdout, no tmux call.
+/// Test: this test.
+#[test]
+fn start_exits_1_with_no_tmux_call_when_the_queue_append_fails() {
+    let root = start_root();
+    let r = root.path();
+    let server = Server::new();
+    let queue = r.join("queue-is-a-dir");
+    std::fs::create_dir(&queue).expect("queue dir");
+    let q = queue.display().to_string();
+    let o = run_start(r, &server, vec![("ARCH_Q_QUEUE", q.clone())]);
+    assert_eq!((o.code, o.stdout.as_str()), (1, ""), "{}", o.stderr);
+    assert!(
+        o.stderr.contains(&format!("cannot write {q}")),
+        "{}",
+        o.stderr
+    );
+    assert!(server.calls().is_empty(), "{:?}", server.calls());
+}
+
+/// Why: divergence D3 — the frozen script prints `started:` and waits for a
+/// URL even when `tmux new-session` fails; the port stops instead.
+/// What: a failed `new-session` is exit 1 after `queued:` only, with no
+/// `started:` line, no `capture-pane` and no `relaunch.log`.
+/// Test: this test.
+#[test]
+fn start_exits_1_before_started_with_no_relaunch_log_on_a_failed_new_session() {
+    let root = start_root();
+    let r = root.path();
     let server = Server::new();
     server.answer("has-session", "", 1);
     server.answer("new-session", "", 1);
-    let o = run(&server, vec![]);
+    let o = run_start(r, &server, vec![]);
     assert_eq!(
         (o.code, o.stdout.as_str()),
         (1, "queued: D01\n"),
@@ -331,25 +433,111 @@ fn start_fails_closed_on_a_failed_tmux_call_or_write() {
     );
     assert!(o.stderr.contains("tmux new-session"), "{}", o.stderr);
     assert!(!r.join("inbox/relaunch.log").exists());
+    assert!(
+        !server.calls().iter().any(|c| c.contains("capture-pane")),
+        "{:?}",
+        server.calls()
+    );
+}
 
-    // capture-pane fails while waiting for the URL.
+/// Why: divergence D1 on the launcher — the frozen script reads a non-zero
+/// `capture-pane` as an empty pane and keeps polling; the port stops.
+/// What: after `started:`, a failed `capture-pane` is exit 1 on the first
+/// try, with no `rc:` line and no `relaunch.log`.
+/// Test: this test.
+#[test]
+fn start_exits_1_with_no_rc_line_on_a_failed_capture_pane() {
+    let root = start_root();
+    let r = root.path();
+    let server = Server::new();
+    server.answer("has-session", "", 1);
     server.answer("new-session", "", 0);
     server.answer("capture-pane", "", 1);
-    let o = run(&server, vec![]);
-    assert_eq!(o.code, 1, "{}", o.stderr);
-    assert!(o.stdout.ends_with("started: qna-alpha\n"), "{}", o.stdout);
+    let o = run_start(r, &server, vec![]);
+    assert_eq!(
+        (o.code, o.stdout.as_str()),
+        (1, "queued: D01\nstarted: qna-alpha\n"),
+        "{}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.contains("tmux capture-pane: exit 1"),
+        "{}",
+        o.stderr
+    );
     assert!(!r.join("inbox/relaunch.log").exists());
+    let captures = server
+        .calls()
+        .iter()
+        .filter(|c| c.contains("capture-pane"))
+        .count();
+    assert_eq!(captures, 1, "{:?}", server.calls());
+}
 
-    // The relaunch.log append fails: no "rc:" line.
+/// Why: divergence D4 — the frozen script prints `rc: <url>` even when its
+/// `relaunch.log` append fails; the port stops instead.
+/// What: `RC_URL_LOG` in a missing directory is exit 1 after `started:`,
+/// with no `rc:` line and the write error on stderr; every tmux call stays
+/// on the private socket.
+/// Test: this test.
+#[test]
+fn start_exits_1_with_no_rc_line_when_the_relaunch_log_append_fails() {
+    let root = start_root();
+    let r = root.path();
+    let server = Server::new();
+    server.answer("has-session", "", 1);
+    server.answer("new-session", "", 0);
     server.answer("capture-pane", "https://claude.ai/code/session_Z9\n", 0);
     let log = r.join("no-dir/relaunch.log").display().to_string();
-    let o = run(&server, vec![("RC_URL_LOG", log)]);
-    assert_eq!(o.code, 1, "{}", o.stderr);
-    assert!(!o.stdout.contains("rc: "), "{}", o.stdout);
-    assert!(o.stderr.contains("cannot write"), "{}", o.stderr);
+    let o = run_start(r, &server, vec![("RC_URL_LOG", log.clone())]);
+    assert_eq!(
+        (o.code, o.stdout.as_str()),
+        (1, "queued: D01\nstarted: qna-alpha\n"),
+        "{}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.contains(&format!("cannot write {log}")),
+        "{}",
+        o.stderr
+    );
     for call in server.calls() {
         assert!(call.starts_with("-S "), "{call}");
     }
+}
+
+/// Why: `Duration::from_secs_f64` panics on NaN, and `ARCH_Q_RC_SLEEP=nan`
+/// parses as NaN (#12029); the frozen script's `sleep nan` fails and its loop
+/// runs on with no pause.
+/// What: the launch with `ARCH_Q_RC_SLEEP=nan` pauses 0 s per try, logs the
+/// URL and exits 0.
+/// Test: this test.
+#[test]
+fn start_treats_a_nan_rc_sleep_as_no_pause() {
+    let root = start_root();
+    let r = root.path();
+    let server = Server::new();
+    server.answer("has-session", "", 1);
+    server.answer("new-session", "", 0);
+    server.answer("capture-pane", "https://claude.ai/code/session_Z9\n", 0);
+    let env = env_of(vec![
+        ("ARCH_Q_SESSION", "qna-alpha".into()),
+        ("CLAUDE_CONFIG_DIR", r.join("cfg").display().to_string()),
+        ("ARCH_Q_RC_SLEEP", "nan".into()),
+        ("ARCH_Q_RC_TRIES", "1".into()),
+    ]);
+    let clock = Arc::new(FakeClock::new(AT));
+    let mut opts = start_options(r, server.tmux(), &env, &no_rc);
+    opts.clock = clock.clone();
+    let o = start::run(&["D01".into()], &opts);
+    assert_eq!(o.code, 0, "{}", o.stderr);
+    assert!(
+        o.stdout
+            .ends_with("rc: https://claude.ai/code/session_Z9\n"),
+        "{}",
+        o.stdout
+    );
+    assert_eq!(clock.sleeps(), [std::time::Duration::ZERO]);
 }
 
 /// C1: the port's sources hold no tmux stand-in; the one the tests use lives
