@@ -88,6 +88,11 @@ path = "src/bin/trusty-architect-ruling-pack.rs"
 name = "trusty-architect-ids36"
 path = "src/bin/trusty-architect-ids36.rs"
 
+# #12029 P2b: the dashboard_jsonl.py port (`fsck [ROOT]`).
+[[bin]]
+name = "trusty-architect-dashboard-jsonl"
+path = "src/bin/trusty-architect-dashboard-jsonl.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are

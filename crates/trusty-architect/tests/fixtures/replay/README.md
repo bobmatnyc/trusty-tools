@@ -503,3 +503,54 @@ $R record --clock 1795784400 --out $D/dashboard_schema/store.json --seed $S/sche
 $R replay $D/ids36/*.json -- <target>/debug/examples/replay_port ids36
 $R replay $D/dashboard_schema/*.json -- <target>/debug/examples/replay_port dashboard_schema
 ```
+
+## dashboard_jsonl and dashboard_derive (#12029 P2b)
+
+Seventeen runs of the frozen Python reference (architect commit
+`0fbbc81eed`), recorded on 2026-11-27 with `--clock 1795784400` and replayed
+in `tests/replay_jsonl_derive.rs` against `examples/replay_port.rs`, which
+hands each to the library's own driver mirror (`dashboard::pyjsonl` and
+`dashboard::pyderive`, `replay_cases`). Every store and document is
+synthetic. No recording declares fakes: neither module starts a process.
+
+- `dashboard_jsonl/`: `driver.py`, copied beside `dashboard_jsonl.py` as
+  `dj_driver.py`, twelve recordings. `pure` covers `canonical` (sorting,
+  escapes, floats, a 30-digit integer, `NaN` and both infinities refused, a
+  repeated key), `render_line`, `render_file`, `sort_ids` (byte order, not
+  UTF-16 order), `sha256` and `changed_keys`. `parse` covers every
+  `parse_file` arm: blank lines, CRLF, each JSON error, a BOM, each shape,
+  `sv` and `version` refusal, a duplicate id and three UTF-8 errors. `read`
+  covers `read_coll`, `collections` (the change-log names, hidden files) and
+  `read_changes`. `append` is the only recording that writes, under
+  `append/` in the sandbox: a fresh log, an empty batch, `seq` continuing, a
+  torn tail, invalid trailing lines, monthly rotation (torn or not, the
+  first valid entry dating it, a non-string or missing `ts`, an existing
+  target overwritten), a 20,000-byte line across the 8 KiB scan window, a
+  BOM line, a negative `seq` and a blank log. `fsck` covers clean, damaged
+  and missing stores. `cli-*` run the module's `fsck [ROOT]` command line.
+- `dashboard_derive/`: `driver.py CASES.json`, copied beside
+  `dashboard_derive.py` and `ids36.py` as `dd_driver.py`, five recordings.
+  `predicates` covers the predicates, `decision_counts`, `tally` (with and
+  without `interactive`) and the run windows (Unicode digits, a final
+  newline, impossible dates). `ids` covers the base-34 id space, a full
+  prefix and every retire arm; one case reads the frozen clock. `times`
+  covers the activity times (offsets kept in `isoformat()`), `stamp_progress`
+  (Python `==` across `1`, `1.0` and `True`), the stale lists, `goal_sessions`,
+  `ordered` and `by_acted_on`. `pending` covers every owner-event kind and
+  `request_queue`.
+
+Not recorded: values Python cannot hash or iterate (a list `goal`, a `null`
+`sessions`) end in a traceback; a lone surrogate cannot be held by the port;
+`snapshot(store, colls)` needs a live `Store`. Regenerate with the modules
+and drivers copied to a sandbox directory `P` and each recording's `files`
+laid into `S`:
+
+```sh
+R=trusty-architect-replay; D=tests/fixtures/replay
+$R record --clock 1795784400 --out $D/dashboard_jsonl/append.json --seed $S/append=append \
+  -- $P/dj_driver.py append/cases.json
+$R record --clock 1795784400 --out $D/dashboard_derive/ids.json --seed $S/ids.json=cases.json \
+  -- $P/dd_driver.py cases.json
+$R replay $D/dashboard_jsonl/*.json -- <target>/debug/examples/replay_port dashboard_jsonl
+$R replay $D/dashboard_derive/*.json -- <target>/debug/examples/replay_port dashboard_derive
+```

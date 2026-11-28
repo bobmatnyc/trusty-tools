@@ -208,7 +208,7 @@ fn write_json(v: &PyValue, indent: Option<usize>, ascii: bool, level: usize, out
 }
 
 /// A JSON string literal as `json.dumps` writes it.
-fn json_str(s: &str, ascii: bool, out: &mut String) {
+pub(crate) fn json_str(s: &str, ascii: bool, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
