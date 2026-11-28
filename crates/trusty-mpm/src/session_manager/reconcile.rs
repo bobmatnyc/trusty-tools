@@ -501,6 +501,7 @@ impl SessionManager {
                 terminal_at: None,
                 stop_cause: None,
                 kind: role.map_or(super::SessionKind::Ordinary, |r| r.kind),
+                claude_sandbox: false,
             };
             // #8942: the Architect's directory is `tm fleet init`'s to repair.
             if role.is_none() {

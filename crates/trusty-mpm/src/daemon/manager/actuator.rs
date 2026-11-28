@@ -200,6 +200,7 @@ impl SessionLauncher for DaemonLauncher {
             // session — the two are separate requests. It runs in the project's
             // main checkout like every other unrequested placement.
             worktree: false,
+            claude_sandbox: false,
         };
         let record = spawn_managed(&self.state, ManagedSessionId::new(), params).await?;
         Ok(LaunchOutcome {

@@ -677,6 +677,21 @@ pub struct SessionRecord {
     /// `old_sessions_json_resaves_without_new_key` in `parent_session_tests.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<ManagedSessionId>,
+
+    /// Whether this session opted in to the Claude Code sandbox at spawn
+    /// (#12077).
+    ///
+    /// Why: the sandbox is off by default and opt-in per launch
+    /// (`TM_CLAUDE_SANDBOX=1`); a resume or relaunch of this session must make
+    /// the same choice, and the spawn request is gone by then.
+    /// What: set from the spawn request by
+    /// [`super::SessionManager::set_claude_sandbox`]; read by
+    /// [`crate::runtime::build_record_adapter`]. `#[serde(default)]` loads
+    /// every older record as `false` (off); skipped when `false`, so such a
+    /// record re-saves byte-identical.
+    /// Test: `claude_sandbox_round_trips_and_old_records_read_false_12077`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_sandbox: bool,
 }
 
 impl SessionRecord {

@@ -153,6 +153,7 @@ impl SessionControl for DaemonSessionControl {
             // `LaunchParams` wire shape, so the session runs in the project's
             // main checkout — the same default every programmatic caller gets.
             worktree: false,
+            claude_sandbox: false,
         };
         let record = spawn_managed(
             &self.state,

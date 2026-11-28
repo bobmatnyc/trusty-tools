@@ -26,7 +26,8 @@ use serde_json::{Map, Value, json};
 use super::{SandboxInputs, SandboxRole, SandboxSettingsError, merge_policy, project_policy};
 
 /// The record's file name under `<workspace>/.trusty-mpm/`.
-const RECORD_FILE: &str = "sandbox-roles.json";
+// #12077: one name, shared with the read-only detection.
+const RECORD_FILE: &str = crate::core::claude_sandbox::ROLE_RECORD_FILE;
 
 /// The record path for `workspace`.
 pub(super) fn record_path(workspace: &Path) -> PathBuf {
@@ -148,35 +149,9 @@ fn combined_policy(record: &Value, role: SandboxRole) -> Value {
     let mut combined = Value::Object(Map::new());
     for key in [SandboxRole::Pm, SandboxRole::Agent].map(role_key) {
         if let Some(policy) = record.get(key) {
-            union_into(&mut combined, policy);
+            // #12077: the same union the inline sandbox payload uses.
+            crate::core::claude_sandbox::merge_settings_payload(&mut combined, policy);
         }
     }
     combined
-}
-
-/// Merge `policy` into `slot`, unioning every list and replacing scalars.
-fn union_into(slot: &mut Value, policy: &Value) {
-    match policy {
-        Value::Object(map) => {
-            if !slot.is_object() {
-                *slot = Value::Object(Map::new());
-            }
-            for (k, v) in map {
-                union_into(&mut slot[k.as_str()], v);
-            }
-        }
-        Value::Array(wanted) => {
-            if !slot.is_array() {
-                *slot = Value::Array(Vec::new());
-            }
-            if let Some(list) = slot.as_array_mut() {
-                for entry in wanted {
-                    if !list.contains(entry) {
-                        list.push(entry.clone());
-                    }
-                }
-            }
-        }
-        other => *slot = other.clone(),
-    }
 }

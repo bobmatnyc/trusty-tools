@@ -121,6 +121,8 @@ pub mod claude_json_guard;
 // DOC-28 cutover bridge: cross-format session discovery — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod claude_mpm_registry;
 pub mod claude_mpm_session;
+// #12077: the opt-in Claude Code sandbox, carried inline on argv.
+pub mod claude_sandbox;
 
 // #6892: the machine-wide builder-slot cap — the `[builders]` config section,
 // the memory-tier default table, and the one host-root resolution site.

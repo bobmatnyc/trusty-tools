@@ -120,11 +120,22 @@ pub fn isolated_spec(
     cwd: &Path,
     launch: &CliLaunch<'_>,
 ) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
-    isolated_spec_with(
-        cwd,
-        launch,
-        &crate::core::architect_lockdown::Lockdown::PRODUCTION,
-    )
+    isolated_spec_sandboxed(cwd, launch, None)
+}
+
+/// [`isolated_spec`] carrying the opted-in `sandbox` payload (#12077).
+///
+/// What: the shipped lockdown with
+/// [`crate::core::architect_lockdown::Lockdown::with_sandbox`], so the payload
+/// joins the one inline `--settings`; `None` is [`isolated_spec`] exactly.
+/// Test: `an_opted_in_isolated_spec_carries_the_sandbox_inline_12077`.
+pub fn isolated_spec_sandboxed(
+    cwd: &Path,
+    launch: &CliLaunch<'_>,
+    sandbox: Option<&serde_json::Value>,
+) -> Result<LaunchSpec, crate::core::architect_lockdown::LockdownError> {
+    let lockdown = crate::core::architect_lockdown::Lockdown::PRODUCTION.with_sandbox(sandbox);
+    isolated_spec_with(cwd, launch, &lockdown)
 }
 
 /// [`isolated_spec`] under the named `lockdown` (#10127).

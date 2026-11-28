@@ -79,6 +79,8 @@ pub(crate) async fn spawn_core(state: &Arc<DaemonState>, req: SpawnRequest) -> R
         force_new: req.force_new,
         // #5274: the explicit "give this session its own worktree" request.
         worktree: req.worktree,
+        // #12077: the client's sandbox opt-in, stored on the record.
+        claude_sandbox: req.claude_sandbox,
     };
 
     // Async path (#2605): provision on a detached task and return the job id
@@ -616,6 +618,7 @@ mod cores_tests {
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         }
     }
 

@@ -922,6 +922,7 @@ mod tests {
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         };
         mgr.store
             .write()
@@ -1086,6 +1087,7 @@ mod tests {
             terminal_at: None,
             stop_cause: None,
             kind: Default::default(),
+            claude_sandbox: false,
         };
 
         assert_eq!(mgr.known_owner_of(&record), Some(sentinel_owner));

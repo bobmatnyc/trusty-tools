@@ -1,0 +1,3 @@
+Added
+- The Claude Code sandbox for PM, agent and divert-worker launches is opt-in: `TM_CLAUDE_SANDBOX=1` turns it on, and unset or any other value leaves it off (the default). An opted-in launch carries the sandbox policy inline as `claude --settings '<json>'` and writes no sandbox key to `.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json` or tm's `claude-config/settings.json`. A daemon-spawned session records the choice from its spawn request, so a resume makes the same one (#12077).
+- `trusty_mpm::core::claude_sandbox::detect_tm_sandbox_keys` reports, read-only, which sandbox keys tm 1.14.14 and 1.14.15 wrote into a project's settings files and into tm's user tier (#12077).

@@ -187,11 +187,10 @@ fn run_launch_command(
     cmd.envs(crate::core::pm_tool_trim::trim_env(profile));
     cmd.args(crate::core::pm_tool_trim::trim_args(profile));
     // #10127: the owner file and an Architect's deny as ONE `--settings`.
-    crate::core::architect_lockdown::Lockdown::PRODUCTION.apply_to_command(
-        profile,
-        files.settings.as_deref(),
-        &mut cmd,
-    )?;
+    // #12077: an opted-in sandbox joins that payload; no settings file is written.
+    crate::core::architect_lockdown::Lockdown::PRODUCTION
+        .with_sandbox(files.sandbox.as_ref())
+        .apply_to_command(profile, files.settings.as_deref(), &mut cmd)?;
     Ok(cmd)
 }
 
@@ -384,6 +383,13 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
             cli.profile,
         )?
         .file,
+        // #12077: the role's sandbox, inline on argv, only when opted in.
+        sandbox: run_sandbox_payload(
+            crate::core::claude_sandbox::sandbox_opted_in(),
+            &repo_path,
+            home.as_deref(),
+            cli.profile,
+        ),
     };
     let mut cmd = run_launch_command(
         // #8405: the operator's config decides the renderer.
@@ -437,6 +443,20 @@ pub fn run_sandbox(
         Some(claude_config_dir),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+/// The inline sandbox payload a `tm run` of `profile` in `repo_path` carries
+/// (#12077): [`crate::core::claude_sandbox::opted_in_launch_sandbox`] for the
+/// profile's role; `None` unless `opted_in` and a home resolved.
+/// Test: `run_carries_the_sandbox_inline_only_when_opted_in_12077`.
+pub fn run_sandbox_payload(
+    opted_in: bool,
+    repo_path: &Path,
+    home: Option<&Path>,
+    profile: crate::core::session_profile::SessionProfile,
+) -> Option<serde_json::Value> {
+    let role = crate::core::session_launch::sandbox_role_for(profile);
+    crate::core::claude_sandbox::opted_in_launch_sandbox(opted_in, role, repo_path, home)
 }
 
 /// Resolve the repo path for an alias without launching it.

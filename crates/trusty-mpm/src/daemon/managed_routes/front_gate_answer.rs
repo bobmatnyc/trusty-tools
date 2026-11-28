@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::daemon::state::DaemonState;
-use crate::runtime::{RuntimeAdapter, build_adapter};
+use crate::runtime::{RuntimeAdapter, build_record_adapter};
 use crate::session_manager::{
     DecisionId, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
 };
@@ -38,7 +38,8 @@ pub async fn spawn_runtime_for(
     let mgr = state.session_manager().await;
     // See #10101: the record's own server.
     let tmux = mgr.tmux_driver_for(record).map_err(|e| e.to_string())?;
-    let adapter = build_adapter(record.runtime, tmux, state.framework_root());
+    // #12077: the record carries the sandbox opt-in.
+    let adapter = build_record_adapter(record, tmux, state.framework_root());
     let gh_env = super::lifecycle::resolve_gh_env(state, &launch_workspace(record)).await;
     let spec_dir = crate::runtime::launch_spec::LaunchSpec::root();
     launch_withheld(&mgr, record, adapter.as_ref(), &gh_env, spec_dir.as_deref()).await

@@ -16,7 +16,8 @@
 //! [`verify_sandbox_settings`] reads both back and refuses the launch when
 //! the merged result is not the sandbox it asked for. #10102 (step 6): every
 //! launch path calls it through `sandbox_launch::apply_launch_sandbox`.
-//! #12077: that entry writes nothing for now; slice 2 re-enables the writer.
+//! #12077: that entry writes nothing; an opted-in launch carries these
+//! policies inline on argv instead (`crate::core::claude_sandbox`).
 //! Test: `sandbox_settings_tests.rs`.
 
 use std::path::{Path, PathBuf};

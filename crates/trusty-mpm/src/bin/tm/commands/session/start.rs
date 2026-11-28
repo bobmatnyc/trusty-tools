@@ -130,7 +130,8 @@ pub(crate) fn start_framework_paths(
 /// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`], plus the
 /// #8992 tool trim when that stamp names a PM, then the owner `carrier`
 /// `--settings` (#8988) — for an Architect merged with the #10127 lockdown
-/// deny, its chat tokens unset; a lockdown error refuses the launch.
+/// deny, its chat tokens unset; a lockdown error refuses the launch. #12077:
+/// an opted-in `sandbox` payload joins that one inline `--settings`.
 /// Test: `inplace_session_spec_follows_the_configured_renderer`,
 /// `inplace_session_spec_carries_the_prompt_file`,
 /// `inplace_session_spec_carries_the_profile_stamp`,
@@ -141,6 +142,7 @@ pub(crate) fn inplace_session_spec(
     config_root: &std::path::Path,
     prompt: &InplacePrompt,
     carrier: Option<&std::path::Path>,
+    sandbox: Option<&serde_json::Value>,
 ) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     let mut spec = trusty_mpm::runtime::cli_launch::inplace_spec(
         cwd,
@@ -158,6 +160,7 @@ pub(crate) fn inplace_session_spec(
         .extend(trusty_mpm::core::pm_tool_trim::trim_args(profile));
     // #10127: the owner file and an Architect's deny as ONE `--settings`.
     trusty_mpm::core::architect_lockdown::Lockdown::PRODUCTION
+        .with_sandbox(sandbox)
         .apply_to_spec(profile, carrier, &mut spec)?;
     Ok(spec)
 }
@@ -358,8 +361,11 @@ async fn start_session_in_place(
     let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile)?;
     // #10102: before `POST /sessions`, so a sandbox refusal registers nothing.
     crate::commands::launch_home::apply_sandbox(path, home, claude_config_dir, profile)?;
+    // #12077: the role's sandbox rides inline on argv, only when opted in.
+    let sandbox = crate::commands::launch_home::launch_sandbox(path, home, profile);
     // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
-    let spec = inplace_session_spec(path, &root, &prompt, settings.file.as_deref())?;
+    let carrier = settings.file.as_deref();
+    let spec = inplace_session_spec(path, &root, &prompt, carrier, sandbox.as_ref())?;
     // #11270: refused before `POST /sessions`, so a refusal adds no record.
     host.refuse_running_architect(&name, &spec)?;
 

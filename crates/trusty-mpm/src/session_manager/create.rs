@@ -368,6 +368,7 @@ impl SessionManager {
             terminal_at: None,
             stop_cause: None,
             kind: super::SessionKind::Ordinary,
+            claude_sandbox: false,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

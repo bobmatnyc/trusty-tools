@@ -796,7 +796,8 @@ fn isolated_claude_spec(
 ) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
     let token = config_dir.and_then(|_| trusty_mpm::core::oauth_token::resolve_oauth_token());
     // #10127: an Architect lockdown error refuses the launch.
-    Ok(trusty_mpm::runtime::cli_launch::isolated_spec(
+    // #12077: an opted-in sandbox rides inline in the same `--settings`.
+    Ok(trusty_mpm::runtime::cli_launch::isolated_spec_sandboxed(
         cwd,
         &trusty_mpm::runtime::cli_launch::CliLaunch {
             model,
@@ -810,6 +811,7 @@ fn isolated_claude_spec(
                 config_root,
             ),
         },
+        files.sandbox.as_ref(),
     )?)
 }
 

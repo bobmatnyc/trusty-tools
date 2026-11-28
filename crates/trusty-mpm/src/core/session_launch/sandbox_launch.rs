@@ -6,9 +6,10 @@
 //! the refusal rules identical on every path.
 //! What: [`sandbox_role_for`] maps a launch profile to its role,
 //! [`launch_sandbox_inputs`] resolves the paths a policy names, and
-//! [`apply_launch_sandbox`] is the launch entry. #12077: enforcement is off on
-//! every launch path, so it writes nothing; the policy writer stays in
-//! `enforce_launch_sandbox` for the slice-2 opt-in.
+//! [`apply_launch_sandbox`] is the launch entry. #12077: it writes nothing on
+//! any launch path, opted in or not; an opted-in launch carries the policy
+//! inline on argv (`crate::core::claude_sandbox`), and the file writer in
+//! `enforce_launch_sandbox` has no launch caller.
 //! Test: `a_default_launch_writes_no_sandbox_key_12077`,
 //! `a_launch_with_no_config_dir_is_not_refused_12077`,
 //! `a_launch_with_no_config_dir_is_refused`,
@@ -85,8 +86,8 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
 
 /// The launch-time sandbox step: a no-op while enforcement is off (#12077).
 ///
-/// Why: #12077 slice 1 — the Claude Code sandbox enforcement is off on every
-/// launch path until an opt-in exists.
+/// Why: #12077 — tm never writes the sandbox into a Claude settings file; an
+/// opted-in launch carries it inline (`crate::core::claude_sandbox`).
 /// What: returns `Ok` before any write or refusal. It writes no project tier,
 /// no user tier and no role record, and refuses no config dir. Every launch
 /// path (`tm launch`/`tm connect`, `tm run`, the managed spawn, resume and
@@ -119,7 +120,8 @@ pub fn apply_launch_sandbox(
 /// What: refuses when `config_dir` is `None` (the spawn sets no
 /// `CLAUDE_CONFIG_DIR`, so Claude Code would read `~/.claude`), relative, or
 /// `<home>/.claude`; otherwise [`write_sandbox_settings`], which verifies.
-/// #12077: unreachable from launch until the slice-2 opt-in calls it.
+/// #12077: no launch path calls it — tm never writes the sandbox into a
+/// Claude settings file; the opt-in carries it inline instead.
 ///
 /// # Errors
 ///
@@ -130,7 +132,7 @@ pub fn apply_launch_sandbox(
 /// `a_launch_into_the_operators_claude_dir_is_refused`,
 /// `a_launch_applies_and_verifies_the_policy`,
 /// `a_verify_failure_refuses_the_launch`.
-#[allow(dead_code)] // #12077: slice 2 calls this behind the opt-in.
+#[allow(dead_code)] // #12077: kept for its tests; no launch path writes the sandbox.
 pub(super) fn enforce_launch_sandbox(
     role: SandboxRole,
     inputs: &SandboxInputs,

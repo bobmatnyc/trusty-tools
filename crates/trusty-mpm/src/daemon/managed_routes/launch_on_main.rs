@@ -205,6 +205,8 @@ pub(super) async fn spawn_managed_on_main(
             warn!(id = %session_id, "spawn_managed (launch-on-main): create failed: {e}");
             e.to_string()
         })?;
+    // #12077: the request's sandbox opt-in rides on the record, for every resume.
+    let record = mgr.set_claude_sandbox(record, params.claude_sandbox).await;
 
     // #8934: a local-only record has no `owner/repo` to reconnect by.
     if let Some(source_id) = &source.source_id
@@ -256,7 +258,8 @@ pub(super) async fn spawn_managed_on_main(
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
     // #8233: the daemon's own framework root, never the process home.
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, state.framework_root());
+    // #12077: the record carries the sandbox opt-in.
+    let adapter = crate::runtime::build_record_adapter(&record, tmux_arc, state.framework_root());
     let gh_env = resolve_gh_env(state, local_path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,

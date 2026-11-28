@@ -147,6 +147,41 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Record the spawn request's sandbox opt-in on a new session (#12077).
+    ///
+    /// Why: a resume or relaunch of the session must honour the choice made at
+    /// spawn; [`crate::runtime::build_record_adapter`] reads it off the record.
+    /// What: `on == false` (the default) changes and writes nothing. `true`
+    /// sets `claude_sandbox` on a fresh read of the stored record and upserts
+    /// it; a failed write is logged and the returned record still carries
+    /// `true`, so this launch is sandboxed even if a later resume is not.
+    /// Test: `set_claude_sandbox_persists_only_an_opt_in_12077`.
+    pub async fn set_claude_sandbox(
+        &self,
+        mut record: super::record::SessionRecord,
+        on: bool,
+    ) -> super::record::SessionRecord {
+        if !on {
+            return record;
+        }
+        record.claude_sandbox = true;
+        let persisted: Result<(), ManagedError> = async {
+            let mut fresh = self.get(&record.id).await?;
+            fresh.claude_sandbox = true;
+            self.store.write().await.upsert(fresh).await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = persisted {
+            warn!(
+                id = %record.id,
+                "set_claude_sandbox: the opt-in was not persisted; a resume will \
+                 launch without the sandbox: {e}"
+            );
+        }
+        record
+    }
+
     /// Record a source project identity on a session, with a bounded retry
     /// (#2157 item 5, the #2154 remedy).
     ///

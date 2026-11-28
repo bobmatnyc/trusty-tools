@@ -100,6 +100,7 @@ pub async fn session_new(
         // caller drives. An MCP-spawned session runs in the main checkout;
         // `tm launch --worktree` is how a human asks for the other placement.
         worktree: false,
+        claude_sandbox: false,
     };
     let minted = ManagedSessionId::new();
     let mut record = spawn_managed(state, minted, params).await?;

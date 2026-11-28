@@ -308,6 +308,7 @@ fn architect_record(
         terminal_at: None,
         stop_cause: None,
         kind,
+        claude_sandbox: false,
     }
 }
 
