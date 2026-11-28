@@ -272,6 +272,26 @@ async fn a_failed_emit_advances_nothing() {
     assert_eq!(rig.wake.n(), 0, "no wake past a failed ledger write");
 }
 
+/// #12112: a ledger that refuses every write (an owner state.json over the
+/// size bar) must not hold the wake back; the row must not stay pending beside
+/// an emitted green key, and the retry must not wake twice.
+#[tokio::test]
+async fn a_refused_ledger_write_still_wakes_the_owner_once() {
+    let rig = Rig::new(1);
+    let mut l = rig.driver();
+    rig.reader.set("OPEN", "h1", GREEN);
+    rig.ledger.fail.store(true, Ordering::SeqCst);
+    let first = l.tick(1).await;
+    assert_eq!(first.woken, 1, "the wake goes ahead without the ledger");
+    let r = rig.row();
+    assert_eq!(r.emitted_key.as_deref(), Some("o/r#1@h1:green#1"));
+    assert_eq!(r.last_woken_key, r.emitted_key, "the wake is recorded");
+    assert_eq!(r.verdict, Some(Verdict::Green), "verdict matches the key");
+    assert_eq!(r.ledger_key, None, "the refused write is not marked done");
+    assert_eq!(l.tick(2).await.woken, 0, "no second wake on the next tick");
+    assert_eq!((rig.emit.n(), rig.wake.n()), (1, 1));
+}
+
 #[tokio::test]
 async fn a_merged_pr_row_is_removed() {
     let rig = Rig::new(1);
