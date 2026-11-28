@@ -265,5 +265,15 @@ trusty-secrets	granted_client_resolves_through_the_real_binary	spawns the built 
 # TRUSTY_SANDBOX=1), so all stay unselected.
 # 147 + 4 -> 151 (Refs #11696; failing runs 45344995292, 45346805627).
 #
+# Three trusty-mpm feature-only tests are child-process helpers, not tests:
+# `core::sm::memory::tests::hold_the_sm_palace_as_writer_child`,
+# `core::sm::memory::tests::open_the_sm_palace_as_the_daemon_child` and
+# `daemon::manager::memory::tests::open_the_portfolio_palace_as_the_daemon_child`.
+# Each returns at once unless its env var names a root; a parent test
+# self-execs it with `--exact ... --ignored`. Selecting one would run an empty
+# body, and the run phase uses default features, so a row would also fail
+# ROW-NEEDS-FEATURES. All stay unselected.
+# 151 + 3 -> 154 (Refs #12077; failing run 46113075791).
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 151
+# UNSELECTED-BASELINE: 154
