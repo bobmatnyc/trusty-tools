@@ -4,7 +4,6 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,6 +12,7 @@ use serde_json::{Value, json};
 
 use std::time::{Duration, Instant};
 
+use trusty_common::exec_stub::write_executable;
 use trusty_computer::app_quit::{
     CHECKED_MARK, GRANT_FLAG, PENDING_HINT, QUIT_TOOL, QuitOutcome, Quitter, SystemQuitter,
 };
@@ -164,8 +164,8 @@ fn pending_quit_is_not_an_error() {
 /// A stand-in for `osascript`: a shell script that ignores its arguments.
 fn fake_osascript(dir: &tempfile::TempDir, body: &str) -> SystemQuitter {
     let path = dir.path().join("osascript");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // #11990: an in-process write fd, inherited by a sibling's fork, made the exec fail with ETXTBSY.
+    write_executable(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
     SystemQuitter {
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_millis(300),
@@ -174,7 +174,9 @@ fn fake_osascript(dir: &tempfile::TempDir, body: &str) -> SystemQuitter {
 
 /// The quit ended in a timeout error.
 fn assert_timed_out(r: Result<QuitOutcome, String>) {
-    assert!(r.expect_err("timeout").contains("timed out"));
+    let e = r.expect_err("timeout");
+    // #11990: print the error, so a non-timeout failure says what it was.
+    assert!(e.contains("timed out"), "want a timeout error, got: {e}");
 }
 
 /// #11990: a non-timeout error fails the check and is printed in the message.
