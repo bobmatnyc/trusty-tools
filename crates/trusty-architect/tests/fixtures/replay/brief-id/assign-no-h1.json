@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "local/briefs/2026-11-27-my_new-brief.md",
+    "--project",
+    "demo"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/2026-11-27-my_new-brief.md": "no heading\n```\n# fenced\n```\n"
+  },
+  "reads": [
+    "local/briefs/2026-11-27-my_new-brief.md"
+  ],
+  "stdout": "MB0000\tassigned\tlocal/briefs/2026-11-27-my_new-brief.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/briefs/2026-11-27-my_new-brief.md": "<!-- brief-id: MB0000 -->\n# MB0000: My new brief\n\nno heading\n```\n# fenced\n```\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0000\", \"path\": \"local/briefs/2026-11-27-my_new-brief.md\", \"title\": \"My new brief\", \"created\": \"2026-11-27T13:00:00Z\", \"project\": \"demo\"}\n"
+  },
+  "clock": 1795784400
+}

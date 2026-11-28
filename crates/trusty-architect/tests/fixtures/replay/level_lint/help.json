@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "-h"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: level_lint.py [-h] [--level LEVEL] [--strict] [--file FILE] [text ...]\n\nWarn on detail the technical level does not allow.\n\npositional arguments:\n  text\n\noptions:\n  -h, --help     show this help message and exit\n  --level LEVEL  one of non-technical, vibe-coder, pm, engineer, senior-\n                 engineer, cto; default: the stored setting\n  --strict       exit 1 when there is any warning\n  --file FILE    read the text from this file (else the TEXT arguments, else\n                 stdin)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

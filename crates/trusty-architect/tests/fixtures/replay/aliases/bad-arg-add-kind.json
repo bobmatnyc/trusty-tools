@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "add",
+    "x",
+    "y"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: aliases.py add [-h] [--alias ALIAS] [--github GITHUB]\n                      [--session SESSION] [--repo-path REPO_PATH]\n                      [--github-repo GITHUB_REPO] [--palace PALACE]\n                      [--index-id INDEX_ID] [--role ROLE]\n                      [--slack-user-id SLACK_USER_ID] [--hostname HOSTNAME]\n                      [--source SOURCE] [--confirmed]\n                      {host,person,project} name\naliases.py add: error: argument kind: invalid choice: 'x' (choose from 'host', 'person', 'project')\n",
+  "exit": 2,
+  "writes": {}
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "missing.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "BADINPUT not a file, '-' or JSON object: 'missing.json'\n",
+  "exit": 2,
+  "writes": {}
+}

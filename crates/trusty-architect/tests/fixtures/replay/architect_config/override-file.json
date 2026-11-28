@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCHITECT_CONFIG": "{ROOT}/o/other.json"
+  },
+  "files": {
+    "o/other.json": "{\"owner_name\": \"Other File\"}\n"
+  },
+  "reads": [
+    "o/other.json"
+  ],
+  "stdout": "default_path: {ROOT}/o/other.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npath: {ROOT}/o/other.json\nowner_name: Other File\nmemory_palace: \ndashboard_port: 7890\ntailnet_url: \nunknown: \nprojects_root: {ROOT}/trusty-mpm-projects\nclaude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\npoll_interval_s: 60\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

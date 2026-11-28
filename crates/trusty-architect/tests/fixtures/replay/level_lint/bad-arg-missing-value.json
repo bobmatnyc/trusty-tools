@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "--strict",
+    "--level"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: level_lint.py [-h] [--level LEVEL] [--strict] [--file FILE] [text ...]\nlevel_lint.py: error: argument --level: expected one argument\n",
+  "exit": 2,
+  "writes": {}
+}

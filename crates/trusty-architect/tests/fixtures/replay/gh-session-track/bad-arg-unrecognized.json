@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "--bogus"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: gh-session-track.py [-h] [--repo REPO] [--root ROOT] [--dry-run]\n                           [--json]\ngh-session-track.py: error: unrecognized arguments: --bogus\n",
+  "exit": 2,
+  "writes": {}
+}

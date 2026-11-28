@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "--keep"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: state-archive.py [-h] [--state STATE] [--archive ARCHIVE] [--keep KEEP]\n                        [--dry-run]\nstate-archive.py: error: argument --keep: expected one argument\n",
+  "exit": 2,
+  "writes": {}
+}

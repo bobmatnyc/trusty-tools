@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCHITECT_CONFIG": "alt/architect.json"
+  },
+  "files": {
+    "alt/architect.json": "{\"repos\": {\"alt-repo\": {\"slug\": \"example-org/alt-repo\"}}}",
+    "event.json": "{\"kind\": \"status\", \"repo\": \"alt-repo\", \"ci_run\": 41, \"claims\": {\"ci_conclusion\": \"failure\"}}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "alt/architect.json",
+    "event.json"
+  ],
+  "stdout": "MATCH ci_run 41 conclusion failure\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "run",
+            "view",
+            "41",
+            "--repo",
+            "example-org/alt-repo",
+            "--json",
+            "conclusion,headSha,status"
+          ],
+          "stdout": "{\"conclusion\": \"failure\", \"headSha\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"status\": \"completed\"}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "run",
+        "view",
+        "41",
+        "--repo",
+        "example-org/alt-repo",
+        "--json",
+        "conclusion,headSha,status"
+      ]
+    ]
+  }
+}

@@ -24,32 +24,53 @@
 //! `trusty-architect-sched` binary (shadow mode, parity, cutover, rollback).
 //! #10063 adds [`dashboard`], the Architect dashboard store (formats, locking,
 //! versions, batches, tally).
+//! #12028 P1c adds [`technical_level`], [`level_lint`] (and its
+//! `trusty-architect-level-lint` binary) and [`architect_config`], ports of
+//! the Architect's level and config readers.
+//! #12028 P1e adds [`writers`], ports of the Architect's state writers
+//! (`state-archive.py`, `brief-id.py`, `aliases.py`) and their binaries.
+//! #12028 P1f adds [`il_agent`], the dispatched agents' read-only ledger
+//! access, and its binary. #12087 adds [`gh_session_track`], the
+//! `gh-session-track.py` port and its binary.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
 //
 // See #9171
 
+pub mod architect_config;
+mod argparse;
+mod argparse_sub; // See #12028 P1e
 pub mod classify;
 mod clock;
 pub mod dashboard;
 mod decimal_table;
 mod error;
 mod fake;
+pub mod gh_session_track; // See #12087
 mod input;
 // #11821 P4-f2: the local install.toml reader, parity-tested against trusty-common.
 pub mod install_paths;
 // #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
 pub mod il;
+// #12028 P1f: the `il_agent.py` port.
+pub mod ids36; // See #12029
+pub mod il_agent;
 pub mod ledger;
+pub mod level_lint;
 mod pointer;
 pub mod poller;
 mod process;
 mod pyjson;
+mod pyjson_file; // See #12028 P1f
+mod pyjson_load;
 mod pystr;
+mod pystrptime; // See #12028
+mod pyval; // See #12028
 pub mod quiet;
 // #12026: record-then-replay parity tool for the script ports.
 pub mod replay;
+pub mod ruling_pack; // See #12028 P1i
 mod scripted;
 // MB1595: the Architect's one job scheduler and its binary.
 pub mod sched;
@@ -59,8 +80,14 @@ pub mod self_ctx;
 pub mod serve;
 mod sha1;
 mod sha256;
+// See #12028: the spec_drift_check.py port (P1b).
+pub mod spec_drift;
+pub mod tasks; // See #12028 P1d
+pub mod technical_level;
 mod tmux;
 pub mod verbs;
+pub mod verify_claim; // See #12028 P1g
+pub mod writers; // See #12028 P1e
 
 pub use classify::input_state_for_send;
 pub use clock::{Clock, FakeClock, SystemClock};

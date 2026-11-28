@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "DASHBOARD_FORMAT": "jsonl",
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/items.jsonl": "{\"data\":{\"goal\":\"G01\",\"kind\":\"task\",\"progress_at\":\"2026-11-26T07:00:00Z\",\"session\":\"s1\",\"status\":\"open\",\"title\":\"Port the checker\",\"version\":4},\"id\":\"T01\",\"sv\":1,\"version\":1}\n{\"id\": \"T02\", \"data\": {}\n"
+  },
+  "reads": [
+    "q/items.jsonl"
+  ],
+  "stdout": "",
+  "stderr": "stale-tasks: cannot read store: {ROOT}/q/items.jsonl:2: invalid JSON: Expecting ',' delimiter: line 1 column 25 (char 24)\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

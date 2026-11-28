@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "r/local/architect.json": "{\"dashboard_port\": \"7890\"}\n"
+  },
+  "reads": [
+    "r/local/architect.json"
+  ],
+  "stdout": "default_path: {ROOT}/r/local/architect.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: {ROOT}/r/local/architect.json: dashboard_port: must be an integer in 1..65535\n",
+  "exit": 1,
+  "writes": {}
+}

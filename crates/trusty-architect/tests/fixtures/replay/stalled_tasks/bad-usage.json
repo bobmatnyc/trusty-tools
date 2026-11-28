@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "x"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: driver.py [hook]\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

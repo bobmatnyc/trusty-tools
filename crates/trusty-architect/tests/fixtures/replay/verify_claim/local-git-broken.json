@@ -1,0 +1,73 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"clearance_request\", \"repo\": \"example-org/example-repo\", \"head\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"base\": \"3333333333cccccccccc4444444444dddddddddd\"}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "UNCHECKED head 1111111111aaaaaaaaaa2222222222bbbbbbbbbb: git failed in the local checkout\nMATCH base 3333333333cccccccccc4444444444dddddddddd exists in example-repo\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "git": [
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "1111111111aaaaaaaaaa2222222222bbbbbbbbbb^{commit}"
+          ],
+          "stdout": "",
+          "stderr": "fatal: not a git repository\n",
+          "exit": 128
+        },
+        {
+          "argv": [
+            "-C",
+            "work/example-repo",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "3333333333cccccccccc4444444444dddddddddd^{commit}"
+          ],
+          "stdout": "3333333333cccccccccc4444444444dddddddddd\n",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "1111111111aaaaaaaaaa2222222222bbbbbbbbbb^{commit}"
+      ],
+      [
+        "git",
+        "-C",
+        "work/example-repo",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "3333333333cccccccccc4444444444dddddddddd^{commit}"
+      ]
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "read",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "q/meta/settings.json": "{\n  \"technical_level\": \"engineer\",\n  \"tz\": \"UTC\",\n  \"version\": 2\n}\n"
+  },
+  "reads": [
+    "q/meta/settings.json"
+  ],
+  "stdout": "read engineer\nTECHNICAL LEVEL: engineer (full technical terms, module names, root cause and trade-offs, 6-10 sentences with a short evidence list)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

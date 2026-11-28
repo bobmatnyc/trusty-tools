@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "brief",
+    "qx-T01"
+  ],
+  "stdin": "",
+  "env": {
+    "ILIO_DIR": "ilio",
+    "ILIO_PROJECT": "il"
+  },
+  "files": {
+    "ilio/r-library.json": "{\"R01\": {\"title\": \"Ack\", \"options\": {\"a\": \"Acknowledged.\", \"b\": \"Merged {sha} into main.\"}}, \"R02\": {\"title\": \"Wait\", \"options\": {\"a\": \"Waiting on {who} for {what}.\"}}}\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "il_agent: state.json missing; run init\n",
+  "exit": 2,
+  "writes": {}
+}

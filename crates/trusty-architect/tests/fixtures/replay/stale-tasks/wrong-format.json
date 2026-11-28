@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "argv": [
+    "--root",
+    "{ROOT}/q"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "q/goals/G01.json": "{\n  \"rank\": 3\n}\n",
+    "q/items.jsonl": ""
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "stale-tasks: cannot read store: {ROOT}/q holds items.jsonl: set DASHBOARD_FORMAT=jsonl\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "argv": [
+    "list"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/registry.jsonl": "{\"id\": \"B0003\", \"path\": \"local/briefs/legacy.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0010\", \"path\": \"local/briefs/b.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB00ab\", \"path\": \"/opt/sample/c.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"mb0011\", \"path\": \"local/briefs/lower.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0012\", \"path\": \"local/briefs/z.md\", \"title\": \"Zoë — notes\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": 7}\n"
+  },
+  "reads": [
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "B0003\tarchitect\tlocal/briefs/legacy.md\tT\nMB0010\tarchitect\tlocal/briefs/b.md\tT\nMB00ab\tarchitect\t/opt/sample/c.md\tT\nmb0011\tarchitect\tlocal/briefs/lower.md\tT\nMB0012\t7\tlocal/briefs/z.md\tZoë — notes\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

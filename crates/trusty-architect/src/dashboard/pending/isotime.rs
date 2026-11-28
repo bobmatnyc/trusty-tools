@@ -26,6 +26,13 @@ pub(crate) fn ts(value: &Value) -> Option<i64> {
 
 /// `datetime.fromisoformat(s)` as UTC microseconds (naive read as UTC).
 pub(crate) fn from_iso(s: &str) -> Option<i64> {
+    from_iso_parts(s).map(|(local, offset)| local - offset)
+}
+
+/// `datetime.fromisoformat(s)` as `(wall-clock microseconds, UTC offset
+/// microseconds)`; a naive result has offset 0. #12028 P1d: `strftime` of
+/// an aware value prints its own wall clock, not UTC.
+pub(crate) fn from_iso_parts(s: &str) -> Option<(i64, i64)> {
     let c: Vec<char> = s.chars().collect();
     if c.len() < 7 {
         return None;
@@ -39,7 +46,7 @@ pub(crate) fn from_iso(s: &str) -> Option<i64> {
         return None;
     }
     if tstr.is_empty() {
-        return Some(day * 86_400_000_000);
+        return Some((day * 86_400_000_000, 0));
     }
     let (h, mi, sec, us, offset) = parse_time(tstr)?;
     let mut hour = h;
@@ -58,7 +65,7 @@ pub(crate) fn from_iso(s: &str) -> Option<i64> {
         return None;
     }
     let local = (day * 86_400 + hour * 3600 + mi * 60 + sec) * 1_000_000 + us;
-    Some(local - offset)
+    Some((local, offset))
 }
 
 fn digit(c: char) -> bool {

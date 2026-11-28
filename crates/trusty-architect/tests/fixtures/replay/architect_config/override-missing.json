@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "{ROOT}/r"
+  ],
+  "stdin": "",
+  "env": {
+    "ARCHITECT_CONFIG": "{ROOT}/o/nope.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "default_path: {ROOT}/o/nope.json\ndefault_claude_config_dir: {ROOT}/.trusty-tools/trusty-mpm/claude-config\n",
+  "stderr": "ConfigError: {ROOT}/o/nope.json: named by ARCHITECT_CONFIG, but does not exist\n",
+  "exit": 1,
+  "writes": {}
+}

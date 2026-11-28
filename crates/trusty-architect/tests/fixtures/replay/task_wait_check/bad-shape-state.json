@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "argv": [],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/il/.trusty-mpm/datg/state.json": "{\n  \"code\": \"A1\",\n  \"v\": 7,\n  \"next\": {},\n  \"goals\": [],\n  \"items\": [],\n  \"tasks\": []\n}\n"
+  },
+  "reads": [
+    "local/il/.trusty-mpm/datg/state.json"
+  ],
+  "stdout": "task_wait_check failed: DatgError: state.json malformed (bad shape); refusing to write\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

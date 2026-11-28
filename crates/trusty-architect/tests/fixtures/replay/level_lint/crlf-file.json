@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "vibe-coder",
+    "--file",
+    "crlf.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "crlf.md": "First line with cargo\r\nsecond line src/a.rs\rthird `tick` line\r\n"
+  },
+  "reads": [
+    "crlf.md"
+  ],
+  "stdout": "level_lint [vibe-coder]: tool `cargo` (line 1)\nlevel_lint [vibe-coder]: path `src/a.rs` (line 2)\nlevel_lint [vibe-coder]: identifier ``tick`` (line 3)\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

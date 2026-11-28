@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "argv": [
+    "resolve",
+    "sam"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

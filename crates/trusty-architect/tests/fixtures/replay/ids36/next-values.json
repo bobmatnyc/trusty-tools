@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "argv": [
+    "next",
+    "0f",
+    "0k",
+    "0n",
+    "0z",
+    "ff",
+    "zy",
+    "zz",
+    "00",
+    "0O"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "next '0f' -> '0g'\nnext '0k' -> '0m'\nnext '0n' -> '0p'\nnext '0z' -> '10'\nnext 'ff' -> 'fg'\nnext 'zy' -> 'zz'\nnext 'zz' -> '01'\nnext '00' -> '01'\nnext '0O' ValueError: not two base-34 digits: '0O'\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {},
+  "clock": 1795784400
+}

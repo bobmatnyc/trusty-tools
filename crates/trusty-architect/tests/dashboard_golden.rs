@@ -22,6 +22,7 @@ use trusty_architect::dashboard::{
     DashError, DeleteArchive, FooterLinks, Format, ListQuery, Op, Removed, SchemaDir, SchemaSet,
     Store, footer, tally_line,
 };
+use trusty_architect::replay::skip_written_file;
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -66,7 +67,7 @@ fn class(result: &Result<Vec<trusty_architect::dashboard::OpResult>, DashError>)
 
 /// Every file under `root` (relative path to bytes), minus `.lock` and the
 /// change logs (the regen script leaves them out; `tests/dashboard_log.rs`
-/// covers them).
+/// covers them). #12087: the replay `writes` comparison shares the filter.
 fn tree(root: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
@@ -77,7 +78,7 @@ fn tree(root: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
                 stack.push(path);
             } else if path
                 .file_name()
-                .is_some_and(|n| n != ".lock" && !n.to_string_lossy().starts_with("changes"))
+                .is_some_and(|n| !skip_written_file(&n.to_string_lossy()))
             {
                 let rel = path.strip_prefix(root).map_err(std::io::Error::other)?;
                 out.insert(rel.to_string_lossy().into_owned(), fs::read(&path)?);

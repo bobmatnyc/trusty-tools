@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "argv": [
+    "list"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "error: [Errno 2] No such file or directory: 'aliases.json'\n",
+  "exit": 1,
+  "writes": {}
+}

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "argv": [
+    "add",
+    "person",
+    "Rae Sample",
+    "--alias",
+    "Rae",
+    "--alias",
+    "Rae",
+    "--github",
+    "rae-gh"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "person Rae Sample: 1 aliases\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "aliases.json": "{\n  \"version\": 1,\n  \"people\": [\n    {\n      \"name\": \"Rae Sample\",\n      \"aliases\": [\n        \"Rae\"\n      ],\n      \"source\": \"added by hand\",\n      \"confirmed\": false,\n      \"github\": [\n        \"rae-gh\"\n      ],\n      \"slack_user_id\": null,\n      \"email_location\": \"directory\",\n      \"role\": \"unspecified\"\n    }\n  ]\n}\n"
+  }
+}

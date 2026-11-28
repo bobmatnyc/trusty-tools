@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"fyi\",\r\n \"pr\": [1]}\r\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json"
+  ],
+  "stdout": "",
+  "stderr": "BADINPUT pr must be an integer or null; got [1]\n",
+  "exit": 2,
+  "writes": {}
+}

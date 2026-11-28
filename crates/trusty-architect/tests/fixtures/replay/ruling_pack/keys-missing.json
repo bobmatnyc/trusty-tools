@@ -1,0 +1,24 @@
+{
+  "version": 3,
+  "argv": [
+    "sample-app",
+    "q",
+    "--keys",
+    "{ROOT}/nope.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "{\n  \"projects\": {\n    \"sample-app\": {\n      \"aliases\": [\"sapp\", \"Sample\"],\n      \"palace\": \"sample-app\",\n      \"index\": \"sample-app-idx\",\n      \"repo\": \"example-org/sample-app\",\n      \"gh_config\": \"gh-example\",\n      \"root\": \"{ROOT}/proj\"\n    },\n    \"second-app\": {\n      \"aliases\": [\"two\"],\n      \"palace\": \"second-palace\",\n      \"index\": \"second-idx\",\n      \"repo\": \"example-two/second\",\n      \"gh_config\": \"gh-two\",\n      \"root\": \"{ROOT}/missing\"\n    },\n    \"bare\": {\n      \"repo\": \"example-org/bare-repo\"\n    }\n  }\n}\n",
+    "proj/src/booking.rs": "fn bookedTotal() -> u32 { 0 }\n"
+  },
+  "reads": [],
+  "stdout": "",
+  "stderr": "FileNotFoundError: [Errno 2] No such file or directory: '{ROOT}/nope.json'\n",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

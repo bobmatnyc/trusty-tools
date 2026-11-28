@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "-h"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: gh-session-track.py [-h] [--repo REPO] [--root ROOT] [--dry-run]\n                           [--json]\n\ngh-session-track.py: open PRs and issues of a GitHub repo, mapped onto\ndashboard sessions (stdlib; read-only gh).\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --root ROOT\n  --dry-run    print the plan, write nothing\n  --json       print the plan as JSON\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

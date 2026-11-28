@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "handback",
+    "-h"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: il_agent.py handback [-h] [--task TASK] [--file FILE]\n\noptions:\n  -h, --help   show this help message and exit\n  --task TASK\n  --file FILE\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

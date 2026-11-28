@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "--level",
+    "pm",
+    "--strict",
+    "--file",
+    "corpus.md"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "corpus.md": "Status for the owner: see https://github.com/acme/app/pull/12 and #34 and acme/app#56.\nThe fix is in crates/core/src/lib.rs:40-52 and notes.md, not in notes.mdx or data.json.bak.\nConfig lives in ~/.config/tool/settings.yaml and ./a.b/c.jsonl:7; plain words.stay fine.\nCommit deadbeef1 landed, abcdef0 too; DEADBEE1 and 1234567 and cafe-babe1234 do not count.\nRun it with --dry-run or ---triple, set RUST_LOG_LEVEL and API_KEY_2 but not _LEADING or TRAIL_ or FOO__BAR.\nThe nightly job 'release-train' failed; the workflows \"lint all\" passed; JOB `ship it` too.\nTools: cargo, pytest, tmux; git-lfs is not git, and gh is gh. pnpm beats npm-ish.\nInline `poll_once` and `a b` identifiers; an empty `` pair and an unclosed ` tick.\nUnicode: café.py and naïve/path.rs and ١٢٣abcdef0 near ſtuff and WORKFLOW 'x'.\nLine ten has http://example.test/a.py?x=--flag inside a URL.\n"
+  },
+  "reads": [
+    "corpus.md"
+  ],
+  "stdout": "level_lint [pm]: path `crates/core/src/lib.rs:40-52` (line 2)\nlevel_lint [pm]: path `notes.md` (line 2)\nlevel_lint [pm]: path `data.json` (line 2)\nlevel_lint [pm]: path `~/.config/tool/settings.yaml` (line 3)\nlevel_lint [pm]: path `./a.b/c.jsonl:7` (line 3)\nlevel_lint [pm]: sha `deadbeef1` (line 4)\nlevel_lint [pm]: sha `abcdef0` (line 4)\nlevel_lint [pm]: flag `--dry-run` (line 5)\nlevel_lint [pm]: envvar `RUST_LOG_LEVEL` (line 5)\nlevel_lint [pm]: envvar `API_KEY_2` (line 5)\nlevel_lint [pm]: job `job 'release-train'` (line 6)\nlevel_lint [pm]: job `workflows \"lint all\"` (line 6)\nlevel_lint [pm]: job `JOB `ship it`` (line 6)\nlevel_lint [pm]: tool `cargo` (line 7)\nlevel_lint [pm]: tool `pytest` (line 7)\nlevel_lint [pm]: tool `tmux` (line 7)\nlevel_lint [pm]: tool `git` (line 7)\nlevel_lint [pm]: tool `gh` (line 7)\nlevel_lint [pm]: tool `gh` (line 7)\nlevel_lint [pm]: tool `pnpm` (line 7)\nlevel_lint [pm]: identifier ``poll_once`` (line 8)\nlevel_lint [pm]: identifier ``a b`` (line 8)\nlevel_lint [pm]: identifier `` pair and an unclosed `` (line 8)\nlevel_lint [pm]: path `café.py` (line 9)\nlevel_lint [pm]: path `naïve/path.rs` (line 9)\nlevel_lint [pm]: job `WORKFLOW 'x'` (line 9)\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {}
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "add",
+    "host",
+    "mail",
+    "--role",
+    "x@example.com"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "not written:\nhosts[0] mail: contains an email address (store a location note instead)\n",
+  "exit": 1,
+  "writes": {}
+}

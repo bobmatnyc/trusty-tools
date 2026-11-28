@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "add",
+    "host",
+    "H1"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{\"hosts\": [{\"name\": \"h1\"}]}"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "not written:\nhosts[0] h1: missing aliases\nhosts[0] h1: missing source\nhosts[0] h1: missing confirmed\nhosts[0] h1: missing hostname\nhosts[0] h1: missing role\n",
+  "exit": 1,
+  "writes": {}
+}

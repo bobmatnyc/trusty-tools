@@ -1,0 +1,17 @@
+{
+  "version": 3,
+  "argv": [
+    "a"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: ruling_pack.py [-h] [--issue ISSUE] [--pr PR] [--file FILE]\n                      [--symbol SYMBOL]\n                      [--type {merge,prod-write,spec,decision,waiver}]\n                      [--checked] [--keys KEYS] [--no-write]\n                      project question\nruling_pack.py: error: the following arguments are required: question\n",
+  "exit": 2,
+  "writes": {},
+  "clock": 1795784400
+}

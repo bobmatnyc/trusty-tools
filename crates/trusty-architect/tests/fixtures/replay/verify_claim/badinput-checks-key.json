@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"fyi\", \"claims\": {\"checks\": {\"ok\": 1}}}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json"
+  ],
+  "stdout": "",
+  "stderr": "BADINPUT claims.checks must be {pass,fail,pending: integer}\n",
+  "exit": 2,
+  "writes": {}
+}

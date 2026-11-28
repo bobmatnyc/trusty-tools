@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "argv": [
+    "show",
+    "qx-T01"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: il_agent.py [-h] [--project PROJECT] {brief,dispatch,handback} ...\nil_agent.py: error: argument verb: invalid choice: 'show' (choose from 'brief', 'dispatch', 'handback')\n",
+  "exit": 2,
+  "writes": {}
+}

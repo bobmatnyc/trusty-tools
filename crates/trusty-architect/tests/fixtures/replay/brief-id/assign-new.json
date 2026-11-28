@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "argv": [
+    "assign",
+    "local/briefs/2026-11-27-port-plan.md"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "local/briefs/2026-11-27-port-plan.md": "---\ntitle: x\n---\n# Port plan for the writers  \n\nbody\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0010\", \"path\": \"local/briefs/old.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "reads": [
+    "local/briefs/2026-11-27-port-plan.md",
+    "local/briefs/registry.jsonl"
+  ],
+  "stdout": "MB0011\tassigned\tlocal/briefs/2026-11-27-port-plan.md\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {
+    "local/briefs/2026-11-27-port-plan.md": "---\ntitle: x\n---\n<!-- brief-id: MB0011 -->\n# MB0011: Port plan for the writers\n\nbody\n",
+    "local/briefs/registry.jsonl": "{\"id\": \"MB0010\", \"path\": \"local/briefs/old.md\", \"title\": \"T\", \"created\": \"2026-11-01T00:00:00Z\", \"project\": \"architect\"}\n{\"id\": \"MB0011\", \"path\": \"local/briefs/2026-11-27-port-plan.md\", \"title\": \"Port plan for the writers\", \"created\": \"2026-11-27T13:00:00Z\", \"project\": \"architect\"}\n"
+  },
+  "clock": 1795784400
+}

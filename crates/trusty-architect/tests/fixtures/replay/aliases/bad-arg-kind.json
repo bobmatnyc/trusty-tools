@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "argv": [
+    "list",
+    "--kind",
+    "people"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {},
+  "reads": [],
+  "stdout": "",
+  "stderr": "usage: aliases.py list [-h] [--kind {host,person,project}]\naliases.py list: error: argument --kind: invalid choice: 'people' (choose from 'host', 'person', 'project')\n",
+  "exit": 2,
+  "writes": {}
+}

@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"merged\", \"repo\": \"example-org/example-repo\", \"pr\": 21, \"merge_sha\": \"5555555555eeeeeeeeee6666666666ffffffffff\", \"claims\": {\"checks\": {\"pass\": 2}}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MISMATCH pr 21 merge_sha 5555555555eeeeeeeeee6666666666ffffffffff: expected 5555555555eeeeeeeeee6666666666ffffffffff, got no merge commit (via rest)\nMISMATCH pr 21 state MERGED: expected MERGED, got CLOSED (via rest)\nUNCHECKED pr 21 checks pass: gh pr checks failed: HTTP 403: API rate limit exceeded; REST fallback failed: more than 2 check runs\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "21",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "mergeCommit,state"
+          ],
+          "stdout": "",
+          "stderr": "GraphQL: API rate limit exceeded for user ID 1.\n",
+          "exit": 1
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/pulls/21"
+          ],
+          "stdout": "{\"head\": {\"sha\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\"}, \"base\": {\"sha\": \"3333333333cccccccccc4444444444dddddddddd\"}, \"merged\": false, \"state\": \"closed\"}",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "pr",
+            "checks",
+            "21",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "bucket"
+          ],
+          "stdout": "",
+          "stderr": "HTTP 403: API rate limit exceeded\n",
+          "exit": 1
+        },
+        {
+          "argv": [
+            "api",
+            "repos/example-org/example-repo/commits/1111111111aaaaaaaaaa2222222222bbbbbbbbbb/check-runs?per_page=100"
+          ],
+          "stdout": "{\"total_count\": 150, \"check_runs\": [{\"status\": \"completed\", \"conclusion\": \"success\"}, {\"status\": \"completed\", \"conclusion\": \"success\"}]}",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "21",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "mergeCommit,state"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/pulls/21"
+      ],
+      [
+        "gh",
+        "pr",
+        "checks",
+        "21",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "bucket"
+      ],
+      [
+        "gh",
+        "api",
+        "repos/example-org/example-repo/commits/1111111111aaaaaaaaaa2222222222bbbbbbbbbb/check-runs?per_page=100"
+      ]
+    ]
+  }
+}

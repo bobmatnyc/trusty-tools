@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "check"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{\"version\": 1, \"people\": [{\"name\": \"Dup One\", \"aliases\": [\"same\", \"\", 3], \"source\": \" \", \"confirmed\": \"yes\", \"github\": \"x\", \"slack_user_id\": 5, \"email_location\": \"a.b@example.org\", \"role\": \"r\"}, {\"name\": \"Dup Two\", \"aliases\": [\"Same\"], \"source\": \"s\", \"confirmed\": true, \"github\": [], \"slack_user_id\": null, \"email_location\": \"directory\", \"role\": \"r\", \"quiet\": [\"\"]}, \"not a dict\", {\"aliases\": []}], \"projects\": {\"oops\": 1}, \"hosts\": [{\"name\": \"same\", \"aliases\": [], \"source\": \"s\", \"confirmed\": false, \"hostname\": null, \"role\": \"r\"}]}"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "ERROR people[0] Dup One: bad type or empty source\nERROR people[0] Dup One: bad type or empty confirmed\nERROR people[0] Dup One: bad type or empty github\nERROR people[0] Dup One: bad type or empty slack_user_id\nERROR people[0] Dup One: aliases holds a non-string or empty item\nERROR people[0] Dup One: contains an email address (store a location note instead)\nERROR people[1] Dup Two: quiet holds a non-string or empty item\nERROR people[2]: not an object\nERROR people[3]: missing name\nERROR people[3]: missing source\nERROR people[3]: missing confirmed\nERROR people[3]: missing github\nERROR people[3]: missing slack_user_id\nERROR people[3]: missing email_location\nERROR people[3]: missing role\nERROR projects: not a list\nERROR duplicate alias, same kind: same: same (host) | Dup One (person) | Dup Two (person)\n17 errors, 0 ambiguous aliases\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {}
+}

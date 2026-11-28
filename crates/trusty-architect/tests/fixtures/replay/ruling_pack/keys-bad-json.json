@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "argv": [
+    "sample-app",
+    "q",
+    "--keys",
+    "{ROOT}/keys.json",
+    "--no-write"
+  ],
+  "stdin": "",
+  "env": {
+    "TZ": "UTC"
+  },
+  "files": {
+    "keys.json": "not json\n"
+  },
+  "reads": [
+    "keys.json"
+  ],
+  "stdout": "",
+  "stderr": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)\n",
+  "exit": 1,
+  "writes": {},
+  "clock": 1795784400
+}

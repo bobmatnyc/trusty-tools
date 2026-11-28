@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "argv": [
+    "--state",
+    "local/state.md",
+    "--archive",
+    "local/state-archive.md",
+    "--dry-run"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "local/state.md": "## handoff 1\na\n## handoff 2\nb\n## handoff 3\nc\n## handoff xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ü\nbody €\n## UPDATE five\nz\n"
+  },
+  "reads": [
+    "local/state.md"
+  ],
+  "stdout": "would move 144 bytes: ## handoff xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nwould move 17 bytes: ## UPDATE five\nwould move 2 sections; state.md 206 -> 45 bytes\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

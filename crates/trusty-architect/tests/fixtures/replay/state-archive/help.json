@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "argv": [
+    "--help"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {},
+  "reads": [],
+  "stdout": "usage: state-archive.py [-h] [--state STATE] [--archive ARCHIVE] [--keep KEEP]\n                        [--dry-run]\n\nstate-archive.py: move old handoff/UPDATE sections out of local/state.md into\nlocal/state-archive.md.\n\noptions:\n  -h, --help         show this help message and exit\n  --state STATE\n  --archive ARCHIVE\n  --keep KEEP\n  --dry-run\n",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

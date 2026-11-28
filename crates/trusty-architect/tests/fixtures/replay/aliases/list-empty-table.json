@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "argv": [
+    "list"
+  ],
+  "stdin": "",
+  "env": {
+    "ALIASES_FILE": "aliases.json"
+  },
+  "files": {
+    "aliases.json": "{}"
+  },
+  "reads": [
+    "aliases.json"
+  ],
+  "stdout": "",
+  "stderr": "",
+  "exit": 0,
+  "writes": {}
+}

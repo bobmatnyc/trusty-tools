@@ -1,0 +1,77 @@
+{
+  "version": 2,
+  "argv": [
+    "event.json"
+  ],
+  "stdin": "",
+  "env": {},
+  "files": {
+    "event.json": "{\"kind\": \"merged\", \"repo\": \"example-org/example-repo\", \"pr\": 14, \"head\": \"7777777777999999999988888888880000000000\", \"merge_sha\": \"5555555555eeeeeeeeee6666666666ffffffffff\", \"claims\": {\"pr_state\": \"closed\", \"merged_at\": \"2026-11\", \"files\": 5, \"commits\": 3, \"checks\": {\"fail\": 0, \"pass\": 1}}}\n",
+    "local/architect.json": "{\n  \"repos\": {\n    \"example-repo\": {\n      \"slug\": \"example-org/example-repo\",\n      \"gh_config_dir\": \"gh/example-org\",\n      \"checkout\": \"work/example-repo\"\n    },\n    \"second\": {\n      \"slug\": \"example-two/second\"\n    }\n  }\n}\n",
+    "work/example-repo/README.md": "sample checkout\n"
+  },
+  "reads": [
+    "event.json",
+    "local/architect.json"
+  ],
+  "stdout": "MISMATCH pr 14 head 7777777777999999999988888888880000000000: expected 7777777777999999999988888888880000000000, got 1111111111aaaaaaaaaa2222222222bbbbbbbbbb\nMISMATCH pr 14 merge_sha 5555555555eeeeeeeeee6666666666ffffffffff: expected 5555555555eeeeeeeeee6666666666ffffffffff, got no merge commit\nMISMATCH pr 14 state CLOSED: expected CLOSED, got MERGED\nMISMATCH pr 14 merged_at 2026-11: expected 2026-11, got 2026-11-21T00:00:00Z\nMISMATCH pr 14 files 5: expected 5, got 4\nMISMATCH pr 14 commits 3: expected 3, got 2\nMISMATCH pr 14 checks fail 0: expected 0, got 1\nMATCH pr 14 checks pass 1\n",
+  "stderr": "",
+  "exit": 1,
+  "writes": {},
+  "fakes": {
+    "stubs": {
+      "gh": [
+        {
+          "argv": [
+            "pr",
+            "view",
+            "14",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "headRefOid,mergeCommit,state,mergedAt,changedFiles,commits"
+          ],
+          "stdout": "{\"headRefOid\": \"1111111111aaaaaaaaaa2222222222bbbbbbbbbb\", \"mergeCommit\": null, \"state\": \"MERGED\", \"mergedAt\": \"2026-11-21T00:00:00Z\", \"changedFiles\": 4, \"commits\": 2}",
+          "stderr": "",
+          "exit": 0
+        },
+        {
+          "argv": [
+            "pr",
+            "checks",
+            "14",
+            "--repo",
+            "example-org/example-repo",
+            "--json",
+            "bucket"
+          ],
+          "stdout": "[{\"bucket\": \"fail\"}, {\"bucket\": \"pass\"}, {\"bucket\": \"pending\"}]",
+          "stderr": "",
+          "exit": 0
+        }
+      ]
+    },
+    "calls": [
+      [
+        "gh",
+        "pr",
+        "view",
+        "14",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "headRefOid,mergeCommit,state,mergedAt,changedFiles,commits"
+      ],
+      [
+        "gh",
+        "pr",
+        "checks",
+        "14",
+        "--repo",
+        "example-org/example-repo",
+        "--json",
+        "bucket"
+      ]
+    ]
+  }
+}
