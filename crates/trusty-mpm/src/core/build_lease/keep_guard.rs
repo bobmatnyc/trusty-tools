@@ -141,8 +141,9 @@ pub fn lock_dir(dir: &Path, wait: Duration) -> Result<CheckoutLock, String> {
             return Err(format!(
                 "CARGO_TARGET_DIR={} is held by another lease (lock {}, {}) for over {}s (it \
                  last built {}); a build here now could replace binaries that lease's tests \
-                 or program run, or run another checkout's (#8692, #11661). Re-run when it \
-                 ends, or give this build its own CARGO_TARGET_DIR",
+                 or program run, or run another checkout's (#8692, #11661). Wait longer with \
+                 --wait-secs (or the setting builders.lease_wait_secs), or give this build \
+                 its own CARGO_TARGET_DIR",
                 dir.display(),
                 path.display(),
                 holder(&path),
@@ -346,7 +347,10 @@ mod tests {
         let err = lock_dir(&dir, Duration::ZERO).expect_err("held");
         assert!(
             err.contains(&dir.join(CHECKOUT_LOCK).display().to_string())
-                && err.contains("held by another lease"),
+                && err.contains("held by another lease")
+                && err.contains("--wait-secs")
+                && err.contains("builders.lease_wait_secs")
+                && err.contains("its own CARGO_TARGET_DIR"),
             "{err}"
         );
         drop(held);

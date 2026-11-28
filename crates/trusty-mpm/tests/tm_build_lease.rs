@@ -1485,7 +1485,10 @@ fn a_kept_or_unset_dir_lease_frees_capacity_while_its_test_binary_runs_8692() {
             "{plan:?}: a build into the owned directory must wait: {err}"
         );
         assert!(
-            err.contains(".trusty-checkout.lock") && err.contains("held by another lease"),
+            err.contains(".trusty-checkout.lock")
+                && err.contains("held by another lease")
+                && err.contains("--wait-secs")
+                && err.contains("builders.lease_wait_secs"),
             "{plan:?}: the refusal names the lock: {err}"
         );
         assert!(
