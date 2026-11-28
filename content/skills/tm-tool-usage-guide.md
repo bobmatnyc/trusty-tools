@@ -50,8 +50,8 @@ Before delegating to Research or reading any file:
    cross-palace sweep, `tm memory recall-deep` or `recall-all`.
 2. `trusty-search search "<q>" --json` from the repo, or
    `trusty-search query "<q>" -i <index>` from elsewhere (hybrid BM25+vector).
-   The narrower `search_semantic` / `search_lexical`, `search_similar` and
-   `list_indexes` stay MCP tools until a `trusty-search` release ships #11771.
+   For a narrower lane, use `trusty-search semantic|lexical|kg "<q>"` (see the
+   table below).
 3. Only if both are insufficient — delegate to Research.
 
 Both tools are mandatory-first, not optional. Skipping straight to Read/Grep
@@ -68,18 +68,18 @@ trusty-search query "skill deploy no-op" -i <index-id>  # from elsewhere
 ```
 
 A `TRUSTY_INDEX` variable in the environment can override the index; pass
-`-i` from outside the repo. The `mcp__trusty-search__*` rows stay MCP until a
-`trusty-search` release ships #11771/#11774:
+`-i` from outside the repo. Every search tool has a native verb, so an mpm
+session never needs an `mcp__trusty-search__*` name (#11625):
 
 | Command | Use |
 |---|---|
-| `search_semantic` / `search_lexical` (MCP) | Narrower single-strategy search when hybrid over- or under-matches |
+| `trusty-search semantic "<q>"` / `trusty-search lexical "<q>"` | Narrower single-strategy search when hybrid over- or under-matches |
 | `trusty-search query "<q>" --indexes "*"` | Cross-project search when the scope is unclear |
-| `search_similar` (MCP) | Find code semantically similar to a known snippet |
-| `search_kg` / `get_call_chain` (MCP) | Structural queries — call graphs, symbol relationships |
-| `grep` / `typeahead` (MCP) | Lexical lookup once you already know the token to find |
+| `trusty-search similar <file> --function <sym>` | Find code semantically similar to a known snippet |
+| `trusty-search kg "<q>"` / `trusty-search call-chain <sym>` | Structural queries — call graphs, symbol relationships |
+| `trusty-search grep <pattern>` / `trusty-search typeahead <prefix>` | Lexical lookup once you already know the token to find |
 | `trusty-search health` | Health check — **use instead of `curl`/`lsof`** (CB#7) |
-| `trusty-search list` / `index-status`; `list_indexes` (MCP) for details | Discover what projects are indexed and their freshness |
+| `trusty-search list [--details]` / `index-status` | Discover what projects are indexed and their freshness |
 
 **Index Pinning (Automatic, MCP tools):** In managed sessions, your `.mcp.json` pinpoints
 the session's own project index (via `trusty-search serve --index <id>`) so bare

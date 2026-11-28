@@ -488,7 +488,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/code-review-standards.md"
-version = "1.2.2"
+version = "1.2.3"
 
 [[member]]
 path = "skills/condition-based-waiting.md"
