@@ -527,6 +527,16 @@ fn fleet_env_holder_helper_11631() {
     }
 }
 
+/// Kills and reaps its child on drop, panic included (#11631).
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// #11631: a test process SIGKILLed while it holds a [`FleetEnv`] leaves no
 /// tmux server on that environment's socket and no tmux dir. Red before
 /// #11631, whose only cleanup was `Drop`, which a SIGKILL skips.
@@ -535,17 +545,21 @@ fn a_killed_fleet_test_leaves_no_tmux_server_11631() {
     let scratch = tempfile::tempdir().expect("scratch");
     let out = scratch.path().join("holder-tmux-dir");
     let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
-    let mut holder = Command::new(std::env::current_exe().expect("test binary"))
-        .arg("--exact")
-        .arg(format!("{module}::fleet_env_holder_helper_11631"))
-        .args(["--ignored", "--test-threads=1", "-q"])
-        .env(HOLDER_OUT_ENV, &out)
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn the FleetEnv holder");
+    // #11631: a panic before the SIGKILL below must still end the holder, or
+    // its tmux server and watchdog outlive the test.
+    let mut holder = Reaped(
+        Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg(format!("{module}::fleet_env_holder_helper_11631"))
+            .args(["--ignored", "--test-threads=1", "-q"])
+            .env(HOLDER_OUT_ENV, &out)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the FleetEnv holder"),
+    );
     // Wait on the holder's own state: its marker, or its exit.
     while !out.exists() {
-        if let Some(status) = holder.try_wait().expect("holder status") {
+        if let Some(status) = holder.0.try_wait().expect("holder status") {
             panic!("the holder exited {status} before it held a FleetEnv");
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
@@ -556,8 +570,8 @@ fn a_killed_fleet_test_leaves_no_tmux_server_11631() {
         "the holder's server is not up"
     );
 
-    holder.kill().expect("SIGKILL the holder");
-    let _ = holder.wait();
+    holder.0.kill().expect("SIGKILL the holder");
+    let _ = holder.0.wait();
 
     // The watchdog's cleanup is a fixed short script; 30 s bounds a hung one.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
