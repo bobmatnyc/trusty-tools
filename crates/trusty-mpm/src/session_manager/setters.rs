@@ -162,8 +162,14 @@ impl SessionManager {
     ///
     /// The [`ManagedError`] of the read or the write.
     ///
+    /// #12077: the refusal also tears the session down (kills its tmux
+    /// session, removes a worktree the spawn reserved), so nothing runs behind
+    /// the refused spawn.
+    ///
     /// Test: `set_claude_sandbox_persists_only_an_opt_in_12077`,
-    /// `an_unpersisted_opt_in_refuses_the_spawn_12077`.
+    /// `an_unpersisted_opt_in_refuses_the_spawn_12077`,
+    /// `a_refused_opt_in_removes_the_worktree_the_spawn_reserved_12077`,
+    /// `a_refused_opt_in_session_is_neither_adopted_nor_resumable_12077`.
     pub async fn set_claude_sandbox(
         &self,
         mut record: super::record::SessionRecord,
@@ -188,9 +194,31 @@ impl SessionManager {
             error!(id = %record.id, "set_claude_sandbox: {why}");
             // #12077: an Errored record is never auto-resumed.
             let _ = self.mark_errored(&record.id, &why).await;
+            // #12077: the tmux session `create_with_reserved_name` made would
+            // otherwise stay up as a bare shell, and reconcile re-adopts a live
+            // session as Active. A teardown failure is logged; the refusal is
+            // still the original error.
+            self.reap_refused_spawn(&record.id).await;
             return Err(e);
         }
         Ok(record)
+    }
+
+    /// Tear down the session of a spawn refused after its tmux session exists.
+    ///
+    /// Why: see [`Self::set_claude_sandbox`] (#12077). The runtime never ran,
+    /// the same case as a denied front gate.
+    /// What: the [`Self::decommission_denied_front_gate`] teardown — kills the
+    /// proven pane, removes an in-project session worktree holding only tm's
+    /// provisioning files (never the operator's main checkout), tombstones the
+    /// record. A failure is logged, never returned.
+    /// Test: `a_refused_opt_in_reaps_the_session_and_keeps_the_main_checkout_12077`,
+    /// `a_failed_teardown_still_returns_the_original_refusal_12077`.
+    async fn reap_refused_spawn(&self, id: &ManagedSessionId) {
+        // #12077: reuse the front-gate deny teardown; do not hand-roll a kill.
+        if let Err(e) = self.decommission_denied_front_gate(id).await {
+            error!(id = %id, "refused spawn: teardown failed, the session may still run: {e}");
+        }
     }
 
     /// Record a source project identity on a session, with a bounded retry
