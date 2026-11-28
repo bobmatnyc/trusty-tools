@@ -534,8 +534,9 @@ describe('production build', () => {
 	it('wires analytics to a first-party path, never the third-party debug script', () => {
 		const bundle = clientBundle();
 		expect(bundle).toContain('/_vercel/insights/script.js');
-		expect(bundle).toMatch(/\{\s*mode:\s*["']production["']\s*\}/);
-		expect(bundle).not.toMatch(/\{\s*mode:\s*["']development["']\s*\}/);
+		// Vite 8's minifier writes string literals as template literals, hence the backtick.
+		expect(bundle).toMatch(/\{\s*mode:\s*["'`]production["'`]\s*\}/);
+		expect(bundle).not.toMatch(/\{\s*mode:\s*["'`]development["'`]\s*\}/);
 	});
 
 	it('renders real documentation, with rewritten links and no blob/main', () => {
