@@ -405,11 +405,28 @@ fn arith_byte(
 
 /// Whether the word `before` ends with is an fd prefix glued to the `<<`
 /// after it (`3`, `{fd}`), which bash reads as part of the operator (#12011).
+// #12011: only an unescaped blank, `;&|(<>` or the text start opens the
+// prefix; after a quote, backtick, `)` or `\ ` the digit joins the word.
 fn glued_fd_prefix(before: &str) -> bool {
-    let start = before
-        .rfind(|c: char| c.is_ascii_whitespace() || ";&|()<>`'\"".contains(c))
+    let bytes = before.as_bytes();
+    let start = (0..bytes.len())
+        .rev()
+        .find(|&at| {
+            let breaks = bytes[at].is_ascii_whitespace() || b";&|(<>".contains(&bytes[at]);
+            // Count the backslash run only at a break byte, so the scan is linear.
+            breaks && slashes_before(bytes, at).is_multiple_of(2)
+        })
         .map_or(0, |at| at + 1);
     before.get(start..).is_some_and(is_redirect_prefix)
+}
+
+/// How many backslashes run back from just before `at`.
+fn slashes_before(bytes: &[u8], at: usize) -> usize {
+    bytes[..at]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count()
 }
 
 /// Whether an unquoted byte ends a word, so a `#` after it opens a comment.

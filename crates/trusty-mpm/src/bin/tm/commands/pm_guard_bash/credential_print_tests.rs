@@ -1964,9 +1964,11 @@ fn allows_the_11959_neighbours() {
 /// 🔴 REGRESSION (#12011, fail-open check): a here-document, here-string or
 /// fd-variable redirect in front of a CLI's subcommand words. Left in argv,
 /// the redirect word took the subcommand slot, so the run-time `$SUB` or the
-/// literal `item get` was never read. Each row after the first two was
-/// allowed at 938622269f; the last two are redirections the guard cannot
-/// place.
+/// literal `item get` was never read. Rows 3-20 were allowed at 938622269f;
+/// rows 19-20 are redirections the guard cannot place. The last five put a
+/// digit or `{name}` after a quote or `\ `, where bash reads it as part of
+/// the argument: denied at 938622269f, allowed at 57b4981882, which glued it
+/// to the here-document mark.
 #[test]
 fn denies_a_redirect_before_a_cli_subcommand_12011() {
     check(
@@ -1994,6 +1996,12 @@ fn denies_a_redirect_before_a_cli_subcommand_12011() {
             "op {fd}<<<fake-input read op://fake-vault/fake-item/f",
             "op read op://fake-vault/fake-item/f -o /tmp/fake-out <<",
             "op read op://fake-vault/fake-item/f -o /tmp/fake-out 3<&",
+            // #12011 round 2: `"a"3<<` is the argument `a3`; the body is stdin.
+            "sh -s \"a\"3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s 'a'3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s \"a\"{fd}<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s a\\ 3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "python3 - \"a\"3<<'EOF'\nimport os\nos.system(\"op read op://fake-vault/fake-item/f\")\nEOF",
         ],
     );
 }
