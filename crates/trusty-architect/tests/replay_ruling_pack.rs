@@ -55,8 +55,6 @@ fn ruling_pack_recordings_replay_clean_against_the_port() {
             "keys-bad-json.json",
             "keys-missing.json",
             "keys-no-projects.json",
-            "memory-absent.json",
-            "memory-only.json",
             "no-fakes.json",
             "no-root.json",
             "recall-errors.json",

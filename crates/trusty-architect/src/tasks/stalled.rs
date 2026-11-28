@@ -3,7 +3,7 @@
 //! Why: every Architect turn names open ledger tasks with no progress past
 //! their priority limit, and owner waits nobody asked the owner about, until
 //! progress is written; the hook text must match the script's.
-//! What: [`line`] lists open or running tasks, not waiting on the owner, whose
+//! What: [`line()`] lists open or running tasks, not waiting on the owner, whose
 //! last progress (`progress_at`, else `created`) is older than the limit (P1
 //! 2 h, P2 4 h, else 12 h), most over the limit first, at most two, then
 //! `+N more`. [`unasked_line`] lists the owner waits past their limit that no
@@ -277,7 +277,7 @@ pub fn unasked_line(
 
 /// Why: the script's command line, run from the Architect checkout.
 /// What: `datg.load_state(il_dir)` (a failure prints the traceback's last
-/// line, exit 1), then [`line`] and [`unasked_line`] with `cap`, each line
+/// line, exit 1), then [`line()`] and [`unasked_line`] with `cap`, each line
 /// or `none`.
 /// Test: `stalled_tasks_recordings_replay_clean_against_the_port`.
 pub fn run(

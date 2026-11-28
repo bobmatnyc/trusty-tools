@@ -19,7 +19,7 @@ use crate::argparse::{self, HELP, Nargs, Opt, Parsed, Pos, invalid_choice};
 use crate::clock::Clock;
 use crate::pyjson_load::{PyValue, loads};
 use crate::pystr::{digit_value, py_repr, strip};
-use crate::pyval::type_name;
+use crate::pyval::{get, type_name};
 use crate::spec_drift::Outcome;
 use crate::writers::{no_checkout, os_error};
 
@@ -138,8 +138,18 @@ fn check(i: usize, v: &str) -> Result<(), String> {
     }
 }
 
-/// `load_keys(path)`: the `projects` map, or the error `main()` meets.
-fn load_keys(path: &str) -> Result<Vec<(String, PyValue)>, BuildError> {
+/// The key map's top-level setting naming the entry field that adds the
+/// `cto` palace (#12097). The script ignores it; unset, no field is checked.
+pub(crate) const CTO_FLAG_KEY: &str = "cto_flag_field";
+
+/// The `projects` map and the configured CTO flag field.
+type KeyMap = (Vec<(String, PyValue)>, Option<String>);
+
+/// `load_keys(path)`: the `projects` map, or the error `main()` meets, and
+/// the string value of [`CTO_FLAG_KEY`] when the map sets one.
+///
+/// Test: `load_keys_reads_the_cto_flag_field_from_the_key_map`.
+pub(crate) fn load_keys(path: &str) -> Result<KeyMap, BuildError> {
     let fatal = |e: PyErr| BuildError::Fatal(e);
     let bytes = std::fs::read(path).map_err(|e| fatal(PyErr::from_line(&os_error(&e, path))))?;
     let text = String::from_utf8(bytes).map_err(|_| {
@@ -155,8 +165,13 @@ fn load_keys(path: &str) -> Result<Vec<(String, PyValue)>, BuildError> {
         Err(e) if e.class == "KeyError" => return Err(BuildError::Unknown("projects".into())),
         Err(e) => return Err(fatal(e)),
     };
+    // #12097: read after `projects`, so every error path stays the script's.
+    let cto_flag = match get(&doc, CTO_FLAG_KEY) {
+        Some(PyValue::Str(f)) if !f.is_empty() => Some(f.clone()),
+        _ => None,
+    };
     match projects {
-        PyValue::Dict(pairs) => Ok(pairs),
+        PyValue::Dict(pairs) => Ok((pairs, cto_flag)),
         other => Err(fatal(PyErr::new(
             "AttributeError",
             format!("'{}' object has no attribute 'items'", type_name(&other)),
@@ -210,17 +225,20 @@ pub fn run(args: &[String], opts: &Options<'_>) -> Outcome {
     if !no_write && checkout.is_none() {
         return no_checkout(PROG, hint);
     }
-    let req = Request {
-        project: &project,
-        question: &question,
-        issues: &issues,
-        prs: &prs,
-        files: &a.all[3],
-        symbols: &a.all[4],
-        qtype: a.values[5].as_deref().unwrap_or("decision"),
-        checked: a.flags[6],
-    };
-    let built = load_keys(&keys).and_then(|projects| build(&req, &projects, opts.clock));
+    let built = load_keys(&keys).and_then(|(projects, cto_flag)| {
+        let req = Request {
+            project: &project,
+            question: &question,
+            issues: &issues,
+            prs: &prs,
+            files: &a.all[3],
+            symbols: &a.all[4],
+            qtype: a.values[5].as_deref().unwrap_or("decision"),
+            checked: a.flags[6],
+            cto_flag: cto_flag.as_deref(),
+        };
+        build(&req, &projects, opts.clock)
+    });
     let (text, key) = match built {
         Ok((text, _, key)) => (text, key),
         Err(BuildError::Unknown(msg)) => {

@@ -6,7 +6,7 @@
 //! What: [`LEVELS`] (lowest to highest), [`DEFAULT`] and [`rule`] (the
 //! one-line rule per level) are the script's tables; [`normalize`] maps any
 //! value outside [`LEVELS`] to [`DEFAULT`]; [`below_engineer`] is true for the
-//! levels `level_lint` checks; [`line`] is the hook text; [`read`] returns the
+//! levels `level_lint` checks; [`line()`] is the hook text; [`read`] returns the
 //! stored level through the dashboard store, [`DEFAULT`] when the document or
 //! key is missing or holds anything else.
 //! Test: `technical_level_recordings_replay_clean_against_the_port`.

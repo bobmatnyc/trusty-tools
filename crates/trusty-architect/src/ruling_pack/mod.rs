@@ -7,7 +7,8 @@
 //! What: [`cli::run`] is the command line. The project resolves through the
 //! key map (key, alias, palace, index id, repo); `trusty-memory serve` is
 //! asked over MCP stdio for prior rulings on the project palace,
-//! `supervisor`, and `cto` for an entry with the CTO flag; `trusty-search`
+//! `supervisor`, and `cto` for an entry whose field named by the key map's
+//! top-level `cto_flag_field` is truthy (unset: never); `trusty-search`
 //! and `rg -F` give facts; a backend that is down is reported and counts as
 //! not found. The pack goes to stdout and, unless `--no-write`, to
 //! `<checkout>/local/packs/<utc>-<key>.md`.

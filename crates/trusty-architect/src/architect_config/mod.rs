@@ -29,9 +29,9 @@ pub const DEFAULT_PORT: i64 = 7890;
 /// `DEFAULT_POLL_INTERVAL_S` (#11369).
 pub const DEFAULT_POLL_INTERVAL_S: u64 = 60;
 /// `DEFAULT_PROJECTS_ROOT`.
-pub const DEFAULT_PROJECTS_ROOT: &str = "~/trusty-mpm-projects";
+pub const DEFAULT_PROJECTS_ROOT: &str = "~/trusty-mpm-projects"; // path-literal: allow
 /// `DEFAULT_CLAUDE_CONFIG_DIR`.
-pub const DEFAULT_CLAUDE_CONFIG_DIR: &str = "~/.trusty-tools/trusty-mpm/claude-config";
+pub const DEFAULT_CLAUDE_CONFIG_DIR: &str = "~/.trusty-tools/trusty-mpm/claude-config"; // path-literal: allow
 const KNOWN: [&str; 9] = [
     "owner_name",
     "memory_palace",

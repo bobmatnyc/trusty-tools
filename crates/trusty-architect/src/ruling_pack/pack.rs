@@ -26,8 +26,6 @@ use crate::writers::os_error;
 pub(crate) const MAX_CHARS: usize = 6000;
 /// The script's `HIT_CHARS`: one memory hit's length.
 const HIT_CHARS: usize = 300;
-/// The key-map flag that adds the `cto` palace (the script's field name).
-const CTO_FLAG: &str = "duetto";
 
 /// The inputs of one pack, as `main()` passes them to `build()`.
 pub(crate) struct Request<'a> {
@@ -39,6 +37,9 @@ pub(crate) struct Request<'a> {
     pub(crate) symbols: &'a [String],
     pub(crate) qtype: &'a str,
     pub(crate) checked: bool,
+    /// The entry field whose truthy value adds the `cto` palace, from the
+    /// key map's `cto_flag_field`; `None` checks no field (#12097).
+    pub(crate) cto_flag: Option<&'a str>,
 }
 
 /// Why `build` produced no pack.
@@ -147,6 +148,30 @@ fn show(v: Option<&PyValue>) -> String {
     v.map_or_else(|| "None".into(), py_str)
 }
 
+/// The palaces to recall, in the script's order, without repeats: the
+/// entry's palace, `supervisor`, then `cto` when the entry's `cto_flag`
+/// field is truthy. `cto_flag` comes from config; `None` never adds `cto` (#12097).
+///
+/// Test: `cto_palace_follows_the_configured_flag_field`.
+pub(crate) fn palaces_for(e: &PyValue, cto_flag: Option<&str>) -> Vec<String> {
+    let cto = cto_flag
+        .and_then(|f| get(e, f))
+        .is_some_and(truthy)
+        .then(|| "cto".to_owned());
+    let candidates = [
+        get(e, "palace").filter(|p| truthy(p)).map(py_str),
+        Some("supervisor".into()),
+        cto,
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for p in candidates.into_iter().flatten() {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// `build(...)`: the pack text, its label and the resolved key.
 ///
 /// Why: the one call `main()` makes; the replay recordings exercise every arm.
@@ -169,20 +194,7 @@ pub(crate) fn build(
         return Err(BuildError::Unknown(msg));
     };
     let ids = identifiers(req.question, req.issues, req.prs, req.files, req.symbols);
-    let mut palaces: Vec<String> = Vec::new();
-    let cto = get(e, CTO_FLAG)
-        .is_some_and(truthy)
-        .then(|| "cto".to_owned());
-    let candidates = [
-        get(e, "palace").filter(|p| truthy(p)).map(py_str),
-        Some("supervisor".into()),
-        cto,
-    ];
-    for p in candidates.into_iter().flatten() {
-        if !palaces.contains(&p) {
-            palaces.push(p);
-        }
-    }
+    let palaces = palaces_for(e, req.cto_flag);
     let mut notes = Vec::new();
 
     let mem: Vec<Recall> = recall_all(&palaces, req.question);

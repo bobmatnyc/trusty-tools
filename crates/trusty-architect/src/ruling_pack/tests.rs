@@ -1,7 +1,8 @@
 //! Unit tests of the `ruling_pack.py` port (#12028 P1i). Expected values
 //! are the frozen script's, run under Python 3.14 on the same inputs.
 
-use super::pack::{suggest_checks, write_pack};
+use super::cli::{CTO_FLAG_KEY, load_keys};
+use super::pack::{palaces_for, suggest_checks, write_pack};
 use super::pyerr::{Key, subscript};
 use super::scan::{identifiers, label, resolve, trim};
 use crate::clock::FakeClock;
@@ -133,4 +134,49 @@ fn write_pack_lands_under_the_given_root() {
     assert_eq!(std::fs::read_to_string(&want).expect("read"), "pack body\n");
     let entries: Vec<_> = std::fs::read_dir(&packs).expect("list").collect();
     assert_eq!(entries.len(), 1, "one file, nothing beside it");
+}
+
+#[test]
+fn cto_palace_follows_the_configured_flag_field() {
+    // See #12097: the flag field comes from config, never from the code.
+    let e = loads(r#"{"palace": "p", "org_flag": true, "off_flag": false}"#).expect("json");
+    assert_eq!(
+        palaces_for(&e, Some("org_flag")),
+        strs(&["p", "supervisor", "cto"])
+    );
+    assert_eq!(
+        palaces_for(&e, Some("off_flag")),
+        strs(&["p", "supervisor"])
+    );
+    assert_eq!(palaces_for(&e, Some("absent")), strs(&["p", "supervisor"]));
+    assert_eq!(palaces_for(&e, None), strs(&["p", "supervisor"]));
+}
+
+#[test]
+fn load_keys_reads_the_cto_flag_field_from_the_key_map() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = |name: &str, text: &str| {
+        let p = dir.path().join(name);
+        std::fs::write(&p, text).expect("write");
+        p.to_string_lossy().into_owned()
+    };
+    let set = path(
+        "set.json",
+        &format!(r#"{{"{CTO_FLAG_KEY}": "org_flag", "projects": {{"a": {{"org_flag": true}}}}}}"#),
+    );
+    let (projects, flag) = load_keys(&set).map_err(|e| e.to_string()).expect("loads");
+    assert_eq!(flag.as_deref(), Some("org_flag"));
+    assert_eq!(
+        palaces_for(&projects[0].1, flag.as_deref()),
+        strs(&["supervisor", "cto"])
+    );
+    for text in [
+        r#"{"projects": {}}"#,
+        r#"{"cto_flag_field": 1, "projects": {}}"#,
+    ] {
+        let (_, flag) = load_keys(&path("unset.json", text))
+            .map_err(|e| e.to_string())
+            .expect("loads");
+        assert_eq!(flag, None, "{text}");
+    }
 }
