@@ -331,7 +331,8 @@ impl<'a> Scanner<'a> {
 
 /// Whether `prefix` belongs to the redirection after it: an fd number (`2>`)
 /// or a `{name}` variable (`{fd}>`), the two shapes bash reads as part of it.
-fn is_redirect_prefix(prefix: &str) -> bool {
+// #12011: shared with the credential-print rule's redirection reader.
+pub(crate) fn is_redirect_prefix(prefix: &str) -> bool {
     let digits = !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit());
     let named = prefix
         .strip_prefix('{')

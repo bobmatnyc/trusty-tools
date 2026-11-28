@@ -23,6 +23,7 @@
 //! `credential_print_tests::allows_script_operands_and_comments`,
 //! `heredoc_operators_skip_comments_escapes_and_expansions`.
 
+use super::super::bash_tokens::is_redirect_prefix;
 use super::super::heredoc::scan_work::{Site, charge};
 use super::super::heredoc::{delimiter_word, is_terminator};
 use super::{Heredoc, input_is_program_text};
@@ -200,7 +201,14 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                     let done = consume_bodies(text, i + 1, &mut pending, heredocs);
                     // Latest first, so an earlier operator's range stays valid.
                     for ((from, to), index) in done.stripped.into_iter().rev() {
-                        out.replace_range(from..to, &format!(" {HEREDOC_MARK}{index}__ "));
+                        // #12011: `3<<'EOF'` keeps its fd glued to the mark, so
+                        // the `3` never reads as an argument word.
+                        let lead = if glued_fd_prefix(&out[..from]) {
+                            ""
+                        } else {
+                            " "
+                        };
+                        out.replace_range(from..to, &format!("{lead}{HEREDOC_MARK}{index}__ "));
                     }
                     out.push_str(&text[copied..=i]);
                     for (start, end) in done.bodies {
@@ -393,6 +401,15 @@ fn arith_byte(
         _ => {}
     }
     i + 1
+}
+
+/// Whether the word `before` ends with is an fd prefix glued to the `<<`
+/// after it (`3`, `{fd}`), which bash reads as part of the operator (#12011).
+fn glued_fd_prefix(before: &str) -> bool {
+    let start = before
+        .rfind(|c: char| c.is_ascii_whitespace() || ";&|()<>`'\"".contains(c))
+        .map_or(0, |at| at + 1);
+    before.get(start..).is_some_and(is_redirect_prefix)
 }
 
 /// Whether an unquoted byte ends a word, so a `#` after it opens a comment.

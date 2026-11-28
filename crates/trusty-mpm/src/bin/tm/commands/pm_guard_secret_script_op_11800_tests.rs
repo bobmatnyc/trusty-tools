@@ -16,9 +16,10 @@ use crate::commands::pm_guard_bash::evaluate_credential_print_command;
 use crate::commands::pm_guard_secret_script::evaluate_script_body_secret_read;
 
 /// Plain Bash commands from the #11800 reviews; each refuses.
-// #11800: `op <<EOF $SUB` and `op {fd}>/dev/null $SUB` allow and are tracked
-// in #12011, so they are not listed.
 const SECRET_BASH_COMMANDS: &[&str] = &[
+    // #12011: a here-document or fd-variable redirect in the slot.
+    "op <<EOF $SUB",
+    "op {fd}>/dev/null $SUB",
     // The plain reads.
     "op read op://v/i/f",
     "op read \"$REF\"",

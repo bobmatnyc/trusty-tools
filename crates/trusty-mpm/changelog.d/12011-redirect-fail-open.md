@@ -1,0 +1,3 @@
+Fixed
+- `tm hook --pm-guard` no longer reads a redirect as one of a credential CLI's subcommand words. A here-document (`<<EOF`, `<< EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`), a here-string (`<<<`), an fd-variable redirect (`{fd}>/dev/null`, `{fd}<&0`, `{fd}<<<`) and the digit-fd forms of each (`3<<'EOF'`, `0<<<word`) now stay out of the command's words. `op <<EOF $SUB`, `op {fd}>/dev/null $SUB`, `gh auth <<EOF $SUB` and `op {fd}>/dev/null item get ITEM` are now refused like the same commands without the redirect. The same reads stay allowed when the output is captured or sent to a file.
+- A here-document operator with no delimiter word, and an fd-numbered redirect the guard cannot place (`3<&` at the end of a command), now refuse instead of being read as an argument.

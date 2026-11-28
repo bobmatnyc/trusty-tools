@@ -1960,3 +1960,59 @@ fn allows_the_11959_neighbours() {
         ],
     );
 }
+
+/// 🔴 REGRESSION (#12011, fail-open check): a here-document, here-string or
+/// fd-variable redirect in front of a CLI's subcommand words. Left in argv,
+/// the redirect word took the subcommand slot, so the run-time `$SUB` or the
+/// literal `item get` was never read. Each row after the first two was
+/// allowed at 938622269f; the last two are redirections the guard cannot
+/// place.
+#[test]
+fn denies_a_redirect_before_a_cli_subcommand_12011() {
+    check(
+        true,
+        &[
+            // Denied before too: `$SUB` is already in the first slot, and a
+            // stripped quoted body leaves only its placeholder.
+            "op $SUB {fd}>/dev/null fake-item",
+            "op <<\"EOF\" $SUB\nfake body\nEOF",
+            "op {fd}>/dev/null $SUB fake-item",
+            "op <<EOF $SUB",
+            "op <<'EOF' $SUB",
+            "op <<\"EOF\" $SUB",
+            "op << EOF $SUB",
+            "op <<-EOF $SUB fake-item",
+            "op 3<<'EOF' $SUB\nfake body\nEOF",
+            "op {fd}<<'EOF' $SUB\nfake body\nEOF",
+            "op 0<<<fake-input $SUB",
+            "gh auth <<EOF $SUB",
+            "gh <<EOF auth $SUB",
+            "gh auth {fd}>/dev/null $SUB",
+            "op {fd}>/dev/null item get fake-item --reveal",
+            "op item {fd}>/dev/null get fake-item --reveal",
+            "op {fd}<&0 item get fake-item --reveal",
+            "op {fd}<<<fake-input read op://fake-vault/fake-item/f",
+            "op read op://fake-vault/fake-item/f -o /tmp/fake-out <<",
+            "op read op://fake-vault/fake-item/f -o /tmp/fake-out 3<&",
+        ],
+    );
+}
+
+/// #12011: the same redirects stay allowed where the value is captured or
+/// sent to a file, or the subcommand is a literal that prints nothing.
+#[test]
+fn allows_the_12011_neighbours() {
+    check(
+        false,
+        &[
+            "X=$(op {fd}>/dev/null item get fake-item --reveal)",
+            "op {fd}>/dev/null item get fake-item --reveal > /tmp/fake-out",
+            "op item get fake-item --reveal > /dev/null 2>&1 {fd}>&1",
+            "op item get fake-item --reveal 3<<<fake-input > /tmp/fake-out",
+            "op read op://fake-vault/fake-item/f -o /tmp/fake-out {fd}<&0",
+            "op item list --vault fake-vault <<EOF $V",
+            "gh auth status <<EOF $H",
+            "op item get fake-item --reveal {fd}>/tmp/fake-log > /tmp/fake-out",
+        ],
+    );
+}

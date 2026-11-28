@@ -28,9 +28,11 @@
 //! `credential_print_tests::denies_the_round_three_bypasses`,
 //! `credential_print_tests::denies_the_round_five_bypasses`,
 //! `credential_print_tests::denies_the_round_six_bypasses`,
-//! `credential_print_tests::allows_the_round_six_neighbours`.
+//! `credential_print_tests::allows_the_round_six_neighbours`,
+//! `credential_print_tests::denies_a_redirect_before_a_cli_subcommand_12011`,
+//! `credential_print_tests::allows_the_12011_neighbours`.
 
-use super::super::bash_tokens::{RedirectRole, redirect_role};
+use super::super::bash_tokens::{RedirectRole, is_redirect_prefix, redirect_role};
 use super::credential_print_heredoc::HEREDOC_MARK;
 use super::credential_print_programs::basename;
 use super::credential_print_taint::expands_tainted;
@@ -67,6 +69,12 @@ pub(super) struct Routed {
 /// sink; `N>&-` closes. A `<<<` word and a stripped here-document feed stdin
 /// and are recorded, not kept in argv; an unquoted here-document's body words
 /// stay in argv and mark stdin as program text when they could run a call.
+/// #12011: an unquoted here-document operator and its delimiter word never
+/// stay in argv, an fd prefix (`3<<<`) belongs to its operator, a `{name}`
+/// redirect is read as fd 10, and an fd-prefixed operator no reader places
+/// refuses.
+/// Test: `credential_print_tests::denies_a_redirect_before_a_cli_subcommand_12011`,
+/// `credential_print_tests::allows_the_12011_neighbours`.
 pub(super) fn apply_redirections(
     tokens: &[String],
     out: Sink,
@@ -90,15 +98,21 @@ pub(super) fn apply_redirections(
         target_carries: false,
     };
     let mut i = 0;
-    while let Some(tok) = tokens.get(i) {
+    while let Some(word) = tokens.get(i) {
         i += 1;
-        if let Some(index) = heredoc_index(tok) {
+        // #12011: a `{name}` redirect opens a descriptor of 10 or more, which
+        // no stage reads, so it is read as fd 10.
+        let named = named_fd_as_ten(word);
+        let tok = named.as_deref().unwrap_or(word);
+        // #12011: an fd prefix (`0<<<`, `3<<EOF`) is part of the operator.
+        let op = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+        if let Some(index) = heredoc_index(op) {
             let text = lifted.heredocs.get(index).is_none_or(|h| h.program_text);
             routed.here_program_text |= text;
             routed.here_any = true;
             continue;
         }
-        if let Some(word) = tok.strip_prefix("<<<") {
+        if let Some(word) = op.strip_prefix("<<<") {
             let word = if word.is_empty() {
                 i += 1;
                 tokens.get(i - 1).map(String::as_str).unwrap_or_default()
@@ -110,7 +124,7 @@ pub(super) fn apply_redirections(
             routed.here_any = true;
             continue;
         }
-        if tok.starts_with("<<") {
+        if let Some(delimiter) = op.strip_prefix("<<") {
             // #8596 round 3: an unquoted here-document left in place; its body
             // words follow the operator.
             let rest = tokens.get(i..).unwrap_or_default();
@@ -118,6 +132,15 @@ pub(super) fn apply_redirections(
             routed.here_any = true;
             // #8676: a body word expanding a credential feeds it on stdin.
             routed.here_carries |= rest.iter().any(|w| carries(w, lifted));
+            // #12011: the operator and its delimiter word feed stdin; left in
+            // argv they took a CLI's subcommand slot (`op <<EOF $SUB`).
+            if delimiter.strip_prefix('-').unwrap_or(delimiter).is_empty() {
+                i += 1;
+                if tokens.get(i - 1).is_none() {
+                    return Err(Refusal::Unreadable("a here-document with no delimiter"));
+                }
+            }
+            continue;
         }
         if let Some((fd, src)) = dup_operands(tok, tokens.get(i).map(String::as_str))? {
             if src.consumed_next {
@@ -178,8 +201,13 @@ pub(super) fn apply_redirections(
             continue;
         }
         let target = match redirect_role(tok) {
+            // #12011: an fd-prefixed operator no reader above placed fails
+            // closed rather than spend a CLI's subcommand slot in argv.
+            RedirectRole::None | RedirectRole::FileDescriptor if fd_prefixed_operator(tok) => {
+                return Err(Refusal::Unreadable("a redirection it cannot classify"));
+            }
             RedirectRole::None | RedirectRole::FileDescriptor => {
-                routed.argv.push(tok.clone());
+                routed.argv.push(word.clone());
                 continue;
             }
             RedirectRole::TargetFollows => {
@@ -464,6 +492,26 @@ pub(crate) fn input_redirect_operand(tok: &str) -> Option<(usize, &str)> {
         return None;
     };
     Some((fd, right))
+}
+
+/// `tok` with a `{name}` fd-variable prefix (`{fd}>`, `{fd}<<`) read as fd
+/// 10 (#12011); `None` for any other word.
+///
+/// Why: bash gives the redirect a new descriptor of 10 or more and stores its
+/// number in `name`, so it never moves fd 0-9. Left whole, `{fd}>/dev/null`
+/// reached argv and spent `op`'s subcommand slot.
+/// Test: `credential_print_tests::denies_a_redirect_before_a_cli_subcommand_12011`.
+fn named_fd_as_ten(tok: &str) -> Option<String> {
+    let close = tok.strip_prefix('{')?.find('}')? + 2;
+    let (prefix, op) = tok.split_at_checked(close)?;
+    let operator = op.starts_with(['<', '>']) || op.starts_with(HEREDOC_MARK);
+    (operator && is_redirect_prefix(prefix)).then(|| format!("10{op}"))
+}
+
+/// Whether `tok` is an fd number glued to a `<` or `>` operator (#12011).
+fn fd_prefixed_operator(tok: &str) -> bool {
+    let op = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    op.len() < tok.len() && op.starts_with(['<', '>'])
 }
 
 /// The index a [`HEREDOC_MARK`] token names.
