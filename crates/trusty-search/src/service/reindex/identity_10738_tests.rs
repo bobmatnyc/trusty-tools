@@ -256,7 +256,7 @@ const LATE_BODY: &str = "pub fn late_10738(x: u32) -> u32 {\n    x + 2\n}\n";
 /// Why: the restart and prune cases run real reindexes, which walk the root;
 /// the corpus directory must not be walked as source.
 /// Test: used by the restart and prune cases below.
-fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
+pub(super) fn walkable_index(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
     Arc::new(walkable_handle(id, root))
 }
 

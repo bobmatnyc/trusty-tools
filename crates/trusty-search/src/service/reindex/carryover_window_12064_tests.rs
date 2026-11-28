@@ -187,3 +187,84 @@ async fn a_write_and_a_delete_in_the_carryover_window_stop_the_run() {
         "only the rewritten a.rs is promoted: {a_rows:?}"
     );
 }
+
+/// Why: #12064 review — the stop set semantic and graph `Failed` and counted
+/// toward quarantine, though the live corpus it leaves attached is intact.
+/// What: one real `run_reindex`, with a put landed between its carryover
+/// copy and its swap. The run ends `Failed` with the stop reason; the stages
+/// equal their pre-run snapshot; the index stamps do not move; the
+/// quarantine records no failure.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
+async fn a_carryover_window_stop_keeps_stages_stamps_and_quarantine() {
+    use super::progress::{ReindexProgress, ReindexStatus};
+    let id = "carryover-run-12064";
+    let _ = crate::service::index_identity::retire(id);
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.rs"), A_V2).expect("a.rs");
+    let handle = super::identity_10738_tests::walkable_index(id, dir.path());
+    super::spawn_reindex_awaitable(handle.clone(), Arc::new(ReindexProgress::new()), false)
+        .await
+        .expect("first reindex");
+    *handle.indexed_head_sha.write().await = Some("sha-before-12064".into());
+    *handle.last_indexed_at.write().await = Some("at-before-12064".into());
+    let before = serde_json::to_value(&*handle.stages.read().await).expect("stages");
+    assert_eq!(before["lexical"]["status"], "ready", "test setup: {before}");
+
+    // The run's copy shares this read guard; its swap queues behind it.
+    let guard = handle.indexer.read().await;
+    let quarantine = super::ReindexQuarantine::new();
+    let progress = Arc::new(ReindexProgress::new());
+    let claim =
+        crate::service::exclude_hold::claim_reindex(&handle, "test", false).expect("claim the run");
+    let run = tokio::spawn(super::runner::run_reindex(
+        handle.clone(),
+        progress.clone(),
+        false,
+        None,
+        None,
+        None,
+        true,
+        Some(quarantine.clone()),
+        claim,
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while handle.indexer.try_read().is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the swap never queued for the write lock"
+        );
+        tokio::task::yield_now().await;
+    }
+    guard
+        .index_file(PUSHED, PUSHED_BODY)
+        .await
+        .expect("put in the window");
+    drop(guard);
+    run.await.expect("reindex task must not panic");
+
+    assert_eq!(progress.status.load(), ReindexStatus::Failed);
+    let events = progress.events.lock().await.clone();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.contains("during the carryover copy")),
+        "the run names the stop: {events:?}"
+    );
+    let after = serde_json::to_value(&*handle.stages.read().await).expect("stages");
+    assert_eq!(after, before, "the stop restores the pre-run stages");
+    assert_eq!(
+        handle.indexed_head_sha.read().await.as_deref(),
+        Some("sha-before-12064")
+    );
+    assert_eq!(
+        handle.last_indexed_at.read().await.as_deref(),
+        Some("at-before-12064")
+    );
+    assert_eq!(
+        quarantine.failure_count(&handle.id),
+        0,
+        "the stop does not count toward quarantine"
+    );
+}
