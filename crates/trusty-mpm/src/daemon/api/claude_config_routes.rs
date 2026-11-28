@@ -571,6 +571,35 @@ fn select_restart_record<'a>(
         .max_by_key(|r| r.created_at)
 }
 
+/// Refuse a config-apply restart of a session that opted in to the sandbox
+/// (#12077).
+///
+/// Why: the restart relaunches a bare `claude` (`relaunch_command`), which
+/// carries no inline sandbox; running an opted-in pane unsandboxed would undo
+/// the operator's choice without a word.
+/// What: `Ok` for a record not opted in (the restart is unchanged); otherwise
+/// a logged [`DaemonError::SessionNotActive`] (409) naming the switch.
+/// Test: `an_opted_in_session_restart_is_refused_12077`,
+/// `a_default_session_restart_is_unchanged_12077`.
+fn refuse_a_sandboxed_restart(
+    record: &SessionRecord,
+    tmux_session: &str,
+) -> Result<(), DaemonError> {
+    if !record.claude_sandbox {
+        return Ok(());
+    }
+    let why = format!(
+        "restart refused: session `{tmux_session}` opted in to the Claude Code sandbox \
+         (TM_CLAUDE_SANDBOX=1), and a config-apply restart relaunches `claude` without it; \
+         stop and resume the managed session instead (#12077)"
+    );
+    tracing::warn!("{why}");
+    Err(DaemonError::SessionNotActive {
+        id: tmux_session.to_owned(),
+        status: why,
+    })
+}
+
 /// The pane the restart types into for `tmux_session` (#9101).
 ///
 /// What: `Ok(None)` when no live managed record carries the name (an
@@ -578,7 +607,8 @@ fn select_restart_record<'a>(
 /// managed record, `SessionManager::owned_pane`'s pane, or its refusal as
 /// [`DaemonError::SessionNotActive`] (409): a record with no pane id, a pane
 /// on another tmux server, or an identity that cannot be read never gets a
-/// restart.
+/// restart. #12077: a record opted in to the sandbox is refused first
+/// ([`refuse_a_sandboxed_restart`]).
 /// Test: `a_stale_record_after_a_server_restart_never_gets_a_claude_restart`,
 /// `an_unreadable_pane_identity_refuses_the_claude_restart`.
 async fn restart_pane_for(
@@ -590,6 +620,8 @@ async fn restart_pane_for(
     let Some(record) = select_restart_record(&records, tmux_session) else {
         return Ok(None);
     };
+    // #12077: the restart types a bare `claude`, which carries no sandbox.
+    refuse_a_sandboxed_restart(record, tmux_session)?;
     mgr.owned_pane(&record.id, record).map(Some).map_err(|e| {
         tracing::warn!("restart in {tmux_session} refused: {e}");
         // #9101: a 409, as the reactivate route answers an unproven pane.

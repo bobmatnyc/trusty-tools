@@ -26,7 +26,7 @@ use anyhow::{Context as _, Result};
 use tracing::{info, warn};
 
 use trusty_mpm::core::session_launch::prepare_isolated_session;
-use trusty_mpm::runtime::{RuntimeKind, build_adapter};
+use trusty_mpm::runtime::{RuntimeKind, build_cli_adapter};
 use trusty_mpm::session_manager::real_tmux::RealTmuxDriver;
 use trusty_mpm::session_manager::{ManagedSessionId, ManagedTmuxDriver, SessionManager};
 
@@ -154,7 +154,7 @@ pub(crate) async fn new_session_manager(state_dir: &Path) -> Result<SessionManag
 ///
 /// Why: this is the WI-A launch path (#1049) plus the WI-B poll (#1051), wired
 /// in-process with no daemon. It reuses the EXACT machinery a daemon launch uses
-/// ([`prepare_isolated_session`], [`SessionManager::create_with_id`], [`build_adapter`] →
+/// ([`prepare_isolated_session`], [`SessionManager::create_with_id`], [`build_cli_adapter`] →
 /// `ClaudeCodeAdapter::spawn`) so the POC exercises the production path, not a
 /// parallel one.
 /// What: in order — (1) `prepare_isolated_session` deploys agents/skills/CLAUDE.md/PM
@@ -239,7 +239,8 @@ pub(crate) async fn launch_and_wait(
     // #8233: `framework_root` arrives from the command entry point, which plays
     // `DaemonState`'s role on this daemon-free path. Resolving a layout here
     // instead is the #4203 defect.
-    let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), framework_root);
+    // #12077: this process's `TM_CLAUDE_SANDBOX=1` opts the spawn in.
+    let adapter = build_cli_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), framework_root);
     adapter
         .spawn(
             &record.tmux_name,

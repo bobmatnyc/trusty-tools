@@ -874,8 +874,12 @@ pub(super) async fn spawn_managed_inproject(
             warn!(id = %session_id, "spawn_managed (inproject): create failed: {e}");
             e.to_string()
         })?;
-    // #12077: the request's sandbox opt-in rides on the record, for every resume.
-    let record = mgr.set_claude_sandbox(record, params.claude_sandbox).await;
+    // #12077: the request's sandbox opt-in rides on the record, for every resume;
+    // a failed write refuses the spawn (fail closed).
+    let record = mgr
+        .set_claude_sandbox(record, params.claude_sandbox)
+        .await
+        .map_err(|e| format!("TM_CLAUDE_SANDBOX=1 opt-in not stored, spawn refused: {e}"))?;
 
     // Record the source project identity so callers can reconnect later.
     if let Some(source_id) = &source.source_id

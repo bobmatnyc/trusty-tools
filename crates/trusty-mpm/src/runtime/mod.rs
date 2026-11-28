@@ -280,6 +280,27 @@ pub fn build_adapter(
     }
 }
 
+/// [`build_adapter`] for a launch the `tm` CLI starts in its own process
+/// (`tm meta run`, #12077): Claude Code carries this process's sandbox opt-in
+/// ([`crate::core::claude_sandbox::sandbox_opted_in`]).
+///
+/// Why: that path has no spawn request or record to carry the switch, and in
+/// 1.14.15 its spawn was sandboxed.
+/// Test: `a_cli_adapter_honours_the_process_switch_12077`.
+pub fn build_cli_adapter(
+    kind: RuntimeKind,
+    tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+    framework_root: &std::path::Path,
+) -> Box<dyn RuntimeAdapter> {
+    match kind {
+        RuntimeKind::ClaudeCode => Box::new(
+            ClaudeCodeAdapter::new(tmux, framework_root)
+                .with_claude_sandbox(crate::core::claude_sandbox::sandbox_opted_in()),
+        ),
+        kind => build_adapter(kind, tmux, framework_root),
+    }
+}
+
 /// [`build_adapter`] for a persisted `record`: its runtime, and for Claude
 /// Code its sandbox opt-in (#12077).
 ///

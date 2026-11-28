@@ -153,16 +153,24 @@ impl SessionManager {
     /// spawn; [`crate::runtime::build_record_adapter`] reads it off the record.
     /// What: `on == false` (the default) changes and writes nothing. `true`
     /// sets `claude_sandbox` on a fresh read of the stored record and upserts
-    /// it; a failed write is logged and the returned record still carries
-    /// `true`, so this launch is sandboxed even if a later resume is not.
-    /// Test: `set_claude_sandbox_persists_only_an_opt_in_12077`.
+    /// it. FAIL-CLOSED: a failed write marks the record errored (best-effort,
+    /// so no automatic path resumes it) and is the caller's error, which
+    /// refuses the spawn — a record that says off must never sit behind a
+    /// session that ran sandboxed.
+    ///
+    /// # Errors
+    ///
+    /// The [`ManagedError`] of the read or the write.
+    ///
+    /// Test: `set_claude_sandbox_persists_only_an_opt_in_12077`,
+    /// `an_unpersisted_opt_in_refuses_the_spawn_12077`.
     pub async fn set_claude_sandbox(
         &self,
         mut record: super::record::SessionRecord,
         on: bool,
-    ) -> super::record::SessionRecord {
+    ) -> Result<super::record::SessionRecord, ManagedError> {
         if !on {
-            return record;
+            return Ok(record);
         }
         record.claude_sandbox = true;
         let persisted: Result<(), ManagedError> = async {
@@ -173,13 +181,16 @@ impl SessionManager {
         }
         .await;
         if let Err(e) = persisted {
-            warn!(
-                id = %record.id,
-                "set_claude_sandbox: the opt-in was not persisted; a resume will \
-                 launch without the sandbox: {e}"
+            let why = format!(
+                "the TM_CLAUDE_SANDBOX=1 opt-in could not be stored on the record, so a \
+                 resume would run unsandboxed; refusing the spawn (#12077): {e}"
             );
+            error!(id = %record.id, "set_claude_sandbox: {why}");
+            // #12077: an Errored record is never auto-resumed.
+            let _ = self.mark_errored(&record.id, &why).await;
+            return Err(e);
         }
-        record
+        Ok(record)
     }
 
     /// Record a source project identity on a session, with a bounded retry
