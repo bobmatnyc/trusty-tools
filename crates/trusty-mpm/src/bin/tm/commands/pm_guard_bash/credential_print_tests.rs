@@ -1965,10 +1965,10 @@ fn allows_the_11959_neighbours() {
 /// fd-variable redirect in front of a CLI's subcommand words. Left in argv,
 /// the redirect word took the subcommand slot, so the run-time `$SUB` or the
 /// literal `item get` was never read. Rows 3-20 were allowed at 938622269f;
-/// rows 19-20 are redirections the guard cannot place. The last five put a
-/// digit or `{name}` after a quote or `\ `, where bash reads it as part of
-/// the argument: denied at 938622269f, allowed at 57b4981882, which glued it
-/// to the here-document mark.
+/// rows 19-20 are redirections the guard cannot place. Rows 21-25 put a digit
+/// or `{name}` after a quote or `\ `, where bash reads it as part of the
+/// argument; rows 26-30 put it after a `\r`, `\x0c`, `<`, `>` or `<&`. A quoted
+/// here-document with an fd prefix now refuses whatever comes before it.
 #[test]
 fn denies_a_redirect_before_a_cli_subcommand_12011() {
     check(
@@ -2002,6 +2002,12 @@ fn denies_a_redirect_before_a_cli_subcommand_12011() {
             "sh -s \"a\"{fd}<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
             "sh -s a\\ 3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
             "python3 - \"a\"3<<'EOF'\nimport os\nos.system(\"op read op://fake-vault/fake-item/f\")\nEOF",
+            // #12011 round 3: the byte before the fd prefix decides nothing.
+            "sh -s a\r3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s a\x0c3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s <3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s >3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
+            "sh -s <&3<<'EOF'\nop read op://fake-vault/fake-item/f\nEOF",
         ],
     );
 }

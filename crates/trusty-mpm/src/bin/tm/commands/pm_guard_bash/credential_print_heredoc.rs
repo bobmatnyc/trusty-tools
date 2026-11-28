@@ -23,10 +23,9 @@
 //! `credential_print_tests::allows_script_operands_and_comments`,
 //! `heredoc_operators_skip_comments_escapes_and_expansions`.
 
-use super::super::bash_tokens::is_redirect_prefix;
 use super::super::heredoc::scan_work::{Site, charge};
 use super::super::heredoc::{delimiter_word, is_terminator};
-use super::{Heredoc, input_is_program_text};
+use super::{Heredoc, Refusal, input_is_program_text};
 
 /// Placeholder a stripped here-document leaves in the command text.
 pub(super) const HEREDOC_MARK: &str = "__TMHEREDOC";
@@ -99,15 +98,30 @@ pub(crate) fn heredoc_operators(text: &str) -> Vec<(usize, OperatorCtx)> {
 /// and at the next newline in code context the pending bodies are consumed,
 /// each up to a line equal to its word. Quoted bodies are removed and pushed
 /// to `heredocs`; the operator becomes `HEREDOC_MARK<n>__`. Byte slicing
-/// happens only at ASCII positions.
-pub(super) fn strip_comments_and_heredocs(text: &str, heredocs: &mut Vec<Heredoc>) -> String {
-    walk(text, heredocs, &mut Vec::new())
+/// happens only at ASCII positions. #12011: a quoted-delimiter operator with
+/// an fd prefix (`3<<'EOF'`, `{fd}<<"EOF"`) refuses ([`fd_prefixed`]).
+/// Test: `credential_print_tests::denies_a_redirect_before_a_cli_subcommand_12011`.
+pub(super) fn strip_comments_and_heredocs(
+    text: &str,
+    heredocs: &mut Vec<Heredoc>,
+) -> Result<String, Refusal> {
+    match walk(text, heredocs, &mut Vec::new()) {
+        (_, true) => Err(Refusal::Unreadable(
+            "a quoted here-document with an fd prefix",
+        )),
+        (out, false) => Ok(out),
+    }
 }
 
 /// The walk behind [`strip_comments_and_heredocs`]; every `<<` it reads as
 /// an operator lands in `ops` (#9150). #9720: its work is linear in the text
-/// however many `<<` wait on one line ([`note_depth`]).
-fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorCtx)>) -> String {
+/// however many `<<` wait on one line ([`note_depth`]). #12011: the flag is
+/// set when a quoted-delimiter operator has an fd prefix.
+fn walk(
+    text: &str,
+    heredocs: &mut Vec<Heredoc>,
+    ops: &mut Vec<(usize, OperatorCtx)>,
+) -> (String, bool) {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
@@ -116,6 +130,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
     let mut line_end = LineEnd::default();
     // #8596 round 3: `#` opens a comment only at the start of a word.
     let mut word_start = true;
+    let mut fd_quoted = false;
     let mut i = 0;
     while i < bytes.len() {
         let top = stack.last().copied().unwrap_or(Ctx::Code(0));
@@ -201,14 +216,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                     let done = consume_bodies(text, i + 1, &mut pending, heredocs);
                     // Latest first, so an earlier operator's range stays valid.
                     for ((from, to), index) in done.stripped.into_iter().rev() {
-                        // #12011: `3<<'EOF'` keeps its fd glued to the mark, so
-                        // the `3` never reads as an argument word.
-                        let lead = if glued_fd_prefix(&out[..from]) {
-                            ""
-                        } else {
-                            " "
-                        };
-                        out.replace_range(from..to, &format!("{lead}{HEREDOC_MARK}{index}__ "));
+                        out.replace_range(from..to, &format!(" {HEREDOC_MARK}{index}__ "));
                     }
                     out.push_str(&text[copied..=i]);
                     for (start, end) in done.bodies {
@@ -226,6 +234,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                     {
                         if let Some(p) = pending.get_mut(waiting) {
                             (p.index, p.depth, p.low) = (ops.len() - 1, stack.len(), stack.len());
+                            fd_quoted |= p.quoted && p.word.is_some() && fd_prefixed(bytes, p.op.0);
                             // Copy the operator now: a comment after it on
                             // the line moves `copied` past it.
                             out.push_str(&text[copied..p.op.1]);
@@ -243,7 +252,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
         i += 1;
     }
     out.push_str(&text[copied.min(text.len())..]);
-    out
+    (out, fd_quoted)
 }
 
 /// Lower the newest waiting operator's low-water mark to `depth` (#9720).
@@ -403,30 +412,14 @@ fn arith_byte(
     i + 1
 }
 
-/// Whether the word `before` ends with is an fd prefix glued to the `<<`
-/// after it (`3`, `{fd}`), which bash reads as part of the operator (#12011).
-// #12011: only an unescaped blank, `;&|(<>` or the text start opens the
-// prefix; after a quote, backtick, `)` or `\ ` the digit joins the word.
-fn glued_fd_prefix(before: &str) -> bool {
-    let bytes = before.as_bytes();
-    let start = (0..bytes.len())
-        .rev()
-        .find(|&at| {
-            let breaks = bytes[at].is_ascii_whitespace() || b";&|(<>".contains(&bytes[at]);
-            // Count the backslash run only at a break byte, so the scan is linear.
-            breaks && slashes_before(bytes, at).is_multiple_of(2)
-        })
-        .map_or(0, |at| at + 1);
-    before.get(start..).is_some_and(is_redirect_prefix)
-}
-
-/// How many backslashes run back from just before `at`.
-fn slashes_before(bytes: &[u8], at: usize) -> usize {
-    bytes[..at]
-        .iter()
-        .rev()
-        .take_while(|&&b| b == b'\\')
-        .count()
+/// Whether the `<<` at byte `at` has an fd prefix: a digit (`3<<`) or the
+/// `}` of `{name}<<` just before it (#12011).
+// #12011: only that one byte is read, never what comes before the prefix, so
+// `"a"3<<'EOF'` and `${x}<<'EOF'` refuse too; that over-refusal is accepted.
+fn fd_prefixed(bytes: &[u8], at: usize) -> bool {
+    at.checked_sub(1)
+        .and_then(|before| bytes.get(before))
+        .is_some_and(|&b| b.is_ascii_digit() || b == b'}')
 }
 
 /// Whether an unquoted byte ends a word, so a `#` after it opens a comment.
