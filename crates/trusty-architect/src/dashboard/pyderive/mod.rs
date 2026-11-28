@@ -4,8 +4,8 @@
 //! stale tasks and the owner events that wake the Architect; the port must
 //! give the same answer for every document shape, so it works on
 //! [`PyValue`]s, which keep Python's types and key order. The serde-based
-//! [`super::derive`], [`super::pending`], [`super::ids`] and [`super::tally`]
-//! serve the live verbs and are left as they are (see #12029).
+//! [`super::derive`], [`super::pending`](mod@super::pending), [`super::ids`]
+//! and [`super::tally`](mod@super::tally) serve the live verbs and are left as they are (see #12029).
 //! What: the predicates here ([`building_brief`], [`is_parked`],
 //! [`is_selftest`], [`is_relayed`]) and the shared time and equality helpers;
 //! `counts` (`decision_counts`, `tally`, `run_progress`, `running_count`),
