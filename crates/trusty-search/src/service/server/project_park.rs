@@ -338,14 +338,8 @@ pub(super) async fn unregister_with_map(
             )),
         };
     }
-    let mut outcome = super::search::unregister_index_checked(
-        state,
-        id,
-        delete_data,
-        expected_root_path,
-        recheck,
-    )
-    .await;
+    let mut outcome =
+        super::search::unregister_index(state, id, delete_data, expected_root_path, recheck).await;
     let row_gone = matches!(
         crate::service::persistence::find_index_registry_entry(id),
         Ok(None)

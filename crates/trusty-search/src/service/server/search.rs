@@ -343,19 +343,10 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// mapping before deregistering — see [`super::delete_close::close_index_files`].
 /// An unquiesced one closes them in the background once the writer finishes —
 /// see [`super::delete_close::close_after_writer_drains`].
+///
+/// #10534: an optional [`DeleteRecheck`] runs under the exclusive teardown
+/// guard right after the `expected_root_path` re-check.
 pub(super) async fn unregister_index(
-    state: &Arc<SearchAppState>,
-    id: &str,
-    delete_data: bool,
-    expected_root_path: Option<&str>,
-) -> UnregisterOutcome {
-    unregister_index_checked(state, id, delete_data, expected_root_path, None).await
-}
-
-/// [`unregister_index`] with an optional [`DeleteRecheck`], run under the
-/// exclusive teardown guard right after the `expected_root_path` re-check
-/// (#10534).
-pub(super) async fn unregister_index_checked(
     state: &Arc<SearchAppState>,
     id: &str,
     delete_data: bool,

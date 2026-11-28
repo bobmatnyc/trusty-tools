@@ -39,6 +39,7 @@ fn covered(idle_days: u64) -> RetentionInput {
 /// must never reach (a main checkout, a missing root).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_class_maps_park_reasons_and_root_kinds() {
     use RetentionClass::{Duplicate, Unregistered};
     let cases = [
@@ -75,6 +76,7 @@ fn retention_class_maps_park_reasons_and_root_kinds() {
 /// Why: AC 4 boundaries — 29 days kept, 30 and 31 evicted.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_keeps_29_days_and_evicts_30_and_31() {
     assert_eq!(RETENTION_SECS, 30 * DAY);
     assert_eq!(
@@ -107,6 +109,7 @@ fn retention_keeps_29_days_and_evicts_30_and_31() {
 /// Why: AC 2 — a registered, non-duplicate index is never evicted.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_keeps_a_registered_index_however_idle() {
     let input = RetentionInput {
         class: None,
@@ -123,6 +126,7 @@ fn retention_keeps_a_registered_index_however_idle() {
 /// A clock behind the stamp reads 0 idle, not a huge age.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_keeps_an_index_of_unknown_age() {
     let unknown = RetentionInput {
         last_activity_unix: None,
@@ -146,6 +150,7 @@ fn retention_keeps_an_index_of_unknown_age() {
 /// Why: AC 2 — an index a live session uses is never evicted.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_keeps_a_live_session_member() {
     let input = RetentionInput {
         live: true,
@@ -160,6 +165,7 @@ fn retention_keeps_a_live_session_member() {
 /// Why: a newly parked duplicate gets its full 30 days from the park.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_restarts_the_clock_at_the_park_time() {
     let input = RetentionInput {
         parked_unix: Some(NOW - 10 * DAY),
@@ -318,6 +324,7 @@ async fn retention_evicts_nothing_without_a_trusted_active_set() {
 /// so it is an unknown age and the index is kept.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn retention_keeps_an_index_with_a_zero_stamp() {
     let zero = RetentionInput {
         last_activity_unix: Some(0),
