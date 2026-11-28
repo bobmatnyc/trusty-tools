@@ -165,6 +165,11 @@ pub const TEST_HOOK_EXE_ENV: &str = "TRUSTY_MPM_TEST_HOOK_EXE";
 /// [`resolve_stable_hook_exe_with`]; a release build never reads it.
 /// Test: `architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op`,
 /// `a_managed_resume_under_an_owner_file_carries_the_same_policy`.
+///
+/// #12077 part 4c: every launch now resolves a hook binary, so a test process
+/// on a runner with no installed `tm` would refuse every launch. The pin
+/// ([`pin_test_hook_exe`]) and, in this crate's own unit tests, a fixed
+/// installed-looking path stand in when the env var is unset.
 fn test_hook_exe() -> Option<PathBuf> {
     if !cfg!(debug_assertions) {
         return None;
@@ -172,6 +177,34 @@ fn test_hook_exe() -> Option<PathBuf> {
     std::env::var_os(TEST_HOOK_EXE_ENV)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .or_else(|| TEST_HOOK_EXE_PIN.get().cloned())
+        .or_else(unit_test_hook_exe)
+}
+
+/// The process-wide test stand-in [`pin_test_hook_exe`] sets (#12077 part 4c).
+static TEST_HOOK_EXE_PIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Pin the stand-in hook binary for this test process (#12077 part 4c).
+///
+/// Why: the `tm` bin's tests link this crate without `cfg(test)`, so they need
+/// a call, not a cfg, to stay hermetic; an env var would need `unsafe` writes
+/// racing other threads.
+/// What: the first call wins; a release build never reads it.
+/// Test: `launch_files_carry_the_hook_body_without_an_owner_12077`.
+pub fn pin_test_hook_exe(path: PathBuf) {
+    let _ = TEST_HOOK_EXE_PIN.set(path);
+}
+
+/// This crate's unit tests: an installed-looking path no host needs to have.
+#[cfg(test)]
+fn unit_test_hook_exe() -> Option<PathBuf> {
+    Some(PathBuf::from(crate::test_support::STABLE_HOOK_EXE))
+}
+
+/// Outside this crate's unit tests: no stand-in.
+#[cfg(not(test))]
+fn unit_test_hook_exe() -> Option<PathBuf> {
+    None
 }
 
 /// Testable core of [`resolve_stable_hook_exe`] with its I/O sources injected.

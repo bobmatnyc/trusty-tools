@@ -495,9 +495,6 @@ pub enum ProvisionError {
     /// #12077 part 4c: no home resolves, so no body could carry tm's hooks.
     #[error("#12077 refusing the launch: no tm state root resolves (no home directory)")]
     StateRoot,
-    /// #12077 part 4c: an Architect's Claude Code is below the hook floor (#10459).
-    #[error(transparent)]
-    ArchitectVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
 }
 
 /// [`provision_settings_at`] for a production launch under `state_root`.
@@ -552,11 +549,11 @@ pub(crate) fn provision_settings_resolved(
     profile: SessionProfile,
     resolved: Result<(crate::core::paths::FrameworkPaths, PathBuf), ProvisionError>,
 ) -> Result<LaunchSettings, ProvisionError> {
-    // #12077 part 4c (Q2): a tm session never runs unguarded.
-    let (fw, exe) = resolved?;
     // #11821: df-D1w — an unresolved root refuses before the owner lookup, so
     // the defaulted root can never retire the owner's last-good record.
     let repos_root = crate::core::repo_paths::try_repos_root()?;
+    // #12077 part 4c (Q2): a tm session never runs unguarded.
+    let (fw, exe) = resolved?;
     let claude_json_dir = claude_json_dir(config_dir);
     provision_settings_at(&CarrierInputs {
         cwd,
@@ -590,10 +587,8 @@ fn provision_settings_default_in(
     profile: SessionProfile,
 ) -> Result<LaunchSettings, ProvisionError> {
     // #11821: the refusal propagates. #12077 part 4c: so does a missing home.
-    match state_root {
-        Some(root) => provision_settings(&root, cwd, config_dir, profile),
-        None => Ok(LaunchSettings::default()),
-    }
+    let root = state_root.ok_or(ProvisionError::StateRoot)?;
+    provision_settings(&root, cwd, config_dir, profile)
 }
 
 /// The directory whose `.claude.json` a launch reads.
