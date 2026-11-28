@@ -158,7 +158,7 @@ SHIM = r"""<script>
   var db = {
     collection: function (name) { return new Query(name, {}); },
     doc: function (path) { var i = path.indexOf("/"); return new DocRef(path.slice(0, i), path.slice(i + 1)); },
-    batch: async function (ops) { return (await write("POST", "batch", { ops: ops })).results; }   /* all-or-nothing; each op may carry if_version */
+    batch: async function (ops) { return (await write("POST", "batch", { ops: ops })).results; }   /* all-or-nothing; each operation may carry if_version */
   };
   async function user() {
     var u = await api("GET", "user");

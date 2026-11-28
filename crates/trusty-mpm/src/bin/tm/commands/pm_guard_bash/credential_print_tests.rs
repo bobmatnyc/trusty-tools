@@ -1820,3 +1820,143 @@ fn keeps_the_10570_critic_shapes_refused_10734() {
     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
     check(true, &rows);
 }
+
+/// 🔴 REGRESSION (#11959): 1Password reads that print a value on stdout, and
+/// an `op run` with masking off. Each row was allowed at 1a174770ac.
+#[test]
+fn denies_the_1password_stdout_reads_11959() {
+    let mut rows: Vec<String> = [
+        "op item get fake-item --fields password",
+        "op item get fake-item --fields label=password --reveal",
+        "op item get \"$I\" --reveal",
+        "op --account work item get fake-item --reveal",
+        "op item get fake-item --otp | head -c 6",
+        "T=$(op item get fake-item --reveal); echo \"$T\"",
+        "op document get fake-doc",
+        "op document get fake-doc --out-file /dev/stdout",
+        "op inject -i fake.tpl",
+        "echo '{{ op://fake-vault/fake-item/password }}' | op inject",
+        "op inject -i fake.tpl -o /dev/stdout",
+        "op run --no-masking -- printenv FAKE_VAR",
+        "op run --env-file .env --no-masking -- npm test 2>/dev/null",
+        "sh -c 'op item get fake-item --reveal'",
+    ]
+    .map(String::from)
+    .to_vec();
+    rows.push(python_body(
+        "subprocess.run([\"op\", \"item\", \"get\", ref, \"--reveal\"])",
+    ));
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    check(true, &rows);
+}
+
+/// 🔴 REGRESSION (#11959, fail-open check): spellings a narrower reading of
+/// the rule would allow: a flag between the subcommand words, a
+/// `--flag=value` form the trigger gate must still see, stdout named as `-`,
+/// and the second subcommand word chosen at run time. Each row was allowed at
+/// 1a174770ac.
+#[test]
+fn denies_the_11959_fail_open_spellings() {
+    check(
+        true,
+        &[
+            "op item --vault fake-vault get fake-item --reveal",
+            "op item --reveal get fake-item",
+            "op run --no-masking=true -- printenv FAKE_VAR",
+            "op document get fake-doc -o -",
+            "op inject -i fake.tpl --out-file=-",
+            "op item $(echo get) fake-item --reveal",
+            "op item \"$SUB\" fake-item --reveal",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#11959 review): an unmasked `op run` whose child names an
+/// `op` subcommand and an out-file flag (op's subcommand must be read by
+/// position, never after `--`), and an `op run` whose own word is known only
+/// at run time. Each row was allowed at 0613e1b0b9.
+#[test]
+fn denies_an_unmasked_op_run_read_by_position_11959() {
+    check(
+        true,
+        &[
+            "op run --no-masking -- cat read -o /tmp/fake-out",
+            "op run --no-masking -- fake-cli inject --out-file /tmp/fake-out",
+            "op run --no-masking -- fake-cli document get -o /tmp/fake-out",
+            "op run $F -- printenv FAKE_VAR",
+            "op run \"$F\" -- printenv FAKE_VAR",
+            "op run $(echo --no-masking) -- printenv FAKE_VAR",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#11959 delta review): a flag with no value, then a flag
+/// with a value, before the subcommand words. Neither all-valued nor
+/// no-value reading leads with the subcommand. Each row was allowed at
+/// 9e8438a6a8.
+#[test]
+fn denies_the_11959_mixed_flag_spellings() {
+    check(
+        true,
+        &[
+            "op --debug --account fake-acct item get fake-item",
+            "op --no-color --account fake-acct read op://fake-vault/fake-item/f",
+            "op item --vault fake-vault --debug get fake-item",
+            "op --cache --account fake-acct run --no-masking -- env",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#11959 delta review): an out-file flag word that pflag
+/// reads as the value of the dash flag before it, and a repeated out-file
+/// flag, whose last value pflag keeps. Each row was allowed at 807c4042c1.
+#[test]
+fn denies_an_out_file_flag_taken_as_a_value_11959() {
+    check(
+        true,
+        &[
+            "op read --account -o op://fake-vault/fake-item/f",
+            "op document get --account -o fake-doc",
+            "op inject --account -o -i fake.tpl",
+            "op read op://fake-vault/fake-item/f --out-file /tmp/fake-out --out-file=",
+            // #11959 review: an empty out-file value writes to stdout.
+            "op read op://fake-vault/fake-item/f --out-file=",
+            "op read op://fake-vault/fake-item/f -o ''",
+            "op inject -i fake.tpl -o \"\"",
+        ],
+    );
+}
+
+/// #11959: captured or file-bound reads, masked `op run`, other `op`
+/// subcommands, and prose mentions stay allowed.
+#[test]
+fn allows_the_11959_neighbours() {
+    check(
+        false,
+        &[
+            "X=$(op item get fake-item --fields password --reveal)",
+            "op item get fake-item --reveal > /tmp/fake-out",
+            "op item list --vault get",
+            "op item list --vault fake-vault",
+            "op item list --vault \"$V\"",
+            "op document get fake-doc --out-file /tmp/fake-doc",
+            "op document get fake-doc -o /tmp/fake-doc",
+            "op inject -i fake.tpl -o /tmp/fake.env",
+            "op read op://fake-vault/fake-item/f -o /tmp/fake-out",
+            "op document get fake-doc --out-file /tmp/fake-out",
+            "op inject -i fake.tpl -o /tmp/fake-out",
+            "op run --env-file .env -- npm test",
+            "op run -- printenv FAKE_VAR",
+            "op run -- grep --no-masking notes.txt",
+            // #11959 review: a subcommand word in a flag value or the child.
+            "op run --env-file .env -- npm run inject",
+            "op item list --vault inject",
+            "op run -- printenv \"$FAKE_VAR\"",
+            "op run $F -- printenv FAKE_VAR > /dev/null 2>&1",
+            "op whoami",
+            "op vault list",
+            "git commit -m 'docs: never run op item get or op inject bare'",
+            "gh pr create --title fake --body 'op run --no-masking prints secrets'",
+        ],
+    );
+}
