@@ -44,7 +44,9 @@ pub(super) fn managed_sandbox(
 /// is refused ([`crate::core::claude_sandbox::NoHomeForSandbox`]); otherwise
 /// the no-write sandbox step, then the inline payload when `opted_in`.
 /// Test: `managed_sandbox_goes_ahead_with_no_home_12077`,
-/// `a_managed_launch_refuses_an_opt_in_with_no_home_12077`.
+/// `a_managed_launch_refuses_an_opt_in_with_no_home_12077`,
+/// `an_opted_in_managed_launch_keeps_the_role_record_without_the_env_12077`,
+/// `a_default_managed_launch_deletes_the_role_record_despite_the_env_12077`.
 pub(super) fn managed_sandbox_at(
     cwd: &Path,
     home: Option<&Path>,
@@ -59,7 +61,8 @@ pub(super) fn managed_sandbox_at(
         .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
     if let Some(home) = home {
         let inputs = sl::launch_sandbox_inputs(cwd, home);
-        sl::apply_launch_sandbox(role, &inputs, Some(config_dir))
+        // #12077: the launch's own opt-in (request or record), not the daemon's env.
+        sl::apply_launch_sandbox(role, &inputs, Some(config_dir), opted_in)
             .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
     }
     Ok(payload)

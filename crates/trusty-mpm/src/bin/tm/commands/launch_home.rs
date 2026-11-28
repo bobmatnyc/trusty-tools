@@ -79,7 +79,9 @@ pub(crate) fn apply_sandbox(
     // #12077: no home is no sandbox refusal; there is nothing to apply.
     let Some(home) = home else { return Ok(()) };
     let inputs = sl::launch_sandbox_inputs(workspace, home);
-    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, config_dir)
+    // #12077: a CLI launch's opt-in is this process's switch.
+    let opted_in = trusty_mpm::core::claude_sandbox::sandbox_opted_in();
+    sl::apply_launch_sandbox(sl::sandbox_role_for(profile), &inputs, config_dir, opted_in)
         .map_err(|err| anyhow::anyhow!("{err}"))
 }
 

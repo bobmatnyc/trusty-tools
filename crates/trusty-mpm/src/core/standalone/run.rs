@@ -441,6 +441,8 @@ pub fn run_sandbox(
         sl::sandbox_role_for(profile),
         &inputs,
         Some(claude_config_dir),
+        // #12077: `tm run` reads this process's switch.
+        crate::core::claude_sandbox::sandbox_opted_in(),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))
 }

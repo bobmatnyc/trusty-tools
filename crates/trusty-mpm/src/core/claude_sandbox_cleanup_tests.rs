@@ -443,13 +443,14 @@ fn the_shared_launch_step_runs_the_cleanup_and_never_refuses_12077() {
     let (tmp, ws) = fixture();
     let inputs = SandboxInputs::new(&ws, tmp.path().join("home"));
     plant(&ws, "{ not json");
-    apply_launch_sandbox(SandboxRole::Pm, &inputs, None).expect("a failure never refuses");
+    apply_launch_sandbox(SandboxRole::Pm, &inputs, None, sandbox_opted_in())
+        .expect("a failure never refuses");
     assert!(
         !marker_path(&ws).exists(),
         "a failure must not finish the cleanup"
     );
     write_text(&settings_path(&ws), SETTINGS);
-    apply_launch_sandbox(SandboxRole::Pm, &inputs, None).expect("not refused");
+    apply_launch_sandbox(SandboxRole::Pm, &inputs, None, sandbox_opted_in()).expect("not refused");
     let after = read_json(&settings_path(&ws));
     assert!(after.pointer("/sandbox/enabled").is_none(), "{after}");
     assert_eq!(after.pointer("/model"), Some(&json!("opus")));

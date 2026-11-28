@@ -91,8 +91,12 @@ fn client_daemon_sockets() -> Vec<std::path::PathBuf> {
 /// What: runs the one-time cleanup pass
 /// ([`crate::core::claude_sandbox::clean_tm_sandbox_keys_on_launch`]) over the
 /// project tier, tm's user tier under `config_dir`, and the role record when
-/// [`crate::core::claude_sandbox::sandbox_opted_in`] is false; then returns `Ok`. It writes no sandbox policy into any tier and no role
-/// record, and refuses no config dir. Every launch
+/// the launch's own `opted_in` is false; then returns `Ok`. It writes no
+/// sandbox policy into any tier and no role record, and refuses no config
+/// dir. #12077: `opted_in` is the value the caller holds (a request, a
+/// persisted record or this process's switch), never read here from the env,
+/// so a daemon whose env lacks the switch cannot delete an opted-in record.
+/// Every launch
 /// path (`tm launch`/`tm connect`, `tm run`, the managed spawn, resume and
 /// relaunch, the divert worker) reaches the sandbox only through here.
 ///
@@ -107,6 +111,7 @@ pub fn apply_launch_sandbox(
     role: SandboxRole,
     inputs: &SandboxInputs,
     config_dir: Option<&Path>,
+    opted_in: bool,
 ) -> Result<(), SandboxSettingsError> {
     // #12077 slice 3: remove tm's 1.14.14/1.14.15 keys once; a failure is
     // logged and never refuses the launch. Runs whatever the opt-in switch.
@@ -116,7 +121,8 @@ pub fn apply_launch_sandbox(
         &inputs.workspace,
         config_dir,
         &inputs.home,
-        crate::core::claude_sandbox::sandbox_opted_in(),
+        // #12077: the caller's opt-in, not this process's env.
+        opted_in,
     );
     tracing::debug!(
         ?role,

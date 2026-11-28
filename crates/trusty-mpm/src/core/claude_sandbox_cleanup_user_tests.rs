@@ -96,8 +96,13 @@ impl Fx {
     /// The shared launch step, as every launch path runs it.
     fn launch(&self) {
         let inputs = SandboxInputs::new(&self.ws, &self.home);
-        apply_launch_sandbox(SandboxRole::Pm, &inputs, Some(&self.config))
-            .expect("the cleanup never refuses a launch");
+        apply_launch_sandbox(
+            SandboxRole::Pm,
+            &inputs,
+            Some(&self.config),
+            sandbox_opted_in(),
+        )
+        .expect("the cleanup never refuses a launch");
     }
 
     /// A 1.14.14 role record and a project file holding its one key.

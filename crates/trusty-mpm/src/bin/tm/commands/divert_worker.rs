@@ -322,8 +322,14 @@ pub(crate) async fn spawn_sandboxed_worker_at(
     let mut settings = None;
     if let Some(home) = sandbox.home {
         let inputs = sl::launch_sandbox_inputs(sandbox.workspace, home);
-        sl::apply_launch_sandbox(sl::SandboxRole::Agent, &inputs, sandbox.config_dir)
-            .map_err(|e| e.to_string())?;
+        // #12077: the worker's own opt-in decides the record delete.
+        sl::apply_launch_sandbox(
+            sl::SandboxRole::Agent,
+            &inputs,
+            sandbox.config_dir,
+            sandbox.opted_in,
+        )
+        .map_err(|e| e.to_string())?;
         // #12077: the agent policy, inline on argv; never a settings file.
         settings = sandbox.opted_in.then(|| {
             trusty_mpm::core::claude_sandbox::inline_sandbox_settings(
