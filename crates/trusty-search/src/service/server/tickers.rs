@@ -477,7 +477,7 @@ pub(super) async fn reap_orphans_once(state: &Arc<SearchAppState>) -> usize {
         // #6380: no expectation. The reaper reads the registration and
         // deletes it in the same pass, so it has no earlier census whose
         // root could have gone stale.
-        if super::project_park::unregister_with_map(state, &id, false, None)
+        if super::project_park::unregister_with_map(state, &id, false, None, None)
             .await
             .removed
         {

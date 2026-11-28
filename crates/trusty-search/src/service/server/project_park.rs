@@ -319,6 +319,7 @@ pub(super) async fn unregister_with_map(
     id: &str,
     delete_data: bool,
     expected_root_path: Option<&str>,
+    recheck: Option<super::search::DeleteRecheck<'_>>,
 ) -> super::search::UnregisterOutcome {
     if let Err(e) = load_map(state) {
         tracing::error!("delete[{id}]: REFUSED — {e}; nothing was torn down (#9169)");
@@ -337,8 +338,14 @@ pub(super) async fn unregister_with_map(
             )),
         };
     }
-    let mut outcome =
-        super::search::unregister_index(state, id, delete_data, expected_root_path).await;
+    let mut outcome = super::search::unregister_index_checked(
+        state,
+        id,
+        delete_data,
+        expected_root_path,
+        recheck,
+    )
+    .await;
     let row_gone = matches!(
         crate::service::persistence::find_index_registry_entry(id),
         Ok(None)

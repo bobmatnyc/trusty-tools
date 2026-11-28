@@ -237,7 +237,7 @@ fn rig(rows: impl FnOnce(&Path, &Path) -> Vec<PersistedIndex>) -> Rig {
     }
 }
 
-/// Why: ruling Dta — an idle worktree-session index is evicted at 30 days,
+/// Why: #10534 — an idle worktree-session index is evicted at 30 days,
 /// corpus included, while the main checkout (registered, non-duplicate), a
 /// 29-day worktree, an unknown-age worktree and a live-session worktree,
 /// all equally old or older, are kept.
@@ -312,4 +312,169 @@ async fn retention_evicts_nothing_without_a_trusted_active_set() {
     let rig = rig(|main, wt| vec![row("repo", main, Some(1)), row("s1", wt, Some(45))]);
     assert_eq!(evict_idle_at(&rig.state, Instant::now(), NOW).await, 0);
     assert!(rig.registered("s1") && rig.marker("s1").exists());
+}
+
+/// Why: #10534 — a stamp of 0 is an unset field, not activity at the epoch,
+/// so it is an unknown age and the index is kept.
+/// Test: this test.
+#[test]
+fn retention_keeps_an_index_with_a_zero_stamp() {
+    let zero = RetentionInput {
+        last_activity_unix: Some(0),
+        ..covered(0)
+    };
+    assert_eq!(
+        retention_verdict(zero, NOW),
+        Verdict::Keep(KeepReason::UnknownAge)
+    );
+    let zero_but_parked = RetentionInput {
+        parked_unix: Some(NOW - 400 * DAY),
+        ..zero
+    };
+    assert_eq!(
+        retention_verdict(zero_but_parked, NOW),
+        Verdict::Keep(KeepReason::UnknownAge)
+    );
+}
+
+/// A worktree sibling `repo/.claude/worktrees/<name>`.
+fn worktree(main: &Path, name: &str) -> PathBuf {
+    let root = main.join(".claude").join("worktrees").join(name);
+    std::fs::create_dir_all(&root).expect("worktree");
+    std::fs::write(root.join(".git"), "gitdir: x\n").expect(".git");
+    root
+}
+
+/// Load `id` (rooted at `root`) into the hot registry.
+fn load(rig: &Rig, id: &str, root: &Path) {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId};
+    let indexer = Arc::new(tokio::sync::RwLock::new(CodeIndexer::new(id, root)));
+    rig.state.registry.register(IndexHandle::bare(
+        IndexId::new(id.to_string()),
+        indexer,
+        root.to_path_buf(),
+    ));
+}
+
+/// Why: #10534 — the pass reads busy state and the active set once, then
+/// waits on each delete's teardown lock. An index loaded, or named by the
+/// active set, during that wait is kept.
+/// What: a held shared teardown lock parks the delete after its scan; the
+/// test loads or trusts the index, then releases the lock.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn an_index_loaded_or_made_live_mid_pass_is_kept() {
+    use crate::core::registry::IndexId;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    for loaded in [true, false] {
+        let id = if loaded {
+            "s-race-loaded"
+        } else {
+            "s-race-live"
+        };
+        let mut root = PathBuf::new();
+        let rig = rig(|main, _| {
+            root = worktree(main, id);
+            vec![row("repo", main, Some(1)), row(id, &root, Some(45))]
+        });
+        let now = Instant::now();
+        rig.trust(&["repo"], now);
+        let key = IndexId::new(id.to_string());
+        let cancel = crate::service::reindex::index_cancel_flag(&key);
+        cancel.store(false, Ordering::Release);
+        let writer = crate::service::reindex::acquire_index_teardown_read(&key).await;
+        let state = Arc::clone(&rig.state);
+        let pass = tokio::spawn(async move { evict_idle_at(&state, now, NOW).await });
+
+        // The delete signals the cancel flag, then waits on the lock.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !cancel.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the pass never reached the delete"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if loaded {
+            load(&rig, id, &root);
+        } else {
+            rig.trust(&["repo", id], Instant::now());
+        }
+        drop(writer);
+
+        assert_eq!(pass.await.expect("pass"), 0, "loaded={loaded}");
+        assert!(rig.registered(id), "loaded={loaded}: the row is kept");
+        assert!(
+            rig.marker(id).exists(),
+            "loaded={loaded}: the corpus is kept"
+        );
+    }
+}
+
+/// Why: #10534 — grep, global grep, chunk pages and the fan-out are use.
+/// Each records `last_queried_unix`, so an index read that way within 30
+/// days is kept after it is unloaded.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn a_grep_chunk_or_fan_out_read_keeps_an_idle_worktree_index() {
+    use crate::core::registry::IndexId;
+    for read in ["grep", "grep-all", "chunks", "fan-out"] {
+        let wall = crate::core::project_map::now_unix();
+        let stamped = |id: &str, root: &Path, idle: u64| PersistedIndex {
+            last_queried_unix: Some(wall - idle),
+            ..PersistedIndex::new(id, root)
+        };
+        let mut wt_root = PathBuf::new();
+        let rig = rig(|main, wt| {
+            wt_root = wt.to_path_buf();
+            vec![stamped("repo", main, DAY), stamped("s1", wt, 45 * DAY)]
+        });
+        let now = Instant::now();
+        rig.trust(&["repo"], now);
+        load(&rig, "s1", &wt_root);
+
+        // The result does not matter here; the read is the activity.
+        match read {
+            "grep" | "grep-all" => {
+                let mut body = serde_json::json!({ "pattern": "fn" });
+                if read == "grep-all" {
+                    body["index_id"] = "s1".into();
+                }
+                let req: crate::service::grep::GrepRequest =
+                    serde_json::from_value(body).expect("grep req");
+                if read == "grep" {
+                    let _ = super::files::grep_report(&rig.state, "s1", req).await;
+                } else {
+                    let _ = super::files::global_grep_report(&rig.state, req).await;
+                }
+            }
+            "chunks" => {
+                let params: super::files::ChunksParams =
+                    serde_json::from_value(serde_json::json!({})).expect("chunk params");
+                let _ = super::files::index_chunks_report(&rig.state, "s1", &params).await;
+            }
+            _ => {
+                let req: super::search_global::GlobalSearchRequest =
+                    serde_json::from_value(serde_json::json!({ "query": "fn" }))
+                        .expect("fan-out req");
+                let _ = super::search_global::global_search_report(&rig.state, req).await;
+            }
+        }
+        // Unloaded again: the retention pass sees only the persisted stamps.
+        let _ = rig
+            .state
+            .registry
+            .remove_and_get(&IndexId::new("s1".to_string()));
+
+        assert_eq!(
+            evict_idle_at(&rig.state, now, wall).await,
+            0,
+            "{read}: a read within 30 days keeps the index"
+        );
+        assert!(rig.registered("s1") && rig.marker("s1").exists(), "{read}");
+    }
 }

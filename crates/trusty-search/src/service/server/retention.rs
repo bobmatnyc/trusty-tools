@@ -2,16 +2,17 @@
 //!
 //! Why: #10533 parks an idle index (unloads it) but nothing ever deletes one,
 //! so a worktree-session index or a decommissioned project's index keeps its
-//! corpus on disk forever. Owner ruling (2026-11-28 05:20Z): a duplicate or an
-//! unregistered index is evicted after 30 days idle; the 7-day orphan grace is
-//! unchanged. Ruling Dta (08:19Z): an idle worktree-session index is evicted by
-//! the same rule.
+//! corpus on disk forever. #10534: a duplicate or an unregistered index is
+//! evicted after 30 days idle, and an idle worktree-session index by the same
+//! rule; the 7-day orphan grace is unchanged.
 //! What: [`retention_class`] names which indexes the rule covers, and
 //! [`retention_verdict`] is the pure keep-or-evict decision. [`evict_idle_once`]
 //! is one pass, run on the orphan-reaper ticker: it reads the registry, the
 //! project map and tm's active set, and evicts through the normal delete core
-//! (`delete_data: true`, root pinned). Every input it cannot read keeps every
-//! index and logs why.
+//! (`delete_data: true`, root pinned). Under the delete's teardown lock it
+//! decides again from fresh inputs, so an index loaded, made live or used
+//! since the scan is kept. Every input it cannot read keeps every index and
+//! logs why.
 //! Test: `retention_10534_tests`.
 
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ pub(super) enum KeepReason {
     NotCovered,
     /// A trusted active set names it.
     LiveSession,
-    /// No activity stamp was ever recorded.
+    /// No activity stamp was ever recorded, or the only one is 0.
     UnknownAge,
     /// Idle for less than [`RETENTION_SECS`].
     Recent,
@@ -110,11 +111,12 @@ pub(super) fn retention_class(
 /// treated as idle since the epoch.
 /// What: idle time runs from the later of the last activity and the park
 /// time, saturating (a clock behind the stamp reads 0). Evict only when a
-/// class covers it, no live session names it, an activity stamp exists, and
-/// the idle time is at least [`RETENTION_SECS`].
+/// class covers it, no live session names it, a non-zero activity stamp
+/// exists, and the idle time is at least [`RETENTION_SECS`].
 /// Test: `retention_keeps_29_days_and_evicts_30_and_31`,
 /// `retention_keeps_a_registered_index_however_idle`,
 /// `retention_keeps_an_index_of_unknown_age`,
+/// `retention_keeps_an_index_with_a_zero_stamp`,
 /// `retention_keeps_a_live_session_member`,
 /// `retention_restarts_the_clock_at_the_park_time`.
 pub(super) fn retention_verdict(input: RetentionInput, now_unix: u64) -> Verdict {
@@ -124,7 +126,8 @@ pub(super) fn retention_verdict(input: RetentionInput, now_unix: u64) -> Verdict
     if input.live {
         return Verdict::Keep(KeepReason::LiveSession);
     }
-    let Some(activity) = input.last_activity_unix else {
+    // #10534: a 0 stamp is an unset field, not activity at the epoch.
+    let Some(activity) = input.last_activity_unix.filter(|&t| t > 0) else {
         return Verdict::Keep(KeepReason::UnknownAge);
     };
     let since = activity.max(input.parked_unix.unwrap_or(0));
@@ -205,8 +208,9 @@ fn read_inputs(state: &SearchAppState) -> Option<(Vec<PersistedIndex>, ProjectMa
 /// registered row that is not loaded, warm-pinned or reindexing gets a
 /// [`retention_verdict`]; an `Evict` runs the delete core with
 /// `delete_data: true` and `expected_root_path` set to the row's root, so a
-/// root re-registered since the read is refused. A row with a non-UTF-8 root
-/// is kept. Root probes run on the blocking pool.
+/// root re-registered since the read is refused, and the delete decides
+/// again under its teardown lock ([`still_evictable`]). A row with a
+/// non-UTF-8 root is kept. Root probes run on the blocking pool.
 /// Test: `an_idle_worktree_session_index_is_evicted_at_30_days`,
 /// `retention_evicts_nothing_when_the_map_or_registry_is_unreadable`,
 /// `retention_evicts_nothing_without_a_trusted_active_set`.
@@ -241,29 +245,88 @@ pub(super) async fn evict_idle_at(
     };
     let mut evicted = 0usize;
     for (row, kind) in rows.iter().zip(kinds) {
-        let park = map.parked_row(&row.id);
-        let input = RetentionInput {
-            class: retention_class(park.map(|p| p.reason), kind),
-            last_activity_unix: last_activity(state, row),
-            parked_unix: park.map(|p| p.parked_unix),
-            live: members.contains(&row.id),
-        };
-        let Verdict::Evict { class, idle_secs } = retention_verdict(input, now_unix) else {
+        let Verdict::Evict { class, idle_secs } =
+            verdict_for(state, row, &map, kind, members.contains(&row.id), now_unix)
+        else {
             continue;
         };
-        if evict(state, row, class, idle_secs).await {
+        if evict(state, row, kind, class, idle_secs, now, now_unix).await {
             evicted += 1;
         }
     }
     evicted
 }
 
+/// The [`retention_verdict`] for `row` given the map, its root kind and
+/// whether a trusted active set names it.
+fn verdict_for(
+    state: &SearchAppState,
+    row: &PersistedIndex,
+    map: &ProjectMap,
+    kind: RootKind,
+    live: bool,
+    now_unix: u64,
+) -> Verdict {
+    let park = map.parked_row(&row.id);
+    let input = RetentionInput {
+        class: retention_class(park.map(|p| p.reason), kind),
+        last_activity_unix: last_activity(state, row),
+        parked_unix: park.map(|p| p.parked_unix),
+        live,
+    };
+    retention_verdict(input, now_unix)
+}
+
+/// Is `id` still to be evicted? Decided again from fresh inputs (#10534).
+///
+/// Why: the pass reads busy state, the active set and the stamps once, then
+/// waits on each delete's teardown lock; an index loaded, made live or used
+/// meanwhile must be kept.
+/// What: `false` when `id` is now busy, the active set is untrusted or names
+/// it, the registry or map cannot be read, its row is gone, or its fresh
+/// verdict is not `Evict`. The root kind is the one the pass probed; the
+/// delete's `expected_root_path` re-check covers a changed root. Run by the
+/// delete under its exclusive teardown guard.
+/// Test: `an_index_loaded_or_made_live_mid_pass_is_kept`.
+fn still_evictable(
+    state: &SearchAppState,
+    id: &str,
+    kind: RootKind,
+    now: Instant,
+    now_unix: u64,
+) -> bool {
+    if busy(state, id) {
+        return false;
+    }
+    let registered = super::residency_pins::registered_in(state);
+    let at = now.max(Instant::now());
+    let Some(members) = state.residency_pins.members(at, &registered) else {
+        return false;
+    };
+    if members.contains(id) {
+        return false;
+    }
+    let Some((rows, map)) = read_inputs(state) else {
+        return false;
+    };
+    let Some(row) = rows.iter().find(|r| r.id == id) else {
+        return false;
+    };
+    matches!(
+        verdict_for(state, row, &map, kind, false, now_unix),
+        Verdict::Evict { .. }
+    )
+}
+
 /// Delete `row` with its data, pinned to its root; `true` when it was removed.
 async fn evict(
     state: &Arc<SearchAppState>,
     row: &PersistedIndex,
+    kind: RootKind,
     class: RetentionClass,
     idle_secs: u64,
+    now: Instant,
+    now_unix: u64,
 ) -> bool {
     let Some(root) = row.root_path.to_str() else {
         tracing::warn!(
@@ -276,7 +339,9 @@ async fn evict(
         delete_data: true,
         expected_root_path: Some(root.to_string()),
     };
-    match super::search::delete_index_report(state, &row.id, params).await {
+    // #10534: decided again under the delete's teardown lock.
+    let recheck = || still_evictable(state, &row.id, kind, now, now_unix);
+    match super::search::delete_index_report_checked(state, &row.id, params, Some(&recheck)).await {
         Ok(_) => {
             tracing::info!(
                 index_id = %row.id,
@@ -286,6 +351,13 @@ async fn evict(
                 row.id
             );
             true
+        }
+        Err((_, body)) if body["error"] == "index_in_use" => {
+            tracing::info!(
+                "retention: '{}' became busy, live or active before its delete; kept (#10534)",
+                row.id
+            );
+            false
         }
         Err((status, body)) => {
             tracing::error!(

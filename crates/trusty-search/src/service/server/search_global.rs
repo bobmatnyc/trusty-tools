@@ -377,6 +377,10 @@ pub(crate) async fn global_search_report(
     crate::core::indexer::query_timings::mark(crate::core::indexer::QueryPhase::Fanout);
     // #10195: the targets, captured for the one `info` line below.
     let targets = active_ids.clone();
+    // #10534: every routed index records the read for the retention clock.
+    for id in &targets {
+        super::query_stamp::record_query_stamp(state, id).await;
+    }
     let deadline_at = tokio::time::Instant::now() + per_index_deadline;
     // #4087 / #5917 / #6581 / #9027: every way an index can contribute no lane
     // is classified by `search_one_index` and counted below, so a partial
