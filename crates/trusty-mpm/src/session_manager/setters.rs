@@ -200,8 +200,16 @@ impl SessionManager {
             // otherwise stay up as a bare shell, and reconcile re-adopts a live
             // session as Active. A teardown failure is logged; the refusal is
             // still the original error.
-            self.reap_refused_spawn(&record.id).await;
-            return Err(e);
+            let left = self.reap_refused_spawn(&record.id).await;
+            // #12077: a pane tm could not prove its own stays up; say so in
+            // the refusal. `Store` is kept (callers match it), so the note
+            // rides in an I/O error's text rather than a new variant.
+            return Err(match left {
+                Some(note) => ManagedError::Store(super::store::StoreError::Io(
+                    std::io::Error::other(format!("{e}; {note}")),
+                )),
+                None => e,
+            });
         }
         Ok(record)
     }
@@ -218,15 +226,18 @@ impl SessionManager {
     /// tombstones the record only ([`Self::decommission_record_only`]), which
     /// removes nothing. Reconcile never adopts a terminal record, so the
     /// tombstone holds even when the pane is unproven and stays up. Every
-    /// failure is logged, never returned.
+    /// failure is logged, never returned. Returns a `pane left running` note
+    /// (#12077) when the pane was not killed, `None` when it was killed or
+    /// absent; the caller appends it to the refusal.
     /// Test: `a_refused_opt_in_reaps_the_session_and_keeps_the_main_checkout_12077`,
     /// `a_failed_teardown_still_returns_the_original_refusal_12077`,
     /// `an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077`.
-    async fn reap_refused_spawn(&self, id: &ManagedSessionId) {
+    async fn reap_refused_spawn(&self, id: &ManagedSessionId) -> Option<String> {
         // #12077: reuse the front-gate deny teardown; do not hand-roll a kill.
         let Err(e) = self.decommission_denied_front_gate(id).await else {
-            return;
+            return None;
         };
+        let mut left_running = None;
         error!(id = %id, "refused spawn: teardown failed, falling back to kill and tombstone: {e}");
         // #12077: the teardown can fail before its kill; kill the proven pane
         // with no workspace guards, and never remove a workspace here.
@@ -238,17 +249,31 @@ impl SessionManager {
                 Ok(teardown) => {
                     if let Some(note) = teardown.left_running() {
                         error!(id = %id, "refused spawn: {note}");
+                        left_running = Some(format!(
+                            "pane left running (tmux session '{}'): {note}",
+                            record.tmux_name
+                        ));
                     }
                 }
-                Err(e) => error!(id = %id, "refused spawn: the pane was not killed: {e}"),
+                Err(e) => {
+                    error!(id = %id, "refused spawn: the pane was not killed: {e}");
+                    left_running = Some(format!(
+                        "pane left running (tmux session '{}'): not killed: {e}",
+                        record.tmux_name
+                    ));
+                }
             },
-            Err(e) => error!(id = %id, "refused spawn: no record to kill the pane of: {e}"),
+            Err(e) => {
+                error!(id = %id, "refused spawn: no record to kill the pane of: {e}");
+                left_running = Some(format!("pane left running (no record to prove it by): {e}"));
+            }
         }
         // #12077: a terminal record is never adopted or resumed, so tombstone
         // it even when the pane could not be killed.
         if let Err(e) = self.decommission_record_only(id).await {
             error!(id = %id, "refused spawn: the record was not tombstoned, a restart may adopt it: {e}");
         }
+        left_running
     }
 
     /// Record a source project identity on a session, with a bounded retry

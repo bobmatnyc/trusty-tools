@@ -224,6 +224,9 @@ async fn a_failed_teardown_still_returns_the_original_refusal_12077() {
     let out = s.refuse(record.clone(), Heal::OnKill).await;
 
     assert!(matches!(out, Err(ManagedError::Store(_))), "{out:?}");
+    // #12077: a killed pane is not "left running".
+    let text = out.expect_err("refused").to_string();
+    assert!(!text.contains("pane left running"), "{text}");
     assert!(!s.live(&record.tmux_name), "a bare shell is still running");
     assert!(ws.path().exists(), "the fallback removed a workspace");
     let stored = s.after_restart(&record.id).await;
@@ -249,6 +252,11 @@ async fn an_unproven_refused_pane_still_leaves_an_unadoptable_record_12077() {
     let out = s.refuse(record.clone(), Heal::OnList).await;
 
     assert!(matches!(out, Err(ManagedError::Store(_))), "{out:?}");
+    // #12077: the refusal names the pane it left up, and keeps the original text.
+    let text = out.expect_err("refused").to_string();
+    assert!(text.contains("pane left running"), "{text}");
+    assert!(text.contains(&record.tmux_name), "{text}");
+    assert!(text.contains("store error"), "{text}");
     assert!(
         s.driver.inner.kill_calls.lock().unwrap().is_empty(),
         "an unproven pane was killed"
