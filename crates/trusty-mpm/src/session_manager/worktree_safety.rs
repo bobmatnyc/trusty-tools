@@ -517,7 +517,8 @@ fn is_trusty_mpm_scoped(path: &str) -> bool {
 /// `inspect_dirt_counts_a_deleted_tracked_file_under_trusty_mpm`,
 /// `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
 /// `an_edited_compiled_prompt_still_keeps_the_clone_11221`,
-/// `a_missing_ledger_keeps_the_compiled_prompt_counted_11221`.
+/// `a_missing_ledger_keeps_the_compiled_prompt_counted_11221`,
+/// `the_launch_key_files_are_not_dirt_12077`.
 fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
     // NOT `Path::exists()`: that collapses every I/O error to `false`, and
     // pass 1 has already skipped every `.trusty-mpm/`-scoped entry on the
@@ -553,7 +554,12 @@ fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
                 "`{entry}` under {TRUSTY_MPM_DIR}/ has a quoted path this guard cannot classify"
             ));
         }
-        if DISPOSABLE_TRUSTY_MPM_FILES.contains(&entry) || vouched(line, entry) {
+        // #12077: the launch-key record and marker are regenerated bookkeeping.
+        let launch_keys = crate::core::session_launch::launch_keys::is_checkout_launch_keys_file;
+        if DISPOSABLE_TRUSTY_MPM_FILES.contains(&entry)
+            || launch_keys(entry)
+            || vouched(line, entry)
+        {
             continue;
         }
         count += 1;

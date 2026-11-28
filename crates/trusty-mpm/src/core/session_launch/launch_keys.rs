@@ -554,24 +554,30 @@ pub(super) fn deliver_launch_keys(
     Ok(())
 }
 
-/// Vouch, in the provisioning ledger, for the record and the cleanup marker a
-/// launch in `project_dir` wrote (#12127), so a provisioned clone's dirt check
-/// does not count them as work. Runs after the ledger's own `record`; a failure
-/// only keeps that workspace at decommission, so it is logged.
+/// Whether repo-relative `rel` is the launch-key record or the cleanup marker
+/// a launch writes into a checkout's `.trusty-mpm/` (#12077).
 ///
-/// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`.
-pub(super) fn vouch_for_launch_keys(project_dir: &Path) {
-    let ws = canonical(project_dir);
-    let marker = ws
-        .join(".trusty-mpm")
-        .join(crate::core::claude_sandbox::LAUNCH_KEYS_CLEANUP_MARKER_FILE);
-    for file in [record_path(project_dir), marker] {
-        if let Err(err) =
-            crate::session_manager::provisioning_ledger::record_harness_file(&ws, &file)
-        {
-            tracing::warn!(path = %file.display(), "#12127: not vouched for in the ledger: {err}");
-        }
+/// Why: both are tm bookkeeping that a launch rewrites and that applies to
+/// this checkout only, like `last-instructions.md`, so the dirt check must not
+/// count them as work, with a provisioning ledger or without one.
+/// What: `.trusty-mpm/launch-keys-cleanup.json`, or
+/// `.trusty-mpm/launch-settings/<32 lowercase hex>.json` — the
+/// [`record_path`] name shape and nothing else.
+/// Test: `the_launch_key_files_are_not_dirt_12077`,
+/// `a_missing_ledger_keeps_the_compiled_prompt_counted_11221`.
+pub(crate) fn is_checkout_launch_keys_file(rel: &str) -> bool {
+    let Some(rest) = rel.strip_prefix(".trusty-mpm/") else {
+        return false;
+    };
+    if rest == crate::core::claude_sandbox::LAUNCH_KEYS_CLEANUP_MARKER_FILE {
+        return true;
     }
+    rest.strip_prefix(LAUNCH_KEYS_DIR)
+        .and_then(|r| r.strip_prefix('/'))
+        .and_then(|name| name.strip_suffix(".json"))
+        .is_some_and(|stem| {
+            stem.len() == 32 && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 /// The settings a launch in `project_dir` runs with, for tests: the project

@@ -1149,8 +1149,6 @@ pub(super) fn prepare_session_inner(
     {
         tracing::warn!("failed to record the provisioning ledger (#8663): {err}");
     }
-    // #12127: the launch-key record and marker are tm's, not work.
-    launch_keys::vouch_for_launch_keys(project_dir);
 
     // DOC-28 cutover bridge — auto-inject catch-up as seed context (#1762).
     // Fail-open: if catch-up fails for any reason (daemon not running, no git
