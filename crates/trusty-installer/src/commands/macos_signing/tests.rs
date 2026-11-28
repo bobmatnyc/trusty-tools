@@ -162,6 +162,10 @@ fn every_declared_set_is_a_named_constant() {
             ANALYZE_SET,
             // #11587
             SECRETS_SET,
+            BROWSER_SET,
+            CONSOLE_SET,
+            REVIEW_SET,
+            INSTALLER_SET,
         ]
     );
 }
@@ -313,6 +317,13 @@ fn hardened_runtime_policy() {
     // #11587: explicit-only, like SEARCH_SET — Hardened Runtime is unverified.
     assert!(use_hardened_runtime(SECRETS_SET, true));
     assert!(!use_hardened_runtime(SECRETS_SET, false));
+    // #11587: trusty-browser signs itself with Hardened Runtime; the other
+    // new sets are untested under it and stay explicit-only.
+    assert!(use_hardened_runtime(BROWSER_SET, false));
+    for set in [CONSOLE_SET, REVIEW_SET, INSTALLER_SET] {
+        assert!(use_hardened_runtime(set, true), "{set}");
+        assert!(!use_hardened_runtime(set, false), "{set}");
+    }
 }
 
 /// Why (#11587): `tctl sign trusty-secrets` must resolve to the one binary a
@@ -958,8 +969,8 @@ async fn release_archive_install_hands_all_three_search_binaries_to_signing() {
         panic!("the release archive must install: {outcome:?}");
     };
 
-    // The signing step's input, as `post_install_signed_set` and
-    // `sign_set_strict` build it.
+    // The signing step's input, as `sign_set_strict` builds it (#11587: the
+    // install step signs the same table binaries by name).
     let signed: Vec<std::path::PathBuf> = binaries_for_set(SEARCH_SET)
         .into_iter()
         .map(|b| install_dir.path().join(b))

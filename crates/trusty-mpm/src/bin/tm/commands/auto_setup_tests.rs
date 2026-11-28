@@ -17,6 +17,7 @@ fn env_in(tmp: &Path, cargo: Option<PathBuf>) -> Env {
         cargo,
         config_dir: tmp.join("claude-config"),
         install_cwd,
+        tctl: None,
     }
 }
 
@@ -346,4 +347,91 @@ fn doctor_rows_leave_a_malformed_config_untouched() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert_eq!(names.len(), 1, "no .corrupt sibling: {names:?}");
+}
+
+/// A fake `tctl` that logs its arguments and exits `code`; never the real one.
+fn fake_tctl(tmp: &Path, code: i32) -> PathBuf {
+    let path = tmp.join(format!("fake-tctl-{code}"));
+    let log = tmp.join("tctl.log");
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> '{}'\nexit {code}\n",
+        log.display()
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The outcome list `ensure` gives for an installed browser.
+fn browser_present() -> Vec<Outcome> {
+    vec![Outcome {
+        bin: "trusty-browser-mcp",
+        install: Install::Present,
+        register: Register::Unchanged,
+    }]
+}
+
+/// Why (#11587): `tm install` signs the browser binaries through `tctl sign`,
+/// and each binary's line follows tctl's exit code; only exit 0 is "signed".
+/// What: with both binaries present, a fake tctl exiting 0, 3, 2 and 1 gives
+/// one line per binary each time; asserts the call is `sign trusty-browser
+/// --dir <cargo_bin>` and the wording per exit code.
+/// Test: This is the test.
+#[test]
+fn browser_signing_reports_each_binary_by_tctl_exit_code() {
+    for (code, want) in [
+        (0, "signed with Developer ID"),
+        (3, "NOT signed: no Developer ID Application identity"),
+        (
+            2,
+            "NOT signed: this tctl has no `trusty-browser` sign target",
+        ),
+        (1, "NOT signed: `tctl sign trusty-browser` failed"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = env_in(tmp.path(), None);
+        for b in BROWSER_BINS {
+            std::fs::write(env.cargo_bin.join(b), "#!/bin/sh\n").unwrap();
+        }
+        env.tctl = Some(fake_tctl(tmp.path(), code));
+        let lines = sign_browser(&env, &browser_present());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("trusty-browser: "), "{lines:?}");
+        assert!(lines[1].starts_with("trusty-browser-mcp: "), "{lines:?}");
+        assert!(lines.iter().all(|l| l.contains(want)), "{code}: {lines:?}");
+        let log = std::fs::read_to_string(tmp.path().join("tctl.log")).unwrap();
+        assert_eq!(
+            log.trim(),
+            format!("sign trusty-browser --dir {}", env.cargo_bin.display())
+        );
+    }
+}
+
+/// Why (#11587): Fail-Open Check. No tctl is a NOT-signed line, not silence
+/// and not success; a browser that did not install signs nothing.
+/// What: no tctl gives a `NOT signed` line naming tctl; a `Missing` browser
+/// install, or no binary on disk, gives no line and no tctl call.
+/// Test: This is the test.
+#[test]
+fn browser_signing_never_claims_signed_without_tctl_or_a_binary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = env_in(tmp.path(), None);
+    std::fs::write(env.cargo_bin.join("trusty-browser-mcp"), "#!/bin/sh\n").unwrap();
+    let lines = sign_browser(&env, &browser_present());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("NOT signed: no `tctl` found"),
+        "{lines:?}"
+    );
+
+    env.tctl = Some(fake_tctl(tmp.path(), 0));
+    let missing = vec![Outcome {
+        bin: "trusty-browser-mcp",
+        install: Install::Missing("no `cargo` on PATH".into()),
+        register: Register::Skipped,
+    }];
+    assert!(sign_browser(&env, &missing).is_empty());
+    std::fs::remove_file(env.cargo_bin.join("trusty-browser-mcp")).unwrap();
+    assert!(sign_browser(&env, &browser_present()).is_empty());
+    assert!(!tmp.path().join("tctl.log").exists(), "tctl must not run");
 }

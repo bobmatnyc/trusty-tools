@@ -565,6 +565,9 @@ const CRATE_BINARIES: &[(&str, &[&str])] = &[
     ("trusty-assistants", &["ta", "tagent"]),
     ("trusty-audit", &["trusty-audit", "taudit"]),
     ("trusty-code", &["tcode"]),
+    // #11587: `cargo install trusty-browser` places both; the install sign
+    // step must sign both, and its table test reads this row.
+    ("trusty-browser", &["trusty-browser", "trusty-browser-mcp"]),
 ];
 
 /// The binary names `cargo install <crate_name>` writes into the bin dir.

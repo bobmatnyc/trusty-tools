@@ -7,7 +7,8 @@
 //! registers it at user scope through the core calls `tm mcp add` uses
 //! (`mcp_config::build_stdio_entry` + `add_server`). An existing entry is never
 //! replaced. [`doctor_rows`] reports each server. Nothing here probes a macOS
-//! permission, so no TCC dialog and no Keychain read can occur.
+//! permission. #11587: on macOS [`sign_browser`] then runs `tctl sign
+//! trusty-browser`, which reads the signing identity from the Keychain.
 //! Test: `auto_setup_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -84,6 +85,8 @@ pub(crate) struct Env {
     pub config_dir: PathBuf,
     /// Working directory for `cargo install`, outside any workspace.
     pub install_cwd: PathBuf,
+    /// #11587: the `tctl` that signs trusty-browser, or `None` when none is found.
+    pub tctl: Option<PathBuf>,
 }
 
 impl Env {
@@ -101,7 +104,12 @@ impl Env {
         let cargo = Some(cargo_bin.join("cargo"))
             .filter(|p| p.is_file())
             .or_else(|| trusty_common::bin_resolve::resolve_binary("cargo"));
+        // #11587: the tctl beside the binaries it signs, else the one on PATH.
+        let tctl = Some(cargo_bin.join("tctl"))
+            .filter(|p| p.is_file())
+            .or_else(|| trusty_common::bin_resolve::resolve_binary("tctl"));
         Some(Self {
+            tctl,
             cargo_home,
             install_timeout: INSTALL_TIMEOUT,
             cargo,
@@ -341,8 +349,87 @@ pub(crate) fn run_and_print() {
         println!("  skipped: no home directory");
         return;
     };
-    for line in report_lines(&ensure(&env)) {
+    let outcomes = ensure(&env);
+    for line in report_lines(&outcomes) {
         println!("  {line}");
+    }
+    // #11587: codesign and the Keychain are macOS-only.
+    if cfg!(target_os = "macos") {
+        for line in sign_browser(&env, &outcomes) {
+            println!("  {line}");
+        }
+    }
+}
+
+/// The binaries `cargo install trusty-browser` places, both Keychain readers.
+pub(crate) const BROWSER_BINS: [&str; 2] = ["trusty-browser", "trusty-browser-mcp"];
+
+/// Sign the installed trusty-browser binaries with `tctl sign trusty-browser`.
+///
+/// Why (#11587, owner ruling Dsf "sign at install only"): `tm install` is the
+/// path that installs trusty-browser, and before this the binaries stayed
+/// ad-hoc until `install-service` / `install-host` signed them. tctl owns
+/// every codesign flag and identifier and attests the result fail-closed, so
+/// tm duplicates none of it.
+/// What: nothing when the browser install is `Missing` or no browser binary
+/// is in `cargo_bin`. Otherwise runs `<tctl> sign trusty-browser --dir
+/// <cargo_bin>` (stdin null, bounded by `install_timeout`) and returns one line
+/// per present binary. Only exit 0 reads as signed; exit 3 is "no identity",
+/// exit 2 "this tctl predates the target", any other end is a failure.
+/// Test: `browser_signing_reports_each_binary_by_tctl_exit_code`,
+/// `browser_signing_never_claims_signed_without_tctl_or_a_binary`.
+pub(crate) fn sign_browser(env: &Env, outcomes: &[Outcome]) -> Vec<String> {
+    let installed = outcomes
+        .iter()
+        .any(|o| o.bin == "trusty-browser-mcp" && !matches!(o.install, Install::Missing(_)));
+    let present: Vec<&str> = BROWSER_BINS
+        .into_iter()
+        .filter(|b| env.cargo_bin.join(b).is_file())
+        .collect();
+    if !installed || present.is_empty() {
+        return Vec::new();
+    }
+    let verdict = match &env.tctl {
+        None => Err("no `tctl` found; install trusty-installer".to_string()),
+        Some(tctl) => run_tctl_sign(env, tctl),
+    };
+    present
+        .into_iter()
+        .map(|b| match &verdict {
+            Ok(()) => format!("{b}: signed with Developer ID and attested (tctl sign)"),
+            Err(why) => {
+                format!("{b}: NOT signed: {why}; then run `tctl sign trusty-browser`")
+            }
+        })
+        .collect()
+}
+
+/// Run `tctl sign trusty-browser --dir <cargo_bin>`; `Err` says why it failed.
+fn run_tctl_sign(env: &Env, tctl: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(tctl);
+    cmd.args(["sign", "trusty-browser", "--dir"])
+        .arg(&env.cargo_bin)
+        .stdin(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let status = cmd
+        .spawn()
+        .and_then(|c| wait_bounded(c, env.install_timeout));
+    match status {
+        Ok(st) if st.success() => Ok(()),
+        Ok(st) => Err(match st.code() {
+            Some(3) => "no Developer ID Application identity is configured (install the \
+                        certificate or set TRUSTY_SIGN_IDENTITY)"
+                .to_string(),
+            Some(2) => "this tctl has no `trusty-browser` sign target; upgrade trusty-installer"
+                .to_string(),
+            _ => format!("`tctl sign trusty-browser` failed ({st})"),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(format!(
+            "`tctl sign trusty-browser` timed out after {} s",
+            env.install_timeout.as_secs()
+        )),
+        Err(e) => Err(format!("cannot run tctl: {e}")),
     }
 }
 

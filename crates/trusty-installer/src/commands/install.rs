@@ -423,6 +423,8 @@ async fn install_all(
     // #5805: via the shared `install_dir_or_fallback`, so this, `install_one`,
     // and the `--dry-run` preview cannot name three different directories.
     let install_dir = crate::download::install_dir_or_fallback();
+    // #11587: the one install sign step; the identity is probed once per run.
+    let mut signer = super::macos_signing::install_step::InstallSigner::probe();
 
     // #3554: the real $PATH, resolved once, used by every member's
     // shadow-detection check below.
@@ -463,6 +465,9 @@ async fn install_all(
                     m.binary.clone(),
                     binary_size(&installed.path),
                 ));
+                // #11587: sign every signable binary this member placed before
+                // its supervisor or service starts, so no daemon runs ad-hoc.
+                signer.sign_member(&installed.path, &m.binaries());
                 // Phase 7: bootstrap trusty-mpm supervisor plist.
                 // #3527: gated behind the SAME `--no-service` /
                 // `TCTL_NO_SERVICE_BOOTSTRAP` decision as every other daemon —
@@ -507,55 +512,19 @@ async fn install_all(
                         }
                     }
                 }
-                // Phase 8: codesign + FDA guidance for trusty-search (single
-                // source of truth: `macos_signing`, unified with
-                // `scripts/install-trusty-search-signed.sh` and `tctl sign` — #2558).
-                // PR #2657 review: this automatic hook signs WITHOUT Hardened
-                // Runtime (matching pre-PR behavior) because trusty-search's
-                // bundled ONNX runtime dylib load path under Hardened Runtime
-                // is not yet empirically verified — see
-                // `macos_signing::use_hardened_runtime`. `tctl sign trusty-search`
-                // / the wrapper script (explicit operator action) DO sign with
-                // Hardened Runtime, also matching pre-PR behavior. Demo-critical
-                // fix: the guidance text is now collected, not printed inline —
-                // see `post_install_notes` above.
-                // #3846 code-critic MEDIUM fix: `existed_before` and the
-                // guidance's interpolated binary path now come from
-                // `installed` (the CONCRETE path/replace-state `install_one`
-                // observed on the actual outcome branch taken — prebuilt
-                // `install_dir` or the cargo-fallback bin dir), never a fixed
-                // `install_dir` guess that names the wrong file/directory
-                // whenever the cargo-install fallback fires.
-                if m.crate_name == "trusty-search" {
-                    if let Some((note, needs_tip)) = super::macos_signing::post_install_search(
-                        &install_dir,
-                        json,
-                        installed.existed_before,
-                        &installed.path,
-                    ) {
-                        post_install_notes.push(note);
-                        show_signing_tip |= needs_tip;
-                    }
-                }
-                // Phase 8b: codesign + App-Data-TCC guidance for trusty-mpm.
-                // Owner-authorized scope extension (#2558, 2026-07-14): `tm`
-                // reads other apps' $HOME containers (Claude config dirs, tmux
-                // state), so macOS's App Data TCC category re-prompts on every
-                // ad-hoc-signed rebuild the same way FDA does for trusty-search;
-                // the same stable-identity Developer-ID signing fixes it. Unlike
-                // trusty-search, trusty-mpm loads no dylibs, so this automatic
-                // hook DOES sign with Hardened Runtime (low risk either way).
-                // Demo-critical fix: deferred, same as trusty-search above.
-                if m.crate_name == "trusty-mpm" {
-                    if let Some((note, needs_tip)) = super::macos_signing::post_install_mpm(
-                        &install_dir,
-                        json,
-                        installed.existed_before,
-                        &installed.path,
-                    ) {
-                        post_install_notes.push(note);
-                        show_signing_tip |= needs_tip;
-                    }
+                // Phase 8: the no-certificate FDA (trusty-search) / App-Data
+                // TCC (trusty-mpm) guidance, deferred like every note above.
+                // #3846 code-critic MEDIUM fix: `existed_before` and the path
+                // come from `installed`, the CONCRETE outcome branch taken.
+                // #11587: signing itself is `signer.sign_member` above.
+                if let Some((note, needs_tip)) = super::macos_signing::post_install_guidance(
+                    &m.crate_name,
+                    json,
+                    installed.existed_before,
+                    &installed.path,
+                ) {
+                    post_install_notes.push(note);
+                    show_signing_tip |= needs_tip;
                 }
                 // Phase 7b (#2556): bootstrap the launchd plist for each shared
                 // daemon (search/memory/analyze/review/console) via its own
@@ -700,6 +669,15 @@ async fn install_all(
         }
     }
 
+    // #11587: then every other installed trusty binary (trusty-secrets,
+    // trusty-browser, …) another install placed in the same directory.
+    signer.sweep(&install_dir);
+    let signing = signer.into_outcomes();
+    if !json {
+        let (lines, no_identity) = super::macos_signing::install_step::report_lines(&signing);
+        post_install_notes.extend(lines);
+        show_signing_tip |= no_identity;
+    }
     // The component table (rustup-style) summarising what landed.
     if !json {
         let _ = tracker.print();
@@ -718,7 +696,7 @@ async fn install_all(
     }
     let runner = super::content_step::ProcessRunner::fetch();
     (
-        report_with_content(outcomes, &placed, &runner, json),
+        report_with_content(outcomes, &placed, &runner, json).with_signing(signing),
         placements,
     )
 }

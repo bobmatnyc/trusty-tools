@@ -143,6 +143,10 @@ pub struct InstallReport {
     /// `--no-verify` skipped the audit and the record was written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<crate::commands::deployment_record::DeploymentAudit>,
+    /// #11587: one entry per installed trusty binary the sign step checked;
+    /// empty (and omitted) off macOS.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signing: Vec<crate::commands::macos_signing::install_step::BinarySigning>,
 }
 
 impl InstallReport {
@@ -205,7 +209,28 @@ impl InstallReport {
             verify: None,
             content: None,
             deployment: None,
+            signing: Vec::new(),
         }
+    }
+
+    /// Fold the install sign step's outcomes into this report (#11587).
+    ///
+    /// Why: a binary the step failed to sign with a configured identity
+    /// re-prompts for Keychain access after every upgrade, so the run must not
+    /// exit 0 over it; the binaries stay placed, as for the content step. A
+    /// host with no identity configured is a supported install and only warns.
+    /// What: attaches `signing`; any `Failed` outcome flips `all_ok`.
+    /// Test: `a_failed_signing_flips_all_ok_but_no_identity_does_not`.
+    pub(super) fn with_signing(
+        mut self,
+        signing: Vec<crate::commands::macos_signing::install_step::BinarySigning>,
+    ) -> Self {
+        use crate::commands::macos_signing::install_step::SignStatus;
+        if signing.iter().any(|s| s.status == SignStatus::Failed) {
+            self.all_ok = false;
+        }
+        self.signing = signing;
+        self
     }
 
     /// Fold the deployment audit into this report (#10607).
@@ -605,6 +630,16 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
             .iter()
             .filter(|c| !c.ok)
             .map(|c| format!("content: {}", c.detail)),
+    );
+    // #11587: a failed signing gates the exit code too, so the footer names it.
+    errors.extend(
+        report
+            .signing
+            .iter()
+            .filter(|s| {
+                s.status == crate::commands::macos_signing::install_step::SignStatus::Failed
+            })
+            .map(|s| format!("signing: {}: {}", s.binary, s.detail)),
     );
 
     SummaryLines {
