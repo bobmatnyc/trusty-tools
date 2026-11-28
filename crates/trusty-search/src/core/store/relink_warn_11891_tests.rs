@@ -4,8 +4,9 @@
 //! no index id or path, so a production warning could not be traced to an
 //! index.
 //! What: a store holding more identical vectors than the sweep's search width
-//! always leaves keys stranded, so a compaction emits both re-link warnings.
-//! Each must carry the store's snapshot path as the `path` field.
+//! makes a compaction log the per-sweep line with duplicate ties, which must
+//! carry the store's snapshot path as the `path` field. Since the
+//! duplicate-aware sweep, those ties strand nothing, so no strand warning fires.
 //! Test: this module. Run with `cargo test -p trusty-search --lib relink_warn_11891`.
 
 use std::sync::{Arc, Mutex};
@@ -28,7 +29,7 @@ impl std::io::Write for Capture {
 }
 
 /// Identical vectors in the store: more than the sweep's 10-hit width, so at
-/// least 30 keys can never find themselves and the sweep always warns.
+/// least 30 keys can never find themselves and read as duplicate ties.
 const DUPLICATES: usize = 40;
 
 /// The rebuild runs on tokio's blocking pool, so the capture is installed on
@@ -40,7 +41,7 @@ fn the_relink_warnings_name_the_index_path() {
     let dispatch = tracing::Dispatch::new(
         tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::INFO)
             .with_ansi(false)
             .without_time()
             .finish(),
@@ -73,17 +74,20 @@ fn the_relink_warnings_name_the_index_path() {
 
     let logged = String::from_utf8(cap.0.lock().expect("capture lock").clone()).expect("utf8");
     let field = format!("path={}", path.display());
-    for warning in [
-        "vectors still stranded after",
-        "stranded vectors after rebuild",
-    ] {
-        let line = logged
-            .lines()
-            .find(|l| l.contains(warning))
-            .unwrap_or_else(|| panic!("no `{warning}` warning in:\n{logged}"));
-        assert!(
-            line.contains(&field),
-            "the warning must name the index by `{field}`: {line}"
-        );
-    }
+    let line = logged
+        .lines()
+        .find(|l| l.contains("re-link sweep at"))
+        .unwrap_or_else(|| panic!("no re-link sweep line in:\n{logged}"));
+    assert!(
+        line.contains(&field),
+        "the sweep line must name the index by `{field}`: {line}"
+    );
+    assert!(
+        line.contains("graph_stranded=0") && !line.contains("duplicate_ties=0"),
+        "identical vectors must read as duplicate ties, not strands: {line}"
+    );
+    assert!(
+        !logged.contains("vectors still stranded after"),
+        "duplicate ties must not leave keys stranded:\n{logged}"
+    );
 }
