@@ -826,13 +826,15 @@ async fn events_is_probed_by_accept_not_by_a_health_method() {
 /// exists, so a probe that only looked for the file would call a dead bus
 /// healthy.
 /// What: a socket whose listener is gone probes `Refused`, renders `down`, and
-/// is confirmed down.
+/// is confirmed down. The bound fd stays open across the probe, as a child a
+/// concurrent test forked would hold it (#12056).
 /// Test: This is the test.
 #[tokio::test]
 async fn accept_probe_reports_a_stale_socket_as_refused() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket = tmp.path().join("trusty-events.sock");
-    drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind"));
+    // #12056: an inherited copy of a listening fd made this probe `Serving`.
+    let _inherited = crate::commands::test_support::stale_socket(&socket);
     assert!(socket.exists(), "the stale socket file must remain");
     let outcome = super::probe_accept_only(&socket).await;
     assert_eq!(outcome, ProbeOutcome::Refused);

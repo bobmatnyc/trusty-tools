@@ -54,6 +54,25 @@ pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 /// `verify_tail::tests::verify_one_*`.
 pub(crate) const PROBEABLE_BINARY: &str = "sh";
 
+/// Leave a stale socket file at `path`: bound, never listening.
+///
+/// Why (#12056, #12083): `drop(UnixListener::bind(..))` races every concurrent
+/// test that spawns a process. A child forked before the drop holds a copy of
+/// the LISTENING fd until its `exec`, so the dial connects and the probe reads
+/// `Serving`. A socket that never called `listen()` refuses every connect
+/// (`ECONNREFUSED` on Linux and macOS), however many copies of its fd exist.
+/// What: binds a stream socket at `path` without `listen()` and returns it.
+/// The caller holds it for the test, standing in for a forked child's copy;
+/// the file stays behind either way.
+/// Test: `probe_http::tests::accept_probe_reports_a_stale_socket_as_refused`,
+/// `ensure::project_setup::tests::register_index_dead_or_missing_socket_is_skipped`.
+pub(crate) fn stale_socket(path: &std::path::Path) -> tokio::net::UnixSocket {
+    let socket = tokio::net::UnixSocket::new_stream().expect("stream socket");
+    // #12056: bind only; a socket that never listens cannot accept a dial.
+    socket.bind(path).expect("bind");
+    socket
+}
+
 /// Write `contents` to `path` as a mode-0755 script the test will then exec.
 ///
 /// Why: `execve` fails with `ETXTBSY` while any process holds a writable fd to
